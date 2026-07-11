@@ -40,6 +40,14 @@ export interface ListTasksInput {
 	includeDone?: boolean;
 }
 
+/** Metadata de un adjunto (sin bytes ni `storageKey`); los bytes se piden aparte con `getAttachment`. */
+export interface LumbreAttachment {
+	id: string;
+	filename: string;
+	mime: string;
+	size: number;
+}
+
 export interface LumbreTask {
 	id: string;
 	content: string;
@@ -51,6 +59,8 @@ export interface LumbreTask {
 	/** Id de la lista de "Algún día" a la que pertenece, o null. */
 	somedayListId?: string | null;
 	createdAt: string;
+	/** Adjuntos vivos de la tarea; leer sus bytes con `getAttachment(id)`. */
+	attachments?: LumbreAttachment[];
 }
 
 /** Error con el status HTTP adjunto, para poder dar mensajes específicos (401, 429…). */
@@ -137,6 +147,51 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks.');
 	}
 	return body as LumbreTask[];
+}
+
+/** Adjunto ya descargado: tipo MIME (de la respuesta) + bytes. */
+export interface DownloadedAttachment {
+	contentType: string;
+	bytes: Buffer;
+}
+
+/**
+ * `GET /api/attachments/:id`: descarga los bytes de un adjunto propio. Mismo
+ * token que el resto (`Authorization: Bearer`); ese endpoint solo sirve el
+ * adjunto si pertenece al dueño del token (anti-IDOR server-side, ver el
+ * endpoint en el repo principal). No pasa por `request()` porque la respuesta
+ * no es JSON.
+ */
+export async function getAttachment(config: LumbreConfig, id: string): Promise<DownloadedAttachment> {
+	const url = `${config.baseUrl.replace(/\/$/, '')}/api/attachments/${id}`;
+	let res: Response;
+	try {
+		res = await fetch(url, { headers: { authorization: `Bearer ${config.token}` } });
+	} catch (err) {
+		const cause = err instanceof Error ? err.message : String(err);
+		throw new LumbreApiError(
+			`No se pudo conectar con Lumbre en ${config.baseUrl} (${cause}). ¿Es correcto LUMBRE_BASE_URL?`
+		);
+	}
+	if (!res.ok) {
+		if (res.status === 401) {
+			throw new LumbreApiError(
+				'Token inválido o no configurado (LUMBRE_TOKEN). Consíguelo en Ajustes → email entrante de Lumbre.',
+				401
+			);
+		}
+		if (res.status === 404) {
+			throw new LumbreApiError(`Adjunto ${id} no encontrado (o no pertenece al dueño del token).`, 404);
+		}
+		if (res.status === 429) {
+			throw new LumbreApiError('Demasiadas peticiones a Lumbre; espera un momento y reintenta.', 429);
+		}
+		throw new LumbreApiError(`Lumbre respondió ${res.status} al pedir el adjunto ${id}.`, res.status);
+	}
+	return {
+		contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+		bytes: Buffer.from(await res.arrayBuffer())
+	};
 }
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────

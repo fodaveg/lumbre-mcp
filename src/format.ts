@@ -14,7 +14,14 @@ function formatTask(t: LumbreTask): string {
 	if (t.date) tags.push(t.date);
 	if (t.deadline) tags.push(`⚑${t.deadline}`);
 	const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
-	return `- ${box} ${t.content}${suffix}`;
+	const line = `- ${box} ${t.content}${suffix}`;
+	if (!t.attachments || t.attachments.length === 0) return line;
+	// Una línea aparte con los adjuntos (nombre + id): el modelo necesita el id
+	// para pedir los bytes con la tool `read_attachment`.
+	const attachmentsLine = `  📎 adjuntos: ${t.attachments
+		.map((a) => `${a.filename} (id: ${a.id})`)
+		.join(' · ')}`;
+	return `${line}\n${attachmentsLine}`;
 }
 
 /** Lista completa → texto compacto con cabecera de recuento + alcance. */

@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import {
 	addTask,
+	getAttachment,
 	listTasks,
 	mutateTask,
 	LumbreApiError,
@@ -14,13 +15,18 @@ import { formatTaskList } from './format.js';
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
  * `add_task` (escribe vía `/api/ingest`) y `list_tasks` (lee vía
- * `GET /api/tasks`). Fase 2: `complete_task`/`update_task`/`reschedule_task`/
- * `delete_task` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
- * PHASE2.md). Todas usan el token personal de email-to-task de Lumbre
- * (Ajustes → email entrante), NUNCA hardcodeado — ver README.md.
+ * `GET /api/tasks`, incluye los adjuntos de cada tarea). `read_attachment` lee
+ * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
+ * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
+ * Fase 2: `complete_task`/`update_task`/`reschedule_task`/`delete_task`
+ * (mutan una tarea EXISTENTE vía `/api/mutations` — ver PHASE2.md). Todas
+ * usan el token personal de email-to-task de Lumbre (Ajustes → email
+ * entrante), NUNCA hardcodeado — ver README.md.
  *
  * Todas las tools de Fase 2 necesitan el `taskId` de antemano: lo normal es
- * llamar primero a `list_tasks` para resolverlo por contenido/fecha.
+ * llamar primero a `list_tasks` para resolverlo por contenido/fecha. Igual
+ * `read_attachment` necesita el `attachment_id` que trae `list_tasks` en el
+ * campo `attachments` de cada tarea.
  */
 
 function loadConfig(): LumbreConfig {
@@ -121,6 +127,43 @@ server.registerTool(
 		try {
 			const tasks = await listTasks(config, input);
 			return textResult(formatTaskList(tasks, input.scope ?? 'today'));
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'read_attachment',
+	{
+		title: 'Leer un adjunto de Lumbre',
+		description:
+			'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
+			'list_tasks, que trae el id y el nombre de cada adjunto). Si es una imagen, la devuelve ' +
+			'para que puedas verla directamente; si no (PDF, etc.), devuelve solo su metadata — no hay ' +
+			'forma de leer el contenido de un adjunto no-imagen con esta tool.',
+		inputSchema: {
+			attachment_id: z
+				.string()
+				.uuid()
+				.describe('Id del adjunto (ver el campo `attachments` de list_tasks)')
+		}
+	},
+	async (input) => {
+		try {
+			const { contentType, bytes } = await getAttachment(config, input.attachment_id);
+			if (contentType.startsWith('image/')) {
+				return {
+					content: [
+						{ type: 'image' as const, data: bytes.toString('base64'), mimeType: contentType }
+					]
+				};
+			}
+			return textResult(
+				`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
+					'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
+					'servidor MCP; no hay forma de mostrártelo a partir de aquí).'
+			);
 		} catch (err) {
 			return errorResult(err);
 		}
