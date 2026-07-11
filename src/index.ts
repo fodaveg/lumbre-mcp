@@ -101,14 +101,19 @@ server.registerTool(
 		description:
 			'Lee las tareas del usuario en Lumbre. `scope` acota el rango temporal: "today" ' +
 			'(default), "week", "inbox"/"someday" (sin fecha), "overdue" (vencidas) o "all". El ' +
-			'filtro `list` (por nombre de lista) NO está soportado todavía por el servidor — si se ' +
-			'usa, la tool devolverá el error explicativo de Lumbre.',
+			'filtro `list` acota además por el nombre (case-insensitive) de una lista de "Algún ' +
+			'día"/proyecto — si no se indica `scope` explícito junto con `list`, el servidor ignora ' +
+			'el alcance temporal por defecto y trae toda la lista (la mayoría de sus tareas no tienen ' +
+			'fecha). Un `list` que no coincide con ninguna lista devuelve una lista vacía, no un error.',
 		inputSchema: {
 			scope: z
 				.enum(['today', 'week', 'inbox', 'someday', 'overdue', 'all'])
 				.optional()
-				.describe('Alcance temporal; default "today"'),
-			list: z.string().optional().describe('NO soportado aún (ver descripción de la tool)'),
+				.describe('Alcance temporal; default "today" ("all" si se usa `list` sin `scope`)'),
+			list: z
+				.string()
+				.optional()
+				.describe('Nombre (case-insensitive) de una lista de "Algún día"/proyecto a filtrar'),
 			includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false')
 		}
 	},

@@ -15,12 +15,11 @@ Paquete Node/TS **independiente** del resto del repo (su propio
   sincronice; no es instantáneo si no hay ningún dispositivo online.
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
   por `scope`: `today` (default), `week`, `inbox`/`someday` (sin fecha),
-  `overdue` o `all`; puede incluir completadas con `includeDone`.
-
-**Limitación conocida:** las listas de "Algún día" (proyectos) viven solo en
-el CRDT del cliente, no en el servidor — así que `list_tasks` no puede
-filtrar por nombre de lista todavía (el parámetro `list` da un error
-explicativo si se usa).
+  `overdue` o `all`; puede incluir completadas con `includeDone`. `list`
+  filtra además por el nombre (case-insensitive) de una lista de "Algún
+  día"/proyecto — sin `scope` explícito junto con `list`, el alcance temporal
+  por defecto pasa a `all` (la mayoría de las tareas de una lista no tienen
+  fecha). Un `list` que no existe (aún) devuelve una lista vacía, no un error.
 
 ## Qué hace (Fase 2 — mutar una tarea existente)
 

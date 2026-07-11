@@ -33,8 +33,9 @@ export type TaskScope = 'today' | 'week' | 'inbox' | 'someday' | 'overdue' | 'al
 
 export interface ListTasksInput {
 	scope?: TaskScope;
-	/** NO soportado todavía por el servidor (ver PHASE2.md) — se reenvía tal
-	 *  cual para que el 400 explicativo del servidor llegue al modelo. */
+	/** Nombre (case-insensitive) de una lista de "Algún día"; filtra las tareas
+	 *  que pertenecen a ella. Sin `scope` explícito, el servidor amplía el
+	 *  alcance temporal a "all" (ver `GET /api/tasks` en el repo principal). */
 	list?: string;
 	includeDone?: boolean;
 }
@@ -47,6 +48,8 @@ export interface LumbreTask {
 	date: string | null;
 	deadline: string | null;
 	list: string | null;
+	/** Id de la lista de "Algún día" a la que pertenece, o null. */
+	somedayListId?: string | null;
 	createdAt: string;
 }
 
