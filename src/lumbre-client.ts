@@ -1,8 +1,9 @@
 /**
- * Cliente HTTP mínimo contra la API de Lumbre. Dos endpoints (Fase 1):
- * `POST /api/ingest` (escritura, ya existente en la app) y `GET /api/tasks`
- * (lectura, nuevo — ver `src/routes/api/tasks/+server.ts` en el repo principal).
- * Ambos se autentican con el MISMO token personal de email-to-task
+ * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
+ * (crea) y `GET /api/tasks` (lee). Fase 2: `POST /api/mutations` (encola
+ * completar/editar/reprogramar/borrar sobre una tarea EXISTENTE — ver
+ * `src/routes/api/mutations/+server.ts` en el repo principal y `PHASE2.md`).
+ * Todos se autentican con el MISMO token personal de email-to-task
  * (Ajustes → email entrante en la app), enviado como `Authorization: Bearer`.
  */
 
@@ -133,4 +134,47 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks.');
 	}
 	return body as LumbreTask[];
+}
+
+// ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
+
+export type MutationKind = 'complete' | 'update' | 'reschedule' | 'delete';
+
+export interface CompleteMutationPayload {
+	done: boolean;
+}
+export interface UpdateMutationPayload {
+	content?: string;
+	notes?: string;
+	/** Nivel `1|2|3` (p1–p3), o `null` para quitar la prioridad (p4/ninguna).
+	 *  El tool `update_task` traduce el `'p1'..'p4'` de cara al modelo a este
+	 *  nivel antes de llamar aquí (ver `index.ts`). */
+	priority?: 1 | 2 | 3 | null;
+}
+export interface RescheduleMutationPayload {
+	/** `YYYY-MM-DD`, o `null` para mandar la tarea a "Algún día"/Bandeja. */
+	date: string | null;
+}
+export type DeleteMutationPayload = Record<string, never>;
+
+export interface MutateTaskInput {
+	taskId: string;
+	kind: MutationKind;
+	payload: CompleteMutationPayload | UpdateMutationPayload | RescheduleMutationPayload | DeleteMutationPayload;
+}
+
+/**
+ * `POST /api/mutations`: encola una mutación sobre una tarea EXISTENTE (el
+ * cliente de Lumbre la aplica al sincronizar — no es instantáneo). Espejo de
+ * `addTask`.
+ */
+export async function mutateTask(config: LumbreConfig, input: MutateTaskInput): Promise<void> {
+	const body = await request(config, '/api/mutations', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(input)
+	});
+	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
+		throw new LumbreApiError('Lumbre no confirmó la mutación (respuesta inesperada).');
+	}
 }

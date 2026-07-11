@@ -1,4 +1,17 @@
-# Fase 2 — mutar tareas existentes (diseño, SIN implementar)
+# Fase 2 — mutar tareas existentes
+
+> **YA IMPLEMENTADA** (rama `feat/mcp-fase2`): `inbound_mutations` (schema +
+> migración `0023`), `src/lib/server/repos/mutations.ts`,
+> `POST /api/mutations` + `GET /api/inbound-mutations`, drenaje en
+> `+page.svelte` (`drainInboundMutations`, `facade.byId`), y las 4 tools
+> (`complete_task`/`update_task`/`reschedule_task`/`delete_task`) en
+> `mcp/src/index.ts`/`lumbre-client.ts`. El diseño de abajo se conserva TAL
+> CUAL (documenta el porqué); las decisiones de implementación reales:
+> `update` valida `priority` como `PriorityLevel|null` (nivel numérico, no
+> `'p1'..'p4'` — la tool traduce), y `reschedule` con `date: null` manda la
+> tarea a la Bandeja de entrada (`facade.resolveInboxListId()` +
+> `moveToList`), no a un `move(id, null, …)` suelto (eso la dejaría sin lista
+> hasta el próximo `ensureSomedayLists`).
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas

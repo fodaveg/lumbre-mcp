@@ -2,17 +2,25 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { addTask, listTasks, LumbreApiError, type LumbreConfig } from './lumbre-client.js';
+import {
+	addTask,
+	listTasks,
+	mutateTask,
+	LumbreApiError,
+	type LumbreConfig
+} from './lumbre-client.js';
 import { formatTaskList } from './format.js';
 
 /**
- * Conector MCP de Lumbre — Fase 1 (transporte stdio, pensado para Claude Code).
- * Dos tools: `add_task` (escribe vía `/api/ingest`) y `list_tasks` (lee vía
- * `GET /api/tasks`). Ambas usan el token personal de email-to-task de Lumbre
+ * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
+ * `add_task` (escribe vía `/api/ingest`) y `list_tasks` (lee vía
+ * `GET /api/tasks`). Fase 2: `complete_task`/`update_task`/`reschedule_task`/
+ * `delete_task` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
+ * PHASE2.md). Todas usan el token personal de email-to-task de Lumbre
  * (Ajustes → email entrante), NUNCA hardcodeado — ver README.md.
  *
- * Fase 2 (mutar tareas existentes: completar/editar/reprogramar/borrar) queda
- * diseñada pero SIN implementar — ver PHASE2.md.
+ * Todas las tools de Fase 2 necesitan el `taskId` de antemano: lo normal es
+ * llamar primero a `list_tasks` para resolverlo por contenido/fecha.
  */
 
 function loadConfig(): LumbreConfig {
@@ -108,6 +116,151 @@ server.registerTool(
 		try {
 			const tasks = await listTasks(config, input);
 			return textResult(formatTaskList(tasks, input.scope ?? 'today'));
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+// ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
+
+/** Aviso compartido en las 4 tools de Fase 2: la app es asíncrona/eventual
+ *  (igual que `add_task`), así que ninguna da confirmación inmediata de que
+ *  la mutación se aplicó de verdad — solo de que quedó encolada. */
+const ASYNC_NOTE =
+	'La aplicación de Lumbre es ASÍNCRONA/eventual (igual que add_task): la mutación se encola y se ' +
+	'aplica la próxima vez que un dispositivo del usuario sincronice, no al instante. No hay ' +
+	'confirmación de que se aplicó de verdad (usa list_tasks más tarde para comprobarlo).';
+
+/** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
+ *  `/api/mutations` para `kind: 'update'`: `p4` = quitar la prioridad (`null`). */
+function priorityToLevel(p: 'p1' | 'p2' | 'p3' | 'p4'): 1 | 2 | 3 | null {
+	return p === 'p4' ? null : (Number(p[1]) as 1 | 2 | 3);
+}
+
+server.registerTool(
+	'complete_task',
+	{
+		title: 'Completar/descompletar una tarea de Lumbre',
+		description:
+			`Marca una tarea existente como hecha, o la desmarca con done:false. ${ASYNC_NOTE} Necesita ` +
+			'el `taskId` de la tarea — resuélvelo antes con list_tasks (por contenido/fecha).',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+			done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'complete',
+				payload: { done: input.done ?? true }
+			});
+			return textResult(
+				`Encolado en Lumbre: ${input.done === false ? 'desmarcar' : 'completar'} la tarea ${input.taskId} ` +
+					'(se aplicará al sincronizar).'
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'update_task',
+	{
+		title: 'Editar una tarea de Lumbre',
+		description:
+			`Edita el texto, las notas o la prioridad de una tarea existente. ${ASYNC_NOTE} Indica solo ` +
+			'los campos que quieras cambiar; los que omitas se dejan igual. Necesita el `taskId` — ' +
+			'resuélvelo antes con list_tasks (por contenido/fecha).',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+			content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
+			notes: z
+				.string()
+				.max(10000)
+				.optional()
+				.describe('Nuevas notas/descripción (reemplaza las anteriores por completo)'),
+			priority: z
+				.enum(['p1', 'p2', 'p3', 'p4'])
+				.optional()
+				.describe('p1 = más urgente … p3; p4 = quitar la prioridad')
+		}
+	},
+	async (input) => {
+		if (input.content === undefined && input.notes === undefined && input.priority === undefined) {
+			return errorResult(new Error('Indica al menos un campo a cambiar (content, notes o priority).'));
+		}
+		try {
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'update',
+				payload: {
+					...(input.content !== undefined ? { content: input.content } : {}),
+					...(input.notes !== undefined ? { notes: input.notes } : {}),
+					...(input.priority !== undefined ? { priority: priorityToLevel(input.priority) } : {})
+				}
+			});
+			return textResult(
+				`Encolada en Lumbre la edición de la tarea ${input.taskId} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'reschedule_task',
+	{
+		title: 'Reprogramar una tarea de Lumbre',
+		description:
+			`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada (date: null). ` +
+			`${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks (por contenido/fecha).`,
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+			date: z
+				.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
+				.describe('Día destino, YYYY-MM-DD, o null para mandarla a "Algún día"/Bandeja de entrada')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'reschedule',
+				payload: { date: input.date }
+			});
+			return textResult(
+				`Encolado en Lumbre el cambio de fecha de la tarea ${input.taskId} a ` +
+					`${input.date ?? '"Algún día"'} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'delete_task',
+	{
+		title: 'Borrar una tarea de Lumbre',
+		description:
+			`Borra (soft-delete) una tarea existente de Lumbre. ${ASYNC_NOTE} ACCIÓN DELICADA: no hay ` +
+			'confirmación inmediata de que se aplicó y no se puede deshacer desde esta tool — confírmalo ' +
+			'con el usuario antes de llamarla. Necesita el `taskId` — resuélvelo antes con list_tasks.',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea a borrar (ver list_tasks)')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, { taskId: input.taskId, kind: 'delete', payload: {} });
+			return textResult(
+				`Encolado en Lumbre el borrado de la tarea ${input.taskId} (se aplicará al sincronizar).`
+			);
 		} catch (err) {
 			return errorResult(err);
 		}
