@@ -24,9 +24,50 @@ function formatTask(t: LumbreTask): string {
 	return `${line}\n${attachmentsLine}`;
 }
 
-/** Lista completa → texto compacto con cabecera de recuento + alcance. */
+/**
+ * Lista completa → texto compacto con cabecera de recuento + alcance,
+ * agrupado por sección (Fase B, listas=proyectos): una cabecera `## <sección>`
+ * por grupo, en el orden en que aparecen en la respuesta del servidor (ya
+ * viene ordenada por fecha/posición). Las tareas sin sección van bajo
+ * `## (sin sección)` — SOLO se muestra esa cabecera si hay alguna tarea CON
+ * sección en el lote (si ninguna tarea tiene sección, listar secciones no
+ * aporta nada y solo añade ruido). Esto ayuda al modelo a distinguir, p. ej.,
+ * bugs de propuestas dentro del mismo proyecto sin tener que parsear el texto.
+ *
+ * El agrupado real es por el PAR `(list, section)`, no solo por `section`:
+ * cuando se listan tareas de VARIAS listas a la vez (query sin `?list=`), dos
+ * proyectos con secciones homónimas (p. ej. "Bugs" en dos listas distintas)
+ * NO deben fusionarse bajo la misma cabecera. Si en el lote hay una única
+ * lista distinta (o ninguna), la cabecera se queda como antes (`## <sección>`,
+ * sin repetir el nombre de la lista, redundante en ese caso); si hay más de
+ * una lista distinta, se antepone su nombre (`## <lista> · <sección>`).
+ */
 export function formatTaskList(tasks: LumbreTask[], scope: TaskScope): string {
 	if (tasks.length === 0) return `Sin tareas (scope=${scope}).`;
 	const header = `${tasks.length} tarea${tasks.length === 1 ? '' : 's'} (scope=${scope}):`;
-	return [header, ...tasks.map(formatTask)].join('\n');
+
+	const hasAnySection = tasks.some((t) => t.section);
+	if (!hasAnySection) {
+		return [header, ...tasks.map(formatTask)].join('\n');
+	}
+
+	// "Listas distintas" = valores de t.list no nulos, deduplicados. Si el lote
+	// solo toca una (o ninguna, todas null), no hace falta desambiguar.
+	const distinctLists = new Set(tasks.map((t) => t.list).filter((l): l is string => !!l));
+	const showList = distinctLists.size > 1;
+
+	const groups: { key: string; label: string; tasks: LumbreTask[] }[] = [];
+	for (const t of tasks) {
+		const sectionLabel = t.section ?? '(sin sección)';
+		const listLabel = t.list ?? '(sin lista)';
+		const label = showList ? `${listLabel} · ${sectionLabel}` : sectionLabel;
+		// Clave de agrupación separada de la etiqueta visible: JSON.stringify
+		// evita colisiones si un nombre de lista/sección contiene el separador.
+		const key = JSON.stringify([showList ? listLabel : null, sectionLabel]);
+		const group = groups.find((g) => g.key === key);
+		if (group) group.tasks.push(t);
+		else groups.push({ key, label, tasks: [t] });
+	}
+	const body = groups.flatMap((g) => [`## ${g.label}`, ...g.tasks.map(formatTask)]);
+	return [header, ...body].join('\n');
 }

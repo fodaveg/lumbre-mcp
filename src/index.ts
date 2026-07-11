@@ -110,7 +110,10 @@ server.registerTool(
 			'filtro `list` acota además por el nombre (case-insensitive) de una lista de "Algún ' +
 			'día"/proyecto — si no se indica `scope` explícito junto con `list`, el servidor ignora ' +
 			'el alcance temporal por defecto y trae toda la lista (la mayoría de sus tareas no tienen ' +
-			'fecha). Un `list` que no coincide con ninguna lista devuelve una lista vacía, no un error.',
+			'fecha). Un `list` que no coincide con ninguna lista devuelve una lista vacía, no un error. ' +
+			'`section` acota además por el nombre (case-insensitive) de una sección DENTRO de `list` ' +
+			'(p. ej. "Bugs"/"Propuestas" dentro de un proyecto) — la respuesta agrupa las tareas por ' +
+			'sección con una cabecera por grupo.',
 		inputSchema: {
 			scope: z
 				.enum(['today', 'week', 'inbox', 'someday', 'overdue', 'all'])
@@ -120,6 +123,13 @@ server.registerTool(
 				.string()
 				.optional()
 				.describe('Nombre (case-insensitive) de una lista de "Algún día"/proyecto a filtrar'),
+			section: z
+				.string()
+				.optional()
+				.describe(
+					'Nombre (case-insensitive) de una sección dentro de `list` a filtrar (Fase B, ' +
+						'listas=proyectos); combinado con `list`, solo casa una sección de ESA lista'
+				),
 			includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false')
 		}
 	},

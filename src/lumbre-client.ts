@@ -37,6 +37,10 @@ export interface ListTasksInput {
 	 *  que pertenecen a ella. Sin `scope` explícito, el servidor amplía el
 	 *  alcance temporal a "all" (ver `GET /api/tasks` en el repo principal). */
 	list?: string;
+	/** Nombre (case-insensitive) de una sección (Fase B, listas=proyectos)
+	 *  dentro de `list`; combinada con `list`, solo casa una sección de ESA
+	 *  lista. Sin `list`, casa la primera sección con ese nombre en cualquiera. */
+	section?: string;
 	includeDone?: boolean;
 }
 
@@ -58,6 +62,10 @@ export interface LumbreTask {
 	list: string | null;
 	/** Id de la lista de "Algún día" a la que pertenece, o null. */
 	somedayListId?: string | null;
+	/** Nombre de la sección (Fase B, listas=proyectos) dentro de `list`, o null. */
+	section?: string | null;
+	/** Id de esa sección, o null. */
+	sectionId?: string | null;
 	createdAt: string;
 	/** Adjuntos vivos de la tarea; leer sus bytes con `getAttachment(id)`. */
 	attachments?: LumbreAttachment[];
@@ -140,6 +148,7 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	const params = new URLSearchParams();
 	if (input.scope) params.set('scope', input.scope);
 	if (input.list) params.set('list', input.list);
+	if (input.section) params.set('section', input.section);
 	if (input.includeDone) params.set('includeDone', 'true');
 	const qs = params.toString();
 	const body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
