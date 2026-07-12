@@ -25,7 +25,12 @@ function formatTask(t: LumbreTask): string {
 	if (t.date) tags.push(t.date);
 	if (t.deadline) tags.push(`⚑${t.deadline}`);
 	const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
-	let line = `- ${box} ${t.content}${suffix}`;
+	// El id (UUID) al final de la línea: TODAS las tools de mutación
+	// (update_task, complete_task, reschedule_task, delete_task, set_section) lo
+	// EXIGEN, y `list_tasks` es el único sitio donde el modelo puede obtenerlo.
+	// Sin esto sus descripciones ("resuélvelo antes con list_tasks") eran
+	// imposibles de cumplir y las mutaciones quedaban de facto inservibles.
+	let line = `- ${box} ${t.content}${suffix}  · id: ${t.id}`;
 	// Línea aparte con las notas (si las hay), truncadas y sin saltos de línea:
 	// es el feedback que David deja en el detalle de la tarea.
 	if (t.notes && t.notes.trim() !== '') {
