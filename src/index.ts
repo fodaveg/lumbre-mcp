@@ -18,8 +18,9 @@ import { formatTaskList } from './format.js';
  * `GET /api/tasks`, incluye los adjuntos de cada tarea). `read_attachment` lee
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
- * Fase 2: `complete_task`/`update_task`/`reschedule_task`/`delete_task`
- * (mutan una tarea EXISTENTE vía `/api/mutations` — ver PHASE2.md). Todas
+ * Fase 2: `complete_task`/`update_task`/`reschedule_task`/`delete_task`/
+ * `set_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
+ * PHASE2.md). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -192,7 +193,7 @@ server.registerTool(
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
 
-/** Aviso compartido en las 4 tools de Fase 2: la app es asíncrona/eventual
+/** Aviso compartido en las tools de Fase 2: la app es asíncrona/eventual
  *  (igual que `add_task`), así que ninguna da confirmación inmediata de que
  *  la mutación se aplicó de verdad — solo de que quedó encolada. */
 const ASYNC_NOTE =
@@ -328,6 +329,44 @@ server.registerTool(
 			await mutateTask(config, { taskId: input.taskId, kind: 'delete', payload: {} });
 			return textResult(
 				`Encolado en Lumbre el borrado de la tarea ${input.taskId} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'set_section',
+	{
+		title: 'Mover una tarea de Lumbre a una sección/heading',
+		description:
+			'Mueve una tarea EXISTENTE a una sección/heading dentro de SU lista/proyecto (se crea si no ' +
+			'existe), o la saca de su sección con section: null. Solo aplica si la tarea ya pertenece a ' +
+			'una lista de "Algún día"/proyecto (si no, se ignora en silencio — una sección solo existe ' +
+			`dentro de una lista). ${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks.`,
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+			section: z
+				.string()
+				.max(200)
+				.nullable()
+				.describe(
+					'Nombre de la sección destino dentro de la lista de la tarea (se crea si no existe). ' +
+						'null = quitarla de su sección actual.'
+				)
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'setSection',
+				payload: { section: input.section }
+			});
+			return textResult(
+				`Encolado en Lumbre: mover la tarea ${input.taskId} a la sección ` +
+					`${input.section === null ? '(ninguna)' : `"${input.section}"`} (se aplicará al sincronizar).`
 			);
 		} catch (err) {
 			return errorResult(err);

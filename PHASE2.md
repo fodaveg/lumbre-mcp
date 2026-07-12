@@ -12,6 +12,16 @@
 > tarea a la Bandeja de entrada (`facade.resolveInboxListId()` +
 > `moveToList`), no a un `move(id, null, …)` suelto (eso la dejaría sin lista
 > hasta el próximo `ensureSomedayLists`).
+>
+> **Añadida después una 5ª tool, `set_section`** (`kind: 'setSection'`,
+> payload `{ section: string | null }`): mueve una tarea EXISTENTE a una
+> sección/heading dentro de SU PROPIA lista (resuelta client-side vía
+> `t.somedayListId`, no viaja en el payload), creándola si no existe
+> (`facade.ensureSectionByName`); `section: null` la saca de su sección
+> (`facade.setTaskSection(id, null)`). Se ignora en silencio si la tarea no
+> pertenece a ninguna lista — una sección solo existe dentro de una lista. Es
+> el espejo, para tareas existentes, del `section` que ya admitía `add_task`
+> al crear.
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas
@@ -69,6 +79,9 @@ Payload por `kind`:
   aquí toda la superficie de edición)
 - `reschedule`: `{ date: string | null }` (mover de día / a "Algún día")
 - `delete`: `{}` (soft-delete, mismo criterio que `softDeleteTask`)
+- `setSection`: `{ section: string | null }` (mover a una sección DENTRO de su
+  propia lista, o `null` para quitarla de sección — añadida después, ver nota
+  de cabecera)
 
 ## Endpoint de escritura
 

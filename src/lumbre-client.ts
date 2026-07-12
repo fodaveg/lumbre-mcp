@@ -1,8 +1,9 @@
 /**
  * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
  * (crea) y `GET /api/tasks` (lee). Fase 2: `POST /api/mutations` (encola
- * completar/editar/reprogramar/borrar sobre una tarea EXISTENTE — ver
- * `src/routes/api/mutations/+server.ts` en el repo principal y `PHASE2.md`).
+ * completar/editar/reprogramar/borrar/mover-de-sección sobre una tarea
+ * EXISTENTE — ver `src/routes/api/mutations/+server.ts` en el repo principal
+ * y `PHASE2.md`).
  * Todos se autentican con el MISMO token personal de email-to-task
  * (Ajustes → email entrante en la app), enviado como `Authorization: Bearer`.
  */
@@ -208,7 +209,7 @@ export async function getAttachment(config: LumbreConfig, id: string): Promise<D
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
 
-export type MutationKind = 'complete' | 'update' | 'reschedule' | 'delete';
+export type MutationKind = 'complete' | 'update' | 'reschedule' | 'delete' | 'setSection';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -226,11 +227,24 @@ export interface RescheduleMutationPayload {
 	date: string | null;
 }
 export type DeleteMutationPayload = Record<string, never>;
+/** `section: "<nombre>"` mueve la tarea a esa sección (se crea si no existe)
+ *  dentro de SU PROPIA lista/proyecto (resuelta client-side, no viaja aquí);
+ *  `section: null` la saca de su sección. Espejo, para tareas existentes, del
+ *  `section` que ya admite `addTask`/`/api/ingest` al crear una tarea. No
+ *  aplica (se ignora en silencio) si la tarea no pertenece a ninguna lista. */
+export interface SetSectionMutationPayload {
+	section: string | null;
+}
 
 export interface MutateTaskInput {
 	taskId: string;
 	kind: MutationKind;
-	payload: CompleteMutationPayload | UpdateMutationPayload | RescheduleMutationPayload | DeleteMutationPayload;
+	payload:
+		| CompleteMutationPayload
+		| UpdateMutationPayload
+		| RescheduleMutationPayload
+		| DeleteMutationPayload
+		| SetSectionMutationPayload;
 }
 
 /**
