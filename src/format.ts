@@ -5,6 +5,17 @@ function priorityLabel(priority: LumbreTask['priority']): string {
 	return priority ? `p${priority}` : '';
 }
 
+/** Longitud máxima de las notas mostradas por tarea antes de truncar con "…". */
+const NOTES_PREVIEW_LENGTH = 240;
+
+/** Notas colapsadas a una línea (saltos de línea → espacio) y truncadas, para
+ *  no romper el formato "una tarea, una línea" de `formatTask`. */
+function notesPreview(notes: string): string {
+	const collapsed = notes.replace(/\s+/g, ' ').trim();
+	if (collapsed.length <= NOTES_PREVIEW_LENGTH) return collapsed;
+	return `${collapsed.slice(0, NOTES_PREVIEW_LENGTH)}…`;
+}
+
 /** Una tarea → una línea compacta y legible (NO JSON crudo, para no saturar al modelo). */
 function formatTask(t: LumbreTask): string {
 	const box = t.done ? '[x]' : '[ ]';
@@ -14,7 +25,12 @@ function formatTask(t: LumbreTask): string {
 	if (t.date) tags.push(t.date);
 	if (t.deadline) tags.push(`⚑${t.deadline}`);
 	const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
-	const line = `- ${box} ${t.content}${suffix}`;
+	let line = `- ${box} ${t.content}${suffix}`;
+	// Línea aparte con las notas (si las hay), truncadas y sin saltos de línea:
+	// es el feedback que David deja en el detalle de la tarea.
+	if (t.notes && t.notes.trim() !== '') {
+		line += `\n  notas: ${notesPreview(t.notes)}`;
+	}
 	if (!t.attachments || t.attachments.length === 0) return line;
 	// Una línea aparte con los adjuntos (nombre + id): el modelo necesita el id
 	// para pedir los bytes con la tool `read_attachment`.
