@@ -59,6 +59,8 @@ export interface LumbreAttachment {
 export interface LumbreTask {
 	id: string;
 	content: string;
+	/** Notas/descripción larga de la tarea, o null si no tiene. */
+	notes: string | null;
 	done: boolean;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;
@@ -205,6 +207,20 @@ export async function getAttachment(config: LumbreConfig, id: string): Promise<D
 		contentType: res.headers.get('content-type') ?? 'application/octet-stream',
 		bytes: Buffer.from(await res.arrayBuffer())
 	};
+}
+
+/**
+ * `POST /api/sync/flush`: fuerza el flush del sync ANTES de leer (bug:
+ * ventana de debounce del persister — ver ese endpoint en el repo
+ * principal). Sin cuerpo. Útil justo antes de un `listTasks` cuando importa
+ * ver el estado más reciente posible; NO recupera cambios de un cliente que
+ * esté offline y nunca los haya mandado por WS (límite server-side).
+ */
+export async function refreshSync(config: LumbreConfig): Promise<void> {
+	const body = await request(config, '/api/sync/flush', { method: 'POST' });
+	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
+		throw new LumbreApiError('Lumbre no confirmó el flush del sync (respuesta inesperada).');
+	}
 }
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────

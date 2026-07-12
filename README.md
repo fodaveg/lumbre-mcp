@@ -20,6 +20,13 @@ Paquete Node/TS **independiente** del resto del repo (su propio
   día"/proyecto — sin `scope` explícito junto con `list`, el alcance temporal
   por defecto pasa a `all` (la mayoría de las tareas de una lista no tienen
   fecha). Un `list` que no existe (aún) devuelve una lista vacía, no un error.
+- `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
+  `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
+  ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket
+  con un pequeño rebote/debounce). Útil justo antes de `list_tasks` cuando
+  importa ver lo más reciente. **Límite**: solo garantiza lo que YA llegó al
+  servidor por WebSocket — los cambios de un dispositivo offline que aún no
+  los mandó no se pueden recuperar desde aquí.
 
 ## Qué hace (Fase 2 — mutar una tarea existente)
 

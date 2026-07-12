@@ -7,6 +7,7 @@ import {
 	getAttachment,
 	listTasks,
 	mutateTask,
+	refreshSync,
 	LumbreApiError,
 	type LumbreConfig
 } from './lumbre-client.js';
@@ -105,6 +106,30 @@ server.registerTool(
 		try {
 			await addTask(config, input);
 			return textResult(`Tarea añadida a Lumbre: “${input.text}”.`);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'refresh_sync',
+	{
+		title: 'Forzar el refresco del sync de Lumbre',
+		description:
+			'Fuerza el flush del sync de Lumbre ANTES de leer, para evitar que list_tasks devuelva un ' +
+			'estado ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket con un ' +
+			'pequeño rebote/debounce). Úsala justo antes de list_tasks cuando importe ver el estado más ' +
+			'reciente posible (p. ej. justo después de que el usuario diga que acaba de cambiar algo en ' +
+			'la app). LÍMITE: solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
+			'del usuario está offline ahora mismo, sus cambios sin enviar no se pueden recuperar desde ' +
+			'aquí, esperar no sirve de nada en ese caso. Sin parámetros.',
+		inputSchema: {}
+	},
+	async () => {
+		try {
+			await refreshSync(config);
+			return textResult('Sync de Lumbre refrescado: el servidor ya tiene persistido todo lo que le había llegado.');
 		} catch (err) {
 			return errorResult(err);
 		}
