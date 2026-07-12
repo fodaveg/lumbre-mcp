@@ -71,7 +71,9 @@ server.registerTool(
 			'Añade una tarea nueva a Lumbre (planificador semanal personal). Se encola y se ' +
 			'materializa en el planificador la próxima vez que un dispositivo sincronice — no es ' +
 			'instantáneo si no hay ningún dispositivo online. Usa esta tool cuando el usuario pida ' +
-			'"apúntame", "recuérdame", "añade a mi lista/tarea/planificador" o similar.',
+			'"apúntame", "recuérdame", "añade a mi lista/tarea/planificador" o similar. `section` ' +
+			'coloca la tarea en una sección/heading concreta DENTRO de `list` (se crea si no ' +
+			'existe); se ignora sin `list`.',
 		inputSchema: {
 			text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
 			list: z
@@ -81,6 +83,14 @@ server.registerTool(
 				.describe(
 					'Nombre de la lista de "Algún día" destino (se crea si no existe). Sin lista y sin ' +
 						'date, el cliente la coloca en "hoy" al materializarla.'
+				),
+			section: z
+				.string()
+				.max(200)
+				.optional()
+				.describe(
+					'Nombre de la sección/heading dentro de `list` donde colocar la tarea (se crea si ' +
+						'no existe). Se ignora si no se indica `list`.'
 				),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
 			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),

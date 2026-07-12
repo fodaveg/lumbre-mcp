@@ -21,6 +21,9 @@ export interface IngestRecurrence {
 export interface AddTaskInput {
 	text: string;
 	list?: string;
+	/** Nombre de la sección/heading dentro de `list` (se crea si no existe);
+	 *  se ignora si no se indica `list`. */
+	section?: string;
 	notes?: string;
 	priority?: 'p1' | 'p2' | 'p3' | 'p4';
 	date?: string;
