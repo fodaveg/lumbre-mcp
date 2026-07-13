@@ -12,7 +12,9 @@ Paquete Node/TS **independiente** del resto del repo (su propio
 - `add_task` — añade una tarea nueva a Lumbre (vía `POST /api/ingest`, el
   mismo endpoint que usa email-to-task/Atajos de iOS). Se encola y se
   materializa en el planificador la próxima vez que un dispositivo tuyo
-  sincronice; no es instantáneo si no hay ningún dispositivo online.
+  sincronice; no es instantáneo si no hay ningún dispositivo online. Acepta
+  `list` (nombre, se crea si no existe) o `listId` (id ESTABLE de la lista,
+  preferente sobre `list`, inmune a renames — sácalo de `list_tasks`).
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
   por `scope`: `today` (default), `week`, `inbox`/`someday` (sin fecha),
   `overdue` o `all`; puede incluir completadas con `includeDone`. `list`
@@ -20,6 +22,9 @@ Paquete Node/TS **independiente** del resto del repo (su propio
   día"/proyecto — sin `scope` explícito junto con `list`, el alcance temporal
   por defecto pasa a `all` (la mayoría de las tareas de una lista no tienen
   fecha). Un `list` que no existe (aún) devuelve una lista vacía, no un error.
+  Si alguna tarea del lote tiene lista, la respuesta empieza con una leyenda
+  (`· lista "Nombre" — listId: <uuid>`), una línea por lista distinta, para
+  que puedas usar ese `listId` en `add_task`/`move_to_list` sin ambigüedad.
 - `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
   `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
   ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket
@@ -47,6 +52,11 @@ tarea — resuélvelo antes con `list_tasks`. Diseño completo en `PHASE2.md`
 - `delete_task({ taskId })` — borra (soft-delete) la tarea. **Acción
   delicada**: sin confirmación inmediata ni deshacer desde la tool; confírmalo
   con el usuario antes de llamarla.
+- `move_to_list({ taskId, listId?, list? })` — mueve la tarea a otra lista de
+  "Algún día"/proyecto. `listId` (id ESTABLE, ver la leyenda de listas al
+  principio de `list_tasks`) es preferente sobre `list` (nombre, se crea si
+  no existe); `listId: null` desvincula la tarea de su lista actual. Conserva
+  la fecha de la tarea y limpia su sección.
 
 ## Compilar
 

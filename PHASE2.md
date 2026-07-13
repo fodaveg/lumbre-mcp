@@ -22,6 +22,17 @@
 > pertenece a ninguna lista — una sección solo existe dentro de una lista. Es
 > el espejo, para tareas existentes, del `section` que ya admitía `add_task`
 > al crear.
+>
+> **Añadida después una 6ª tool, `move_to_list`** (`kind: 'moveToList'`,
+> payload `{ listId?: string | null } | { list?: string }`, lote 2 —
+> identidad de listas): mueve una tarea EXISTENTE a otra lista de "Algún
+> día", por `listId` ESTABLE (preferente, inmune a renames) o por `list`
+> (nombre, se crea si no existe — mismo criterio que `list` en `add_task`);
+> `listId: null` explícito la desvincula de su lista actual. Conserva la
+> fecha de la tarea y limpia su sección (una sección solo existe dentro de
+> su lista de origen). `list_tasks` expone el `listId` de cada lista en una
+> leyenda al principio de su salida (ver `format.ts`), para que el modelo no
+> tenga que inspeccionar tarea por tarea.
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas

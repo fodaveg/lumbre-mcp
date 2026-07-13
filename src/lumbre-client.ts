@@ -22,6 +22,10 @@ export interface IngestRecurrence {
 export interface AddTaskInput {
 	text: string;
 	list?: string;
+	/** Id ESTABLE de la lista de "Algún día" destino (lote 2 — identidad de
+	 *  listas), alternativa a `list` (por nombre) inmune a renames. Preferente
+	 *  sobre `list` si se indican ambos — ver `/api/ingest` en el repo principal. */
+	listId?: string;
 	/** Nombre de la sección/heading dentro de `list` (se crea si no existe);
 	 *  se ignora si no se indica `list`. */
 	section?: string;
@@ -225,7 +229,7 @@ export async function refreshSync(config: LumbreConfig): Promise<void> {
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
 
-export type MutationKind = 'complete' | 'update' | 'reschedule' | 'delete' | 'setSection';
+export type MutationKind = 'complete' | 'update' | 'reschedule' | 'delete' | 'setSection' | 'moveToList';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -251,6 +255,16 @@ export type DeleteMutationPayload = Record<string, never>;
 export interface SetSectionMutationPayload {
 	section: string | null;
 }
+/** Mueve una tarea existente a otra lista de "Algún día" (lote 2 — identidad
+ *  de listas): por `listId` ESTABLE (preferente, inmune a renames) o por
+ *  `list` (nombre, se crea si no existe — mismo criterio que `list` en
+ *  `add_task`/`/api/ingest`); `listId: null` explícito la desvincula de su
+ *  lista actual. Manda solo uno de los dos campos (el tool `move_to_list`
+ *  decide cuál según lo que reciba). */
+export interface MoveToListMutationPayload {
+	listId?: string | null;
+	list?: string;
+}
 
 export interface MutateTaskInput {
 	taskId: string;
@@ -260,7 +274,8 @@ export interface MutateTaskInput {
 		| UpdateMutationPayload
 		| RescheduleMutationPayload
 		| DeleteMutationPayload
-		| SetSectionMutationPayload;
+		| SetSectionMutationPayload
+		| MoveToListMutationPayload;
 }
 
 /**

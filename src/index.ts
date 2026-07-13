@@ -20,8 +20,8 @@ import { formatTaskList } from './format.js';
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
  * Fase 2: `complete_task`/`update_task`/`reschedule_task`/`delete_task`/
- * `set_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
- * PHASE2.md). Todas
+ * `set_section`/`move_to_list` (mutan una tarea EXISTENTE vía
+ * `/api/mutations` — ver PHASE2.md). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -85,6 +85,14 @@ server.registerTool(
 				.describe(
 					'Nombre de la lista de "Algún día" destino (se crea si no existe). Sin lista y sin ' +
 						'date, el cliente la coloca en "hoy" al materializarla.'
+				),
+			listId: z
+				.string()
+				.uuid()
+				.optional()
+				.describe(
+					'Id ESTABLE de la lista destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
+						'de list_tasks. Si se omite, se usa `list` por nombre (se crea si no existe).'
 				),
 			section: z
 				.string()
@@ -392,6 +400,58 @@ server.registerTool(
 			return textResult(
 				`Encolado en Lumbre: mover la tarea ${input.taskId} a la sección ` +
 					`${input.section === null ? '(ninguna)' : `"${input.section}"`} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'move_to_list',
+	{
+		title: 'Mover una tarea de Lumbre a otra lista',
+		description:
+			'Mueve una tarea EXISTENTE a otra lista de "Algún día"/proyecto (o la desvincula de la ' +
+			'suya). Targetea por `listId` (id ESTABLE, preferente, inmune a renames — sácalo de ' +
+			'list_tasks) o por `list` (nombre, se crea si no existe); `listId: null` explícito ' +
+			'desvincula la tarea de su lista actual. CONSERVA la fecha de la tarea y limpia su ' +
+			`sección (una sección solo existe dentro de su lista de origen). ${ASYNC_NOTE} Necesita ` +
+			'el `taskId` — resuélvelo antes con list_tasks.',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+			listId: z
+				.union([z.string().uuid(), z.null()])
+				.optional()
+				.describe(
+					'Id ESTABLE de la lista destino (ver list_tasks), PREFERENTE sobre `list`. ' +
+						'null = desvincular la tarea de su lista actual.'
+				),
+			list: z
+				.string()
+				.max(200)
+				.optional()
+				.describe('Nombre de la lista destino (se crea si no existe); se ignora si se indica `listId`.')
+		}
+	},
+	async (input) => {
+		if (input.listId === undefined && input.list === undefined) {
+			return errorResult(new Error('Indica `listId` o `list` (la lista destino).'));
+		}
+		try {
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'moveToList',
+				payload: input.listId !== undefined ? { listId: input.listId } : { list: input.list! }
+			});
+			const target =
+				input.listId === null
+					? '(ninguna lista)'
+					: input.listId !== undefined
+						? `listId ${input.listId}`
+						: `"${input.list}"`;
+			return textResult(
+				`Encolado en Lumbre: mover la tarea ${input.taskId} a ${target} (se aplicará al sincronizar).`
 			);
 		} catch (err) {
 			return errorResult(err);
