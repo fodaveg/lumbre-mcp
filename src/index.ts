@@ -270,6 +270,39 @@ server.registerTool(
 );
 
 server.registerTool(
+	'cancel_task',
+	{
+		title: 'Cancelar/restaurar una tarea de Lumbre',
+		description:
+			'Cancela una tarea EXISTENTE: equivalente a completarla, pero marcada como "no se hizo ni ' +
+			'se hará" (distinto de complete_task, que significa que sí se hizo) — sale igualmente de ' +
+			'pendientes/rollover. Usa esta tool cuando el usuario diga "cancela", "ya no hace falta", ' +
+			`"descarta esta tarea" (sin querer decir que la borre). ${ASYNC_NOTE} Con cancelled:false ` +
+			'restaura la tarea cancelada a pendiente (equivalente a "deshacer"). Necesita el `taskId` — ' +
+			'resuélvelo antes con list_tasks.',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+			cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'cancel',
+				payload: { cancelled: input.cancelled ?? true }
+			});
+			return textResult(
+				`Encolado en Lumbre: ${input.cancelled === false ? 'restaurar' : 'cancelar'} la tarea ${input.taskId} ` +
+					'(se aplicará al sincronizar).'
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
 	'update_task',
 	{
 		title: 'Editar una tarea de Lumbre',

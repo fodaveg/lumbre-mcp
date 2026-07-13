@@ -33,6 +33,15 @@
 > su lista de origen). `list_tasks` expone el `listId` de cada lista en una
 > leyenda al principio de su salida (ver `format.ts`), para que el modelo no
 > tenga que inspeccionar tarea por tarea.
+>
+> **Añadida después una 7ª tool, `cancel_task`** (`kind: 'cancel'`, payload
+> `{ cancelled: boolean }`): cancela una tarea EXISTENTE — "se cerró, pero no
+> se hizo ni se hará" (`TasksFacade.cancel`, next-batch B), distinto de
+> `complete_task` (que sí significa que se hizo). `cancelled: false` (default
+> `true`) la restaura (`TasksFacade.uncancel`). Espejo exacto de
+> `complete_task`/`kind: 'complete'`; la invariante de mutua exclusión con
+> `completedAt` la aplica la propia fachada al drenar, el payload solo viaja
+> el booleano.
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas

@@ -229,7 +229,14 @@ export async function refreshSync(config: LumbreConfig): Promise<void> {
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
 
-export type MutationKind = 'complete' | 'update' | 'reschedule' | 'delete' | 'setSection' | 'moveToList';
+export type MutationKind =
+	| 'complete'
+	| 'update'
+	| 'reschedule'
+	| 'delete'
+	| 'setSection'
+	| 'moveToList'
+	| 'cancel';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -265,6 +272,14 @@ export interface MoveToListMutationPayload {
 	listId?: string | null;
 	list?: string;
 }
+/** `cancelled: true` (default, ver `cancel_task` en `index.ts`) cancela la
+ *  tarea; `false` la restaura (uncancel). Espejo de `CompleteMutationPayload`,
+ *  pero para la marca `cancelledAt` (mutuamente excluyente con `completedAt`
+ *  — la invariante la aplica la fachada del cliente de Lumbre al drenar, no
+ *  este payload, que solo viaja tal cual hasta `/api/mutations`). */
+export interface CancelMutationPayload {
+	cancelled: boolean;
+}
 
 export interface MutateTaskInput {
 	taskId: string;
@@ -275,7 +290,8 @@ export interface MutateTaskInput {
 		| RescheduleMutationPayload
 		| DeleteMutationPayload
 		| SetSectionMutationPayload
-		| MoveToListMutationPayload;
+		| MoveToListMutationPayload
+		| CancelMutationPayload;
 }
 
 /**

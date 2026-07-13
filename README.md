@@ -44,6 +44,9 @@ tarea — resuélvelo antes con `list_tasks`. Diseño completo en `PHASE2.md`
 
 - `complete_task({ taskId, done? })` — marca hecha (`done` default `true`) o
   la desmarca (`done: false`).
+- `cancel_task({ taskId, cancelled? })` — cancela la tarea (`cancelled`
+  default `true`): equivalente a completarla, pero marcada como "no se hizo
+  ni se hará" (distinto de `complete_task`). `cancelled: false` la restaura.
 - `update_task({ taskId, content?, notes?, priority? })` — edita texto/notas/
   prioridad; solo toca los campos que envíes. `priority` es `'p1'..'p4'`
   (`p4` = quitar la prioridad).
