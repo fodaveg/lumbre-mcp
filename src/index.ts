@@ -115,6 +115,11 @@ server.registerTool(
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
 			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),
 			deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
+			time: z
+				.string()
+				.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+				.optional()
+				.describe('Hora "HH:MM" (24h) DENTRO de `date`; sin `date` no tiene efecto visible'),
 			recurrence: recurrenceSchema.optional(),
 			subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
 			notes: z.string().max(10000).optional().describe('Notas/descripción larga')
@@ -382,9 +387,9 @@ server.registerTool(
 	{
 		title: 'Editar una tarea de Lumbre',
 		description:
-			`Edita el texto, las notas o la prioridad de una tarea existente. ${ASYNC_NOTE} Indica solo ` +
-			'los campos que quieras cambiar; los que omitas se dejan igual. Necesita el `taskId` — ' +
-			'resuélvelo antes con list_tasks (por contenido/fecha).',
+			`Edita el texto, las notas, la prioridad o la hora de una tarea existente. ${ASYNC_NOTE} ` +
+			'Indica solo los campos que quieras cambiar; los que omitas se dejan igual. Necesita el ' +
+			'`taskId` — resuélvelo antes con list_tasks (por contenido/fecha).',
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
@@ -396,12 +401,23 @@ server.registerTool(
 			priority: z
 				.enum(['p1', 'p2', 'p3', 'p4'])
 				.optional()
-				.describe('p1 = más urgente … p3; p4 = quitar la prioridad')
+				.describe('p1 = más urgente … p3; p4 = quitar la prioridad'),
+			time: z
+				.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
+				.optional()
+				.describe('Hora "HH:MM" (24h) DENTRO del día programado, o null para quitarla')
 		}
 	},
 	async (input) => {
-		if (input.content === undefined && input.notes === undefined && input.priority === undefined) {
-			return errorResult(new Error('Indica al menos un campo a cambiar (content, notes o priority).'));
+		if (
+			input.content === undefined &&
+			input.notes === undefined &&
+			input.priority === undefined &&
+			input.time === undefined
+		) {
+			return errorResult(
+				new Error('Indica al menos un campo a cambiar (content, notes, priority o time).')
+			);
 		}
 		try {
 			await requireTaskExists(input.taskId);
@@ -411,7 +427,8 @@ server.registerTool(
 				payload: {
 					...(input.content !== undefined ? { content: input.content } : {}),
 					...(input.notes !== undefined ? { notes: input.notes } : {}),
-					...(input.priority !== undefined ? { priority: priorityToLevel(input.priority) } : {})
+					...(input.priority !== undefined ? { priority: priorityToLevel(input.priority) } : {}),
+					...(input.time !== undefined ? { time: input.time } : {})
 				}
 			});
 			return textResult(
