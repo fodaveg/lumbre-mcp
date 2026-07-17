@@ -50,6 +50,10 @@ export interface ListTasksInput {
 	 *  lista. Sin `list`, casa la primera sección con ese nombre en cualquiera. */
 	section?: string;
 	includeDone?: boolean;
+	/** Tope de tareas a traer (la API lo capa a 500); NO expuesto como parámetro
+	 *  de la tool `list_tasks` — solo lo usa `findTaskById` internamente, para
+	 *  barrer el mayor número posible al comprobar existencia. */
+	limit?: number;
 }
 
 /** Metadata de un adjunto (sin bytes ni `storageKey`); los bytes se piden aparte con `getAttachment`. */
@@ -160,12 +164,43 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if (input.list) params.set('list', input.list);
 	if (input.section) params.set('section', input.section);
 	if (input.includeDone) params.set('includeDone', 'true');
+	if (input.limit) params.set('limit', String(input.limit));
 	const qs = params.toString();
 	const body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
 	if (!Array.isArray(body)) {
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks.');
 	}
 	return body as LumbreTask[];
+}
+
+/** Tope de `/api/tasks?limit=` (ver ese endpoint); lo usa `findTaskById` para
+ *  barrer el mayor número posible de tareas vivas al comprobar existencia. */
+const MAX_TASKS_LIMIT = 500;
+
+/**
+ * Busca una tarea por `id` entre TODAS las visibles del usuario (`scope=all`,
+ * `includeDone=true`, límite al tope) y la devuelve, o `undefined` si no
+ * aparece. No hay un endpoint de "tarea por id" dedicado en la API — ver
+ * `GET /api/tasks` en el repo principal — así que esto barre el listado
+ * completo y filtra aquí; usa el MISMO endpoint (y por tanto los mismos
+ * límites) que `listTasks`/`list_tasks`, así que un id real que el modelo
+ * pudo haber obtenido de `list_tasks` siempre será encontrable aquí también.
+ *
+ * Límites conocidos (heredados de `/api/tasks`, ver ese endpoint):
+ * - Cuentas con más de `MAX_TASKS_LIMIT` tareas vivas de primer nivel podrían
+ *   dar un falso "no existe" para un id real fuera de esa ventana.
+ * - Subtareas (`parentId` no nulo) y tareas archivadas/borradas NUNCA
+ *   aparecen — igual que en `list_tasks`, así que el modelo tampoco pudo
+ *   haber sacado su id de ahí.
+ *
+ * La usan tanto `get_task` (para devolver la tarea completa) como el chequeo
+ * de existencia de las tools de mutación (ver `requireTaskExists` en
+ * `index.ts`): un `taskId` mal transcrito (bug real, ver la tarea que motiva
+ * este fichero) hoy se encolaba igual y se perdía en silencio al drenar.
+ */
+export async function findTaskById(config: LumbreConfig, taskId: string): Promise<LumbreTask | undefined> {
+	const tasks = await listTasks(config, { scope: 'all', includeDone: true, limit: MAX_TASKS_LIMIT });
+	return tasks.find((t) => t.id === taskId);
 }
 
 /** Adjunto ya descargado: tipo MIME (de la respuesta) + bytes. */

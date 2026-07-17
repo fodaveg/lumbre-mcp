@@ -16,25 +16,47 @@ function notesPreview(notes: string): string {
 	return `${collapsed.slice(0, NOTES_PREVIEW_LENGTH)}…`;
 }
 
+/** Notas TAL CUAL (sin truncar NI colapsar saltos de línea) — para
+ *  `fullNotes: true`/`get_task`: el caso de uso es reeditarlas con
+ *  `update_task` (que REEMPLAZA la nota entera), así que hasta los saltos de
+ *  línea importan; colapsarlos como hace `notesPreview` los destruiría. */
+function notesFull(notes: string): string {
+	return notes.trim();
+}
+
+/** Opciones de formateo de una tarea; hoy solo si mostrar las notas
+ *  íntegras (ver `notesFull`) o el resumen truncado (`notesPreview`,
+ *  default). */
+interface FormatTaskOptions {
+	fullNotes?: boolean;
+}
+
 /** Una tarea → una línea compacta y legible (NO JSON crudo, para no saturar al modelo). */
-function formatTask(t: LumbreTask): string {
+function formatTask(t: LumbreTask, opts: FormatTaskOptions = {}): string {
 	const box = t.done ? '[x]' : '[ ]';
 	const tags: string[] = [];
 	const prio = priorityLabel(t.priority);
 	if (prio) tags.push(prio);
 	if (t.date) tags.push(t.date);
 	if (t.deadline) tags.push(`⚑${t.deadline}`);
-	const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
+	// `createdAt` recortado a minuto (sin segundos/ms): sirve para desempatar
+	// duplicados ("deja el más nuevo") sin alargar la línea de más.
+	tags.push(`creada:${t.createdAt.slice(0, 16)}`);
+	const suffix = ` (${tags.join(', ')})`;
 	// El id (UUID) al final de la línea: TODAS las tools de mutación
 	// (update_task, complete_task, reschedule_task, delete_task, set_section) lo
 	// EXIGEN, y `list_tasks` es el único sitio donde el modelo puede obtenerlo.
 	// Sin esto sus descripciones ("resuélvelo antes con list_tasks") eran
 	// imposibles de cumplir y las mutaciones quedaban de facto inservibles.
 	let line = `- ${box} ${t.content}${suffix}  · id: ${t.id}`;
-	// Línea aparte con las notas (si las hay), truncadas y sin saltos de línea:
-	// es el feedback que David deja en el detalle de la tarea.
+	// Línea aparte con las notas (si las hay): truncadas y sin saltos de línea
+	// por defecto (es solo el feedback que David deja en el detalle de la
+	// tarea, no hace falta reproducirlo exacto); íntegras y verbatim con
+	// `fullNotes` (o desde `get_task`), para poder reeditarlas sin destruir lo
+	// que no cupiera en el resumen — ver `notesFull`.
 	if (t.notes && t.notes.trim() !== '') {
-		line += `\n  notas: ${notesPreview(t.notes)}`;
+		const notesText = opts.fullNotes ? notesFull(t.notes) : notesPreview(t.notes);
+		line += `\n  notas: ${notesText}`;
 	}
 	if (!t.attachments || t.attachments.length === 0) return line;
 	// Una línea aparte con los adjuntos (nombre + id): el modelo necesita el id
@@ -43,6 +65,38 @@ function formatTask(t: LumbreTask): string {
 		.map((a) => `${a.filename} (id: ${a.id})`)
 		.join(' · ')}`;
 	return `${line}\n${attachmentsLine}`;
+}
+
+/**
+ * Tarea → bloque legible con TODOS sus campos (para `get_task`, ver
+ * `index.ts`): a diferencia de `formatTask` (pensado para listados, una línea
+ * por tarea), este vuelca lista/sección/`createdAt` explícitos y las notas
+ * SIEMPRE íntegras y verbatim (ver `notesFull`) — el caso de uso es leer una
+ * tarea entera para poder reeditar su nota con `update_task` sin perder nada.
+ */
+export function formatTaskFull(t: LumbreTask): string {
+	const lines = [
+		`Tarea ${t.id}`,
+		`- contenido: ${t.content}`,
+		`- estado: ${t.done ? 'hecha' : 'pendiente'}`,
+		`- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
+		`- fecha: ${t.date ?? '(sin fecha)'}`,
+		`- deadline: ${t.deadline ? `⚑${t.deadline}` : '(sin deadline)'}`,
+		`- lista: ${t.list ? `"${t.list}"${t.somedayListId ? ` (listId: ${t.somedayListId})` : ''}` : '(sin lista)'}`,
+		`- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
+		`- creada: ${t.createdAt}`
+	];
+	if (t.notes && t.notes.trim() !== '') {
+		lines.push(`- notas:\n${notesFull(t.notes)}`);
+	} else {
+		lines.push('- notas: (sin notas)');
+	}
+	if (t.attachments && t.attachments.length > 0) {
+		lines.push(
+			`- 📎 adjuntos: ${t.attachments.map((a) => `${a.filename} (id: ${a.id})`).join(' · ')}`
+		);
+	}
+	return lines.join('\n');
 }
 
 /**
@@ -85,8 +139,19 @@ function listLegend(tasks: LumbreTask[]): string[] {
  * lista distinta (o ninguna), la cabecera se queda como antes (`## <sección>`,
  * sin repetir el nombre de la lista, redundante en ese caso); si hay más de
  * una lista distinta, se antepone su nombre (`## <lista> · <sección>`).
+ *
+ * `opts.fullNotes` (default `false`) pasa a cada `formatTask`: con `true` las
+ * notas de TODAS las tareas del lote salen íntegras y verbatim en vez de
+ * truncadas a `NOTES_PREVIEW_LENGTH` — pensado para lotes ya acotados (p. ej.
+ * `list` + `section`) donde perder detalle de la nota molesta más que el
+ * texto extra en el contexto. Para leer una sola tarea completa sin acotar el
+ * listado entero, mejor `get_task` (ver `index.ts`/`formatTaskFull`).
  */
-export function formatTaskList(tasks: LumbreTask[], scope: TaskScope): string {
+export function formatTaskList(
+	tasks: LumbreTask[],
+	scope: TaskScope,
+	opts: FormatTaskOptions = {}
+): string {
 	if (tasks.length === 0) return `Sin tareas (scope=${scope}).`;
 	const header = `${tasks.length} tarea${tasks.length === 1 ? '' : 's'} (scope=${scope}):`;
 	// Leyenda de listas primero (si alguna tarea tiene lista): da el `listId`
@@ -97,7 +162,7 @@ export function formatTaskList(tasks: LumbreTask[], scope: TaskScope): string {
 
 	const hasAnySection = tasks.some((t) => t.section);
 	if (!hasAnySection) {
-		return [...prefix, header, ...tasks.map(formatTask)].join('\n');
+		return [...prefix, header, ...tasks.map((t) => formatTask(t, opts))].join('\n');
 	}
 
 	// "Listas distintas" = valores de t.list no nulos, deduplicados. Si el lote
@@ -117,6 +182,6 @@ export function formatTaskList(tasks: LumbreTask[], scope: TaskScope): string {
 		if (group) group.tasks.push(t);
 		else groups.push({ key, label, tasks: [t] });
 	}
-	const body = groups.flatMap((g) => [`## ${g.label}`, ...g.tasks.map(formatTask)]);
+	const body = groups.flatMap((g) => [`## ${g.label}`, ...g.tasks.map((t) => formatTask(t, opts))]);
 	return [...prefix, header, ...body].join('\n');
 }

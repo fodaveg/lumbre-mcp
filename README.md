@@ -25,6 +25,15 @@ Paquete Node/TS **independiente** del resto del repo (su propio
   Si alguna tarea del lote tiene lista, la respuesta empieza con una leyenda
   (`· lista "Nombre" — listId: <uuid>`), una línea por lista distinta, para
   que puedas usar ese `listId` en `add_task`/`move_to_list` sin ambigüedad.
+  Cada tarea muestra su `createdAt` (recortado a minuto) para desempatar
+  duplicados. Las notas salen truncadas a ~240 caracteres por defecto (para no
+  inflar el contexto en listados largos); `fullNotes: true` las deja íntegras
+  y sin colapsar saltos de línea para TODO el lote — útil si vas a reeditar
+  una nota con `update_task` (que la REEMPLAZA entera) y el lote ya está
+  acotado. Para una sola tarea concreta, mejor `get_task`.
+- `get_task({ taskId })` — devuelve UNA tarea completa y sin recortar (notas
+  íntegras y verbatim, `createdAt` sin recortar, lista/sección con sus ids).
+  Da error si el `taskId` no existe entre las tareas visibles del usuario.
 - `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
   `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
   ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket
@@ -41,6 +50,14 @@ sincronice; **ninguna da confirmación inmediata** de que se aplicó de verdad
 (usa `list_tasks` después para comprobarlo). Todas necesitan el `taskId` de la
 tarea — resuélvelo antes con `list_tasks`. Diseño completo en `PHASE2.md`
 (ya implementado; el documento se conserva como referencia del porqué).
+
+Todas VALIDAN antes de encolar que el `taskId` EXISTE entre las tareas
+visibles del usuario (una llamada extra a `GET /api/tasks`) y dan error si no
+— la EXISTENCIA sí se puede comprobar en el acto, a diferencia de si la
+mutación llegó a APLICARSE de verdad, que sigue siendo asíncrono. Antes de
+este chequeo, un `taskId` mal transcrito se encolaba igual y la mutación se
+perdía en silencio al drenar (`/api/mutations` no valida pertenencia
+server-side, ver ese endpoint).
 
 - `complete_task({ taskId, done? })` — marca hecha (`done` default `true`) o
   la desmarca (`done: false`).

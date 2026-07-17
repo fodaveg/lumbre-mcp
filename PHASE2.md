@@ -42,6 +42,22 @@
 > `complete_task`/`kind: 'complete'`; la invariante de mutua exclusión con
 > `completedAt` la aplica la propia fachada al drenar, el payload solo viaja
 > el booleano.
+>
+> **Fix 2026-07-17 (bug real, audit del uso del MCP):** las 7 tools de arriba
+> encolaban una mutación sobre un `taskId` que NO existía (typo de UUID) y
+> respondían "Encolado…" igual — la mutación se perdía en SILENCIO al drenar
+> (ver la nota anti-IDOR arriba: el drenaje descarta cualquier `taskId` que no
+> encuentre). `index.ts` ahora valida con `findTaskById` (`lumbre-client.ts`,
+> vía `GET /api/tasks?scope=all&includeDone=true&limit=500`) ANTES de
+> encolar, y da error si no existe — la EXISTENCIA sí se puede comprobar en el
+> acto, a diferencia de si la mutación llegó a APLICARSE (eso sigue siendo
+> asíncrono). Misma sesión: `list_tasks` exponía `notes` truncadas a ~240
+> caracteres sin forma de leerlas íntegras (rompía editarlas con `update_task`,
+> que las REEMPLAZA enteras) y no exponía `createdAt` (útil para desempatar
+> duplicados) — se añadió `fullNotes: true` a `list_tasks` (notas íntegras y
+> verbatim para todo el lote) y una tool nueva, `get_task(taskId)` (la tarea
+> entera, sin recortes), además de `createdAt` recortado a minuto en cada línea
+> de `list_tasks`. Ver `format.ts`/`lumbre-client.ts`/`index.ts`.
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas

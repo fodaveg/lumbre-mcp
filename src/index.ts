@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import {
 	addTask,
+	findTaskById,
 	getAttachment,
 	listTasks,
 	mutateTask,
@@ -11,7 +12,7 @@ import {
 	LumbreApiError,
 	type LumbreConfig
 } from './lumbre-client.js';
-import { formatTaskList } from './format.js';
+import { formatTaskFull, formatTaskList } from './format.js';
 
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
@@ -19,8 +20,8 @@ import { formatTaskList } from './format.js';
  * `GET /api/tasks`, incluye los adjuntos de cada tarea). `read_attachment` lee
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
- * Fase 2: `complete_task`/`update_task`/`reschedule_task`/`delete_task`/
- * `set_section`/`move_to_list` (mutan una tarea EXISTENTE vía
+ * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
+ * `delete_task`/`set_section`/`move_to_list` (mutan una tarea EXISTENTE vía
  * `/api/mutations` — ver PHASE2.md). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
@@ -28,7 +29,16 @@ import { formatTaskList } from './format.js';
  * Todas las tools de Fase 2 necesitan el `taskId` de antemano: lo normal es
  * llamar primero a `list_tasks` para resolverlo por contenido/fecha. Igual
  * `read_attachment` necesita el `attachment_id` que trae `list_tasks` en el
- * campo `attachments` de cada tarea.
+ * campo `attachments` de cada tarea. TODAS validan que el `taskId` EXISTE
+ * antes de encolar (ver `requireTaskExists` más abajo) — bug real hasta
+ * 2026-07-17: un id mal transcrito se encolaba igual y se perdía en silencio.
+ *
+ * `list_tasks` trunca las notas de cada tarea a ~240 caracteres por defecto
+ * (para no inflar el contexto en listados largos); `fullNotes: true` las deja
+ * íntegras para TODO el lote, y `get_task(taskId)` devuelve una única tarea
+ * completa (notas verbatim + `createdAt` + lista/sección) — pensado para
+ * reeditar una nota con `update_task` (que la REEMPLAZA entera) sin destruir
+ * lo que la versión truncada no traía.
  */
 
 function loadConfig(): LumbreConfig {
@@ -174,13 +184,47 @@ server.registerTool(
 					'Nombre (case-insensitive) de una sección dentro de `list` a filtrar (Fase B, ' +
 						'listas=proyectos); combinado con `list`, solo casa una sección de ESA lista'
 				),
-			includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false')
+			includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
+			fullNotes: z
+				.boolean()
+				.optional()
+				.describe(
+					'Si true, las notas de CADA tarea del lote salen íntegras y sin colapsar saltos de ' +
+						'línea, en vez de truncadas a ~240 caracteres (default false, para no inflar el ' +
+						'contexto en listados largos). Útil si vas a reeditar la nota con update_task (que ' +
+						'la REEMPLAZA entera) y el lote ya está acotado (p. ej. con `list`/`section`). Para ' +
+						'una sola tarea concreta, mejor get_task.'
+				)
 		}
 	},
 	async (input) => {
 		try {
 			const tasks = await listTasks(config, input);
-			return textResult(formatTaskList(tasks, input.scope ?? 'today'));
+			return textResult(formatTaskList(tasks, input.scope ?? 'today', { fullNotes: input.fullNotes }));
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'get_task',
+	{
+		title: 'Leer una tarea completa de Lumbre',
+		description:
+			'Devuelve UNA tarea de Lumbre entera y sin recortar (notas íntegras y verbatim, fecha de ' +
+			'creación, lista/sección con sus ids) — pensado para reeditar su nota con update_task sin ' +
+			'perder lo que list_tasks trunca por defecto (~240 caracteres). Da error si el taskId no ' +
+			'existe entre las tareas visibles del usuario (resuélvelo antes con list_tasks).',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)')
+		}
+	},
+	async (input) => {
+		try {
+			const task = await findTaskById(config, input.taskId);
+			if (!task) return errorResult(taskNotFoundError(input.taskId));
+			return textResult(formatTaskFull(task));
 		} catch (err) {
 			return errorResult(err);
 		}
@@ -234,6 +278,35 @@ const ASYNC_NOTE =
 	'aplica la próxima vez que un dispositivo del usuario sincronice, no al instante. No hay ' +
 	'confirmación de que se aplicó de verdad (usa list_tasks más tarde para comprobarlo).';
 
+/** Error uniforme para un `taskId` que no aparece entre las tareas visibles
+ *  del usuario — ver `requireTaskExists` para el porqué. */
+function taskNotFoundError(taskId: string): Error {
+	return new Error(
+		`No existe ninguna tarea con id ${taskId} entre las tareas visibles del usuario (¿se transcribió ` +
+			'mal? resuelve el id de nuevo con list_tasks). No se ha encolado ninguna mutación.'
+	);
+}
+
+/**
+ * Comprueba que `taskId` EXISTE antes de encolar cualquier mutación sobre él.
+ * `/api/mutations` NO valida esto server-side (deliberado — ver el JSDoc de
+ * ese endpoint: `tasks` es una proyección que puede ir desfasada del CRDT
+ * real, así que el drenaje del CLIENTE descarta en silencio cualquier
+ * `taskId` que no encuentre). Sin este chequeo aquí, un id mal transcrito
+ * (typo real que mordió a David el 2026-07-17: `9c184fe4-2103-…` en vez de
+ * `9c184fe4-ddb2-4103-…`) se encolaba igual y el MCP contestaba "Encolado…"
+ * tan tranquilo, perdiendo la mutación sin avisar. La EXISTENCIA sí se puede
+ * comprobar en el acto (a diferencia de si la mutación llegó a APLICARSE,
+ * que sigue siendo asíncrono — ver `ASYNC_NOTE`), así que sí merece la pena
+ * gastar la llamada extra a `GET /api/tasks` (vía `findTaskById`) antes de
+ * encolar. Lanza si no existe; el llamante ya está dentro de un `try/catch`
+ * que lo convierte en `errorResult`.
+ */
+async function requireTaskExists(taskId: string): Promise<void> {
+	const task = await findTaskById(config, taskId);
+	if (!task) throw taskNotFoundError(taskId);
+}
+
 /** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
  *  `/api/mutations` para `kind: 'update'`: `p4` = quitar la prioridad (`null`). */
 function priorityToLevel(p: 'p1' | 'p2' | 'p3' | 'p4'): 1 | 2 | 3 | null {
@@ -254,6 +327,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'complete',
@@ -287,6 +361,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'cancel',
@@ -329,6 +404,7 @@ server.registerTool(
 			return errorResult(new Error('Indica al menos un campo a cambiar (content, notes o priority).'));
 		}
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'update',
@@ -363,6 +439,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'reschedule',
@@ -392,6 +469,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, { taskId: input.taskId, kind: 'delete', payload: {} });
 			return textResult(
 				`Encolado en Lumbre el borrado de la tarea ${input.taskId} (se aplicará al sincronizar).`
@@ -425,6 +503,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'setSection',
@@ -472,6 +551,7 @@ server.registerTool(
 			return errorResult(new Error('Indica `listId` o `list` (la lista destino).'));
 		}
 		try {
+			await requireTaskExists(input.taskId);
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'moveToList',
