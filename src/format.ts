@@ -73,6 +73,11 @@ function formatTask(t: LumbreTask, opts: FormatTaskOptions = {}): string {
  * por tarea), este vuelca lista/sección/`createdAt` explícitos y las notas
  * SIEMPRE íntegras y verbatim (ver `notesFull`) — el caso de uso es leer una
  * tarea entera para poder reeditar su nota con `update_task` sin perder nada.
+ *
+ * `subtasks` (si la tarea es de primer nivel y tiene alguna, ver
+ * `LumbreTask.subtasks`): una línea `[x]`/`[ ]` por subtarea, con SU id — es
+ * el ÚNICO sitio donde el modelo puede obtener el id de una subtarea, para
+ * poder pasárselo después a `complete_subtask`.
  */
 export function formatTaskFull(t: LumbreTask): string {
 	const lines = [
@@ -95,6 +100,12 @@ export function formatTaskFull(t: LumbreTask): string {
 		lines.push(
 			`- 📎 adjuntos: ${t.attachments.map((a) => `${a.filename} (id: ${a.id})`).join(' · ')}`
 		);
+	}
+	if (t.subtasks && t.subtasks.length > 0) {
+		lines.push('- subtareas:');
+		for (const s of t.subtasks) {
+			lines.push(`  ${s.done ? '[x]' : '[ ]'} ${s.content}  · id: ${s.id}`);
+		}
 	}
 	return lines.join('\n');
 }

@@ -4,11 +4,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import {
 	addTask,
+	assertTaskUsable,
 	findTaskById,
 	getAttachment,
 	listTasks,
 	mutateTask,
 	refreshSync,
+	taskNotFoundError,
 	LumbreApiError,
 	type LumbreConfig
 } from './lumbre-client.js';
@@ -21,8 +23,8 @@ import { formatTaskFull, formatTaskList } from './format.js';
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
- * `delete_task`/`set_section`/`move_to_list`/`add_subtask` (mutan una tarea
- * EXISTENTE vía `/api/mutations` — ver PHASE2.md). Todas
+ * `delete_task`/`set_section`/`move_to_list`/`add_subtask`/`complete_subtask`
+ * (mutan una tarea EXISTENTE vía `/api/mutations` — ver PHASE2.md). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -219,8 +221,11 @@ server.registerTool(
 		description:
 			'Devuelve UNA tarea de Lumbre entera y sin recortar (notas íntegras y verbatim, fecha de ' +
 			'creación, lista/sección con sus ids) — pensado para reeditar su nota con update_task sin ' +
-			'perder lo que list_tasks trunca por defecto (~240 caracteres). Da error si el taskId no ' +
-			'existe entre las tareas visibles del usuario (resuélvelo antes con list_tasks).',
+			'perder lo que list_tasks trunca por defecto (~240 caracteres). Si la tarea tiene subtareas ' +
+			'(checklist, #17), las incluye con su id y su estado hecha/pendiente — es la ÚNICA forma de ' +
+			'obtener el id de una subtarea (list_tasks nunca las lista), necesario para complete_subtask. ' +
+			'Da error si el taskId no existe entre las tareas visibles del usuario (resuélvelo antes con ' +
+			'list_tasks).',
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)')
 		}
@@ -283,33 +288,33 @@ const ASYNC_NOTE =
 	'aplica la próxima vez que un dispositivo del usuario sincronice, no al instante. No hay ' +
 	'confirmación de que se aplicó de verdad (usa list_tasks más tarde para comprobarlo).';
 
-/** Error uniforme para un `taskId` que no aparece entre las tareas visibles
- *  del usuario — ver `requireTaskExists` para el porqué. */
-function taskNotFoundError(taskId: string): Error {
-	return new Error(
-		`No existe ninguna tarea con id ${taskId} entre las tareas visibles del usuario (¿se transcribió ` +
-			'mal? resuelve el id de nuevo con list_tasks). No se ha encolado ninguna mutación.'
-	);
-}
-
 /**
- * Comprueba que `taskId` EXISTE antes de encolar cualquier mutación sobre él.
- * `/api/mutations` NO valida esto server-side (deliberado — ver el JSDoc de
- * ese endpoint: `tasks` es una proyección que puede ir desfasada del CRDT
- * real, así que el drenaje del CLIENTE descarta en silencio cualquier
- * `taskId` que no encuentre). Sin este chequeo aquí, un id mal transcrito
- * (typo real que mordió a David el 2026-07-17: `9c184fe4-2103-…` en vez de
- * `9c184fe4-ddb2-4103-…`) se encolaba igual y el MCP contestaba "Encolado…"
- * tan tranquilo, perdiendo la mutación sin avisar. La EXISTENCIA sí se puede
- * comprobar en el acto (a diferencia de si la mutación llegó a APLICARSE,
- * que sigue siendo asíncrono — ver `ASYNC_NOTE`), así que sí merece la pena
- * gastar la llamada extra a `GET /api/tasks` (vía `findTaskById`) antes de
- * encolar. Lanza si no existe; el llamante ya está dentro de un `try/catch`
- * que lo convierte en `errorResult`.
+ * Comprueba que `taskId` EXISTE antes de encolar cualquier mutación sobre él,
+ * y (SELECTIVAMENTE, ver `allowSubtask`) que no sea una subtarea si la tool
+ * no admite una ahí. `/api/mutations` NO valida esto server-side (deliberado
+ * — ver el JSDoc de ese endpoint: `tasks` es una proyección que puede ir
+ * desfasada del CRDT real, así que el drenaje del CLIENTE descarta en
+ * silencio cualquier `taskId` que no encuentre). Sin el chequeo de
+ * EXISTENCIA aquí, un id mal transcrito (typo real que mordió a David el
+ * 2026-07-17: `9c184fe4-2103-…` en vez de `9c184fe4-ddb2-4103-…`) se
+ * encolaba igual y el MCP contestaba "Encolado…" tan tranquilo, perdiendo la
+ * mutación sin avisar. La EXISTENCIA sí se puede comprobar en el acto (a
+ * diferencia de si la mutación llegó a APLICARSE, que sigue siendo asíncrono
+ * — ver `ASYNC_NOTE`), así que sí merece la pena gastar la llamada extra a
+ * `GET /api/tasks?id=` (vía `findTaskById`) antes de encolar.
+ *
+ * Fino wrapper de red sobre `assertTaskUsable` (`lumbre-client.ts`, función
+ * PURA que hace la comprobación en sí — allí vive el JSDoc completo del
+ * criterio `allowSubtask` por tool, y sus tests). Lanza si no existe, o si
+ * existe pero es una subtarea y `allowSubtask` es `false`; el llamante ya
+ * está dentro de un `try/catch` que lo convierte en `errorResult`.
  */
-async function requireTaskExists(taskId: string): Promise<void> {
+async function requireTaskExists(
+	taskId: string,
+	opts: { allowSubtask?: boolean } = {}
+): Promise<void> {
 	const task = await findTaskById(config, taskId);
-	if (!task) throw taskNotFoundError(taskId);
+	assertTaskUsable(task, taskId, opts);
 }
 
 /** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
@@ -323,7 +328,8 @@ server.registerTool(
 	{
 		title: 'Completar/descompletar una tarea de Lumbre',
 		description:
-			`Marca una tarea existente como hecha, o la desmarca con done:false. ${ASYNC_NOTE} Necesita ` +
+			`Marca una tarea existente como hecha, o la desmarca con done:false. También admite el id de ` +
+			`una SUBTAREA (aunque para eso es más claro complete_subtask). ${ASYNC_NOTE} Necesita ` +
 			'el `taskId` de la tarea — resuélvelo antes con list_tasks (por contenido/fecha).',
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
@@ -332,7 +338,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: true });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'complete',
@@ -366,7 +372,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: true });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'cancel',
@@ -387,9 +393,10 @@ server.registerTool(
 	{
 		title: 'Editar una tarea de Lumbre',
 		description:
-			`Edita el texto, las notas, la prioridad o la hora de una tarea existente. ${ASYNC_NOTE} ` +
-			'Indica solo los campos que quieras cambiar; los que omitas se dejan igual. Necesita el ' +
-			'`taskId` — resuélvelo antes con list_tasks (por contenido/fecha).',
+			`Edita el texto, las notas, la prioridad o la hora de una tarea existente. NO aplica a una ` +
+			`SUBTAREA (rechaza su id con error). ${ASYNC_NOTE} Indica solo los campos que quieras ` +
+			'cambiar; los que omitas se dejan igual. Necesita el `taskId` — resuélvelo antes con ' +
+			'list_tasks (por contenido/fecha).',
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
@@ -420,7 +427,7 @@ server.registerTool(
 			);
 		}
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: false });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'update',
@@ -445,7 +452,8 @@ server.registerTool(
 	{
 		title: 'Reprogramar una tarea de Lumbre',
 		description:
-			`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada (date: null). ` +
+			`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada (date: null). NO ` +
+			`aplica a una SUBTAREA (rechaza su id con error: una subtarea no tiene agenda propia). ` +
 			`${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks (por contenido/fecha).`,
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
@@ -456,7 +464,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: false });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'reschedule',
@@ -477,16 +485,18 @@ server.registerTool(
 	{
 		title: 'Borrar una tarea de Lumbre',
 		description:
-			`Borra (soft-delete) una tarea existente de Lumbre. ${ASYNC_NOTE} ACCIÓN DELICADA: no hay ` +
-			'confirmación inmediata de que se aplicó y no se puede deshacer desde esta tool — confírmalo ' +
-			'con el usuario antes de llamarla. Necesita el `taskId` — resuélvelo antes con list_tasks.',
+			`Borra (soft-delete) una tarea existente de Lumbre — también admite el id de una SUBTAREA ` +
+			`(borra solo esa subtarea, no toca el resto de la checklist). ${ASYNC_NOTE} ACCIÓN DELICADA: ` +
+			'no hay confirmación inmediata de que se aplicó y no se puede deshacer desde esta tool — ' +
+			'confírmalo con el usuario antes de llamarla. Necesita el `taskId` — resuélvelo antes con ' +
+			'list_tasks (o con get_task de la tarea padre si es una subtarea).',
 		inputSchema: {
-			taskId: z.string().uuid().describe('Id de la tarea a borrar (ver list_tasks)')
+			taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a borrar (ver list_tasks/get_task)')
 		}
 	},
 	async (input) => {
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: true });
 			await mutateTask(config, { taskId: input.taskId, kind: 'delete', payload: {} });
 			return textResult(
 				`Encolado en Lumbre el borrado de la tarea ${input.taskId} (se aplicará al sincronizar).`
@@ -505,7 +515,8 @@ server.registerTool(
 			'Mueve una tarea EXISTENTE a una sección/heading dentro de SU lista/proyecto (se crea si no ' +
 			'existe), o la saca de su sección con section: null. Solo aplica si la tarea ya pertenece a ' +
 			'una lista de "Algún día"/proyecto (si no, se ignora en silencio — una sección solo existe ' +
-			`dentro de una lista). ${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks.`,
+			'dentro de una lista). NO aplica a una SUBTAREA (rechaza su id con error). ' +
+			`${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks.`,
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			section: z
@@ -520,7 +531,7 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: false });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'setSection',
@@ -545,7 +556,8 @@ server.registerTool(
 			'suya). Targetea por `listId` (id ESTABLE, preferente, inmune a renames — sácalo de ' +
 			'list_tasks) o por `list` (nombre, se crea si no existe); `listId: null` explícito ' +
 			'desvincula la tarea de su lista actual. CONSERVA la fecha de la tarea y limpia su ' +
-			`sección (una sección solo existe dentro de su lista de origen). ${ASYNC_NOTE} Necesita ` +
+			'sección (una sección solo existe dentro de su lista de origen). NO aplica a una SUBTAREA ' +
+			`(rechaza su id con error: una subtarea no tiene residencia propia). ${ASYNC_NOTE} Necesita ` +
 			'el `taskId` — resuélvelo antes con list_tasks.',
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
@@ -568,7 +580,7 @@ server.registerTool(
 			return errorResult(new Error('Indica `listId` o `list` (la lista destino).'));
 		}
 		try {
-			await requireTaskExists(input.taskId);
+			await requireTaskExists(input.taskId, { allowSubtask: false });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'moveToList',
@@ -612,7 +624,12 @@ server.registerTool(
 	},
 	async (input) => {
 		try {
-			await requireTaskExists(input.taskId);
+			// `allowSubtask: true` (no relaja nada nuevo): si `taskId` YA es una
+			// subtarea, esto solo evita adelantar el rechazo aquí — el
+			// materializador (`task-ops`/`inbound-materialize.ts`) descarta la
+			// mutación en silencio de todas formas, comportamiento YA documentado
+			// arriba y sin cambios por este fix.
+			await requireTaskExists(input.taskId, { allowSubtask: true });
 			await mutateTask(config, {
 				taskId: input.taskId,
 				kind: 'addSubtask',
@@ -621,6 +638,39 @@ server.registerTool(
 			return textResult(
 				`Encolado en Lumbre: ${input.subtasks.length} subtarea(s) para la tarea ${input.taskId} ` +
 					'(se aplicará al sincronizar).'
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'complete_subtask',
+	{
+		title: 'Completar/descompletar una subtarea de Lumbre',
+		description:
+			'Marca una SUBTAREA (checklist, #17) existente como hecha, o la desmarca con done:false. ' +
+			'Completar una subtarea es completar una tarea: MISMO mecanismo que complete_task, aplicado ' +
+			'a su id — no cascada nada sobre la tarea padre (cada subtarea se completa de forma ' +
+			`independiente). ${ASYNC_NOTE} Necesita el \`subtaskId\`: resuélvelo con get_task(taskId) de ` +
+			'la tarea PADRE (list_tasks nunca lista subtareas, así que no aparecen ahí).',
+		inputSchema: {
+			subtaskId: z.string().uuid().describe('Id de la subtarea (ver get_task de su tarea padre)'),
+			done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
+		}
+	},
+	async (input) => {
+		try {
+			await requireTaskExists(input.subtaskId, { allowSubtask: true });
+			await mutateTask(config, {
+				taskId: input.subtaskId,
+				kind: 'complete',
+				payload: { done: input.done ?? true }
+			});
+			return textResult(
+				`Encolado en Lumbre: ${input.done === false ? 'desmarcar' : 'completar'} la subtarea ` +
+					`${input.subtaskId} (se aplicará al sincronizar).`
 			);
 		} catch (err) {
 			return errorResult(err);

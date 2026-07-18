@@ -55,8 +55,7 @@ export interface ListTasksInput {
 	section?: string;
 	includeDone?: boolean;
 	/** Tope de tareas a traer (la API lo capa a 500); NO expuesto como parámetro
-	 *  de la tool `list_tasks` — solo lo usa `findTaskById` internamente, para
-	 *  barrer el mayor número posible al comprobar existencia. */
+	 *  de la tool `list_tasks`. */
 	limit?: number;
 }
 
@@ -66,6 +65,15 @@ export interface LumbreAttachment {
 	filename: string;
 	mime: string;
 	size: number;
+}
+
+/** Una subtarea (checklist, #17) tal como la devuelve `GET /api/tasks?id=`
+ *  dentro de `subtasks` de su tarea padre — ver `LumbreTask.subtasks`. Solo
+ *  `id`/`content`/`done`: el orden del array YA es el orden de la checklist. */
+export interface LumbreSubtask {
+	id: string;
+	content: string;
+	done: boolean;
 }
 
 export interface LumbreTask {
@@ -87,6 +95,21 @@ export interface LumbreTask {
 	createdAt: string;
 	/** Adjuntos vivos de la tarea; leer sus bytes con `getAttachment(id)`. */
 	attachments?: LumbreAttachment[];
+	/** Subtareas vivas (checklist, #17), SOLO presente cuando esta tarea llegó
+	 *  vía `findTaskById`/`GET /api/tasks?id=` y es de PRIMER NIVEL — el
+	 *  listado (`listTasks`/`list_tasks`) NUNCA lo trae (mismo criterio que ese
+	 *  endpoint: las subtareas no aparecen en el listado). Una subtarea nunca
+	 *  trae `subtasks` propio (anidamiento de UN nivel). */
+	subtasks?: LumbreSubtask[];
+	/** Id de la tarea PADRE si ESTA tarea es una subtarea, o `null` si es de
+	 *  primer nivel (el listado SIEMPRE trae `null`, ver `GET /api/tasks`; solo
+	 *  el lookup por `id` puede traerlo informado). Es la señal que
+	 *  `requireTaskExists`/`allowSubtask` (`index.ts`) usa para decidir, tool
+	 *  por tool, si una operación aplica a una subtarea (code-review 🟠: antes
+	 *  de esto, ampliar `findTaskById` a subtareas dejaba que CUALQUIER tool de
+	 *  mutación aceptara un `subtaskId`, incluidas las de residencia/agenda que
+	 *  no tienen sentido ahí). */
+	parentId?: string | null;
 }
 
 /** Error con el status HTTP adjunto, para poder dar mensajes específicos (401, 429…). */
@@ -177,34 +200,94 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	return body as LumbreTask[];
 }
 
-/** Tope de `/api/tasks?limit=` (ver ese endpoint); lo usa `findTaskById` para
- *  barrer el mayor número posible de tareas vivas al comprobar existencia. */
-const MAX_TASKS_LIMIT = 500;
-
 /**
- * Busca una tarea por `id` entre TODAS las visibles del usuario (`scope=all`,
- * `includeDone=true`, límite al tope) y la devuelve, o `undefined` si no
- * aparece. No hay un endpoint de "tarea por id" dedicado en la API — ver
- * `GET /api/tasks` en el repo principal — así que esto barre el listado
- * completo y filtra aquí; usa el MISMO endpoint (y por tanto los mismos
- * límites) que `listTasks`/`list_tasks`, así que un id real que el modelo
- * pudo haber obtenido de `list_tasks` siempre será encontrable aquí también.
+ * Busca UNA tarea por `id` vía `GET /api/tasks?id=` (lookup directo, no
+ * listado — ver ese endpoint en el repo principal) y la devuelve, o
+ * `undefined` si no existe/no es del usuario del token. A diferencia del
+ * viejo enfoque (barrer `scope=all` con `list_tasks` y filtrar aquí), este
+ * endpoint busca entre TODAS las tareas vivas del usuario — de primer nivel
+ * Y SUBTAREAS —, así que:
  *
- * Límites conocidos (heredados de `/api/tasks`, ver ese endpoint):
- * - Cuentas con más de `MAX_TASKS_LIMIT` tareas vivas de primer nivel podrían
- *   dar un falso "no existe" para un id real fuera de esa ventana.
- * - Subtareas (`parentId` no nulo) y tareas archivadas/borradas NUNCA
- *   aparecen — igual que en `list_tasks`, así que el modelo tampoco pudo
- *   haber sacado su id de ahí.
+ * - No hay tope de cuenta (antes una cuenta con más de 500 tareas vivas de
+ *   primer nivel podía dar un falso "no existe" para un id real fuera de esa
+ *   ventana; el lookup por `id` no pagina).
+ * - Encuentra el id de una SUBTAREA, que `list_tasks`/`scope=all` nunca
+ *   exponen — precondición para poder comprobar la existencia de una
+ *   subtarea antes de completarla (ver `complete_subtask` en `index.ts`).
  *
- * La usan tanto `get_task` (para devolver la tarea completa) como el chequeo
- * de existencia de las tools de mutación (ver `requireTaskExists` en
- * `index.ts`): un `taskId` mal transcrito (bug real, ver la tarea que motiva
- * este fichero) hoy se encolaba igual y se perdía en silencio al drenar.
+ * Tareas ARCHIVADAS siguen sin aparecer (mismo criterio que antes, heredado
+ * del endpoint).
+ *
+ * La usan tanto `get_task` (para devolver la tarea completa, con sus
+ * subtareas si las tiene) como el chequeo de existencia de las tools de
+ * mutación (ver `requireTaskExists` en `index.ts`): un `taskId` mal
+ * transcrito (bug real, ver la tarea que motiva este fichero) hoy se
+ * encolaba igual y se perdía en silencio al drenar.
  */
 export async function findTaskById(config: LumbreConfig, taskId: string): Promise<LumbreTask | undefined> {
-	const tasks = await listTasks(config, { scope: 'all', includeDone: true, limit: MAX_TASKS_LIMIT });
-	return tasks.find((t) => t.id === taskId);
+	const params = new URLSearchParams({ id: taskId });
+	const body = await request(config, `/api/tasks?${params.toString()}`);
+	if (!Array.isArray(body)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?id=.');
+	}
+	return (body as LumbreTask[])[0];
+}
+
+/** Error uniforme para un `taskId`/`subtaskId` que no aparece entre las
+ *  tareas visibles del usuario — ver `assertTaskUsable`. */
+export function taskNotFoundError(taskId: string): Error {
+	return new Error(
+		`No existe ninguna tarea (ni subtarea) con id ${taskId} entre las visibles del usuario (¿se ` +
+			'transcribió mal? resuélvelo de nuevo con list_tasks, o con get_task de la tarea padre si es ' +
+			'una subtarea). No se ha encolado ninguna mutación.'
+	);
+}
+
+/** Error uniforme cuando `taskId` SÍ existe pero es una subtarea y la tool no
+ *  aplica ahí — ver `assertTaskUsable`. */
+export function subtaskNotAllowedError(taskId: string): Error {
+	return new Error(
+		`El id ${taskId} es de una SUBTAREA: esta operación no aplica a una subtarea (es de residencia/` +
+			'agenda/edición, pensada para tareas de primer nivel). Si querías completarla, cancelarla o ' +
+			'borrarla, usa complete_subtask/cancel_task/delete_task; si querías operar sobre la tarea ' +
+			'PADRE, resuelve su id con list_tasks. No se ha encolado ninguna mutación.'
+	);
+}
+
+/**
+ * Decide si una tool puede operar sobre `task` (YA resuelto por
+ * `findTaskById`, o `undefined` si no existe): lanza `taskNotFoundError` si
+ * no existe, o `subtaskNotAllowedError` si es una subtarea (`parentId`
+ * informado) y `opts.allowSubtask` es `false` (default). Función PURA — sin
+ * red — a propósito: separada de `requireTaskExists` (`index.ts`, el fino
+ * wrapper que la conecta con `findTaskById`) para poder testear la matriz de
+ * decisión (qué tool acepta/rechaza un `subtaskId`) sin mockear `fetch` — ver
+ * `lumbre-client.test.ts`.
+ *
+ * `allowSubtask` (default `false`, code-review 🟠 — hallazgo tras la 1ª
+ * versión de esta feature): ampliar `findTaskById` para que resuelva
+ * subtareas (precondición de `complete_subtask`) dejaba, de rebote, que
+ * CUALQUIER tool de mutación aceptara un `subtaskId` — incluidas
+ * `reschedule_task`/`move_to_list` (`task-ops.moveTask`/
+ * `reassignTaskProject`, SIN guard de `parentId`), que corromperían la ley de
+ * residencia (docs/20-contrato-lista.md, ver `reconcileTaskInvariants` en
+ * `task-ops.ts`) escribiendo `date`/`somedayListId` en la fila de una
+ * subtarea. La política, tool por tool (ver cada `requireTaskExists(...)` en
+ * `index.ts`):
+ *  - `allowSubtask: true` — `complete_task`, `cancel_task`, `delete_task`,
+ *    `complete_subtask`, `add_subtask` (no tocan residencia/agenda; `get_task`
+ *    ni siquiera pasa por aquí, pero acepta un `subtaskId` igual).
+ *  - `allowSubtask: false` (default) — `update_task`, `reschedule_task`,
+ *    `set_section`, `move_to_list` (residencia/agenda/edición: no aplican a
+ *    una subtarea).
+ */
+export function assertTaskUsable(
+	task: LumbreTask | undefined,
+	taskId: string,
+	opts: { allowSubtask?: boolean } = {}
+): asserts task is LumbreTask {
+	if (!task) throw taskNotFoundError(taskId);
+	if (!opts.allowSubtask && task.parentId) throw subtaskNotAllowedError(taskId);
 }
 
 /** Adjunto ya descargado: tipo MIME (de la respuesta) + bytes. */

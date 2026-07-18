@@ -32,8 +32,11 @@ Paquete Node/TS **independiente** del resto del repo (su propio
   una nota con `update_task` (que la REEMPLAZA entera) y el lote ya está
   acotado. Para una sola tarea concreta, mejor `get_task`.
 - `get_task({ taskId })` — devuelve UNA tarea completa y sin recortar (notas
-  íntegras y verbatim, `createdAt` sin recortar, lista/sección con sus ids).
-  Da error si el `taskId` no existe entre las tareas visibles del usuario.
+  íntegras y verbatim, `createdAt` sin recortar, lista/sección con sus ids). Si
+  tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/
+  pendiente — es la ÚNICA forma de obtener el id de una subtarea (`list_tasks`
+  nunca las lista), necesario para `complete_subtask`. Da error si el `taskId`
+  no existe entre las tareas visibles del usuario.
 - `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
   `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
   ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket
@@ -82,6 +85,10 @@ server-side, ver ese endpoint).
   descarta en silencio (no hay forma de confirmarlo desde la tool; comprueba
   con `list_tasks`). Para crear una tarea CON subtareas de una vez, usa
   `add_task` con `subtasks` en el payload.
+- `complete_subtask({ subtaskId, done? })` — marca hecha (`done` default
+  `true`) o desmarca (`done: false`) una SUBTAREA existente, por su id (ver
+  `get_task` de su tarea padre). Mismo mecanismo que `complete_task`: no
+  cascada nada sobre la tarea padre.
 
 ## Compilar
 

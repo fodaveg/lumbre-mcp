@@ -72,17 +72,50 @@
 > encolaban una mutación sobre un `taskId` que NO existía (typo de UUID) y
 > respondían "Encolado…" igual — la mutación se perdía en SILENCIO al drenar
 > (ver la nota anti-IDOR arriba: el drenaje descarta cualquier `taskId` que no
-> encuentre). `index.ts` ahora valida con `findTaskById` (`lumbre-client.ts`,
-> vía `GET /api/tasks?scope=all&includeDone=true&limit=500`) ANTES de
-> encolar, y da error si no existe — la EXISTENCIA sí se puede comprobar en el
-> acto, a diferencia de si la mutación llegó a APLICARSE (eso sigue siendo
-> asíncrono). Misma sesión: `list_tasks` exponía `notes` truncadas a ~240
-> caracteres sin forma de leerlas íntegras (rompía editarlas con `update_task`,
-> que las REEMPLAZA enteras) y no exponía `createdAt` (útil para desempatar
-> duplicados) — se añadió `fullNotes: true` a `list_tasks` (notas íntegras y
-> verbatim para todo el lote) y una tool nueva, `get_task(taskId)` (la tarea
-> entera, sin recortes), además de `createdAt` recortado a minuto en cada línea
-> de `list_tasks`. Ver `format.ts`/`lumbre-client.ts`/`index.ts`.
+> encuentre). `index.ts` ahora valida con `findTaskById` (`lumbre-client.ts`)
+> ANTES de encolar, y da error si no existe — la EXISTENCIA sí se puede
+> comprobar en el acto, a diferencia de si la mutación llegó a APLICARSE (eso
+> sigue siendo asíncrono). Misma sesión: `list_tasks` exponía `notes`
+> truncadas a ~240 caracteres sin forma de leerlas íntegras (rompía editarlas
+> con `update_task`, que las REEMPLAZA enteras) y no exponía `createdAt` (útil
+> para desempatar duplicados) — se añadió `fullNotes: true` a `list_tasks`
+> (notas íntegras y verbatim para todo el lote) y una tool nueva,
+> `get_task(taskId)` (la tarea entera, sin recortes), además de `createdAt`
+> recortado a minuto en cada línea de `list_tasks`. Ver
+> `format.ts`/`lumbre-client.ts`/`index.ts`.
+>
+> **Añadida después: lectura y completado de SUBTAREAS (esta tarea).**
+> `add_subtask` ya podía CREARLAS, pero no había forma de LEERLAS ni
+> marcarlas hechas — `list_tasks`/`GET /api/tasks` las excluye siempre (mismo
+> criterio que las tareas de primer nivel exigen), así que su id era
+> inalcanzable. Dos piezas:
+>
+> 1. **Lectura, extendiendo `get_task` (no un endpoint nuevo):** `GET /api/tasks`
+>    gana un parámetro `?id=<uuid>` — lookup DIRECTO por id (ignora
+>    scope/list/section/includeDone/limit), que busca entre TODAS las tareas
+>    vivas del usuario, de primer nivel Y SUBTAREAS. Si la tarea resuelta es de
+>    primer nivel, la respuesta trae un campo `subtasks: {id, content, done}[]`
+>    (en orden) con su checklist — `get_task`/`formatTaskFull` lo vuelca como
+>    una línea `[x]`/`[ ]` por subtarea, con su id. Se eligió extender
+>    `get_task` en vez de un endpoint `GET /api/tasks/:id/subtasks` dedicado
+>    porque el mismo lookup por `id` YA resuelve dos problemas a la vez: exponer
+>    la checklist del padre Y encontrar el id de una subtarea suelta (necesario
+>    para el punto 2) — un solo camino, no dos. `list_tasks`/scope-listado
+>    SIGUE excluyendo subtareas exactamente igual que antes (no cambia nada
+>    ahí); `findTaskById` (`lumbre-client.ts`) ahora pega directo a `?id=` en
+>    vez de barrer `scope=all&limit=500` y filtrar en el cliente MCP — más
+>    barato Y sin el tope de 500 tareas de primer nivel de antes.
+> 2. **Completar, reutilizando `kind: 'complete'` (sin kind nuevo):** a nivel
+>    de datos, `toggleTaskDone`/`task-ops.ts` YA funcionaba sobre el id de una
+>    subtarea (no discrimina por `parentId` — solo `addSubtask`/
+>    `setTaskRecurrence` sí lo hacen, por la regla de anidamiento de UN nivel).
+>    El único bloqueo era `requireTaskExists` (MCP), que validaba contra
+>    `findTaskById`, ciego a subtareas. Al resolverlo en el punto 1, la
+>    comprobación de existencia ya alcanza subtareas SIN relajar nada (misma
+>    autoridad: el store del usuario del token). Tool nueva, `complete_subtask
+>    ({ subtaskId, done? })`, espejo exacto de `complete_task` pero encolando
+>    sobre `subtaskId` — NO cascada nada sobre el padre (cada subtarea se
+>    completa de forma independiente, igual que en la UI).
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas
