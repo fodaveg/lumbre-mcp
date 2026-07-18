@@ -2,7 +2,8 @@
  * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
  * (crea) y `GET /api/tasks` (lee). Fase 2: `POST /api/mutations` (encola
  * completar/editar/reprogramar/borrar/mover-de-sección/cancelar/añadir-
- * subtareas sobre una tarea EXISTENTE — ver
+ * subtareas sobre una tarea EXISTENTE, o crear/anidar-desanidar/renombrar/
+ * borrar una LISTA de "Algún día" — ver
  * `src/routes/api/mutations/+server.ts` en el repo principal y `PHASE2.md`).
  * Todos se autentican con el MISMO token personal de email-to-task
  * (Ajustes → email entrante en la app), enviado como `Authorization: Bearer`.
@@ -360,7 +361,11 @@ export type MutationKind =
 	| 'moveToList'
 	| 'cancel'
 	| 'addSubtask'
-	| 'removeSection';
+	| 'removeSection'
+	| 'createList'
+	| 'nestList'
+	| 'renameList'
+	| 'removeList';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -422,6 +427,30 @@ export interface AddSubtaskMutationPayload {
 export interface RemoveSectionMutationPayload {
 	sectionId: string;
 }
+/** Crea una lista de "Algún día" nueva (paridad UI↔MCP): `name` obligatorio,
+ *  `color`/`icon` opcionales. El id REAL de la lista nueva viaja en
+ *  `MutateTaskInput.taskId` (lo genera el llamante, ver `create_list` en
+ *  `index.ts`), no aquí — mismo criterio que `removeSection` con
+ *  `sectionId`, pero para una CREACIÓN en vez de un target existente. Espejo
+ *  de `CreateListPayload` (`$lib/server/repos/mutations.ts` en el repo
+ *  principal). */
+export interface CreateListMutationPayload {
+	name: string;
+	color?: string | null;
+	icon?: string | null;
+}
+/** Fija (`parentId: uuid`) o quita (`parentId: null`) el padre de la lista
+ *  `MutateTaskInput.taskId` — anida/desanida. Espejo de `NestListPayload`. */
+export interface NestListMutationPayload {
+	parentId: string | null;
+}
+/** Renombra la lista `MutateTaskInput.taskId`. Espejo de `RenameListPayload`. */
+export interface RenameListMutationPayload {
+	name: string;
+}
+/** Borra la lista `MutateTaskInput.taskId`. Sin campos — espejo de
+ *  `RemoveListPayload`. */
+export type RemoveListMutationPayload = Record<string, never>;
 
 export interface MutateTaskInput {
 	taskId: string;
@@ -435,7 +464,11 @@ export interface MutateTaskInput {
 		| MoveToListMutationPayload
 		| CancelMutationPayload
 		| AddSubtaskMutationPayload
-		| RemoveSectionMutationPayload;
+		| RemoveSectionMutationPayload
+		| CreateListMutationPayload
+		| NestListMutationPayload
+		| RenameListMutationPayload
+		| RemoveListMutationPayload;
 }
 
 /**

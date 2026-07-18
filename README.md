@@ -95,6 +95,29 @@ server-side, ver ese endpoint).
   lista). Sin `list_sections` todavía: resuelve el `sectionId` desde el campo
   `sectionId` de una tarea que ya viva ahí (`list_tasks`/`get_task`).
 
+### Gestión de listas de "Algún día" (paridad UI↔MCP)
+
+Mismo criterio async/eventual que el resto de Fase 2. Sin una tool
+`list_lists` todavía: resuelve un `listId` existente con el que devolvió
+`create_list`, o con el campo `somedayListId` de una tarea que ya viva en esa
+lista (`list_tasks`/`get_task`).
+
+- `create_list({ name, color?, icon? })` — crea una lista/proyecto nueva;
+  devuelve su `listId` (úsalo luego en `add_task`, `move_to_list` o
+  `nest_list`). `color` acepta uno de `red|amber|green|blue|violet|pink` o un
+  hex `#rrggbb`; sin color/icono por defecto.
+- `nest_list({ listId, parentId })` — fija el padre de una lista EXISTENTE (la
+  anida), o la deja de primer nivel con `parentId: null` (desanidar). Un
+  anidado rechazado (ciclo, auto-anidado, o la Bandeja de entrada, que nunca
+  es anidable) se descarta en silencio.
+- `rename_list({ listId, name })` — renombra una lista EXISTENTE; su identidad
+  y sus tareas no cambian.
+- `remove_list({ listId })` — borra una lista EXISTENTE. Sus tareas NUNCA se
+  pierden (las sin fecha se reasignan a otra lista viva; las "prestadas" con
+  fecha quedan como tarea de día normal); sus listas hijas pasan a primer
+  nivel. No aplica a la última lista viva ni a la Bandeja de entrada canónica
+  (se ignora en silencio en ambos casos).
+
 ## Compilar
 
 ```bash

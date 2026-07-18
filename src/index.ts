@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -25,7 +26,11 @@ import { formatTaskFull, formatTaskList } from './format.js';
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
  * `delete_task`/`set_section`/`move_to_list`/`add_subtask`/`complete_subtask`/
  * `remove_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
- * PHASE2.md; `remove_section` es la excepción, muta una SECCIÓN). Todas
+ * PHASE2.md; `remove_section` es la excepción, muta una SECCIÓN).
+ * `create_list`/`nest_list`/`rename_list`/`remove_list` (paridad UI↔MCP —
+ * gestión de listas de "Algún día", `docs/20-contrato-lista.md`): mutan una
+ * LISTA, no una tarea; `create_list` es la única que CREA (genera su propio
+ * id con `randomUUID()` antes de encolar, ver su JSDoc más abajo). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -578,6 +583,151 @@ server.registerTool(
 			});
 			return textResult(
 				`Encolado en Lumbre el borrado de la sección ${input.sectionId} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'create_list',
+	{
+		title: 'Crear una lista de "Algún día" en Lumbre',
+		description:
+			'Crea una lista/proyecto de "Algún día" nueva en Lumbre (contenedor de tareas fuera del ' +
+			'tiempo, con identidad propia — docs/20-contrato-lista.md). Devuelve el `listId` generado: ' +
+			'úsalo después con add_task (`listId`), move_to_list, o nest_list para anidarla bajo otra ' +
+			`lista. ${ASYNC_NOTE}`,
+		inputSchema: {
+			name: z.string().min(1).max(200).describe('Nombre de la lista (obligatorio)'),
+			color: z
+				.string()
+				.max(20)
+				.optional()
+				.describe(
+					'Color de la lista: uno de red|amber|green|blue|violet|pink, o un hex libre "#rrggbb". ' +
+						'Sin color por defecto.'
+				),
+			icon: z.string().max(16).optional().describe('Emoji/icono de la lista. Sin icono por defecto.')
+		}
+	},
+	async (input) => {
+		try {
+			// El id lo genera esta tool, ANTES de encolar (mismo criterio que
+			// `clientTaskId` para `add_task`): `create_list` es la ÚNICA mutación
+			// de lista que CREA en vez de mutar algo existente, así que no hay un
+			// `listId` previo que targetear — ver el JSDoc de `MUTATION_KINDS`
+			// (`$lib/server/repos/mutations.ts` en el repo principal).
+			const listId = randomUUID();
+			await mutateTask(config, {
+				taskId: listId,
+				kind: 'createList',
+				payload: {
+					name: input.name,
+					...(input.color !== undefined ? { color: input.color } : {}),
+					...(input.icon !== undefined ? { icon: input.icon } : {})
+				}
+			});
+			return textResult(
+				`Encolada en Lumbre la lista "${input.name}" (listId ${listId}; se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'nest_list',
+	{
+		title: 'Anidar o desanidar una lista de Lumbre',
+		description:
+			'Fija el padre de una lista de "Algún día" EXISTENTE (la anida bajo otra), o la deja de ' +
+			'primer nivel con parentId: null (desanidar). Sin una tool para listar listas todavía: ' +
+			'resuelve `listId`/`parentId` con el que devolvió create_list, o con el campo ' +
+			`\`somedayListId\` de una tarea que ya viva en esa lista (list_tasks/get_task). ${ASYNC_NOTE} ` +
+			'Si el anidado se rechaza (crearía un ciclo, auto-anidado, o la lista es la Bandeja de ' +
+			'entrada, que nunca es anidable) o `listId`/`parentId` no existen, el materializador lo ' +
+			'descarta EN SILENCIO — no hay forma de confirmarlo desde esta tool.',
+		inputSchema: {
+			listId: z.string().uuid().describe('Id de la lista a anidar/desanidar'),
+			parentId: z
+				.union([z.string().uuid(), z.null()])
+				.describe('Id de la lista padre destino, o null para dejarla de primer nivel')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.listId,
+				kind: 'nestList',
+				payload: { parentId: input.parentId }
+			});
+			const target = input.parentId === null ? '(primer nivel)' : `bajo la lista ${input.parentId}`;
+			return textResult(
+				`Encolado en Lumbre: anidar la lista ${input.listId} ${target} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'rename_list',
+	{
+		title: 'Renombrar una lista de Lumbre',
+		description:
+			'Renombra una lista de "Algún día" EXISTENTE de Lumbre; su identidad y sus tareas no ' +
+			'cambian (docs/20-contrato-lista.md: la identidad es el id, no el nombre). Sin una tool ' +
+			'para listar listas todavía: resuelve `listId` con el que devolvió create_list, o con el ' +
+			`campo \`somedayListId\` de una tarea que ya viva ahí (list_tasks/get_task). ${ASYNC_NOTE}`,
+		inputSchema: {
+			listId: z.string().uuid().describe('Id de la lista a renombrar'),
+			name: z.string().min(1).max(200).describe('Nuevo nombre')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.listId,
+				kind: 'renameList',
+				payload: { name: input.name }
+			});
+			return textResult(
+				`Encolado en Lumbre: renombrar la lista ${input.listId} a "${input.name}" ` +
+					'(se aplicará al sincronizar).'
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'remove_list',
+	{
+		title: 'Borrar una lista de Lumbre',
+		description:
+			'Borra (tombstone) una lista/proyecto de "Algún día" EXISTENTE de Lumbre. Sus tareas NUNCA ' +
+			'se pierden: las sin fecha se reasignan a otra lista viva; las "prestadas" (con fecha) ' +
+			'pierden el vínculo y quedan como tarea de día normal. Sus listas hijas directas pasan a ' +
+			'primer nivel (no se borran en cascada). No aplica a la ÚLTIMA lista viva ni a la Bandeja ' +
+			'de entrada canónica (docs/20-contrato-lista.md §5, "Prohibidos"): se ignora en silencio ' +
+			'en ambos casos — no hay forma de confirmarlo desde esta tool, comprueba con list_tasks. ' +
+			'Sin una tool para listar listas todavía: resuelve `listId` con el que devolvió ' +
+			`create_list, o con el campo \`somedayListId\` de una tarea que ya viva ahí ` +
+			`(list_tasks/get_task). ${ASYNC_NOTE}`,
+		inputSchema: {
+			listId: z.string().uuid().describe('Id de la lista a borrar')
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, { taskId: input.listId, kind: 'removeList', payload: {} });
+			return textResult(
+				`Encolado en Lumbre el borrado de la lista ${input.listId} (se aplicará al sincronizar).`
 			);
 		} catch (err) {
 			return errorResult(err);

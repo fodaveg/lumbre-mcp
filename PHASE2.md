@@ -135,6 +135,32 @@
 > tarea aquí. Sin `list_sections` todavía (backlog: extensión MCP gestión de
 > listas): el modelo resuelve el `sectionId` a partir del campo `sectionId` de
 > una tarea que ya viva en esa sección (`list_tasks`/`get_task`).
+>
+> **Añadidas después CUATRO tools más, gestión de LISTAS (paridad UI↔MCP,
+> "extensión MCP gestión de listas" del backlog): `create_list`/`nest_list`/
+> `rename_list`/`remove_list`.** Mismo criterio que `remove_section`: el
+> objetivo es una LISTA, no una tarea, así que las cuatro reusan `taskId`
+> (target genérico de la fila) para transportar el `listId` — salvo
+> `create_list`, que no tiene un target EXISTENTE que apuntar (es una
+> CREACIÓN): la tool genera el id ella misma con `randomUUID()` ANTES de
+> encolar (mismo criterio que `clientTaskId` en `add_task`/`inbound_tasks`),
+> lo manda como `taskId`, y `task-ops.createSomedayListOp` lo usa TAL CUAL
+> como id de la lista nueva — da idempotencia de creación gratis (reabrir-en-
+> fallo reaplica la MISMA fila, con el MISMO `taskId`, así que no-opea si ya
+> existe, MISMO mecanismo que `addSubtask`/`clientTaskId`). Los cuatro `kind`s
+> nuevos (`createList`/`nestList`/`renameList`/`removeList`) se resuelven en
+> ambos materializadores (`inbound-materialize.ts`/`apply-inbound-mutation.ts`)
+> ANTES del guard "la tarea existe" (igual que `restore`/`removeSection`), y
+> delegan en `task-ops.createSomedayListOp`/`nestList`/`renameSomedayListOp`/
+> `removeSomedayListOp` — gemelos headless de `TasksFacade.createSomedayList`/
+> `nestList`/`renameSomedayList`/`removeSomedayList` (`tasks.svelte.ts`, las
+> MISMAS operaciones que ya usa la UI; la fachada ahora DELEGA en `task-ops`
+> en vez de llevar su propia copia). `remove_list` respeta el contrato de
+> lista (`docs/20-contrato-lista.md` §5, "Prohibidos"): no-op silencioso
+> contra la última lista viva o la Bandeja de entrada canónica. Sin una tool
+> `list_lists` todavía (list_tasks/get_task siguen siendo la única vía para
+> resolver un `listId` existente, vía `somedayListId`) — follow-up anotado,
+> fuera de alcance de este lote.
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas
