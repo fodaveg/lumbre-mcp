@@ -77,6 +77,11 @@ server-side, ver ese endpoint).
   principio de `list_tasks`) es preferente sobre `list` (nombre, se crea si
   no existe); `listId: null` desvincula la tarea de su lista actual. Conserva
   la fecha de la tarea y limpia su sección.
+- `add_subtask({ taskId, subtasks })` — añade una o más subtareas (checklist,
+  #17) a `taskId`. Anidamiento de UN nivel: si `taskId` ya es una subtarea, se
+  descarta en silencio (no hay forma de confirmarlo desde la tool; comprueba
+  con `list_tasks`). Para crear una tarea CON subtareas de una vez, usa
+  `add_task` con `subtasks` en el payload.
 
 ## Compilar
 

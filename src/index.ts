@@ -21,8 +21,8 @@ import { formatTaskFull, formatTaskList } from './format.js';
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
- * `delete_task`/`set_section`/`move_to_list` (mutan una tarea EXISTENTE vía
- * `/api/mutations` — ver PHASE2.md). Todas
+ * `delete_task`/`set_section`/`move_to_list`/`add_subtask` (mutan una tarea
+ * EXISTENTE vía `/api/mutations` — ver PHASE2.md). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -582,6 +582,45 @@ server.registerTool(
 						: `"${input.list}"`;
 			return textResult(
 				`Encolado en Lumbre: mover la tarea ${input.taskId} a ${target} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'add_subtask',
+	{
+		title: 'Añadir subtareas a una tarea de Lumbre',
+		description:
+			'Añade una o más subtareas (checklist, #17) a una tarea EXISTENTE de Lumbre. ' +
+			`${ASYNC_NOTE} No se puede añadir subtareas a una SUBTAREA (anidamiento de UN nivel: ` +
+			'una subtarea no puede tener subtareas propias); si `taskId` ya es una subtarea, el ' +
+			'servidor descarta la mutación en silencio (usa list_tasks para comprobar si aplicó). ' +
+			'Necesita el `taskId` de la tarea PADRE — resuélvelo antes con list_tasks (por ' +
+			'contenido/fecha). Para añadir subtareas al CREAR una tarea nueva, usa add_task con ' +
+			'`subtasks` en vez de esta tool.',
+		inputSchema: {
+			taskId: z.string().uuid().describe('Id de la tarea PADRE (ver list_tasks)'),
+			subtasks: z
+				.array(z.string())
+				.min(1)
+				.max(50)
+				.describe('Textos de las subtareas a añadir, en orden (cada uno se recorta a 500 caracteres)')
+		}
+	},
+	async (input) => {
+		try {
+			await requireTaskExists(input.taskId);
+			await mutateTask(config, {
+				taskId: input.taskId,
+				kind: 'addSubtask',
+				payload: { subtasks: input.subtasks }
+			});
+			return textResult(
+				`Encolado en Lumbre: ${input.subtasks.length} subtarea(s) para la tarea ${input.taskId} ` +
+					'(se aplicará al sincronizar).'
 			);
 		} catch (err) {
 			return errorResult(err);

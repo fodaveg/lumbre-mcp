@@ -43,6 +43,31 @@
 > `completedAt` la aplica la propia fachada al drenar, el payload solo viaja
 > el booleano.
 >
+> **Añadida después una 8ª tool, `add_subtask`** (`kind: 'addSubtask'`,
+> payload `{ subtasks: string[] }`, saneado con `normalizeSubtasks` — mismo
+> tope `MAX_SUBTASKS`/`MAX_SUBTASK_LEN` que `add_task.subtasks`): añade
+> subtareas a una tarea EXISTENTE, reutilizando `task-ops.addSubtask` (misma
+> función que ya usa la creación con `subtasks` en el payload). Anidamiento de
+> UN nivel (docs/18-que-es-una-tarea.md §2.2/§6.2 — una subtarea no puede
+> tener subtareas): si `taskId` ya es una subtarea (`parentId` definido), o si
+> no está viva (archivada/borrada), el materializador (ambos gemelos,
+> `inbound-materialize.ts`/`apply-inbound-mutation.ts`) descarta la mutación
+> EN SILENCIO — mismo criterio tolerante que `set_section` sin lista. Espejo,
+> para tareas existentes, del `subtasks` que ya admitía `add_task` al crear.
+>
+> **Fix 2026-07-18 (code-review bloqueante — idempotencia de creación):**
+> `addSubtask` es ADITIVO (crea una subtarea nueva por texto), a diferencia
+> del resto de `kind`s (asignaciones LWW) — reabrir-en-fallo (`docs/22-
+> contrato-sync.md` §4: el batch se reabre si el flush/persist falla DESPUÉS
+> de materializar en memoria) podía duplicar cada subtarea al reintentar,
+> porque `task-ops.addSubtask` llamaba `crypto.randomUUID()` de nuevo por
+> texto. Resuelto derivando un id ESTABLE por subtarea a partir del `id` de la
+> propia fila de `inbound_mutations` (siempre estable entre reintentos) + su
+> índice en el array (`deterministicUuid`, `$lib/deterministic-id.ts`) — mismo
+> mecanismo que `clientTaskId` resuelve para la creación de una tarea entera.
+> `task-ops.addSubtask` acepta ahora un `id` opcional y no-opea si ya existe
+> (viva o tombstoned).
+>
 > **Fix 2026-07-17 (bug real, audit del uso del MCP):** las 7 tools de arriba
 > encolaban una mutación sobre un `taskId` que NO existía (typo de UUID) y
 > respondían "Encolado…" igual — la mutación se perdía en SILENCIO al drenar

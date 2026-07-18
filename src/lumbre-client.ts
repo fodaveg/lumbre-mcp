@@ -1,9 +1,9 @@
 /**
  * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
  * (crea) y `GET /api/tasks` (lee). Fase 2: `POST /api/mutations` (encola
- * completar/editar/reprogramar/borrar/mover-de-sección sobre una tarea
- * EXISTENTE — ver `src/routes/api/mutations/+server.ts` en el repo principal
- * y `PHASE2.md`).
+ * completar/editar/reprogramar/borrar/mover-de-sección/cancelar/añadir-
+ * subtareas sobre una tarea EXISTENTE — ver
+ * `src/routes/api/mutations/+server.ts` en el repo principal y `PHASE2.md`).
  * Todos se autentican con el MISMO token personal de email-to-task
  * (Ajustes → email entrante en la app), enviado como `Authorization: Bearer`.
  */
@@ -275,7 +275,8 @@ export type MutationKind =
 	| 'delete'
 	| 'setSection'
 	| 'moveToList'
-	| 'cancel';
+	| 'cancel'
+	| 'addSubtask';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -321,6 +322,13 @@ export interface MoveToListMutationPayload {
 export interface CancelMutationPayload {
 	cancelled: boolean;
 }
+/** Subtareas a añadir a una tarea EXISTENTE (espejo, para tareas ya creadas,
+ *  del `subtasks` que ya admite `addTask`/`/api/ingest` al crear). El
+ *  servidor sanea cada texto (recorte a 500 caracteres, tope de 50 elementos —
+ *  mismo criterio que `add_task.subtasks`). */
+export interface AddSubtaskMutationPayload {
+	subtasks: string[];
+}
 
 export interface MutateTaskInput {
 	taskId: string;
@@ -332,7 +340,8 @@ export interface MutateTaskInput {
 		| DeleteMutationPayload
 		| SetSectionMutationPayload
 		| MoveToListMutationPayload
-		| CancelMutationPayload;
+		| CancelMutationPayload
+		| AddSubtaskMutationPayload;
 }
 
 /**
