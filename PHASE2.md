@@ -116,6 +116,25 @@
 >    ({ subtaskId, done? })`, espejo exacto de `complete_task` pero encolando
 >    sobre `subtaskId` — NO cascada nada sobre el padre (cada subtarea se
 >    completa de forma independiente, igual que en la UI).
+>
+> **Añadida después una 10ª tool, `remove_section`** (`kind: 'removeSection'`,
+> payload `{ sectionId: string }`, épico paridad UI↔MCP): borra una SECCIÓN de
+> lista existente — la única tool/`kind` cuyo objetivo NO es una tarea. Como
+> `{ taskId, kind, payload }` sigue siendo la forma fija del cuerpo (`taskId`
+> validado como uuid ANTES de mirar `kind`), `remove_section` manda el
+> `sectionId` en AMBOS sitios: en `taskId` (target genérico de la fila, ver el
+> JSDoc de `inboundMutations` en `db/schema.ts`) y repetido en el payload por
+> forma; el materializador usa SIEMPRE `payload.sectionId` como autoritativo.
+> Espeja EXACTAMENTE `TasksFacade.removeSection` (`tasks.svelte.ts`, la
+> operación que ya usa la UI para borrar una sección): sus tareas NUNCA se
+> borran, solo pierden `sectionId` (quedan sueltas, "sin sección", DENTRO de
+> la MISMA lista) y se les quita el marcador auto-tag (`#tag`/`@contexto`) de
+> esa sección, si tenían. Ambos materializadores (`inbound-materialize.ts`/
+> `apply-inbound-mutation.ts`) tratan este `kind` ANTES del guard "la tarea
+> existe" (igual que `restore`), porque `item.taskId` nunca resuelve a una
+> tarea aquí. Sin `list_sections` todavía (backlog: extensión MCP gestión de
+> listas): el modelo resuelve el `sectionId` a partir del campo `sectionId` de
+> una tarea que ya viva en esa sección (`list_tasks`/`get_task`).
 
 Fase 1 (`add_task`/`list_tasks`) solo añade y lee. Fase 2 añadiría
 `complete_task`, `update_task`, `reschedule_task` y `delete_task`: todas

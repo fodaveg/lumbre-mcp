@@ -89,6 +89,11 @@ server-side, ver ese endpoint).
   `true`) o desmarca (`done: false`) una SUBTAREA existente, por su id (ver
   `get_task` de su tarea padre). Mismo mecanismo que `complete_task`: no
   cascada nada sobre la tarea padre.
+- `remove_section({ sectionId })` — borra (tombstone) una sección/heading
+  dentro de una lista de "Algún día"/proyecto. Sus tareas NUNCA se borran:
+  solo pierden la sección (quedan sueltas, "sin sección", dentro de la MISMA
+  lista). Sin `list_sections` todavía: resuelve el `sectionId` desde el campo
+  `sectionId` de una tarea que ya viva ahí (`list_tasks`/`get_task`).
 
 ## Compilar
 

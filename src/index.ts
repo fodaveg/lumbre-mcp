@@ -23,8 +23,9 @@ import { formatTaskFull, formatTaskList } from './format.js';
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
- * `delete_task`/`set_section`/`move_to_list`/`add_subtask`/`complete_subtask`
- * (mutan una tarea EXISTENTE vía `/api/mutations` — ver PHASE2.md). Todas
+ * `delete_task`/`set_section`/`move_to_list`/`add_subtask`/`complete_subtask`/
+ * `remove_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
+ * PHASE2.md; `remove_section` es la excepción, muta una SECCIÓN). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -540,6 +541,43 @@ server.registerTool(
 			return textResult(
 				`Encolado en Lumbre: mover la tarea ${input.taskId} a la sección ` +
 					`${input.section === null ? '(ninguna)' : `"${input.section}"`} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'remove_section',
+	{
+		title: 'Borrar una sección de Lumbre',
+		description:
+			'Borra (tombstone) una sección/heading DENTRO de una lista de "Algún día"/proyecto de Lumbre. ' +
+			'Las tareas que vivían en esa sección NUNCA se borran: solo pierden su sección (quedan ' +
+			'sueltas, "sin sección", DENTRO de la MISMA lista — no cambian de residencia). Sin ' +
+			'`list_sections` todavía: resuelve el `sectionId` a borrar desde el campo `sectionId` de ' +
+			`una tarea que ya viva ahí (ver list_tasks/get_task). ${ASYNC_NOTE} Si el \`sectionId\` no ` +
+			'existe (mal transcrito, o ajeno), el materializador lo descarta EN SILENCIO — no hay forma ' +
+			'de confirmarlo desde esta tool, comprueba con list_tasks.',
+		inputSchema: {
+			sectionId: z
+				.string()
+				.uuid()
+				.describe(
+					'Id de la sección a borrar (ver el campo `sectionId` de una tarea que viva en ella, en list_tasks/get_task)'
+				)
+		}
+	},
+	async (input) => {
+		try {
+			await mutateTask(config, {
+				taskId: input.sectionId,
+				kind: 'removeSection',
+				payload: { sectionId: input.sectionId }
+			});
+			return textResult(
+				`Encolado en Lumbre el borrado de la sección ${input.sectionId} (se aplicará al sincronizar).`
 			);
 		} catch (err) {
 			return errorResult(err);

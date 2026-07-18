@@ -359,7 +359,8 @@ export type MutationKind =
 	| 'setSection'
 	| 'moveToList'
 	| 'cancel'
-	| 'addSubtask';
+	| 'addSubtask'
+	| 'removeSection';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -412,6 +413,15 @@ export interface CancelMutationPayload {
 export interface AddSubtaskMutationPayload {
 	subtasks: string[];
 }
+/** Borra (tombstone) una sección de lista — el ÚNICO `kind` cuyo objetivo NO
+ *  es una tarea: `MutateTaskInput.taskId` transporta el `sectionId` (repetido
+ *  aquí en el payload por forma; ver `remove_section` en `index.ts`). Sus
+ *  tareas NUNCA se borran, solo pierden `sectionId` (quedan sueltas dentro de
+ *  la misma lista). Espejo de `RemoveSectionPayload`
+ *  (`$lib/server/repos/mutations.ts` en el repo principal). */
+export interface RemoveSectionMutationPayload {
+	sectionId: string;
+}
 
 export interface MutateTaskInput {
 	taskId: string;
@@ -424,7 +434,8 @@ export interface MutateTaskInput {
 		| SetSectionMutationPayload
 		| MoveToListMutationPayload
 		| CancelMutationPayload
-		| AddSubtaskMutationPayload;
+		| AddSubtaskMutationPayload
+		| RemoveSectionMutationPayload;
 }
 
 /**
