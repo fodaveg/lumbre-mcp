@@ -1,4 +1,4 @@
-import type { LumbreTask, TaskScope } from './lumbre-client.js';
+import type { LumbreListSummary, LumbreTask, TaskScope } from './lumbre-client.js';
 
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority: LumbreTask['priority']): string {
@@ -195,4 +195,19 @@ export function formatTaskList(
 	}
 	const body = groups.flatMap((g) => [`## ${g.label}`, ...g.tasks.map((t) => formatTask(t, opts))]);
 	return [...prefix, header, ...body].join('\n');
+}
+
+/**
+ * Formatea el resultado de `list_lists` (`GET /api/tasks?includeLists=1`):
+ * TODAS las listas vivas del usuario, con su recuento — INCLUIDAS las de
+ * recuento 0 (b00303b5: antes una lista vacía no aparecía en NINGÚN sitio
+ * del MCP, indistinguible de "no existe").
+ */
+export function formatListSummaries(lists: LumbreListSummary[]): string {
+	if (lists.length === 0) return 'Sin listas.';
+	const header = `${lists.length} lista${lists.length === 1 ? '' : 's'}:`;
+	const body = lists.map(
+		(l) => `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})`
+	);
+	return [header, ...body].join('\n');
 }

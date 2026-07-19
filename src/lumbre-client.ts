@@ -205,6 +205,31 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	return body as LumbreTask[];
 }
 
+/** Resumen de una lista de "Algún día" (`GET /api/tasks?includeLists=1`). */
+export interface LumbreListSummary {
+	id: string;
+	name: string;
+	/** Nº de tareas de primer nivel vivas en la lista; 0 es un valor legítimo
+	 *  (lista recién creada, o vaciada) — NO significa que la lista no exista. */
+	taskCount: number;
+}
+
+/**
+ * `GET /api/tasks?includeLists=1`: enumera TODAS las listas de "Algún día"
+ * vivas del usuario, INCLUIDAS las que no tienen ninguna tarea todavía. Sin
+ * esto, una lista con 0 tareas es invisible para el MCP — `list_tasks` solo
+ * puede "ver" una lista a través de las tareas que contiene, así que una
+ * lista recién creada (por la app o por `create_list`) no aparece en ningún
+ * sitio hasta que se le añade la primera tarea (bug real, b00303b5).
+ */
+export async function listLists(config: LumbreConfig): Promise<LumbreListSummary[]> {
+	const body = await request(config, '/api/tasks?includeLists=1');
+	if (!body || typeof body !== 'object' || !Array.isArray((body as { lists?: unknown }).lists)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1.');
+	}
+	return (body as { lists: LumbreListSummary[] }).lists;
+}
+
 /**
  * Busca UNA tarea por `id` vía `GET /api/tasks?id=` (lookup directo, no
  * listado — ver ese endpoint en el repo principal) y la devuelve, o

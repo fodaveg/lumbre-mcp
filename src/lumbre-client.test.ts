@@ -4,6 +4,7 @@ import {
 	buildBatchFromOps,
 	collectExistenceCheckIds,
 	findTasksByIds,
+	listLists,
 	runBatch,
 	subtaskNotAllowedError,
 	taskNotFoundError,
@@ -151,6 +152,38 @@ describe('findTasksByIds', () => {
 	it('respuesta que no es un array lanza LumbreApiError', async () => {
 		mockFetchJson({ not: 'an-array' });
 		await expect(findTasksByIds(config, ['a'])).rejects.toThrow(/inesperada/);
+	});
+});
+
+// b00303b5: `list_lists` — lee TODAS las listas, incluidas las de recuento 0
+// (una lista vacía es invisible en `list_tasks`, que solo "ve" listas a
+// través de sus tareas).
+describe('listLists', () => {
+	it('manda GET /api/tasks?includeLists=1 y devuelve `lists` tal cual, INCLUIDAS las de taskCount 0', async () => {
+		const lists = [
+			{ id: 'l1', name: 'Con tareas', taskCount: 3 },
+			{ id: 'l2', name: 'Recién creada', taskCount: 0 }
+		];
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ lists }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const result = await listLists(config);
+		expect(result).toEqual(lists);
+		expect(result.find((l) => l.name === 'Recién creada')?.taskCount).toBe(0);
+
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('https://lumbre.test/api/tasks?includeLists=1');
+		expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
+	});
+
+	it('respuesta sin `lists` (array) lanza LumbreApiError', async () => {
+		mockFetchJson({ not: 'lists' });
+		await expect(listLists(config)).rejects.toThrow(/inesperada/);
 	});
 });
 

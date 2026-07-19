@@ -31,6 +31,13 @@ Paquete Node/TS **independiente** del resto del repo (su propio
   y sin colapsar saltos de línea para TODO el lote — útil si vas a reeditar
   una nota con `update_task` (que la REEMPLAZA entera) y el lote ya está
   acotado. Para una sola tarea concreta, mejor `get_task`.
+- `list_lists()` — enumera TODAS tus listas de "Algún día", con su recuento de
+  tareas (vía `GET /api/tasks?includeLists=1`) — INCLUIDAS las que todavía no
+  tienen ninguna tarea. A diferencia de `list_tasks({ list })`, que responde
+  `[]` tanto si la lista no existe como si existe pero está vacía, `list_lists`
+  distingue ambos casos: úsala para comprobar si una lista existe (p. ej. el
+  usuario dice que la acaba de crear) o para resolver su `listId` sin
+  depender de que ya tenga tareas. Sin parámetros.
 - `get_task({ taskId })` — devuelve UNA tarea completa y sin recortar (notas
   íntegras y verbatim, `createdAt` sin recortar, lista/sección con sus ids). Si
   tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/

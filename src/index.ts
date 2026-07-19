@@ -11,6 +11,7 @@ import {
 	findTaskById,
 	findTasksByIds,
 	getAttachment,
+	listLists,
 	listTasks,
 	mutateTask,
 	priorityToLevel,
@@ -23,7 +24,7 @@ import {
 	type LumbreTask,
 	type MutateTasksOp
 } from './lumbre-client.js';
-import { formatTaskFull, formatTaskList } from './format.js';
+import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
@@ -38,7 +39,11 @@ import { formatTaskFull, formatTaskList } from './format.js';
  * `create_list`/`nest_list`/`rename_list`/`remove_list` (paridad UI↔MCP —
  * gestión de listas de "Algún día", `docs/20-contrato-lista.md`): mutan una
  * LISTA, no una tarea; `create_list` es la única que CREA (genera su propio
- * id con `randomUUID()` antes de encolar, ver su JSDoc más abajo). Todas
+ * id con `randomUUID()` antes de encolar, ver su JSDoc más abajo). `list_lists`
+ * (fix b00303b5) lee TODAS las listas vivas con su recuento vía
+ * `GET /api/tasks?includeLists=1` — a diferencia de `list_tasks({list})`, SÍ
+ * distingue una lista que existe pero está vacía de una que no existe (ambas
+ * dan `[]` en `list_tasks`, ver su JSDoc). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -185,7 +190,9 @@ server.registerTool(
 			'filtro `list` acota además por el nombre (case-insensitive) de una lista de "Algún ' +
 			'día"/proyecto — si no se indica `scope` explícito junto con `list`, el servidor ignora ' +
 			'el alcance temporal por defecto y trae toda la lista (la mayoría de sus tareas no tienen ' +
-			'fecha). Un `list` que no coincide con ninguna lista devuelve una lista vacía, no un error. ' +
+			'fecha). Un `list` que no coincide con ninguna lista devuelve una lista vacía, no un error — ' +
+			'MISMO resultado que una lista que SÍ existe pero aún no tiene tareas; si necesitas saber si ' +
+			'una lista existe (p. ej. el usuario dice que la acaba de crear), usa list_lists en su lugar. ' +
 			'`section` acota además por el nombre (case-insensitive) de una sección DENTRO de `list` ' +
 			'(p. ej. "Bugs"/"Propuestas" dentro de un proyecto) — la respuesta agrupa las tareas por ' +
 			'sección con una cabecera por grupo.',
@@ -222,6 +229,28 @@ server.registerTool(
 		try {
 			const tasks = await listTasks(config, input);
 			return textResult(formatTaskList(tasks, input.scope ?? 'today', { fullNotes: input.fullNotes }));
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'list_lists',
+	{
+		title: 'Listar las listas de "Algún día" de Lumbre',
+		description:
+			'Enumera TODAS las listas de "Algún día"/proyecto del usuario, con su recuento de tareas ' +
+			'— INCLUIDAS las que todavía no tienen ninguna tarea (recuento 0). Úsala para comprobar si ' +
+			'una lista existe o para resolver su `listId` por nombre SIN depender de que ya tenga ' +
+			'tareas: `list_tasks({ list: "X" })` no distingue "la lista X existe pero está vacía" de ' +
+			'"no existe ninguna lista X" (ambas devuelven cero tareas) — `list_lists` sí. Sin parámetros.',
+		inputSchema: {}
+	},
+	async () => {
+		try {
+			const lists = await listLists(config);
+			return textResult(formatListSummaries(lists));
 		} catch (err) {
 			return errorResult(err);
 		}
