@@ -6,14 +6,22 @@ import { z } from 'zod';
 import {
 	addTask,
 	assertTaskUsable,
+	buildBatchFromOps,
+	collectExistenceCheckIds,
 	findTaskById,
+	findTasksByIds,
 	getAttachment,
 	listTasks,
 	mutateTask,
+	priorityToLevel,
 	refreshSync,
+	runBatch,
 	taskNotFoundError,
 	LumbreApiError,
-	type LumbreConfig
+	type BatchResultItem,
+	type LumbreConfig,
+	type LumbreTask,
+	type MutateTasksOp
 } from './lumbre-client.js';
 import { formatTaskFull, formatTaskList } from './format.js';
 
@@ -321,12 +329,6 @@ async function requireTaskExists(
 ): Promise<void> {
 	const task = await findTaskById(config, taskId);
 	assertTaskUsable(task, taskId, opts);
-}
-
-/** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
- *  `/api/mutations` para `kind: 'update'`: `p4` = quitar la prioridad (`null`). */
-function priorityToLevel(p: 'p1' | 'p2' | 'p3' | 'p4'): 1 | 2 | 3 | null {
-	return p === 'p4' ? null : (Number(p[1]) as 1 | 2 | 3);
 }
 
 server.registerTool(
@@ -860,6 +862,227 @@ server.registerTool(
 				`Encolado en Lumbre: ${input.done === false ? 'desmarcar' : 'completar'} la subtarea ` +
 					`${input.subtaskId} (se aplicará al sincronizar).`
 			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+// ── Feature batch (`plan-batch.md`): N operaciones en UNA sola tool call ───
+
+/**
+ * `discriminatedUnion` por `op`: una entrada por cada tool de mutación (Fase
+ * 2) + `add_task`. MISMOS campos y MISMOS schemas zod que la tool individual
+ * correspondiente (copiados de arriba, no reinventados) — la única novedad es
+ * el discriminante `op` y que viajan varias a la vez dentro de `ops`. Sin
+ * `restore` (ninguna tool individual lo expone tampoco). Sin `refresh_sync`/
+ * `list_tasks`/`get_task`/`read_attachment` (son lecturas, no mutaciones
+ * encolables).
+ */
+const mutateTasksOpSchema = z.discriminatedUnion('op', [
+	z.object({
+		op: z.literal('add_task'),
+		text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
+		list: z
+			.string()
+			.max(200)
+			.optional()
+			.describe('Nombre de la lista de "Algún día" destino (se crea si no existe)'),
+		listId: z
+			.string()
+			.uuid()
+			.optional()
+			.describe('Id ESTABLE de la lista destino, PREFERENTE sobre `list` — sácalo de list_tasks'),
+		section: z
+			.string()
+			.max(200)
+			.optional()
+			.describe('Nombre de la sección/heading dentro de `list` (se crea si no existe)'),
+		priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
+		date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),
+		deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
+		time: z
+			.string()
+			.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+			.optional()
+			.describe('Hora "HH:MM" (24h) DENTRO de `date`'),
+		recurrence: recurrenceSchema.optional(),
+		subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
+		notes: z.string().max(10000).optional().describe('Notas/descripción larga')
+	}),
+	z.object({
+		op: z.literal('complete'),
+		taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a completar'),
+		done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
+	}),
+	z.object({
+		op: z.literal('cancel'),
+		taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a cancelar'),
+		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
+	}),
+	z.object({
+		op: z.literal('update'),
+		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
+		content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título'),
+		notes: z.string().max(10000).optional().describe('Nuevas notas (reemplaza las anteriores)'),
+		priority: z
+			.enum(['p1', 'p2', 'p3', 'p4'])
+			.optional()
+			.describe('p1 = más urgente … p3; p4 = quitar la prioridad'),
+		time: z
+			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
+			.optional()
+			.describe('Hora "HH:MM" (24h), o null para quitarla')
+	}),
+	z.object({
+		op: z.literal('reschedule'),
+		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
+		date: z
+			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
+			.describe('Día destino, YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada')
+	}),
+	z.object({
+		op: z.literal('delete'),
+		taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a borrar')
+	}),
+	z.object({
+		op: z.literal('set_section'),
+		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
+		section: z.string().max(200).nullable().describe('Sección destino, o null para quitarla')
+	}),
+	z.object({
+		op: z.literal('move_to_list'),
+		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
+		listId: z
+			.union([z.string().uuid(), z.null()])
+			.optional()
+			.describe('Id ESTABLE de la lista destino, PREFERENTE sobre `list`; null = desvincular'),
+		list: z.string().max(200).optional().describe('Nombre de la lista destino (se crea si no existe)')
+	}),
+	z.object({
+		op: z.literal('add_subtask'),
+		taskId: z.string().uuid().describe('Id de la tarea PADRE'),
+		subtasks: z.array(z.string()).min(1).max(50).describe('Textos de las subtareas a añadir, en orden')
+	}),
+	z.object({
+		op: z.literal('complete_subtask'),
+		subtaskId: z.string().uuid().describe('Id de la subtarea (ver get_task de su tarea padre)'),
+		done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
+	}),
+	z.object({
+		op: z.literal('remove_section'),
+		sectionId: z.string().uuid().describe('Id de la sección a borrar')
+	}),
+	z.object({
+		op: z.literal('create_list'),
+		name: z.string().min(1).max(200).describe('Nombre de la lista (obligatorio)'),
+		color: z
+			.string()
+			.max(20)
+			.optional()
+			.describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
+		icon: z.string().max(16).optional().describe('Emoji/icono de la lista'),
+		listId: z
+			.string()
+			.uuid()
+			.optional()
+			.describe(
+				'Id (uuid) que TENDRÁ la lista — opcional, para ENCADENAR con otra op del MISMO ' +
+					'`mutate_tasks` (p. ej. un `move_to_list`/`nest_list` posterior con ese mismo `listId`, ' +
+					'sin depender de una llamada previa para conocerlo). Genera tú mismo un uuid v4 si lo ' +
+					'necesitas; si se omite, el servidor asigna uno (que solo conocerás en la respuesta).'
+			)
+	}),
+	z.object({
+		op: z.literal('nest_list'),
+		listId: z.string().uuid().describe('Id de la lista a anidar/desanidar'),
+		parentId: z.union([z.string().uuid(), z.null()]).describe('Lista padre destino, o null para desanidar')
+	}),
+	z.object({
+		op: z.literal('rename_list'),
+		listId: z.string().uuid().describe('Id de la lista a renombrar'),
+		name: z.string().min(1).max(200).describe('Nuevo nombre')
+	}),
+	z.object({
+		op: z.literal('remove_list'),
+		listId: z.string().uuid().describe('Id de la lista a borrar')
+	})
+]);
+
+server.registerTool(
+	'mutate_tasks',
+	{
+		title: 'Ejecutar varias operaciones en Lumbre de una sola vez',
+		description:
+			'Vía PREFERENTE cuando hay que hacer VARIAS operaciones en Lumbre (crear y/o mutar) de golpe: ' +
+			'resuelve TODAS las existencias de tarea del lote en UNA sola comprobación y las encola en UNA ' +
+			'sola petición (en vez de una tool call por operación, cada una con su propio round-trip) — ' +
+			'úsala en cuanto vayas a hacer más de una operación seguida. Cada elemento de `ops` es EXACTAMENTE ' +
+			'lo mismo que la tool individual equivalente (`op:"add_task"` = add_task, `op:"complete"` = ' +
+			'complete_task, `op:"cancel"` = cancel_task, `op:"update"` = update_task, `op:"reschedule"` = ' +
+			'reschedule_task, `op:"delete"` = delete_task, `op:"set_section"` = set_section, ' +
+			'`op:"move_to_list"` = move_to_list, `op:"add_subtask"` = add_subtask, `op:"complete_subtask"` = ' +
+			'complete_subtask, `op:"remove_section"` = remove_section, `op:"create_list"` = create_list, ' +
+			'`op:"nest_list"` = nest_list, `op:"rename_list"` = rename_list, `op:"remove_list"` = remove_list). ' +
+			'Las tools individuales SIGUEN existiendo para una operación suelta. Éxito PARCIAL: una op inválida ' +
+			'(taskId inexistente, subtarea donde no aplica, payload inválido) no impide las demás — el ' +
+			'resultado detalla qué operación (por su posición en `ops`, 0-indexada) falló y por qué, Y el ' +
+			'`id` de cada una que sí se encoló (el de una `create_list` es su `listId`, el de un `add_task` ' +
+			'su `taskId` nuevo). ENCADENAR dentro del MISMO lote: la única op que crea algo cuyo id necesites ' +
+			'referenciar EN OTRA op del mismo `mutate_tasks` es `create_list` — dale tú mismo un `listId` ' +
+			'(uuid v4) al crearla y úsalo en el `move_to_list`/`nest_list` que la targetee, en vez de esperar ' +
+			'a la respuesta (el id de un `add_task` lo asigna el servidor y solo se conoce DESPUÉS, no se ' +
+			`puede referenciar dentro de la misma llamada). ${ASYNC_NOTE}`,
+		inputSchema: {
+			ops: z
+				.array(mutateTasksOpSchema)
+				.min(1)
+				.max(200)
+				.describe('Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada)')
+		}
+	},
+	async (input) => {
+		try {
+			const ops = input.ops as MutateTasksOp[];
+			const idsToCheck = collectExistenceCheckIds(ops);
+			const existing: Map<string, LumbreTask> =
+				idsToCheck.length > 0 ? await findTasksByIds(config, idsToCheck) : new Map();
+			const { batchOps, originalIndexes, skipped } = buildBatchFromOps(ops, existing);
+
+			const results: BatchResultItem[] = batchOps.length > 0 ? await runBatch(config, batchOps) : [];
+
+			// Ambas fuentes de fallo (descartadas ANTES de mandar el batch, y las
+			// que el servidor rechazó al validar/encolar) se combinan en un único
+			// informe, ordenado por posición ORIGINAL en `ops` — el modelo ve
+			// exactamente qué operación falló y por qué, sin tener que distinguir
+			// entre ambas fases. Las EXITOSAS con `id` (code-review 🟠 #3a: antes
+			// se perdían — el modelo no podía enterarse del `listId` de un
+			// `create_list` sin una `list_tasks` de más) también se recogen, para
+			// poder encadenarlas en un turno posterior (o confirmar el id que ya
+			// se auto-generó, si la op no traía uno propio — ver `create_list`).
+			const failures: { index: number; error: string }[] = [...skipped];
+			const succeededWithId: { index: number; id: string }[] = [];
+			results.forEach((r, i) => {
+				const index = originalIndexes[i];
+				if (r.ok) {
+					if (r.id !== undefined) succeededWithId.push({ index, id: r.id });
+				} else {
+					failures.push({ index, error: r.error ?? 'error desconocido' });
+				}
+			});
+			const okCount = results.filter((r) => r.ok).length;
+			failures.sort((a, b) => a.index - b.index);
+			succeededWithId.sort((a, b) => a.index - b.index);
+
+			const failureLines = failures.map((f) => `  [${f.index}] ${ops[f.index].op}: ${f.error}`);
+			const idLines = succeededWithId.map((s) => `  [${s.index}] ${ops[s.index].op}: id ${s.id}`);
+			let summary = `Lumbre: ${okCount}/${ops.length} operación(es) encoladas.`;
+			if (idLines.length > 0) summary += `\nids asignados:\n${idLines.join('\n')}`;
+			if (failureLines.length > 0) {
+				summary += `\n${failureLines.length} fallaron:\n${failureLines.join('\n')}`;
+			}
+			summary += `\n\n${ASYNC_NOTE}`;
+			return textResult(summary);
 		} catch (err) {
 			return errorResult(err);
 		}

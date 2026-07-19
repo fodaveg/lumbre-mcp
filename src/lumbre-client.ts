@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 /**
  * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
  * (crea) y `GET /api/tasks` (lee). Fase 2: `POST /api/mutations` (encola
@@ -5,6 +7,8 @@
  * subtareas sobre una tarea EXISTENTE, o crear/anidar-desanidar/renombrar/
  * borrar una LISTA de "Algún día" — ver
  * `src/routes/api/mutations/+server.ts` en el repo principal y `PHASE2.md`).
+ * Feature batch (`plan-batch.md`): `POST /api/batch` (N ops de golpe) y
+ * `GET /api/tasks?ids=` (existencia en lote) — ver el final de este fichero.
  * Todos se autentican con el MISMO token personal de email-to-task
  * (Ajustes → email entrante en la app), enviado como `Authorization: Bearer`.
  */
@@ -232,6 +236,33 @@ export async function findTaskById(config: LumbreConfig, taskId: string): Promis
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?id=.');
 	}
 	return (body as LumbreTask[])[0];
+}
+
+/**
+ * Busca VARIAS tareas de golpe vía `GET /api/tasks?ids=` (feature batch —
+ * espejo de `findTaskById`, pero para un LOTE): UNA sola petición → un `Map`
+ * por `id`, en vez de una `findTaskById` por cada `taskId`/`subtaskId` a
+ * comprobar. Pensado para `mutate_tasks` (`index.ts`): resuelve la existencia
+ * de TODAS las tareas que targetea un lote en una sola llamada, antes de
+ * mandar `runBatch`. Ids sin coincidencia (no existen, ajenas al token, o
+ * repetidos) simplemente no tienen entrada en el `Map` — el llamante lo
+ * distingue con `.get(id)` → `undefined`, mismo criterio que
+ * `findTaskById` devolviendo `undefined`. `ids: []` no llama a la red (`Map`
+ * vacío directo).
+ */
+export async function findTasksByIds(
+	config: LumbreConfig,
+	ids: string[]
+): Promise<Map<string, LumbreTask>> {
+	if (ids.length === 0) return new Map();
+	const params = new URLSearchParams({ ids: ids.join(',') });
+	const body = await request(config, `/api/tasks?${params.toString()}`);
+	if (!Array.isArray(body)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?ids=.');
+	}
+	const map = new Map<string, LumbreTask>();
+	for (const t of body as LumbreTask[]) map.set(t.id, t);
+	return map;
 }
 
 /** Error uniforme para un `taskId`/`subtaskId` que no aparece entre las
@@ -485,4 +516,341 @@ export async function mutateTask(config: LumbreConfig, input: MutateTaskInput): 
 	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
 		throw new LumbreApiError('Lumbre no confirmó la mutación (respuesta inesperada).');
 	}
+}
+
+/** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
+ *  `/api/mutations`/`/api/batch` para `kind: 'update'`: `p4` = quitar la
+ *  prioridad (`null`). Vive aquí (no en `index.ts`) porque `translateOp`
+ *  (más abajo) también la necesita, y `lumbre-client.ts` no depende de
+ *  `index.ts` (evita el ciclo). */
+export function priorityToLevel(p: 'p1' | 'p2' | 'p3' | 'p4'): 1 | 2 | 3 | null {
+	return p === 'p4' ? null : (Number(p[1]) as 1 | 2 | 3);
+}
+
+// ── Feature batch (`plan-batch.md`): N operaciones en UNA petición ─────────
+
+/** Una op del `POST /api/batch` del servidor — espejo EXACTO de lo que acepta
+ *  ese endpoint (ver su JSDoc en `src/routes/api/batch/+server.ts` del repo
+ *  principal): `ingest` (crear, mismo shape que `AddTaskInput`) o `mutate`
+ *  (mismo shape que `MutateTaskInput`). `runBatch` manda un array de estas. */
+export type BatchOp =
+	| { type: 'ingest'; task: AddTaskInput }
+	| { type: 'mutate'; taskId: string; kind: MutationKind; payload: MutateTaskInput['payload'] };
+
+/** Una entrada del informe que devuelve `POST /api/batch` — `index` es la
+ *  posición DENTRO del array de `BatchOp` mandado (no del `ops` original de
+ *  `mutate_tasks`: ver `originalIndexes` en `buildBatchFromOps`, que hace esa
+ *  traducción). `id` es el `clientTaskId` (ingest) o el `taskId` (mutate). */
+export interface BatchResultItem {
+	index: number;
+	type: 'ingest' | 'mutate' | 'unknown';
+	ok: boolean;
+	error?: string;
+	id?: string;
+}
+
+/**
+ * `POST /api/batch`: encola TODAS las `ops` de golpe (el servidor las valida
+ * y encola una por una, éxito PARCIAL — una op inválida no tumba las demás,
+ * ver el JSDoc del endpoint) y drena UNA sola vez. Espejo de `addTask`/
+ * `mutateTask`, pero para un LOTE entero en vez de una operación suelta — es
+ * la vía PREFERENTE para `mutate_tasks` (`index.ts`) cuando hay varias
+ * operaciones seguidas: 1 petición + 1 drenaje en vez de N.
+ */
+export async function runBatch(config: LumbreConfig, ops: BatchOp[]): Promise<BatchResultItem[]> {
+	const body = await request(config, '/api/batch', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ ops })
+	});
+	if (
+		!body ||
+		typeof body !== 'object' ||
+		(body as { ok?: unknown }).ok !== true ||
+		!Array.isArray((body as { results?: unknown }).results)
+	) {
+		throw new LumbreApiError('Lumbre no confirmó el batch (respuesta inesperada).');
+	}
+	return (body as { results: BatchResultItem[] }).results;
+}
+
+/**
+ * Una operación de la tool `mutate_tasks` (`index.ts`): discriminada por
+ * `op`, un espejo — MISMOS campos, mismo significado — de la tool individual
+ * correspondiente (`add_task`, `complete_task` → `op:'complete'`,
+ * `cancel_task` → `op:'cancel'`, etc.). Separado en un tipo TS plano (sin
+ * zod) para poder testear `buildBatchFromOps` sin depender del SDK de MCP —
+ * el zod `discriminatedUnion` de `index.ts` produce valores estructuralmente
+ * iguales a este tipo.
+ */
+export type MutateTasksOp =
+	| ({ op: 'add_task' } & AddTaskInput)
+	| { op: 'complete'; taskId: string; done?: boolean }
+	| { op: 'cancel'; taskId: string; cancelled?: boolean }
+	| {
+			op: 'update';
+			taskId: string;
+			content?: string;
+			notes?: string;
+			priority?: 'p1' | 'p2' | 'p3' | 'p4';
+			time?: string | null;
+	  }
+	| { op: 'reschedule'; taskId: string; date: string | null }
+	| { op: 'delete'; taskId: string }
+	| { op: 'set_section'; taskId: string; section: string | null }
+	| { op: 'move_to_list'; taskId: string; listId?: string | null; list?: string }
+	| { op: 'add_subtask'; taskId: string; subtasks: string[] }
+	| { op: 'complete_subtask'; subtaskId: string; done?: boolean }
+	| { op: 'remove_section'; sectionId: string }
+	| {
+			op: 'create_list';
+			name: string;
+			color?: string | null;
+			icon?: string | null;
+			/** Id (uuid) PRE-GENERADO por el llamante, opcional (code-review 🟠 #3b
+			 *  — encadenado intra-lote): si viene, `translateOp` lo usa TAL CUAL
+			 *  en vez de generar uno con `randomUUID()`, así el modelo puede
+			 *  targetear ESA MISMA lista desde otra op del MISMO `mutate_tasks`
+			 *  (p. ej. `move_to_list`/`nest_list` con ese `listId`, sin depender
+			 *  de una llamada previa para conocerlo). Ausente → se genera como
+			 *  hasta ahora (mismo criterio que la tool individual `create_list`). */
+			listId?: string;
+	  }
+	| { op: 'nest_list'; listId: string; parentId: string | null }
+	| { op: 'rename_list'; listId: string; name: string }
+	| { op: 'remove_list'; listId: string };
+
+/**
+ * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
+ * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
+ * matriz de `requireTaskExists` en `index.ts` (ver el JSDoc de
+ * `assertTaskUsable` para el porqué completo). Las ops de LISTA/SECCIÓN
+ * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`) y
+ * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
+ * existencia (mismo criterio que sus tools individuales, que tampoco llaman
+ * `requireTaskExists`). La PRESENCIA de una clave es la señal de "esta op
+ * necesita comprobación de existencia" (ver `collectExistenceCheckIds`/
+ * `buildBatchFromOps`).
+ */
+const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> = {
+	complete: true,
+	cancel: true,
+	delete: true,
+	add_subtask: true,
+	complete_subtask: true,
+	update: false,
+	reschedule: false,
+	set_section: false,
+	move_to_list: false
+};
+
+/** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
+ *  de lista/sección/creación (ver `TASK_TARGET_ALLOW_SUBTASK`). */
+function targetIdOf(op: MutateTasksOp): string | undefined {
+	if ('taskId' in op) return op.taskId;
+	if ('subtaskId' in op) return op.subtaskId;
+	return undefined;
+}
+
+/**
+ * Ids que `mutate_tasks` debe resolver con `findTasksByIds` ANTES de mandar
+ * el lote — deduplicados (varias ops pueden targetear la misma tarea). Pura,
+ * sin red: separada de la llamada real para poder testearla sola.
+ */
+export function collectExistenceCheckIds(ops: MutateTasksOp[]): string[] {
+	const ids = new Set<string>();
+	for (const op of ops) {
+		if (TASK_TARGET_ALLOW_SUBTASK[op.op] === undefined) continue;
+		const id = targetIdOf(op);
+		if (id !== undefined) ids.add(id);
+	}
+	return [...ids];
+}
+
+/** Validación local (sin red) de una op, previa a la comprobación de
+ *  existencia — mismos guards que hacían `update_task`/`move_to_list`
+ *  ANTES de llamar a `requireTaskExists` en `index.ts` (ver esas tools):
+ *  `update` necesita al menos un campo a cambiar; `move_to_list` necesita
+ *  `listId` o `list`. `null` si la op pasa (nada que reportar aquí). */
+function localValidationError(op: MutateTasksOp): string | null {
+	if (op.op === 'update') {
+		if (
+			op.content === undefined &&
+			op.notes === undefined &&
+			op.priority === undefined &&
+			op.time === undefined
+		) {
+			return 'update: indica al menos un campo a cambiar (content, notes, priority o time).';
+		}
+	}
+	if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
+		return 'move_to_list: indica `listId` o `list` (la lista destino).';
+	}
+	return null;
+}
+
+/** `MutateTasksOp` → `BatchOp` — MISMA traducción, campo a campo, que cada
+ *  tool individual construye para su `mutateTask`/`addTask` (ver `index.ts`:
+ *  `complete_task`, `update_task`, `create_list`… — cada rama de este
+ *  `switch` es su equivalente). `create_list` usa el `listId` PRE-GENERADO
+ *  por el llamante si vino (encadenado intra-lote), o genera uno con
+ *  `randomUUID()` si no — ver el JSDoc de `MutateTasksOp['create_list']`. */
+function translateOp(op: MutateTasksOp): BatchOp {
+	switch (op.op) {
+		case 'add_task': {
+			const { op: _discard, ...task } = op;
+			return { type: 'ingest', task };
+		}
+		case 'complete':
+			return {
+				type: 'mutate',
+				taskId: op.taskId,
+				kind: 'complete',
+				payload: { done: op.done ?? true }
+			};
+		case 'cancel':
+			return {
+				type: 'mutate',
+				taskId: op.taskId,
+				kind: 'cancel',
+				payload: { cancelled: op.cancelled ?? true }
+			};
+		case 'update':
+			return {
+				type: 'mutate',
+				taskId: op.taskId,
+				kind: 'update',
+				payload: {
+					...(op.content !== undefined ? { content: op.content } : {}),
+					...(op.notes !== undefined ? { notes: op.notes } : {}),
+					...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
+					...(op.time !== undefined ? { time: op.time } : {})
+				}
+			};
+		case 'reschedule':
+			return { type: 'mutate', taskId: op.taskId, kind: 'reschedule', payload: { date: op.date } };
+		case 'delete':
+			return { type: 'mutate', taskId: op.taskId, kind: 'delete', payload: {} };
+		case 'set_section':
+			return {
+				type: 'mutate',
+				taskId: op.taskId,
+				kind: 'setSection',
+				payload: { section: op.section }
+			};
+		case 'move_to_list':
+			return {
+				type: 'mutate',
+				taskId: op.taskId,
+				kind: 'moveToList',
+				payload: op.listId !== undefined ? { listId: op.listId } : { list: op.list! }
+			};
+		case 'add_subtask':
+			return {
+				type: 'mutate',
+				taskId: op.taskId,
+				kind: 'addSubtask',
+				payload: { subtasks: op.subtasks }
+			};
+		case 'complete_subtask':
+			return {
+				type: 'mutate',
+				taskId: op.subtaskId,
+				kind: 'complete',
+				payload: { done: op.done ?? true }
+			};
+		case 'remove_section':
+			return {
+				type: 'mutate',
+				taskId: op.sectionId,
+				kind: 'removeSection',
+				payload: { sectionId: op.sectionId }
+			};
+		case 'create_list':
+			// `listId` PRE-GENERADO por el llamante (encadenado intra-lote, ver el
+			// JSDoc de `MutateTasksOp['create_list']`) si vino; si no, uno nuevo —
+			// MISMO criterio que la tool individual `create_list`.
+			return {
+				type: 'mutate',
+				taskId: op.listId ?? randomUUID(),
+				kind: 'createList',
+				payload: {
+					name: op.name,
+					...(op.color !== undefined ? { color: op.color } : {}),
+					...(op.icon !== undefined ? { icon: op.icon } : {})
+				}
+			};
+		case 'nest_list':
+			return {
+				type: 'mutate',
+				taskId: op.listId,
+				kind: 'nestList',
+				payload: { parentId: op.parentId }
+			};
+		case 'rename_list':
+			return {
+				type: 'mutate',
+				taskId: op.listId,
+				kind: 'renameList',
+				payload: { name: op.name }
+			};
+		case 'remove_list':
+			return { type: 'mutate', taskId: op.listId, kind: 'removeList', payload: {} };
+	}
+}
+
+/** Resultado de `buildBatchFromOps` — ver su JSDoc. */
+export interface BuildBatchResult {
+	/** Ops YA traducidas a `BatchOp`, listas para `runBatch`, en el MISMO
+	 *  orden en que se mandan (índice de este array = índice que devolverá
+	 *  `results` del servidor). */
+	batchOps: BatchOp[];
+	/** `originalIndexes[i]` = índice en el `ops` ORIGINAL (el que pasó el
+	 *  modelo) del elemento `batchOps[i]` — la traducción entre el índice que
+	 *  ve el servidor y el que tiene sentido reportar de vuelta al modelo. */
+	originalIndexes: number[];
+	/** Ops descartadas ANTES de mandar el batch (validación local o
+	 *  existencia), con su índice en el `ops` ORIGINAL y el motivo — NUNCA
+	 *  viajan en `batchOps` (no gastan cupo de rate-limit ni round-trip). */
+	skipped: { index: number; error: string }[];
+}
+
+/**
+ * Núcleo PURO (sin red) de `mutate_tasks`: valida localmente cada op
+ * (`localValidationError`) y, si targetea una tarea, comprueba su existencia
+ * contra `existing` (`assertTaskUsable`, con el `allowSubtask` que le toque —
+ * ver `TASK_TARGET_ALLOW_SUBTASK`); lo que pasa ambos filtros se traduce a
+ * `BatchOp` (`translateOp`). Separado de la llamada real (`findTasksByIds` +
+ * `runBatch`, en `index.ts`) para poder testearlo sin mockear `fetch` — mismo
+ * patrón que `assertTaskUsable`/`lumbre-client.test.ts`.
+ */
+export function buildBatchFromOps(
+	ops: MutateTasksOp[],
+	existing: Map<string, LumbreTask>
+): BuildBatchResult {
+	const batchOps: BatchOp[] = [];
+	const originalIndexes: number[] = [];
+	const skipped: { index: number; error: string }[] = [];
+
+	ops.forEach((op, index) => {
+		const localError = localValidationError(op);
+		if (localError !== null) {
+			skipped.push({ index, error: localError });
+			return;
+		}
+		const allowSubtask = TASK_TARGET_ALLOW_SUBTASK[op.op];
+		if (allowSubtask !== undefined) {
+			const targetId = targetIdOf(op)!;
+			try {
+				assertTaskUsable(existing.get(targetId), targetId, { allowSubtask });
+			} catch (err) {
+				skipped.push({ index, error: err instanceof Error ? err.message : String(err) });
+				return;
+			}
+		}
+		batchOps.push(translateOp(op));
+		originalIndexes.push(index);
+	});
+
+	return { batchOps, originalIndexes, skipped };
 }
