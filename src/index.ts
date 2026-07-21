@@ -140,7 +140,7 @@ server.registerTool(
 				.string()
 				.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 				.optional()
-				.describe('Hora "HH:MM" (24h) DENTRO de `date`; sin `date` no tiene efecto visible'),
+				.describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
 			recurrence: recurrenceSchema.optional(),
 			subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
 			notes: z.string().max(10000).optional().describe('Notas/descripción larga')
@@ -449,7 +449,7 @@ server.registerTool(
 			time: z
 				.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
 				.optional()
-				.describe('Hora "HH:MM" (24h) DENTRO del día programado, o null para quitarla')
+				.describe('Hora "HH:MM" (24h); si la tarea no tiene día se agenda hoy. null la quita')
 		}
 	},
 	async (input) => {
@@ -934,7 +934,7 @@ const mutateTasksOpSchema = z.discriminatedUnion('op', [
 			.string()
 			.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 			.optional()
-			.describe('Hora "HH:MM" (24h) DENTRO de `date`'),
+			.describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
 		recurrence: recurrenceSchema.optional(),
 		subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
 		notes: z.string().max(10000).optional().describe('Notas/descripción larga')
@@ -961,7 +961,7 @@ const mutateTasksOpSchema = z.discriminatedUnion('op', [
 		time: z
 			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
 			.optional()
-			.describe('Hora "HH:MM" (24h), o null para quitarla')
+			.describe('Hora "HH:MM" (24h); si la tarea no tiene día se agenda hoy. null la quita')
 	}),
 	z.object({
 		op: z.literal('reschedule'),

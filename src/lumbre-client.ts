@@ -38,7 +38,7 @@ export interface AddTaskInput {
 	priority?: 'p1' | 'p2' | 'p3' | 'p4';
 	date?: string;
 	deadline?: string;
-	/** Hora "HH:MM" (24h) DENTRO de `date` — mismo formato que el chip de hora
+	/** Hora "HH:MM" (24h); sin `date`, el servidor agenda la tarea hoy. Mismo formato que el chip de hora
 	 *  de la app (ver `/api/ingest` en el repo principal). Sin sentido sin
 	 *  `date`, pero el servidor no lo impone. */
 	time?: string;
@@ -433,7 +433,7 @@ export interface UpdateMutationPayload {
 	 *  El tool `update_task` traduce el `'p1'..'p4'` de cara al modelo a este
 	 *  nivel antes de llamar aquí (ver `index.ts`). */
 	priority?: 1 | 2 | 3 | null;
-	/** Hora "HH:MM" (24h) DENTRO de `date`, o `null` para quitarla. */
+	/** Hora "HH:MM" (24h); si no hay día, se agenda hoy. `null` la quita. */
 	time?: string | null;
 }
 export interface RescheduleMutationPayload {
