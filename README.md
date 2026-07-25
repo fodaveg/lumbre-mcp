@@ -152,7 +152,7 @@ servers), apuntando `command`/`args` al `dist/index.js` compilado arriba:
 			"args": ["/ruta/absoluta/a/lumbre/mcp/dist/index.js"],
 			"env": {
 				"LUMBRE_TOKEN": "tu-token-de-email-to-task",
-				"LUMBRE_BASE_URL": "https://lumbre.pro"
+				"LUMBRE_BASE_URL": "https://app.lumbre.pro"
 			}
 		}
 	}
@@ -162,7 +162,11 @@ servers), apuntando `command`/`args` al `dist/index.js` compilado arriba:
 - `LUMBRE_TOKEN` es **obligatorio** — sin él, el proceso falla al arrancar con
   un error explicativo (nunca lo pidas al modelo ni lo hardcodees en el
   código: va en tu config LOCAL, fuera de cualquier repo).
-- `LUMBRE_BASE_URL` es opcional (default `https://lumbre.pro`); cámbialo si
+- `LUMBRE_BASE_URL` es opcional (default `https://app.lumbre.pro`). **No lo
+  apuntes al viejo `lumbre.pro`**: desde la fase (c) del renombrado ese host
+  responde 302 al nuevo, y `fetch` **descarta la cabecera `Authorization` al
+  seguir una redirección cross-origin** — daría un 401 sin pista de la causa.
+  Cámbialo solo si
   usas un self-host distinto (p. ej. `http://localhost:5173` en dev, aunque
   ahí necesitarás que `/api/ingest`/`/api/tasks` sean alcanzables sin TLS).
 
