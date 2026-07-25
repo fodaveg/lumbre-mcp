@@ -72,7 +72,7 @@ function loadConfig(): LumbreConfig {
 		);
 		process.exit(1);
 	}
-	const baseUrl = process.env.LUMBRE_BASE_URL?.trim() || 'https://lumbre.pro';
+	const baseUrl = process.env.LUMBRE_BASE_URL?.trim() || 'https://app.lumbre.pro';
 	return { baseUrl, token };
 }
 
