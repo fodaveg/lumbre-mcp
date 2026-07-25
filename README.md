@@ -4,8 +4,14 @@ Conector [MCP](https://modelcontextprotocol.io) de **Lumbre** — deja que
 Claude Code (u otro cliente MCP) añada, consulte y mute tareas de tu
 planificador semanal desde una conversación.
 
-Paquete Node/TS **independiente** del resto del repo (su propio
-`package.json`/`tsconfig.json`); no comparte dependencias con la app SvelteKit.
+Paquete Node/TS **autónomo**: no comparte dependencias ni build con la app
+SvelteKit de Lumbre; habla con ella solo por HTTP (`app.lumbre.pro`) usando el
+token de email-to-task.
+
+Vivía como `mcp/` dentro del repo de la app y se extrajo a este repo propio el
+2026-07-25 con `git subtree split --prefix=mcp`, así que **conserva su
+historia** (los primeros 23 commits llevan mensajes del monorepo, con `feat(mcp):`
+y también de otros ámbitos que tocaron esta carpeta de paso).
 
 ## Qué hace (Fase 1 — crear/leer)
 
@@ -125,13 +131,75 @@ lista (`list_tasks`/`get_task`).
   nivel. No aplica a la última lista viva ni a la Bandeja de entrada canónica
   (se ignora en silencio en ambos casos).
 
+### Ejecutar varias operaciones a la vez (`mutate_tasks`)
+
+Vía PREFERENTE en cuanto haya más de una operación seguida (crear y/o
+mutar): resuelve TODAS las existencias de tarea del lote en una sola
+comprobación y las encola en una sola petición (`ops`, máx. 200), en vez de
+una tool call por operación. Las tools individuales de arriba SIGUEN
+existiendo para una operación suelta. Éxito PARCIAL: una op inválida
+(`taskId` inexistente, subtarea donde no aplica, forma equivocada para esa
+`op`) no impide las demás — el resultado detalla, por posición 0-indexada en
+`ops`, qué falló y por qué, y el `id` de cada una que sí se encoló (el de un
+`create_list` es su `listId`; el de un `add_task`, su `taskId` nuevo).
+
+Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`, con el mismo
+significado que la tool individual equivalente: `op:"add_task"` = `add_task`,
+`op:"complete"` = `complete_task`, `op:"cancel"` = `cancel_task`,
+`op:"update"` = `update_task`, `op:"reschedule"` = `reschedule_task`,
+`op:"delete"` = `delete_task`, `op:"set_section"` = `set_section`,
+`op:"move_to_list"` = `move_to_list`, `op:"add_subtask"` = `add_subtask`,
+`op:"complete_subtask"` = `complete_subtask`, `op:"remove_section"` =
+`remove_section`, `op:"create_list"` = `create_list`, `op:"nest_list"` =
+`nest_list`, `op:"rename_list"` = `rename_list`, `op:"remove_list"` =
+`remove_list`. El schema que expone la tool es deliberadamente laxo (los 21
+campos que usan las 15 ops, todos opcionales); el contrato real por-op
+(`*` = obligatorio) es:
+
+```
+add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes]
+complete: taskId* [done]
+cancel: taskId* [cancelled]
+update: taskId*, ≥1 de [content, notes, priority, time]
+reschedule: taskId*, date*
+delete: taskId*
+set_section: taskId*, section*
+move_to_list: taskId*, uno de [listId, list]
+add_subtask: taskId*, subtasks*
+complete_subtask: subtaskId* [done]
+remove_section: sectionId*
+create_list: name* [color, icon, listId]
+nest_list: listId*, parentId*
+rename_list: listId*, name*
+remove_list: listId*
+```
+
+Un elemento que no encaja en la forma de SU `op` (campo obligatorio ausente,
+o un campo válido en general pero ajeno a esa op — p. ej.
+`{ op: "complete", date: "2026-01-01" }`) se rechaza igual que antes, solo
+que ahora entra en el mismo informe de éxito parcial que un `taskId`
+inexistente, en vez de tumbar la llamada entera.
+
+**Encadenar dentro del MISMO lote**: la única op que crea algo cuyo id
+puedas necesitar referenciar EN OTRA op del mismo `mutate_tasks` es
+`create_list` — dale tú mismo un `listId` (uuid v4) al crearla y úsalo en el
+`move_to_list`/`nest_list` que la targetee, en vez de esperar a la respuesta
+(el id de un `add_task` lo asigna el servidor y solo se conoce DESPUÉS, no se
+puede referenciar dentro de la misma llamada).
+
 ## Compilar
 
 ```bash
-cd mcp
+git clone git@github.com:fodaveg/lumbre-mcp.git
+cd lumbre-mcp
 npm install   # o pnpm install / yarn — es un paquete independiente
 npm run build # → dist/index.js
 ```
+
+Requiere **Node ≥ 22**. Con Node 24 el toolchain revienta
+(`ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`); si tienes varias versiones,
+apunta el `command` de la config al binario de Node 22 en vez de al `node`
+del PATH (ver más abajo).
 
 ## Configurar en Claude Code
 
@@ -149,7 +217,7 @@ servers), apuntando `command`/`args` al `dist/index.js` compilado arriba:
 	"mcpServers": {
 		"lumbre": {
 			"command": "node",
-			"args": ["/ruta/absoluta/a/lumbre/mcp/dist/index.js"],
+			"args": ["/ruta/absoluta/a/lumbre-mcp/dist/index.js"],
 			"env": {
 				"LUMBRE_TOKEN": "tu-token-de-email-to-task",
 				"LUMBRE_BASE_URL": "https://app.lumbre.pro"

@@ -2,6 +2,8 @@
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Transport, TransportSendOptions } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
 	addTask,
@@ -87,7 +89,10 @@ function errorResult(err: unknown) {
 
 const config = loadConfig();
 
-const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
+// Exportado para poder inspeccionarlo/reconectarlo a un transporte in-memory
+// desde `index.test.ts` (ver su cabecera) — la superficie de tools YA
+// registrada, sin repetir los 21 `registerTool` de este fichero.
+export const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
 
 const recurrenceSchema = z
 	.object({
@@ -99,14 +104,10 @@ const recurrenceSchema = z
 server.registerTool(
 	'add_task',
 	{
-		title: 'Añadir tarea a Lumbre',
 		description:
-			'Añade una tarea nueva a Lumbre (planificador semanal personal). Se encola y se ' +
-			'materializa en el planificador la próxima vez que un dispositivo sincronice — no es ' +
-			'instantáneo si no hay ningún dispositivo online. Usa esta tool cuando el usuario pida ' +
-			'"apúntame", "recuérdame", "añade a mi lista/tarea/planificador" o similar. `section` ' +
-			'coloca la tarea en una sección/heading concreta DENTRO de `list` (se crea si no ' +
-			'existe); se ignora sin `list`.',
+			'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
+			'"recuérdame", "añade a mi lista/tarea". Se encola y se materializa al sincronizar. ' +
+			'`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
 		inputSchema: {
 			text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
 			list: z
@@ -159,15 +160,11 @@ server.registerTool(
 server.registerTool(
 	'refresh_sync',
 	{
-		title: 'Forzar el refresco del sync de Lumbre',
 		description:
-			'Fuerza el flush del sync de Lumbre ANTES de leer, para evitar que list_tasks devuelva un ' +
-			'estado ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket con un ' +
-			'pequeño rebote/debounce). Úsala justo antes de list_tasks cuando importe ver el estado más ' +
-			'reciente posible (p. ej. justo después de que el usuario diga que acaba de cambiar algo en ' +
-			'la app). LÍMITE: solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
-			'del usuario está offline ahora mismo, sus cambios sin enviar no se pueden recuperar desde ' +
-			'aquí, esperar no sirve de nada en ese caso. Sin parámetros.',
+			'Fuerza el flush de sync de Lumbre antes de leer (evita que list_tasks devuelva estado ' +
+			'rancio). Solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
+			'del usuario está offline, sus cambios sin enviar no se pueden recuperar. Sin parámetros.',
+
 		inputSchema: {}
 	},
 	async () => {
@@ -183,19 +180,13 @@ server.registerTool(
 server.registerTool(
 	'list_tasks',
 	{
-		title: 'Listar tareas de Lumbre',
 		description:
-			'Lee las tareas del usuario en Lumbre. `scope` acota el rango temporal: "today" ' +
-			'(default), "week", "inbox"/"someday" (sin fecha), "overdue" (vencidas) o "all". El ' +
-			'filtro `list` acota además por el nombre (case-insensitive) de una lista de "Algún ' +
-			'día"/proyecto — si no se indica `scope` explícito junto con `list`, el servidor ignora ' +
-			'el alcance temporal por defecto y trae toda la lista (la mayoría de sus tareas no tienen ' +
-			'fecha). Un `list` que no coincide con ninguna lista devuelve una lista vacía, no un error — ' +
-			'MISMO resultado que una lista que SÍ existe pero aún no tiene tareas; si necesitas saber si ' +
-			'una lista existe (p. ej. el usuario dice que la acaba de crear), usa list_lists en su lugar. ' +
-			'`section` acota además por el nombre (case-insensitive) de una sección DENTRO de `list` ' +
-			'(p. ej. "Bugs"/"Propuestas" dentro de un proyecto) — la respuesta agrupa las tareas por ' +
-			'sección con una cabecera por grupo.',
+			'Lee tareas de Lumbre. `scope`: today (default), week, inbox/someday, overdue, all ' +
+			'(auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
+			'vacío igual que una lista vacía existente — usa list_lists para distinguir. `section` ' +
+			'agrupa por sección dentro de `list`. Las notas salen truncadas a ~240 chars ' +
+			'(`fullNotes`/get_task para íntegras: update_task REEMPLAZA la nota entera).',
+
 		inputSchema: {
 			scope: z
 				.enum(['today', 'week', 'inbox', 'someday', 'overdue', 'all'])
@@ -238,13 +229,11 @@ server.registerTool(
 server.registerTool(
 	'list_lists',
 	{
-		title: 'Listar las listas de "Algún día" de Lumbre',
 		description:
-			'Enumera TODAS las listas de "Algún día"/proyecto del usuario, con su recuento de tareas ' +
-			'— INCLUIDAS las que todavía no tienen ninguna tarea (recuento 0). Úsala para comprobar si ' +
-			'una lista existe o para resolver su `listId` por nombre SIN depender de que ya tenga ' +
-			'tareas: `list_tasks({ list: "X" })` no distingue "la lista X existe pero está vacía" de ' +
-			'"no existe ninguna lista X" (ambas devuelven cero tareas) — `list_lists` sí. Sin parámetros.',
+			'Enumera TODAS las listas de "Algún día" con su recuento de tareas, incluidas las ' +
+			'vacías (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacía de ' +
+			'inexistente. Sin parámetros.',
+
 		inputSchema: {}
 	},
 	async () => {
@@ -260,15 +249,11 @@ server.registerTool(
 server.registerTool(
 	'get_task',
 	{
-		title: 'Leer una tarea completa de Lumbre',
 		description:
-			'Devuelve UNA tarea de Lumbre entera y sin recortar (notas íntegras y verbatim, fecha de ' +
-			'creación, lista/sección con sus ids) — pensado para reeditar su nota con update_task sin ' +
-			'perder lo que list_tasks trunca por defecto (~240 caracteres). Si la tarea tiene subtareas ' +
-			'(checklist, #17), las incluye con su id y su estado hecha/pendiente — es la ÚNICA forma de ' +
-			'obtener el id de una subtarea (list_tasks nunca las lista), necesario para complete_subtask. ' +
-			'Da error si el taskId no existe entre las tareas visibles del usuario (resuélvelo antes con ' +
-			'list_tasks).',
+			'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
+			'lista/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
+			'obtener el id de una subtarea. Error si el taskId no existe.',
+
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)')
 		}
@@ -287,12 +272,10 @@ server.registerTool(
 server.registerTool(
 	'read_attachment',
 	{
-		title: 'Leer un adjunto de Lumbre',
 		description:
 			'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
-			'list_tasks, que trae el id y el nombre de cada adjunto). Si es una imagen, la devuelve ' +
-			'para que puedas verla directamente; si no (PDF, etc.), devuelve solo su metadata — no hay ' +
-			'forma de leer el contenido de un adjunto no-imagen con esta tool.',
+			'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
+			'devuelve solo su metadata — no hay forma de leer su contenido con esta tool.',
 		inputSchema: {
 			attachment_id: z
 				.string()
@@ -323,13 +306,18 @@ server.registerTool(
 
 // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
 
-/** Aviso compartido en las tools de Fase 2: la app es asíncrona/eventual
- *  (igual que `add_task`), así que ninguna da confirmación inmediata de que
- *  la mutación se aplicó de verdad — solo de que quedó encolada. */
-const ASYNC_NOTE =
-	'La aplicación de Lumbre es ASÍNCRONA/eventual (igual que add_task): la mutación se encola y se ' +
-	'aplica la próxima vez que un dispositivo del usuario sincronice, no al instante. No hay ' +
-	'confirmación de que se aplicó de verdad (usa list_tasks más tarde para comprobarlo).';
+/**
+ * Aviso compartido en las tools de Fase 2 y en `mutate_tasks` (15 usos): la
+ * app de Lumbre es ASÍNCRONA/eventual (igual que `add_task`) — cada mutación
+ * se encola y se aplica la próxima vez que un dispositivo del usuario
+ * sincronice, no al instante, y ninguna tool da confirmación inmediata de que
+ * se aplicó de verdad (usa `list_tasks` más tarde para comprobarlo). Versión
+ * CORTA a propósito: repetida 15 veces en `tools/list`, la redacción larga
+ * costaba ~3.3k caracteres solo en esta frase — el detalle completo
+ * (por qué es eventual, el rebote del WebSocket, etc.) vive una única vez en
+ * `README.md` ("Qué hace — Fase 2").
+ */
+const ASYNC_NOTE = 'Asíncrono (como add_task): se encola y se aplica al sincronizar, sin confirmación inmediata.';
 
 /**
  * Comprueba que `taskId` EXISTE antes de encolar cualquier mutación sobre él,
@@ -363,11 +351,9 @@ async function requireTaskExists(
 server.registerTool(
 	'complete_task',
 	{
-		title: 'Completar/descompletar una tarea de Lumbre',
 		description:
-			`Marca una tarea existente como hecha, o la desmarca con done:false. También admite el id de ` +
-			`una SUBTAREA (aunque para eso es más claro complete_subtask). ${ASYNC_NOTE} Necesita ` +
-			'el `taskId` de la tarea — resuélvelo antes con list_tasks (por contenido/fecha).',
+			`Marca una tarea (o SUBTAREA, aunque para eso es más claro complete_subtask) como hecha, o ` +
+			`la desmarca con done:false. ${ASYNC_NOTE}`,
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
@@ -394,14 +380,11 @@ server.registerTool(
 server.registerTool(
 	'cancel_task',
 	{
-		title: 'Cancelar/restaurar una tarea de Lumbre',
 		description:
-			'Cancela una tarea EXISTENTE: equivalente a completarla, pero marcada como "no se hizo ni ' +
-			'se hará" (distinto de complete_task, que significa que sí se hizo) — sale igualmente de ' +
-			'pendientes/rollover. Usa esta tool cuando el usuario diga "cancela", "ya no hace falta", ' +
-			`"descarta esta tarea" (sin querer decir que la borre). ${ASYNC_NOTE} Con cancelled:false ` +
-			'restaura la tarea cancelada a pendiente (equivalente a "deshacer"). Necesita el `taskId` — ' +
-			'resuélvelo antes con list_tasks.',
+			`Cancela una tarea existente ("no se hizo ni se hará", distinto de completarla); sale ` +
+			`igual de pendientes/rollover. Dispara con "cancela"/"descarta" (sin borrarla). ` +
+			`cancelled:false la restaura. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
@@ -428,12 +411,10 @@ server.registerTool(
 server.registerTool(
 	'update_task',
 	{
-		title: 'Editar una tarea de Lumbre',
 		description:
-			`Edita el texto, las notas, la prioridad o la hora de una tarea existente. NO aplica a una ` +
-			`SUBTAREA (rechaza su id con error). ${ASYNC_NOTE} Indica solo los campos que quieras ` +
-			'cambiar; los que omitas se dejan igual. Necesita el `taskId` — resuélvelo antes con ' +
-			'list_tasks (por contenido/fecha).',
+			`Edita texto, notas, prioridad u hora de una tarea existente (NO subtareas: rechaza su id ` +
+			`con error). Los campos que omitas no cambian; \`notes\` REEMPLAZA las anteriores enteras. ` +
+			`${ASYNC_NOTE}`,
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
@@ -487,11 +468,9 @@ server.registerTool(
 server.registerTool(
 	'reschedule_task',
 	{
-		title: 'Reprogramar una tarea de Lumbre',
 		description:
-			`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada (date: null). NO ` +
-			`aplica a una SUBTAREA (rechaza su id con error: una subtarea no tiene agenda propia). ` +
-			`${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks (por contenido/fecha).`,
+			`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada con date:null. ` +
+			`NO aplica a una SUBTAREA (rechaza su id con error). ${ASYNC_NOTE}`,
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			date: z
@@ -520,13 +499,11 @@ server.registerTool(
 server.registerTool(
 	'delete_task',
 	{
-		title: 'Borrar una tarea de Lumbre',
 		description:
-			`Borra (soft-delete) una tarea existente de Lumbre — también admite el id de una SUBTAREA ` +
-			`(borra solo esa subtarea, no toca el resto de la checklist). ${ASYNC_NOTE} ACCIÓN DELICADA: ` +
-			'no hay confirmación inmediata de que se aplicó y no se puede deshacer desde esta tool — ' +
-			'confírmalo con el usuario antes de llamarla. Necesita el `taskId` — resuélvelo antes con ' +
-			'list_tasks (o con get_task de la tarea padre si es una subtarea).',
+			`Borra (soft-delete) una tarea existente, o una SUBTAREA suya (borra solo esa). ACCIÓN ` +
+			`DELICADA: sin confirmación inmediata ni deshacer — confírmalo con el usuario antes de ` +
+			`llamarla. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a borrar (ver list_tasks/get_task)')
 		}
@@ -547,13 +524,11 @@ server.registerTool(
 server.registerTool(
 	'set_section',
 	{
-		title: 'Mover una tarea de Lumbre a una sección/heading',
 		description:
-			'Mueve una tarea EXISTENTE a una sección/heading dentro de SU lista/proyecto (se crea si no ' +
-			'existe), o la saca de su sección con section: null. Solo aplica si la tarea ya pertenece a ' +
-			'una lista de "Algún día"/proyecto (si no, se ignora en silencio — una sección solo existe ' +
-			'dentro de una lista). NO aplica a una SUBTAREA (rechaza su id con error). ' +
-			`${ASYNC_NOTE} Necesita el \`taskId\` — resuélvelo antes con list_tasks.`,
+			'Mueve una tarea existente a una sección dentro de SU lista (se crea si no existe), o ' +
+			'la saca con section:null. Se ignora si la tarea no tiene lista propia. NO aplica a ' +
+			'subtareas. ' + ASYNC_NOTE,
+
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			section: z
@@ -587,15 +562,11 @@ server.registerTool(
 server.registerTool(
 	'remove_section',
 	{
-		title: 'Borrar una sección de Lumbre',
 		description:
-			'Borra (tombstone) una sección/heading DENTRO de una lista de "Algún día"/proyecto de Lumbre. ' +
-			'Las tareas que vivían en esa sección NUNCA se borran: solo pierden su sección (quedan ' +
-			'sueltas, "sin sección", DENTRO de la MISMA lista — no cambian de residencia). Sin ' +
-			'`list_sections` todavía: resuelve el `sectionId` a borrar desde el campo `sectionId` de ' +
-			`una tarea que ya viva ahí (ver list_tasks/get_task). ${ASYNC_NOTE} Si el \`sectionId\` no ` +
-			'existe (mal transcrito, o ajeno), el materializador lo descarta EN SILENCIO — no hay forma ' +
-			'de confirmarlo desde esta tool, comprueba con list_tasks.',
+			'Borra una sección dentro de una lista; sus tareas no se borran, solo quedan sueltas ' +
+			'en la MISMA lista. Resuelve `sectionId` desde una tarea que viva ahí ' +
+			'(list_tasks/get_task); si no existe, se ignora. ' + ASYNC_NOTE,
+
 		inputSchema: {
 			sectionId: z
 				.string()
@@ -621,15 +592,22 @@ server.registerTool(
 	}
 );
 
+// ── Gestión de listas de "Algún día" (paridad UI↔MCP, docs/20-contrato-lista.md) ──
+//
+// `create_list`/`nest_list`/`rename_list`/`remove_list` mutan una LISTA, no
+// una tarea; `create_list` es la única que CREA (genera su propio id con
+// `randomUUID()` antes de encolar, ver su comentario más abajo). Identidad =
+// el id, no el nombre (`rename_list` no la cambia). `remove_list` nunca
+// pierde tareas (se reasignan) ni permite borrar la última lista viva ni la
+// Bandeja de entrada canónica (§5 "Prohibidos" del contrato). Detalle
+// completo del contrato de lista en `docs/20-contrato-lista.md`.
+
 server.registerTool(
 	'create_list',
 	{
-		title: 'Crear una lista de "Algún día" en Lumbre',
 		description:
-			'Crea una lista/proyecto de "Algún día" nueva en Lumbre (contenedor de tareas fuera del ' +
-			'tiempo, con identidad propia — docs/20-contrato-lista.md). Devuelve el `listId` generado: ' +
-			'úsalo después con add_task (`listId`), move_to_list, o nest_list para anidarla bajo otra ' +
-			`lista. ${ASYNC_NOTE}`,
+			`Crea una lista/proyecto de "Algún día" nueva. Devuelve el \`listId\` generado: úsalo ` +
+			`después en add_task (\`listId\`), move_to_list o nest_list. ${ASYNC_NOTE}`,
 		inputSchema: {
 			name: z.string().min(1).max(200).describe('Nombre de la lista (obligatorio)'),
 			color: z
@@ -672,15 +650,11 @@ server.registerTool(
 server.registerTool(
 	'nest_list',
 	{
-		title: 'Anidar o desanidar una lista de Lumbre',
 		description:
-			'Fija el padre de una lista de "Algún día" EXISTENTE (la anida bajo otra), o la deja de ' +
-			'primer nivel con parentId: null (desanidar). Sin una tool para listar listas todavía: ' +
-			'resuelve `listId`/`parentId` con el que devolvió create_list, o con el campo ' +
-			`\`somedayListId\` de una tarea que ya viva en esa lista (list_tasks/get_task). ${ASYNC_NOTE} ` +
-			'Si el anidado se rechaza (crearía un ciclo, auto-anidado, o la lista es la Bandeja de ' +
-			'entrada, que nunca es anidable) o `listId`/`parentId` no existen, el materializador lo ' +
-			'descarta EN SILENCIO — no hay forma de confirmarlo desde esta tool.',
+			`Fija el padre de una lista existente (la anida), o la deja de primer nivel con ` +
+			`parentId:null. Un anidado inválido (ciclo, auto-anidado, o la Bandeja de entrada) o ` +
+			`un id inexistente se descarta en silencio. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			listId: z.string().uuid().describe('Id de la lista a anidar/desanidar'),
 			parentId: z
@@ -708,12 +682,8 @@ server.registerTool(
 server.registerTool(
 	'rename_list',
 	{
-		title: 'Renombrar una lista de Lumbre',
 		description:
-			'Renombra una lista de "Algún día" EXISTENTE de Lumbre; su identidad y sus tareas no ' +
-			'cambian (docs/20-contrato-lista.md: la identidad es el id, no el nombre). Sin una tool ' +
-			'para listar listas todavía: resuelve `listId` con el que devolvió create_list, o con el ' +
-			`campo \`somedayListId\` de una tarea que ya viva ahí (list_tasks/get_task). ${ASYNC_NOTE}`,
+			`Renombra una lista EXISTENTE; su identidad (id) y sus tareas no cambian. ${ASYNC_NOTE}`,
 		inputSchema: {
 			listId: z.string().uuid().describe('Id de la lista a renombrar'),
 			name: z.string().min(1).max(200).describe('Nuevo nombre')
@@ -739,17 +709,11 @@ server.registerTool(
 server.registerTool(
 	'remove_list',
 	{
-		title: 'Borrar una lista de Lumbre',
 		description:
-			'Borra (tombstone) una lista/proyecto de "Algún día" EXISTENTE de Lumbre. Sus tareas NUNCA ' +
-			'se pierden: las sin fecha se reasignan a otra lista viva; las "prestadas" (con fecha) ' +
-			'pierden el vínculo y quedan como tarea de día normal. Sus listas hijas directas pasan a ' +
-			'primer nivel (no se borran en cascada). No aplica a la ÚLTIMA lista viva ni a la Bandeja ' +
-			'de entrada canónica (docs/20-contrato-lista.md §5, "Prohibidos"): se ignora en silencio ' +
-			'en ambos casos — no hay forma de confirmarlo desde esta tool, comprueba con list_tasks. ' +
-			'Sin una tool para listar listas todavía: resuelve `listId` con el que devolvió ' +
-			`create_list, o con el campo \`somedayListId\` de una tarea que ya viva ahí ` +
-			`(list_tasks/get_task). ${ASYNC_NOTE}`,
+			`Borra una lista existente; sus tareas no se pierden (se reasignan o quedan como ` +
+			`tarea normal) y sus hijas pasan a primer nivel. No aplica a la última lista viva ni ` +
+			`a la Bandeja de entrada: se ignora. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			listId: z.string().uuid().describe('Id de la lista a borrar')
 		}
@@ -769,15 +733,11 @@ server.registerTool(
 server.registerTool(
 	'move_to_list',
 	{
-		title: 'Mover una tarea de Lumbre a otra lista',
 		description:
-			'Mueve una tarea EXISTENTE a otra lista de "Algún día"/proyecto (o la desvincula de la ' +
-			'suya). Targetea por `listId` (id ESTABLE, preferente, inmune a renames — sácalo de ' +
-			'list_tasks) o por `list` (nombre, se crea si no existe); `listId: null` explícito ' +
-			'desvincula la tarea de su lista actual. CONSERVA la fecha de la tarea y limpia su ' +
-			'sección (una sección solo existe dentro de su lista de origen). NO aplica a una SUBTAREA ' +
-			`(rechaza su id con error: una subtarea no tiene residencia propia). ${ASYNC_NOTE} Necesita ` +
-			'el `taskId` — resuélvelo antes con list_tasks.',
+			`Mueve una tarea existente a otra lista, o la desvincula con listId:null. Prefiere ` +
+			`\`listId\` (estable) sobre \`list\` (nombre, se crea si no existe). Conserva fecha, ` +
+			`limpia sección. NO aplica a subtareas. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 			listId: z
@@ -823,15 +783,11 @@ server.registerTool(
 server.registerTool(
 	'add_subtask',
 	{
-		title: 'Añadir subtareas a una tarea de Lumbre',
 		description:
-			'Añade una o más subtareas (checklist, #17) a una tarea EXISTENTE de Lumbre. ' +
-			`${ASYNC_NOTE} No se puede añadir subtareas a una SUBTAREA (anidamiento de UN nivel: ` +
-			'una subtarea no puede tener subtareas propias); si `taskId` ya es una subtarea, el ' +
-			'servidor descarta la mutación en silencio (usa list_tasks para comprobar si aplicó). ' +
-			'Necesita el `taskId` de la tarea PADRE — resuélvelo antes con list_tasks (por ' +
-			'contenido/fecha). Para añadir subtareas al CREAR una tarea nueva, usa add_task con ' +
-			'`subtasks` en vez de esta tool.',
+			`Añade subtareas (checklist) a una tarea existente. Un solo nivel: si \`taskId\` ya ` +
+			`es subtarea, se descarta en silencio. Para crearlas junto con la tarea, usa add_task ` +
+			`con \`subtasks\`. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			taskId: z.string().uuid().describe('Id de la tarea PADRE (ver list_tasks)'),
 			subtasks: z
@@ -867,13 +823,11 @@ server.registerTool(
 server.registerTool(
 	'complete_subtask',
 	{
-		title: 'Completar/descompletar una subtarea de Lumbre',
 		description:
-			'Marca una SUBTAREA (checklist, #17) existente como hecha, o la desmarca con done:false. ' +
-			'Completar una subtarea es completar una tarea: MISMO mecanismo que complete_task, aplicado ' +
-			'a su id — no cascada nada sobre la tarea padre (cada subtarea se completa de forma ' +
-			`independiente). ${ASYNC_NOTE} Necesita el \`subtaskId\`: resuélvelo con get_task(taskId) de ` +
-			'la tarea PADRE (list_tasks nunca lista subtareas, así que no aparecen ahí).',
+			`Marca hecha (o desmarca con done:false) una SUBTAREA por su id — mismo mecanismo que ` +
+			`complete_task, sin cascada sobre la tarea padre. Resuelve \`subtaskId\` con ` +
+			`get_task(taskId) de su padre. ${ASYNC_NOTE}`,
+
 		inputSchema: {
 			subtaskId: z.string().uuid().describe('Id de la subtarea (ver get_task de su tarea padre)'),
 			done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
@@ -900,196 +854,322 @@ server.registerTool(
 // ── Feature batch (`plan-batch.md`): N operaciones en UNA sola tool call ───
 
 /**
- * `discriminatedUnion` por `op`: una entrada por cada tool de mutación (Fase
- * 2) + `add_task`. MISMOS campos y MISMOS schemas zod que la tool individual
- * correspondiente (copiados de arriba, no reinventados) — la única novedad es
- * el discriminante `op` y que viajan varias a la vez dentro de `ops`. Sin
- * `restore` (ninguna tool individual lo expone tampoco). Sin `refresh_sync`/
- * `list_tasks`/`get_task`/`read_attachment` (son lecturas, no mutaciones
- * encolables).
+ * `mutate_tasks` usa DOS schemas de las mismas 15 formas por-op, no uno
+ * (medido: aplanar `ops.items` bajó su JSON Schema EXPUESTO de 7.638 a ~3.1k
+ * caracteres — el 27% de toda la superficie de `tools/list` — ver la tarea
+ * que lo motivó, 2026-07-25):
+ *
+ * - `mutateTasksOpSchema` (EXPUESTO, más abajo): UN objeto plano con los 21
+ *   campos que usan las 15 ops, TODOS opcionales, cada uno con su
+ *   `.describe()` UNA sola vez. Antes esto era un `z.discriminatedUnion` de
+ *   15 ramas casi idénticas → `anyOf` con los mismos campos y las mismas
+ *   descripciones repetidas 15 veces en el JSON Schema que ve el modelo. El
+ *   contrato real por-op (qué campo es obligatorio/ajeno a cada `op`) YA NO
+ *   vive en el tipo expuesto: vive en la `description` de `ops` (tabla
+ *   compacta, `*` = obligatorio) y en el README ("Ejecutar varias
+ *   operaciones a la vez").
+ * - `mutateTasksStrictOpSchema` (INTERNO — NO forma parte de `inputSchema`,
+ *   nunca se serializa): las MISMAS 15 formas por-op de siempre, con los
+ *   MISMOS tipos y la MISMA obligatoriedad que tenía cada rama del
+ *   `discriminatedUnion` de antes, cada una `.strict()` (rechaza cualquier
+ *   campo ajeno a esa op). El handler de `mutate_tasks`, más abajo, la usa
+ *   para re-validar cada elemento de `ops` ANTES de tocar red — así
+ *   `{op:'complete', date:'2026-01-01'}` (campo `date` ajeno a `complete`)
+ *   SIGUE fallando exactamente igual que antes. La diferencia es DÓNDE: con
+ *   el `discriminatedUnion` expuesto, una op mal formada tumbaba el
+ *   `mutate_tasks` ENTERO en el framework (`validateToolInput`), antes de
+ *   que el handler viera nada; ahora entra en el mismo informe de "éxito
+ *   parcial" que ya existía para un `taskId` inexistente — se reporta esa
+ *   op concreta y las demás, si son válidas, se encolan igual. Mejora de
+ *   comportamiento, no solo de tamaño.
+ *
+ * `create_list.listId` (encadenar dentro del MISMO lote, sin depender de la
+ * respuesta): dale tú mismo un uuid v4 al crearla y úsalo en el
+ * `move_to_list`/`nest_list` que la targetee en OTRA op del mismo lote —
+ * detalle completo (antes en la `.describe()` de esa variante, 335
+ * caracteres que solo importan una vez, no repetidos por tool call) movido
+ * al README.
  */
-const mutateTasksOpSchema = z.discriminatedUnion('op', [
-	z.object({
-		op: z.literal('add_task'),
-		text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
-		list: z
-			.string()
-			.max(200)
-			.optional()
-			.describe('Nombre de la lista de "Algún día" destino (se crea si no existe)'),
-		listId: z
-			.string()
-			.uuid()
-			.optional()
-			.describe('Id ESTABLE de la lista destino, PREFERENTE sobre `list` — sácalo de list_tasks'),
-		section: z
-			.string()
-			.max(200)
-			.optional()
-			.describe('Nombre de la sección/heading dentro de `list` (se crea si no existe)'),
-		priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
-		date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),
-		deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
-		time: z
-			.string()
-			.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
-			.optional()
-			.describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
-		recurrence: recurrenceSchema.optional(),
-		subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
-		notes: z.string().max(10000).optional().describe('Notas/descripción larga')
-	}),
-	z.object({
-		op: z.literal('complete'),
-		taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a completar'),
-		done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
-	}),
-	z.object({
-		op: z.literal('cancel'),
-		taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a cancelar'),
-		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
-	}),
-	z.object({
-		op: z.literal('update'),
-		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
-		content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título'),
-		notes: z.string().max(10000).optional().describe('Nuevas notas (reemplaza las anteriores)'),
-		priority: z
-			.enum(['p1', 'p2', 'p3', 'p4'])
-			.optional()
-			.describe('p1 = más urgente … p3; p4 = quitar la prioridad'),
-		time: z
-			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
-			.optional()
-			.describe('Hora "HH:MM" (24h); si la tarea no tiene día se agenda hoy. null la quita')
-	}),
-	z.object({
-		op: z.literal('reschedule'),
-		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
-		date: z
-			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
-			.describe('Día destino, YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada')
-	}),
-	z.object({
-		op: z.literal('delete'),
-		taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a borrar')
-	}),
-	z.object({
-		op: z.literal('set_section'),
-		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
-		section: z.string().max(200).nullable().describe('Sección destino, o null para quitarla')
-	}),
-	z.object({
-		op: z.literal('move_to_list'),
-		taskId: z.string().uuid().describe('Id de la tarea (NO aplica a subtareas)'),
+export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
+	z
+		.object({
+			op: z.literal('add_task'),
+			text: z.string().min(1).max(2000),
+			list: z.string().max(200).optional(),
+			listId: z.string().uuid().optional(),
+			section: z.string().max(200).optional(),
+			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
+			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+			deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+			time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+			recurrence: recurrenceSchema.optional(),
+			subtasks: z.array(z.string()).optional(),
+			notes: z.string().max(10000).optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('complete'),
+			taskId: z.string().uuid(),
+			done: z.boolean().optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('cancel'),
+			taskId: z.string().uuid(),
+			cancelled: z.boolean().optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('update'),
+			taskId: z.string().uuid(),
+			content: z.string().min(1).max(2000).optional(),
+			notes: z.string().max(10000).optional(),
+			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
+			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('reschedule'),
+			taskId: z.string().uuid(),
+			date: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('delete'),
+			taskId: z.string().uuid()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('set_section'),
+			taskId: z.string().uuid(),
+			section: z.string().max(200).nullable()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('move_to_list'),
+			taskId: z.string().uuid(),
+			listId: z.union([z.string().uuid(), z.null()]).optional(),
+			list: z.string().max(200).optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('add_subtask'),
+			taskId: z.string().uuid(),
+			subtasks: z.array(z.string()).min(1).max(50)
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('complete_subtask'),
+			subtaskId: z.string().uuid(),
+			done: z.boolean().optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('remove_section'),
+			sectionId: z.string().uuid()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('create_list'),
+			name: z.string().min(1).max(200),
+			color: z.string().max(20).optional(),
+			icon: z.string().max(16).optional(),
+			listId: z.string().uuid().optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('nest_list'),
+			listId: z.string().uuid(),
+			parentId: z.union([z.string().uuid(), z.null()])
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('rename_list'),
+			listId: z.string().uuid(),
+			name: z.string().min(1).max(200)
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('remove_list'),
+			listId: z.string().uuid()
+		})
+		.strict()
+]);
+
+/**
+ * Schema EXPUESTO de un elemento de `ops` (ver el JSDoc de
+ * `mutateTasksStrictOpSchema` de arriba para el porqué de tenerlos
+ * separados): plano, los 21 campos que usan las 15 ops TODOS opcionales
+ * (salvo `op`), cada uno con su `.describe()` UNA sola vez. `.strict()` aquí
+ * solo pilla un nombre de campo que no es NINGUNO de los 21 conocidos
+ * (typo); que un campo válido en general no aplique a la `op` concreta de
+ * ESE elemento lo pilla `mutateTasksStrictOpSchema` en el handler, no este
+ * schema.
+ */
+export const mutateTasksOpSchema = z
+	.object({
+		op: z
+			.enum([
+				'add_task',
+				'complete',
+				'cancel',
+				'update',
+				'reschedule',
+				'delete',
+				'set_section',
+				'move_to_list',
+				'add_subtask',
+				'complete_subtask',
+				'remove_section',
+				'create_list',
+				'nest_list',
+				'rename_list',
+				'remove_list'
+			])
+			.describe('Operación a ejecutar — contrato por-op en la description de `ops`, más abajo'),
+		taskId: z.string().uuid().optional().describe('Id de la tarea (o subtarea, según la op) — ver list_tasks/get_task'),
+		subtaskId: z.string().uuid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
+		sectionId: z.string().uuid().optional().describe('Id de la sección — ver el campo `sectionId` en list_tasks/get_task'),
 		listId: z
 			.union([z.string().uuid(), z.null()])
 			.optional()
-			.describe('Id ESTABLE de la lista destino, PREFERENTE sobre `list`; null = desvincular'),
-		list: z.string().max(200).optional().describe('Nombre de la lista destino (se crea si no existe)')
-	}),
-	z.object({
-		op: z.literal('add_subtask'),
-		taskId: z.string().uuid().describe('Id de la tarea PADRE'),
-		subtasks: z.array(z.string()).min(1).max(50).describe('Textos de las subtareas a añadir, en orden')
-	}),
-	z.object({
-		op: z.literal('complete_subtask'),
-		subtaskId: z.string().uuid().describe('Id de la subtarea (ver get_task de su tarea padre)'),
-		done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
-	}),
-	z.object({
-		op: z.literal('remove_section'),
-		sectionId: z.string().uuid().describe('Id de la sección a borrar')
-	}),
-	z.object({
-		op: z.literal('create_list'),
-		name: z.string().min(1).max(200).describe('Nombre de la lista (obligatorio)'),
-		color: z
-			.string()
-			.max(20)
+			.describe('Id ESTABLE de una lista: destino, padre, o PRE-GENERADO por ti (create_list, para encadenar)'),
+		text: z.string().min(1).max(2000).optional().describe('Texto de la tarea nueva'),
+		content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
+		name: z.string().min(1).max(200).optional().describe('Nombre de la lista'),
+		list: z.string().max(200).optional().describe('Nombre de la lista destino (se crea si no existe)'),
+		section: z.string().max(200).nullable().optional().describe('Nombre de la sección/heading, o null para quitarla'),
+		notes: z.string().max(10000).optional().describe('Notas/descripción (reemplaza las anteriores enteras)'),
+		priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente … p4 = ninguna/quitar la prioridad'),
+		date: z
+			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
 			.optional()
-			.describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
+			.describe('Día YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada'),
+		deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
+		time: z
+			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
+			.optional()
+			.describe('Hora "HH:MM" (24h); null la quita'),
+		recurrence: recurrenceSchema.optional().describe('Recurrencia simple (freq + interval)'),
+		subtasks: z.array(z.string()).optional().describe('Textos de las subtareas a añadir/crear, en orden'),
+		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
+		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar'),
+		color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
 		icon: z.string().max(16).optional().describe('Emoji/icono de la lista'),
-		listId: z
-			.string()
-			.uuid()
-			.optional()
-			.describe(
-				'Id (uuid) que TENDRÁ la lista — opcional, para ENCADENAR con otra op del MISMO ' +
-					'`mutate_tasks` (p. ej. un `move_to_list`/`nest_list` posterior con ese mismo `listId`, ' +
-					'sin depender de una llamada previa para conocerlo). Genera tú mismo un uuid v4 si lo ' +
-					'necesitas; si se omite, el servidor asigna uno (que solo conocerás en la respuesta).'
-			)
-	}),
-	z.object({
-		op: z.literal('nest_list'),
-		listId: z.string().uuid().describe('Id de la lista a anidar/desanidar'),
-		parentId: z.union([z.string().uuid(), z.null()]).describe('Lista padre destino, o null para desanidar')
-	}),
-	z.object({
-		op: z.literal('rename_list'),
-		listId: z.string().uuid().describe('Id de la lista a renombrar'),
-		name: z.string().min(1).max(200).describe('Nuevo nombre')
-	}),
-	z.object({
-		op: z.literal('remove_list'),
-		listId: z.string().uuid().describe('Id de la lista a borrar')
+		parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id de la lista padre destino, o null para desanidar')
 	})
-]);
+	.strict();
+
+/**
+ * Mensaje legible para un elemento de `ops` que no encaja en la forma
+ * ESTRICTA de su `op` (`mutateTasksStrictOpSchema`): identifica la op y,
+ * campo a campo, qué falta o qué sobra — para que el modelo pueda corregir
+ * ESE elemento concreto sin adivinar cuál de los 21 campos venía mal.
+ */
+function formatOpShapeError(op: string, error: z.ZodError): string {
+	const parts = error.issues.map((issue) => {
+		if (issue.code === 'unrecognized_keys') {
+			return `campo(s) que no aplican a "${op}": ${issue.keys.join(', ')}`;
+		}
+		const field = issue.path.length > 0 ? issue.path.join('.') : '(op)';
+		return `${field}: ${issue.message}`;
+	});
+	return `${op}: ${parts.join('; ')}`;
+}
 
 server.registerTool(
 	'mutate_tasks',
 	{
-		title: 'Ejecutar varias operaciones en Lumbre de una sola vez',
 		description:
-			'Vía PREFERENTE cuando hay que hacer VARIAS operaciones en Lumbre (crear y/o mutar) de golpe: ' +
-			'resuelve TODAS las existencias de tarea del lote en UNA sola comprobación y las encola en UNA ' +
-			'sola petición (en vez de una tool call por operación, cada una con su propio round-trip) — ' +
-			'úsala en cuanto vayas a hacer más de una operación seguida. Cada elemento de `ops` es EXACTAMENTE ' +
-			'lo mismo que la tool individual equivalente (`op:"add_task"` = add_task, `op:"complete"` = ' +
-			'complete_task, `op:"cancel"` = cancel_task, `op:"update"` = update_task, `op:"reschedule"` = ' +
-			'reschedule_task, `op:"delete"` = delete_task, `op:"set_section"` = set_section, ' +
-			'`op:"move_to_list"` = move_to_list, `op:"add_subtask"` = add_subtask, `op:"complete_subtask"` = ' +
-			'complete_subtask, `op:"remove_section"` = remove_section, `op:"create_list"` = create_list, ' +
-			'`op:"nest_list"` = nest_list, `op:"rename_list"` = rename_list, `op:"remove_list"` = remove_list). ' +
-			'Las tools individuales SIGUEN existiendo para una operación suelta. Éxito PARCIAL: una op inválida ' +
-			'(taskId inexistente, subtarea donde no aplica, payload inválido) no impide las demás — el ' +
-			'resultado detalla qué operación (por su posición en `ops`, 0-indexada) falló y por qué, Y el ' +
-			'`id` de cada una que sí se encoló (el de una `create_list` es su `listId`, el de un `add_task` ' +
-			'su `taskId` nuevo). ENCADENAR dentro del MISMO lote: la única op que crea algo cuyo id necesites ' +
-			'referenciar EN OTRA op del mismo `mutate_tasks` es `create_list` — dale tú mismo un `listId` ' +
-			'(uuid v4) al crearla y úsalo en el `move_to_list`/`nest_list` que la targetee, en vez de esperar ' +
-			'a la respuesta (el id de un `add_task` lo asigna el servidor y solo se conoce DESPUÉS, no se ' +
-			`puede referenciar dentro de la misma llamada). ${ASYNC_NOTE}`,
+			`Vía PREFERENTE para VARIAS operaciones de golpe (crear y/o mutar): resuelve existencias y ` +
+			`encola en UNA sola llamada, en vez de una tool call por operación. Cada elemento de \`ops\` ` +
+			`equivale a su tool individual (mapeo op↔tool en el README); contrato por-op en la description ` +
+			`de \`ops\`. Las tools sueltas siguen existiendo. Éxito PARCIAL: una op inválida no bloquea las ` +
+			`demás — el resultado detalla qué falló por posición y el \`id\` de cada una encolada ` +
+			`(create_list→listId, add_task→taskId). Encadenar un create_list con otra op del MISMO lote: ` +
+			`dale tú el \`listId\` (uuid v4) al crearla. ${ASYNC_NOTE}`,
 		inputSchema: {
 			ops: z
 				.array(mutateTasksOpSchema)
 				.min(1)
 				.max(200)
-				.describe('Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada)')
+				.describe(
+					'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
+						'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
+						'priority, date, deadline, time, recurrence, subtasks, notes] · complete: taskId* ' +
+						'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, ' +
+						'priority, time] · reschedule: taskId*, date* · delete: taskId* · set_section: ' +
+						'taskId*, section* · move_to_list: taskId*, uno de [listId, list] · add_subtask: ' +
+						'taskId*, subtasks* · complete_subtask: subtaskId* [done] · remove_section: sectionId* ' +
+						'· create_list: name* [color, icon, listId] · nest_list: listId*, parentId* · ' +
+						'rename_list: listId*, name* · remove_list: listId*'
+				)
 		}
 	},
 	async (input) => {
 		try {
-			const ops = input.ops as MutateTasksOp[];
-			const idsToCheck = collectExistenceCheckIds(ops);
+			// Re-validación ESTRICTA por-op ANTES de tocar red: `mutateTasksOpSchema`
+			// (el schema EXPUESTO) es deliberadamente laxo, así que un elemento cuya
+			// forma no encaje con SU `op` (campo obligatorio ausente, o un campo
+			// válido en general pero ajeno a esa op) todavía no se ha rechazado en
+			// este punto — ver el JSDoc de `mutateTasksStrictOpSchema`. Se reporta
+			// como un fallo MÁS del informe de éxito parcial (mismo array que
+			// `taskId` inexistente), no tumba el `mutate_tasks` entero.
+			const rawOps = input.ops as Record<string, unknown>[];
+			const validated: MutateTasksOp[] = [];
+			// Índice, dentro de `validated` (compactado, sin los descartados por
+			// forma), de la posición ORIGINAL en `input.ops` — mismo patrón de
+			// indirección que ya usa `buildBatchFromOps` para `batchOps` vs `ops`,
+			// aplicado un nivel más arriba.
+			const validatedOriginalIndexes: number[] = [];
+			const shapeFailures: { index: number; error: string }[] = [];
+			rawOps.forEach((raw, index) => {
+				const result = mutateTasksStrictOpSchema.safeParse(raw);
+				if (!result.success) {
+					shapeFailures.push({ index, error: formatOpShapeError(String(raw.op), result.error) });
+					return;
+				}
+				validated.push(result.data as MutateTasksOp);
+				validatedOriginalIndexes.push(index);
+			});
+
+			const idsToCheck = collectExistenceCheckIds(validated);
 			const existing: Map<string, LumbreTask> =
 				idsToCheck.length > 0 ? await findTasksByIds(config, idsToCheck) : new Map();
-			const { batchOps, originalIndexes, skipped } = buildBatchFromOps(ops, existing);
+			const built = buildBatchFromOps(validated, existing);
+			const batchOps = built.batchOps;
+			const originalIndexes = built.originalIndexes.map((i) => validatedOriginalIndexes[i]);
 
 			const results: BatchResultItem[] = batchOps.length > 0 ? await runBatch(config, batchOps) : [];
 
-			// Ambas fuentes de fallo (descartadas ANTES de mandar el batch, y las
-			// que el servidor rechazó al validar/encolar) se combinan en un único
-			// informe, ordenado por posición ORIGINAL en `ops` — el modelo ve
-			// exactamente qué operación falló y por qué, sin tener que distinguir
-			// entre ambas fases. Las EXITOSAS con `id` (code-review 🟠 #3a: antes
-			// se perdían — el modelo no podía enterarse del `listId` de un
+			// Tres fuentes de fallo ahora (forma inválida, descartadas ANTES de
+			// mandar el batch por `buildBatchFromOps`, y las que el servidor
+			// rechazó al validar/encolar) se combinan en un único informe,
+			// ordenado por posición ORIGINAL en `ops` — el modelo ve exactamente
+			// qué operación falló y por qué, sin tener que distinguir entre las
+			// tres fases. Las EXITOSAS con `id` (code-review 🟠 #3a: antes se
+			// perdían — el modelo no podía enterarse del `listId` de un
 			// `create_list` sin una `list_tasks` de más) también se recogen, para
 			// poder encadenarlas en un turno posterior (o confirmar el id que ya
 			// se auto-generó, si la op no traía uno propio — ver `create_list`).
-			const failures: { index: number; error: string }[] = [...skipped];
+			const failures: { index: number; error: string }[] = [
+				...shapeFailures,
+				...built.skipped.map((s) => ({ index: validatedOriginalIndexes[s.index], error: s.error }))
+			];
 			const succeededWithId: { index: number; id: string }[] = [];
 			results.forEach((r, i) => {
 				const index = originalIndexes[i];
@@ -1103,9 +1183,13 @@ server.registerTool(
 			failures.sort((a, b) => a.index - b.index);
 			succeededWithId.sort((a, b) => a.index - b.index);
 
-			const failureLines = failures.map((f) => `  [${f.index}] ${ops[f.index].op}: ${f.error}`);
-			const idLines = succeededWithId.map((s) => `  [${s.index}] ${ops[s.index].op}: id ${s.id}`);
-			let summary = `Lumbre: ${okCount}/${ops.length} operación(es) encoladas.`;
+			// `op` se lee del elemento CRUDO (`rawOps`), no de `validated` (que no
+			// tiene entrada para los descartados por forma) — el schema EXPUESTO
+			// ya garantiza que es uno de los 15 nombres válidos.
+			const opNameAt = (index: number) => String(rawOps[index].op);
+			const failureLines = failures.map((f) => `  [${f.index}] ${opNameAt(f.index)}: ${f.error}`);
+			const idLines = succeededWithId.map((s) => `  [${s.index}] ${opNameAt(s.index)}: id ${s.id}`);
+			let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) encoladas.`;
 			if (idLines.length > 0) summary += `\nids asignados:\n${idLines.join('\n')}`;
 			if (failureLines.length > 0) {
 				summary += `\n${failureLines.length} fallaron:\n${failureLines.join('\n')}`;
@@ -1118,5 +1202,65 @@ server.registerTool(
 	}
 );
 
-const transport = new StdioServerTransport();
+/**
+ * Borra `$schema` de `value`, recursivamente (arrays y objetos anidados) — la
+ * conversión zod→JSON Schema del SDK mete
+ * `"$schema":"http://json-schema.org/draft-07/schema#"` en el `inputSchema`
+ * de CADA tool (una vez por tool, no una vez global): 1.071 chars en las 21
+ * tools de hoy, que ni la API de Anthropic ni ningún cliente MCP leen (el
+ * `$schema` de JSON Schema es metadata de qué DIALECTO usar para validar el
+ * documento; aquí lo fija el propio SDK al generar, no hace falta que viaje).
+ * Muta `value` in-place (no clona) — el llamante ya tiene una copia efímera
+ * del mensaje JSON-RPC que va a mandar, no hay nada más que la referencie.
+ */
+export function stripSchemaRecursively(value: unknown): void {
+	if (Array.isArray(value)) {
+		for (const item of value) stripSchemaRecursively(item);
+		return;
+	}
+	if (value && typeof value === 'object') {
+		delete (value as Record<string, unknown>).$schema;
+		for (const v of Object.values(value as Record<string, unknown>)) stripSchemaRecursively(v);
+	}
+}
+
+/**
+ * Envuelve `transport.send` para interceptar la respuesta de `tools/list`
+ * (un mensaje JSON-RPC `result` con un array `tools`) y borrarle `$schema` a
+ * cada `inputSchema` ANTES de que salga por el wire — ver `stripSchemaRecursively`.
+ *
+ * POR QUÉ AQUÍ Y NO sustituyendo el handler de `tools/list`: `McpServer`
+ * registra ESE handler internamente (`setToolRequestHandlers`, ver
+ * `node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js`) con la
+ * lógica real de listar/filtrar/convertir cada tool registrada — pisarlo
+ * significaría reimplementar esa lógica a mano y que se desincronice en
+ * cuanto el SDK cambie de versión. Envolver `send` es un parche NO invasivo
+ * (no toca la lógica de negocio del SDK, solo el mensaje ya serializado justo
+ * antes de mandarlo) y a prueba de que el SDK cambie CÓMO genera `$schema`
+ * (mientras siga siendo un campo llamado igual en `inputSchema`, esto lo pilla).
+ *
+ * Recibe y devuelve un `Transport` genérico (no específicamente
+ * `StdioServerTransport`) para poder aplicar la MISMA lógica sobre un
+ * transporte in-memory en tests (`index.test.ts`) sin duplicar código; en
+ * producción se aplica sobre el `StdioServerTransport` real, más abajo.
+ *
+ * ALERTA para quien lea esto dentro de un año: NO es evidente por qué existe
+ * (parece un parche raro sobre un objeto ajeno) — el motivo es puramente de
+ * coste en tokens de la superficie de tools (ver la tarea que lo introdujo,
+ * 2026-07-25); si el SDK algún día deja de emitir `$schema`, esto se puede
+ * borrar sin más.
+ */
+export function stripToolsListSchema(transport: Transport): Transport {
+	const originalSend = transport.send.bind(transport);
+	transport.send = async (message: JSONRPCMessage, options?: TransportSendOptions) => {
+		const result = (message as { result?: unknown }).result;
+		if (result && typeof result === 'object' && Array.isArray((result as { tools?: unknown }).tools)) {
+			stripSchemaRecursively((result as { tools: unknown }).tools);
+		}
+		return originalSend(message, options);
+	};
+	return transport;
+}
+
+const transport = stripToolsListSchema(new StdioServerTransport());
 await server.connect(transport);

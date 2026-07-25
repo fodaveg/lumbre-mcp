@@ -1,0 +1,7 @@
+node_modules/
+dist/
+dist.old/
+dist.new/
+.distcheck-tmp/
+.DS_Store
+*.log
