@@ -32,11 +32,36 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   (`· lista "Nombre" — listId: <uuid>`), una línea por lista distinta, para
   que puedas usar ese `listId` en `add_task`/`move_to_list` sin ambigüedad.
   Cada tarea muestra su `createdAt` (recortado a minuto) para desempatar
-  duplicados. Las notas salen truncadas a ~240 caracteres por defecto (para no
-  inflar el contexto en listados largos); `fullNotes: true` las deja íntegras
-  y sin colapsar saltos de línea para TODO el lote — útil si vas a reeditar
-  una nota con `update_task` (que la REEMPLAZA entera) y el lote ya está
-  acotado. Para una sola tarea concreta, mejor `get_task`.
+  duplicados. `notes` controla las notas de cada tarea, default `'auto'`
+  (2026-07-25, sustituye al viejo truncado fijo a 240 chars): GARANTÍA — una
+  nota sale ÍNTEGRA (si `content` lleva `@done`/`#done`, si `notesUpdatedAt`
+  —la marca de última edición de la nota que expone la API, derivada del HLC
+  de su celda CRDT— es POSTERIOR a la última vez que este MCP la mostró
+  —huella local best-effort en
+  `${XDG_STATE_HOME:-~/.local/state}/lumbre-mcp/notes-seen.json`, comparación
+  EXACTA, sin ventana—, o si se tocó dentro de `notesRecentHours`, default 24h,
+  cuando aún no hay huella —bootstrap, solo la 1ª vez que el MCP ve esa
+  tarea—) o como marcador `✎N ↻DDmmm` con su tamaño en chars Y la fecha de la
+  última edición (p. ej. `✎573 ↻24jul`) — NUNCA un texto recortado a medias
+  (motivo: el preview de 240 truncaba justo la cola, que es donde David deja
+  su feedback, y el resultado se leía como una nota completa; la fecha del
+  marcador es lo que hace honesto el hueco que queda del bootstrap — permite
+  juzgar si la nota se tocó DESPUÉS de cerrar la tarea incluso sin el texto).
+  La cabecera del listado declara el criterio aplicado y los recuentos
+  (`N íntegras (@done · cambiadas · tocadas <24h) · M con marcador`) y remite
+  a `get_task` para las que quedaron sin leer. `'none'` omite las notas,
+  `'preview'` es el recorte legado a ~240 chars colapsado a una línea, `'full'`
+  las deja íntegras y sin colapsar saltos de línea para TODO el lote
+  (`fullNotes: true` sigue siendo su alias) — útil si vas a reeditar una nota
+  con `update_task` (que la REEMPLAZA entera) y el lote ya está acotado. Para
+  una sola tarea concreta, mejor `get_task` (también íntegra siempre, y
+  también registra la huella). `notesSince` (`"YYYY-MM-DD"` o ISO completo)
+  es una consulta de precisión APARTE, SIN estado y con exclusividad de
+  criterio: ignora `notes`/`fullNotes`, `@done`/`#done` y la huella local por
+  completo — íntegra SOLO si `notesUpdatedAt` es igual o posterior a esa
+  fecha, marcador el resto (incluida una tarea `@done` con nota vieja); la
+  cabecera lo declara (`tocadas desde 2026-07-20`). Úsalo para "qué ha
+  cambiado desde X", no para lectura normal (para eso, el default `'auto'`).
 - `list_lists()` — enumera TODAS tus listas de "Algún día", con su recuento de
   tareas (vía `GET /api/tasks?includeLists=1`) — INCLUIDAS las que todavía no
   tienen ninguna tarea. A diferencia de `list_tasks({ list })`, que responde

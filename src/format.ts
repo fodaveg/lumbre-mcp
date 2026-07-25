@@ -1,11 +1,14 @@
 import type { LumbreListSummary, LumbreTask, TaskScope } from './lumbre-client.js';
+import { DEFAULT_NOTES_RECENT_HOURS, type AutoNotesResult, type NotesMode } from './notes.js';
 
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority: LumbreTask['priority']): string {
 	return priority ? `p${priority}` : '';
 }
 
-/** Longitud máxima de las notas mostradas por tarea antes de truncar con "…". */
+/** Longitud máxima de las notas mostradas por tarea antes de truncar con "…"
+ *  — SOLO en `notesMode: 'preview'` (legado); `'auto'` (default) nunca trunca
+ *  a medias, ver `buildNotesLine`/`decideAutoNoteRender` en `notes.ts`. */
 const NOTES_PREVIEW_LENGTH = 240;
 
 /** Notas colapsadas a una línea (saltos de línea → espacio) y truncadas, para
@@ -17,18 +20,95 @@ function notesPreview(notes: string): string {
 }
 
 /** Notas TAL CUAL (sin truncar NI colapsar saltos de línea) — para
- *  `fullNotes: true`/`get_task`: el caso de uso es reeditarlas con
- *  `update_task` (que REEMPLAZA la nota entera), así que hasta los saltos de
- *  línea importan; colapsarlos como hace `notesPreview` los destruiría. */
+ *  `notesMode: 'full'`/`'auto'` (cuando toca íntegra)/`get_task`: el caso de
+ *  uso es reeditarlas con `update_task` (que REEMPLAZA la nota entera), así
+ *  que hasta los saltos de línea importan; colapsarlos como hace
+ *  `notesPreview` los destruiría. */
 function notesFull(notes: string): string {
 	return notes.trim();
 }
 
-/** Opciones de formateo de una tarea; hoy solo si mostrar las notas
- *  íntegras (ver `notesFull`) o el resumen truncado (`notesPreview`,
- *  default). */
+/** Meses en español, abreviados a 3 letras minúsculas — sufijo de fecha del
+ *  marcador (`✎N ↻DDmmm`, ver `formatNoteMarker`). */
+const SPANISH_MONTHS = [
+	'ene',
+	'feb',
+	'mar',
+	'abr',
+	'may',
+	'jun',
+	'jul',
+	'ago',
+	'sep',
+	'oct',
+	'nov',
+	'dic'
+];
+
+/** `DDmmm` (p. ej. `24jul`) a partir de un ISO — `''` si no es una fecha
+ *  válida (el llamante, `formatNoteMarker`, cae al marcador sin fecha). */
+function formatMarkerDate(iso: string): string {
+	const d = new Date(iso);
+	if (Number.isNaN(d.getTime())) return '';
+	const day = String(d.getUTCDate()).padStart(2, '0');
+	return `${day}${SPANISH_MONTHS[d.getUTCMonth()]}`;
+}
+
+/** Marcador `✎N` (tamaño) + `↻DDmmm` (fecha de la última edición de la
+ *  nota, si se conoce) — compacto a propósito: es lo que hace honesto el
+ *  hueco que queda del bootstrap de `notes: 'auto'` (ver `notes.ts`), porque
+ *  incluso sin el texto permite juzgar si la nota se tocó DESPUÉS de cerrar
+ *  la tarea. `updatedAt: null` (no debería pasar ya, ver el JSDoc de
+ *  `LumbreTask.notesUpdatedAt`) cae al marcador legado, solo con el tamaño. */
+function formatNoteMarker(length: number, updatedAt: string | null): string {
+	const dateSuffix = updatedAt ? formatMarkerDate(updatedAt) : '';
+	return dateSuffix ? `✎${length} ↻${dateSuffix}` : `✎${length}`;
+}
+
+/** Opciones de formateo de un listado de tareas. `notesMode` (default
+ *  `'preview'`, aunque `index.ts` SIEMPRE pasa uno explícito — `list_tasks`
+ *  por defecto usa `'auto'`): qué mostrar en la línea de notas de cada tarea
+ *  — ver `buildNotesLine`. `autoRender` es OBLIGATORIO cuando `notesMode ===
+ *  'auto'` (la decisión por tarea + los recuentos para la cabecera, ya
+ *  calculados por `computeAutoNotesRender`/`computeNotesSinceRender` en
+ *  `notes.ts` — este módulo no toca el fichero de huellas, solo pinta lo que
+ *  ya se decidió). `notesWindowHours`/`notesSinceLabel` son SOLO para la
+ *  cabecera (`autoNotesHeaderLine`): qué criterio se aplicó — ver
+ *  `notesSince` en `index.ts`. */
 interface FormatTaskOptions {
-	fullNotes?: boolean;
+	notesMode?: NotesMode;
+	autoRender?: AutoNotesResult;
+	/** Ventana de bootstrap (horas) usada por `computeAutoNotesRender` en
+	 *  esta llamada (`notesRecentHours` de `list_tasks`) — solo informativa,
+	 *  para el texto de la cabecera. */
+	notesWindowHours?: number;
+	/** `notesSince` tal como lo pasó el usuario, si esta llamada usó ese
+	 *  criterio de precisión en vez del normal de `auto` — ver
+	 *  `computeNotesSinceRender`. */
+	notesSinceLabel?: string;
+}
+
+/**
+ * Texto de la línea de notas de `t` según `opts.notesMode`, o `null` si no
+ * hay que mostrar ninguna (sin nota, o `notesMode: 'none'`). GARANTÍA de
+ * `'auto'`: el resultado es SIEMPRE el texto verbatim completo (`notesFull`)
+ * o un marcador `✎N` con el tamaño real — nunca un recorte a medias, que es
+ * justo lo que se puede confundir con "ya la leí completa" (motivo de esta
+ * feature, ver `notes.ts`). Si `opts.autoRender` no trae decisión para `t.id`
+ * (no debería pasar: `computeAutoNotesRender` cubre TODA tarea con nota del
+ * mismo lote — solo ocurriría si se llama con opciones inconsistentes), cae a
+ * marcador con la longitud real en vez de arriesgar un truncado.
+ */
+function buildNotesLine(t: LumbreTask, opts: FormatTaskOptions): string | null {
+	if (!t.notes || t.notes.trim() === '') return null;
+	const mode = opts.notesMode ?? 'preview';
+	if (mode === 'none') return null;
+	if (mode === 'full') return notesFull(t.notes);
+	if (mode === 'preview') return notesPreview(t.notes);
+	// 'auto' (o `notesSince`, que reusa este mismo camino — ver `formatTaskList`)
+	const decision = opts.autoRender?.perTask.get(t.id);
+	if (!decision) return formatNoteMarker(t.notes.trim().length, t.notesUpdatedAt ?? null);
+	return decision.kind === 'full' ? notesFull(t.notes) : formatNoteMarker(decision.length, decision.updatedAt);
 }
 
 /** Una tarea → una línea compacta y legible (NO JSON crudo, para no saturar al modelo). */
@@ -49,15 +129,10 @@ function formatTask(t: LumbreTask, opts: FormatTaskOptions = {}): string {
 	// Sin esto sus descripciones ("resuélvelo antes con list_tasks") eran
 	// imposibles de cumplir y las mutaciones quedaban de facto inservibles.
 	let line = `- ${box} ${t.content}${suffix}  · id: ${t.id}`;
-	// Línea aparte con las notas (si las hay): truncadas y sin saltos de línea
-	// por defecto (es solo el feedback que David deja en el detalle de la
-	// tarea, no hace falta reproducirlo exacto); íntegras y verbatim con
-	// `fullNotes` (o desde `get_task`), para poder reeditarlas sin destruir lo
-	// que no cupiera en el resumen — ver `notesFull`.
-	if (t.notes && t.notes.trim() !== '') {
-		const notesText = opts.fullNotes ? notesFull(t.notes) : notesPreview(t.notes);
-		line += `\n  notas: ${notesText}`;
-	}
+	// Línea aparte con las notas (si las hay y el modo no es 'none') — ver
+	// `buildNotesLine` para el criterio completo por `notesMode`.
+	const notesLine = buildNotesLine(t, opts);
+	if (notesLine !== null) line += `\n  notas: ${notesLine}`;
 	if (!t.attachments || t.attachments.length === 0) return line;
 	// Una línea aparte con los adjuntos (nombre + id): el modelo necesita el id
 	// para pedir los bytes con la tool `read_attachment`.
@@ -134,6 +209,41 @@ function listLegend(tasks: LumbreTask[]): string[] {
 }
 
 /**
+ * Cabecera de notas para `notesMode: 'auto'` (`list_tasks`, con o sin
+ * `notesSince`): declara qué CRITERIO se aplicó y lleva la instrucción de
+ * "sin leer" DENTRO de la salida — tiene que viajar ahí porque la sesión de
+ * mañana no tendrá el contexto de esta tarea. `null` si el lote no tiene
+ * NINGUNA nota (no aporta nada, solo ruido).
+ *
+ * Dos variantes de criterio, mutuamente excluyentes (mismo criterio que
+ * `computeAutoNotesRender` vs `computeNotesSinceRender`):
+ * - Normal (`opts.sinceLabel` ausente): `íntegras` cubre @done/#done, cambió
+ *   desde la última vez que se vio, o se tocó dentro de la ventana de
+ *   bootstrap (`opts.windowHours`, default `DEFAULT_NOTES_RECENT_HOURS`).
+ * - `notesSince` (`opts.sinceLabel` presente): ÚNICAMENTE la marca desde esa
+ *   fecha decide (ver `decideNotesSinceRender`) — la cabecera lo declara
+ *   explícito para que no se confunda con el criterio normal.
+ *
+ * `con marcador` son las que el modelo NO ha leído todavía — la instrucción
+ * se lo dice explícitamente para que no las dé por revisadas sin más.
+ */
+function autoNotesHeaderLine(
+	autoRender: AutoNotesResult,
+	opts: { windowHours?: number; sinceLabel?: string }
+): string | null {
+	const { fullCount, markerCount } = autoRender;
+	if (fullCount + markerCount === 0) return null;
+	const fullWord = fullCount === 1 ? 'íntegra' : 'íntegras';
+	const criterion = opts.sinceLabel
+		? `tocadas desde ${opts.sinceLabel}`
+		: `@done · cambiadas · tocadas <${opts.windowHours ?? DEFAULT_NOTES_RECENT_HOURS}h`;
+	return (
+		`notas: ${fullCount} ${fullWord} (${criterion}) · ` +
+		`${markerCount} con marcador → SIN LEER, usa get_task antes de darlas por revisadas`
+	);
+}
+
+/**
  * Lista completa → texto compacto con cabecera de recuento + alcance,
  * agrupado por sección (Fase B, listas=proyectos): una cabecera `## <sección>`
  * por grupo, en el orden en que aparecen en la respuesta del servidor (ya
@@ -151,12 +261,11 @@ function listLegend(tasks: LumbreTask[]): string[] {
  * sin repetir el nombre de la lista, redundante en ese caso); si hay más de
  * una lista distinta, se antepone su nombre (`## <lista> · <sección>`).
  *
- * `opts.fullNotes` (default `false`) pasa a cada `formatTask`: con `true` las
- * notas de TODAS las tareas del lote salen íntegras y verbatim en vez de
- * truncadas a `NOTES_PREVIEW_LENGTH` — pensado para lotes ya acotados (p. ej.
- * `list` + `section`) donde perder detalle de la nota molesta más que el
- * texto extra en el contexto. Para leer una sola tarea completa sin acotar el
- * listado entero, mejor `get_task` (ver `index.ts`/`formatTaskFull`).
+ * `opts.notesMode` (default `'preview'`, aunque `index.ts` siempre pasa uno
+ * explícito) pasa a cada `formatTask` — ver `buildNotesLine` para el
+ * criterio completo por modo. En `'auto'`, además, la cabecera declara los
+ * recuentos (`autoNotesHeaderLine`) — la instrucción tiene que viajar EN la
+ * salida porque la sesión que la lea mañana no tendrá este contexto.
  */
 export function formatTaskList(
 	tasks: LumbreTask[],
@@ -165,11 +274,19 @@ export function formatTaskList(
 ): string {
 	if (tasks.length === 0) return `Sin tareas (scope=${scope}).`;
 	const header = `${tasks.length} tarea${tasks.length === 1 ? '' : 's'} (scope=${scope}):`;
+	const notesHeaderLine =
+		(opts.notesMode ?? 'preview') === 'auto' && opts.autoRender
+			? autoNotesHeaderLine(opts.autoRender, {
+					windowHours: opts.notesWindowHours,
+					sinceLabel: opts.notesSinceLabel
+				})
+			: null;
 	// Leyenda de listas primero (si alguna tarea tiene lista): da el `listId`
 	// de cada una sin tocar el formato por-tarea, que se deja intacto para no
 	// añadir ruido repetido línea a línea.
 	const legend = listLegend(tasks);
-	const prefix = legend.length > 0 ? [...legend, ''] : [];
+	const prefixLines = [...(notesHeaderLine ? [notesHeaderLine] : []), ...legend];
+	const prefix = prefixLines.length > 0 ? [...prefixLines, ''] : [];
 
 	const hasAnySection = tasks.some((t) => t.section);
 	if (!hasAnySection) {

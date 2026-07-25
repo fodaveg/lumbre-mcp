@@ -27,6 +27,7 @@ import type { z } from 'zod';
 let tools: Tool[];
 let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
+let effectiveNotesMode: (input: { notes?: string; fullNotes?: boolean }) => string;
 
 beforeAll(async () => {
 	process.env.LUMBRE_TOKEN = 'test-token-para-index-test';
@@ -34,6 +35,7 @@ beforeAll(async () => {
 	const indexModule = await import('./index.js');
 	mutateTasksOpSchema = indexModule.mutateTasksOpSchema;
 	mutateTasksStrictOpSchema = indexModule.mutateTasksStrictOpSchema;
+	effectiveNotesMode = indexModule.effectiveNotesMode;
 
 	await indexModule.server.close();
 
@@ -118,10 +120,18 @@ describe('tools/list — superficie completa', () => {
 		// (transporte in-memory) y compilando a un dir temporal fuera de
 		// `dist/` y hablando MCP de verdad por stdio con él (mismo
 		// procedimiento que (a)+(c)+(d)). Antes de (e): 29.307. Antes de
-		// (a)+(c)+(d): 36.495. Techo = medido + ~5% de holgura, no el valor
-		// exacto, para no tener que tocar este test por variaciones triviales
-		// de formato JSON.
-		const CHAR_CEILING = 21100;
+		// (a)+(c)+(d): 36.495. Re-medido el mismo día tras añadir `list_tasks
+		// ({ notes: 'auto'|'none'|'preview'|'full' })` (garantía de notas
+		// íntegras-o-marcador — ver `notes.ts`): 20.611 (el enum nuevo + su
+		// `.describe()` + el aviso de `fullNotes` deprecated suman ~560 chars).
+		// Re-medido el mismo día tras exponer `notesUpdatedAt`/el cierre del
+		// hueco de la capa 2 (marca en vez de hash) + `notesRecentHours` +
+		// `notesSince` (consulta de precisión) en `list_tasks`: 21.596 (~985
+		// chars más que los 20.611 de arriba, sobre todo la `.describe()` de
+		// `notesSince` y el criterio ampliado de `notes`).
+		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
+		// que tocar este test por variaciones triviales de formato JSON.
+		const CHAR_CEILING = 22700;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -345,5 +355,30 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 			donee: true
 		});
 		expect(result.success).toBe(false);
+	});
+});
+
+describe('effectiveNotesMode — resuelve el modo de notas de list_tasks (con el alias legado)', () => {
+	it('sin `notes` ni `fullNotes` → "auto" (nuevo default)', () => {
+		expect(effectiveNotesMode({})).toBe('auto');
+	});
+
+	it('`notes` explícito manda, sea cual sea', () => {
+		expect(effectiveNotesMode({ notes: 'none' })).toBe('none');
+		expect(effectiveNotesMode({ notes: 'preview' })).toBe('preview');
+		expect(effectiveNotesMode({ notes: 'full' })).toBe('full');
+		expect(effectiveNotesMode({ notes: 'auto' })).toBe('auto');
+	});
+
+	it('`fullNotes: true` sigue equivaliendo a "full" (back-compat, sin `notes`)', () => {
+		expect(effectiveNotesMode({ fullNotes: true })).toBe('full');
+	});
+
+	it('`fullNotes: false` no cambia el default ("auto")', () => {
+		expect(effectiveNotesMode({ fullNotes: false })).toBe('auto');
+	});
+
+	it('`notes` explícito GANA a `fullNotes` si ambos vienen', () => {
+		expect(effectiveNotesMode({ notes: 'none', fullNotes: true })).toBe('none');
 	});
 });

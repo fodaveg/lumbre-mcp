@@ -86,6 +86,15 @@ export interface LumbreTask {
 	content: string;
 	/** Notas/descripción larga de la tarea, o null si no tiene. */
 	notes: string | null;
+	/** ISO 8601 de la última edición de la NOTA (derivada del HLC de su celda
+	 *  CRDT), o `null` si la nota nunca se tocó — verificado en prod 2026-07-25:
+	 *  125/125 notas con marca poblada, 0 tareas sin nota con marca. Es lo que
+	 *  cierra el hueco de la capa 2 de `notes: 'auto'` (`src/notes.ts`): antes
+	 *  se aproximaba con un hash local sin fecha, ahora la marca decide exacta,
+	 *  sin ventana, en cuanto hay huella previa que comparar. Puede venir
+	 *  ausente/`null` en tareas viejas o si la API cambia — trátalo siempre
+	 *  como "desconocido", nunca falles por su ausencia (ver `decideAutoNoteRender`). */
+	notesUpdatedAt?: string | null;
 	done: boolean;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;

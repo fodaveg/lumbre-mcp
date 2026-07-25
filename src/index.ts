@@ -27,6 +27,15 @@ import {
 	type MutateTasksOp
 } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
+import {
+	computeAutoNotesRender,
+	computeNotesSinceRender,
+	DEFAULT_NOTES_RECENT_HOURS,
+	hasNotes,
+	parseNotesSince,
+	recordNotesSeen,
+	type NotesMode
+} from './notes.js';
 
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
@@ -56,12 +65,23 @@ import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js
  * antes de encolar (ver `requireTaskExists` más abajo) — bug real hasta
  * 2026-07-17: un id mal transcrito se encolaba igual y se perdía en silencio.
  *
- * `list_tasks` trunca las notas de cada tarea a ~240 caracteres por defecto
- * (para no inflar el contexto en listados largos); `fullNotes: true` las deja
- * íntegras para TODO el lote, y `get_task(taskId)` devuelve una única tarea
- * completa (notas verbatim + `createdAt` + lista/sección) — pensado para
- * reeditar una nota con `update_task` (que la REEMPLAZA entera) sin destruir
- * lo que la versión truncada no traía.
+ * `list_tasks({ notes })` decide qué notas mostrar (default `'auto'`, ver
+ * `src/notes.ts`): GARANTÍA — en `auto` una nota sale ÍNTEGRA (si lleva
+ * `@done`/`#done`, si `notesUpdatedAt` es POSTERIOR a la última vez que este
+ * MCP la mostró — huella local en disco por marca, ya no por hash, desde
+ * 2026-07-25 — o si se tocó dentro de `notesRecentHours` cuando aún no hay
+ * huella) o como marcador `✎N ↻fecha` con su tamaño y la fecha de la última
+ * edición, NUNCA truncada a medias (un truncado se confunde con "ya la leí
+ * completa", que es justo el bug que motivó esta feature — David escribe su
+ * feedback al final de la nota, y el preview de 240 chars se lo comía el 90%
+ * de las veces). `notesSince` es una consulta de precisión aparte, SIN
+ * estado: solo la marca decide, ignorando @done/huella — "qué cambió desde
+ * X". `'none'` omite las notas, `'preview'` es el recorte legado a ~240
+ * chars (ya no es el default), `'full'` las deja íntegras para TODO el lote
+ * (`fullNotes: true` sigue siendo su alias). `get_task(taskId)` devuelve una
+ * única tarea completa (notas verbatim + `createdAt` + lista/sección) —
+ * pensado para reeditar una nota con `update_task` (que la REEMPLAZA entera)
+ * sin destruir lo que un marcador/preview no traía.
  */
 
 function loadConfig(): LumbreConfig {
@@ -177,6 +197,17 @@ server.registerTool(
 	}
 );
 
+/**
+ * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
+ * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
+ * `.describe()` de ambos campos más arriba), si no `'auto'` (default nuevo).
+ * Función PURA — sin red — para poder testear el alias sin mockear `fetch`
+ * (mismo patrón que `mutateTasksOpSchema`/`buildBatchFromOps`).
+ */
+export function effectiveNotesMode(input: { notes?: NotesMode; fullNotes?: boolean }): NotesMode {
+	return input.notes ?? (input.fullNotes ? 'full' : 'auto');
+}
+
 server.registerTool(
 	'list_tasks',
 	{
@@ -184,8 +215,12 @@ server.registerTool(
 			'Lee tareas de Lumbre. `scope`: today (default), week, inbox/someday, overdue, all ' +
 			'(auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
 			'vacío igual que una lista vacía existente — usa list_lists para distinguir. `section` ' +
-			'agrupa por sección dentro de `list`. Las notas salen truncadas a ~240 chars ' +
-			'(`fullNotes`/get_task para íntegras: update_task REEMPLAZA la nota entera).',
+			'agrupa por sección dentro de `list`. `notes` controla las notas de cada tarea (default ' +
+			'"auto": íntegra si @done/#done, si cambió desde la última vez que la viste, o si se tocó ' +
+			'hace poco (`notesRecentHours`), si no un marcador ✎N con su tamaño y fecha — NUNCA un ' +
+			'texto recortado a medias; la cabecera del listado detalla el criterio y te avisa de ' +
+			'cuáles no has leído). `notesSince` es una consulta de precisión aparte: solo lo tocado ' +
+			'desde esa fecha.',
 
 		inputSchema: {
 			scope: z
@@ -204,22 +239,92 @@ server.registerTool(
 						'listas=proyectos); combinado con `list`, solo casa una sección de ESA lista'
 				),
 			includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
+			notes: z
+				.enum(['auto', 'none', 'preview', 'full'])
+				.optional()
+				.describe(
+					'"auto" (default): íntegra si @done/#done, si cambió desde la última vez que este MCP ' +
+						'la mostró (huella local por `notesUpdatedAt`), o si se tocó dentro de ' +
+						'`notesRecentHours` (solo la 1ª vez que se ve esa tarea) — si no, un marcador ' +
+						'"✎N ↻fecha" con su tamaño y la fecha de la última edición — GARANTÍA: nunca un ' +
+						'recorte a medias. "none": sin notas. "preview": recorte legado a ~240 chars, ' +
+						'colapsado a una línea. "full": todas íntegras y verbatim para TODO el lote ' +
+						'(equivale a fullNotes:true) — útil si vas a reeditar con update_task (que ' +
+						'REEMPLAZA la nota entera). Para una sola tarea concreta, mejor get_task. Se ignora ' +
+						'si mandas `notesSince`.'
+				),
 			fullNotes: z
 				.boolean()
 				.optional()
+				.describe('DEPRECATED, alias de notes:"full" (se ignora si `notes` viene informado).'),
+			notesRecentHours: z
+				.number()
+				.positive()
+				.optional()
 				.describe(
-					'Si true, las notas de CADA tarea del lote salen íntegras y sin colapsar saltos de ' +
-						'línea, en vez de truncadas a ~240 caracteres (default false, para no inflar el ' +
-						'contexto en listados largos). Útil si vas a reeditar la nota con update_task (que ' +
-						'la REEMPLAZA entera) y el lote ya está acotado (p. ej. con `list`/`section`). Para ' +
-						'una sola tarea concreta, mejor get_task.'
+					`Solo con "auto": ventana (horas, default ${DEFAULT_NOTES_RECENT_HOURS}) para dar por ` +
+						'íntegra la nota de una tarea que el MCP ve por 1ª vez (sin huella local aún) — ' +
+						'más ventana = más notas íntegras de golpe, más chars en la respuesta.'
+				),
+			notesSince: z
+				.string()
+				.min(10)
+				.optional()
+				.describe(
+					'Consulta de precisión, SIN estado: "YYYY-MM-DD" o ISO completo — íntegra SOLO si la ' +
+						'nota se editó desde esa fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`/' +
+						'`fullNotes`, @done/#done y la huella local por completo (mezclar criterios haría ' +
+						'la consulta impredecible): úsalo para "qué ha cambiado desde X", no para lectura ' +
+						'normal.'
 				)
 		}
 	},
 	async (input) => {
 		try {
 			const tasks = await listTasks(config, input);
-			return textResult(formatTaskList(tasks, input.scope ?? 'today', { fullNotes: input.fullNotes }));
+
+			if (input.notesSince !== undefined) {
+				const since = parseNotesSince(input.notesSince);
+				if (!since) {
+					return errorResult(
+						new Error(
+							`notesSince inválido: "${input.notesSince}" (usa "YYYY-MM-DD" o ISO 8601 completo).`
+						)
+					);
+				}
+				const autoRender = computeNotesSinceRender(tasks, since);
+				return textResult(
+					formatTaskList(tasks, input.scope ?? 'today', {
+						notesMode: 'auto',
+						autoRender,
+						notesSinceLabel: input.notesSince
+					})
+				);
+			}
+
+			const notesMode = effectiveNotesMode(input);
+			if (notesMode === 'auto') {
+				const autoRender = await computeAutoNotesRender(tasks, { windowHours: input.notesRecentHours });
+				return textResult(
+					formatTaskList(tasks, input.scope ?? 'today', {
+						notesMode,
+						autoRender,
+						notesWindowHours: input.notesRecentHours
+					})
+				);
+			}
+			if (notesMode === 'full') {
+				// Íntegra en 'full' también cuenta como SURFACEADA — misma huella
+				// que 'auto' registra, para que una vuelta con `notes: 'full'` no
+				// haga que la siguiente en 'auto' vuelva a marcar "cambió" sin
+				// haber cambiado — ver el JSDoc de `recordNotesSeen`.
+				await recordNotesSeen(
+					tasks
+						.filter(hasNotes)
+						.map((t) => ({ taskId: t.id, notes: t.notes as string, notesUpdatedAt: t.notesUpdatedAt }))
+				);
+			}
+			return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode }));
 		} catch (err) {
 			return errorResult(err);
 		}
@@ -262,6 +367,15 @@ server.registerTool(
 		try {
 			const task = await findTaskById(config, input.taskId);
 			if (!task) return errorResult(taskNotFoundError(input.taskId));
+			// La nota (si la hay) sale SIEMPRE íntegra aquí (`formatTaskFull`) — se
+			// registra como vista, misma huella que `list_tasks({notes:'auto'})`
+			// consulta (ver `notes.ts`); best-effort, nunca puede romper esta
+			// lectura.
+			if (hasNotes(task)) {
+				await recordNotesSeen([
+					{ taskId: task.id, notes: task.notes as string, notesUpdatedAt: task.notesUpdatedAt }
+				]);
+			}
 			return textResult(formatTaskFull(task));
 		} catch (err) {
 			return errorResult(err);
