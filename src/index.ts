@@ -27,6 +27,7 @@ import {
 	type MutateTasksOp
 } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
+import { resolveRefs } from './refs.js';
 import {
 	computeAutoNotesRender,
 	computeNotesSinceRender,
@@ -34,6 +35,7 @@ import {
 	hasNotes,
 	parseNotesSince,
 	recordNotesSeen,
+	type AutoNotesResult,
 	type NotesMode
 } from './notes.js';
 
@@ -82,6 +84,15 @@ import {
  * única tarea completa (notas verbatim + `createdAt` + lista/sección) —
  * pensado para reeditar una nota con `update_task` (que la REEMPLAZA entera)
  * sin destruir lo que un marcador/preview no traía.
+ *
+ * `list_tasks`/`get_task` resuelven además, EN VIVO, las referencias
+ * `[[task:ID|Etiqueta]]`/`[[list:ID|Etiqueta]]` que traiga el texto o las notas
+ * del lote (`refs.ts`): título ACTUAL + estado + id + marcador `✎N` si la tarea
+ * referenciada tiene nota, y ROTA declarada si el destino ya no existe. Antes
+ * se reenviaba la etiqueta congelada del enlace, así que una referencia rota
+ * era indistinguible de una viva. Cuesta como mucho DOS peticiones extra por
+ * lote (una `?ids=` con todos los ids de tarea de golpe + una `?includeLists=1`
+ * solo si hay referencias a listas) y CERO si el lote no tiene referencias.
  */
 
 function loadConfig(): LumbreConfig {
@@ -208,12 +219,37 @@ export function effectiveNotesMode(input: { notes?: NotesMode; fullNotes?: boole
 	return input.notes ?? (input.fullNotes ? 'full' : 'auto');
 }
 
+/**
+ * Textos del lote que hay que escanear en busca de referencias
+ * (`[[task:…]]`/`[[list:…]]`, ver `refs.ts`): SIEMPRE el contenido de cada
+ * tarea, y sus notas SOLO si de verdad se van a pintar en esta respuesta —
+ * resolver la referencia de una nota que sale como marcador (o que `notes:
+ * 'none'` omite) gastaría hueco del `?ids=` para algo que nadie va a leer.
+ * Pura, sin red: decide QUÉ pedir, no lo pide. `'preview'` sí se incluye
+ * entero aunque el recorte a 240 chars pueda dejar fuera alguna referencia
+ * (modo legado, no vale la pena afinar más).
+ */
+export function refTexts(
+	tasks: LumbreTask[],
+	notesMode: NotesMode,
+	autoRender?: AutoNotesResult
+): (string | null | undefined)[] {
+	const texts: (string | null | undefined)[] = [];
+	for (const t of tasks) {
+		texts.push(t.content);
+		if (notesMode === 'none') continue;
+		if (notesMode === 'auto' && autoRender?.perTask.get(t.id)?.kind !== 'full') continue;
+		texts.push(t.notes);
+	}
+	return texts;
+}
+
 server.registerTool(
 	'list_tasks',
 	{
 		description:
-			'Lee tareas de Lumbre. `scope`: today (default), week, inbox/someday, overdue, all ' +
-			'(auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
+			'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
+			'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
 			'vacío igual que una lista vacía existente — usa list_lists para distinguir. `section` ' +
 			'agrupa por sección dentro de `list`. `notes` controla las notas de cada tarea (default ' +
 			'"auto": íntegra si @done/#done, si cambió desde la última vez que la viste, o si se tocó ' +
@@ -224,9 +260,19 @@ server.registerTool(
 
 		inputSchema: {
 			scope: z
-				.enum(['today', 'week', 'inbox', 'someday', 'overdue', 'all'])
+				.enum(['today', 'week', 'upcoming', 'inbox', 'someday', 'overdue', 'all'])
 				.optional()
-				.describe('Alcance temporal; default "today" ("all" si se usa `list` sin `scope`)'),
+				.describe(
+					'Alcance temporal; default "today" ("all" si se usa `list` sin `scope`). "week" es la ' +
+						'semana de CALENDARIO; "upcoming" es una ventana rodante que siempre empieza hoy'
+				),
+			days: z
+				.number()
+				.int()
+				.min(1)
+				.max(14)
+				.optional()
+				.describe('Solo con scope "upcoming": días de la ventana contando hoy (default 7, máx 14)'),
 			list: z
 				.string()
 				.optional()
@@ -282,6 +328,7 @@ server.registerTool(
 	async (input) => {
 		try {
 			const tasks = await listTasks(config, input);
+			const scope = input.scope ?? 'today';
 
 			if (input.notesSince !== undefined) {
 				const since = parseNotesSince(input.notesSince);
@@ -293,11 +340,13 @@ server.registerTool(
 					);
 				}
 				const autoRender = computeNotesSinceRender(tasks, since);
+				const refs = await resolveRefs(config, refTexts(tasks, 'auto', autoRender));
 				return textResult(
-					formatTaskList(tasks, input.scope ?? 'today', {
+					formatTaskList(tasks, scope, {
 						notesMode: 'auto',
 						autoRender,
-						notesSinceLabel: input.notesSince
+						notesSinceLabel: input.notesSince,
+						refs
 					})
 				);
 			}
@@ -305,11 +354,13 @@ server.registerTool(
 			const notesMode = effectiveNotesMode(input);
 			if (notesMode === 'auto') {
 				const autoRender = await computeAutoNotesRender(tasks, { windowHours: input.notesRecentHours });
+				const refs = await resolveRefs(config, refTexts(tasks, notesMode, autoRender));
 				return textResult(
-					formatTaskList(tasks, input.scope ?? 'today', {
+					formatTaskList(tasks, scope, {
 						notesMode,
 						autoRender,
-						notesWindowHours: input.notesRecentHours
+						notesWindowHours: input.notesRecentHours,
+						refs
 					})
 				);
 			}
@@ -324,7 +375,8 @@ server.registerTool(
 						.map((t) => ({ taskId: t.id, notes: t.notes as string, notesUpdatedAt: t.notesUpdatedAt }))
 				);
 			}
-			return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode }));
+			const refs = await resolveRefs(config, refTexts(tasks, notesMode));
+			return textResult(formatTaskList(tasks, scope, { notesMode, refs }));
 		} catch (err) {
 			return errorResult(err);
 		}
@@ -376,7 +428,15 @@ server.registerTool(
 					{ taskId: task.id, notes: task.notes as string, notesUpdatedAt: task.notesUpdatedAt }
 				]);
 			}
-			return textResult(formatTaskFull(task));
+			// Referencias EN VIVO del texto, la nota (que aquí sale siempre íntegra)
+			// y las subtareas — ver `refs.ts`. Cero peticiones extra si no hay
+			// ninguna referencia, que es el caso normal.
+			const refs = await resolveRefs(config, [
+				task.content,
+				task.notes,
+				...(task.subtasks ?? []).map((s) => s.content)
+			]);
+			return textResult(formatTaskFull(task, refs));
 		} catch (err) {
 			return errorResult(err);
 		}

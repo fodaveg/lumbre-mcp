@@ -5,6 +5,7 @@ import {
 	collectExistenceCheckIds,
 	findTasksByIds,
 	listLists,
+	listTasks,
 	runBatch,
 	subtaskNotAllowedError,
 	taskNotFoundError,
@@ -184,6 +185,30 @@ describe('listLists', () => {
 	it('respuesta sin `lists` (array) lanza LumbreApiError', async () => {
 		mockFetchJson({ not: 'lists' });
 		await expect(listLists(config)).rejects.toThrow(/inesperada/);
+	});
+});
+
+// `scope=upcoming` + `days` (2026-07-26): ventana RODANTE de N días contando
+// hoy — `week` es la semana de CALENDARIO y en domingo no tiene nada delante.
+describe('listTasks — scope upcoming', () => {
+	it('reenvía `scope=upcoming` y `days` tal cual en la query', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		await listTasks(config, { scope: 'upcoming', days: 3 });
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?scope=upcoming&days=3');
+	});
+
+	it('sin `days` no manda el parámetro (el default 7 lo pone el servidor)', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		await listTasks(config, { scope: 'upcoming' });
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?scope=upcoming');
 	});
 });
 
