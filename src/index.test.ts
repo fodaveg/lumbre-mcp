@@ -140,11 +140,40 @@ describe('tools/list — superficie completa', () => {
 		// recolada en las de siempre está MEDIDO, no razonado: serializando solo
 		// las 21 anteriores por este mismo camino in-memory salen 21.596 clavados,
 		// el mismo número que antes de este lote.
+		// Re-medido el mismo día tras `add_brl_entry({ time })` (David: volcar la
+		// libreta de papel con su hora, en vez de la hora del reloj al llamar a
+		// la tool): 24.669 = +330 sobre los 24.339 de arriba, solo el campo
+		// nuevo y su `.describe()`.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 25300;
+		const CHAR_CEILING = 25900;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
+	});
+
+	// David, 9 ago 2026: apunta el BRL en una libreta de papel CON su hora y
+	// luego lo vuelca a Lumbre — sin `time` en `add_brl_entry`, la API solo
+	// sabía sellar la hora del reloj al llamar a la tool. `time` es opcional
+	// (Zod `.optional()`), así que NO puede aparecer en `required` — mismo
+	// criterio que `date`/`deadline` en `add_task`, que tampoco están.
+	it('`add_brl_entry` expone `time` "HH:MM" (24h) OPCIONAL, con el mismo patrón que `add_task`', () => {
+		const addBrlEntry = tools.find((t) => t.name === 'add_brl_entry');
+		expect(addBrlEntry).toBeDefined();
+		const schema = addBrlEntry!.inputSchema as {
+			properties?: Record<string, { type?: string; pattern?: string }>;
+			required?: string[];
+		};
+		expect(schema.properties?.time).toMatchObject({
+			type: 'string',
+			pattern: '^([01]\\d|2[0-3]):[0-5]\\d$'
+		});
+		expect(schema.required ?? []).not.toContain('time');
+
+		const addTask = tools.find((t) => t.name === 'add_task');
+		const addTaskSchema = addTask!.inputSchema as {
+			properties?: Record<string, { pattern?: string }>;
+		};
+		expect(schema.properties?.time?.pattern).toBe(addTaskSchema.properties?.time?.pattern);
 	});
 
 	it('`mutate_tasks` sigue siendo, con diferencia, la tool con más superficie', () => {

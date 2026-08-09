@@ -523,14 +523,16 @@ export type RemoveListMutationPayload = Record<string, never>;
  *  que pertenece y `entry` su texto —`- …` nota, `= …` pensamiento; sin
  *  marcador es una nota—. El id de la entrada nueva viaja en
  *  `MutateTaskInput.taskId` (lo genera el llamante, ver `add_brl_entry` en
- *  `index.ts`), no aquí — MISMO criterio que `createList`. La HORA la sella el
- *  servidor al encolar (hora del reloj si es el día en curso del usuario, sin
- *  hora si no), así que no viaja en el payload. Espejo de
+ *  `index.ts`), no aquí — MISMO criterio que `createList`. `time` (`HH:MM`,
+ *  24h) es OPCIONAL: para volcar apuntes tomados en papel a la hora que de
+ *  verdad marcaban. Sin ella, el servidor la sella al encolar (hora del reloj
+ *  si es el día en curso del usuario, sin hora si no). Espejo de
  *  `CreateBrlEntryPayload` (`$lib/server/repos/mutations.ts` en el repo
  *  principal). */
 export interface CreateBrlEntryMutationPayload {
 	date: string;
 	entry: string;
+	time?: string;
 }
 /** Reemplaza el texto de una entrada de registro existente. El símbolo forma
  *  parte del texto: mandar `= …` sobre una nota la convierte en pensamiento. */

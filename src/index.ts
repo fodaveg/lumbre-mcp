@@ -1059,7 +1059,16 @@ server.registerTool(
 			kind: z
 				.enum(['note', 'thought'])
 				.optional()
-				.describe('note = nota `-` (default); thought = pensamiento `=`')
+				.describe('note = nota `-` (default); thought = pensamiento `=`'),
+			time: z
+				.string()
+				.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+				.optional()
+				.describe(
+					'Hora "HH:MM" (24h) de la entrada, para volcar apuntes tomados en papel a la hora que ' +
+						'de verdad marcaban (en vez de la hora del reloj al llamar a esta tool). Sin ella, se ' +
+						'sella con el reloj del servidor si `date` es hoy, o sin hora si es otro día.'
+				)
 		}
 	},
 	async (input) => {
@@ -1073,7 +1082,8 @@ server.registerTool(
 				kind: 'createBrlEntry',
 				payload: {
 					date: input.date,
-					entry: `${input.kind === 'thought' ? '=' : '-'} ${input.text}`
+					entry: `${input.kind === 'thought' ? '=' : '-'} ${input.text}`,
+					...(input.time !== undefined ? { time: input.time } : {})
 				}
 			});
 			return textResult(
