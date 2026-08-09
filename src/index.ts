@@ -13,6 +13,7 @@ import {
 	findTaskById,
 	findTasksByIds,
 	getAttachment,
+	listBrlEntries,
 	listLists,
 	listTasks,
 	mutateTask,
@@ -54,7 +55,11 @@ import {
  * (fix b00303b5) lee TODAS las listas vivas con su recuento vía
  * `GET /api/tasks?includeLists=1` — a diferencia de `list_tasks({list})`, SÍ
  * distingue una lista que existe pero está vacía de una que no existe (ambas
- * dan `[]` en `list_tasks`, ver su JSDoc). Todas
+ * dan `[]` en `list_tasks`, ver su JSDoc).
+ * `list_brl_entries`/`add_brl_entry`/`update_brl_entry`/`delete_brl_entry`
+ * (BRL, add-on experimental): leen y mutan el REGISTRO del día —entradas `-`
+ * (nota) y `=` (pensamiento)—, que NO son tareas y no salen en `list_tasks`;
+ * ver el bloque «BRL» más abajo. Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -111,7 +116,7 @@ const config = loadConfig();
 
 // Exportado para poder inspeccionarlo/reconectarlo a un transporte in-memory
 // desde `index.test.ts` (ver su cabecera) — la superficie de tools YA
-// registrada, sin repetir los 21 `registerTool` de este fichero.
+// registrada, sin repetir los 25 `registerTool` de este fichero.
 export const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
 
 const recurrenceSchema = z
@@ -958,6 +963,187 @@ server.registerTool(
 			return textResult(
 				`Encolado en Lumbre: ${input.done === false ? 'desmarcar' : 'completar'} la subtarea ` +
 					`${input.subtaskId} (se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+// ── BRL (add-on experimental): registro del día ────────────────────────────
+
+/**
+ * Las cuatro tools de BRL (`list_brl_entries` + los tres verbos) son el espejo,
+ * para el REGISTRO, de lo que `list_tasks`/`add_task`/`update_task`/
+ * `delete_task` son para las tareas. Dos avisos que valen para las cuatro:
+ *
+ *  - El registro NO son tareas. Una entrada `-`/`=` es un apunte de diario del
+ *    día ("he comprado el pan", "igual conviene madrugar"), no algo que hacer:
+ *    no se completa, no se reprograma y no sale en `list_tasks`. Si lo que el
+ *    usuario quiere es algo que hacer, la tool es `add_task`.
+ *  - El add-on puede estar APAGADO en la cuenta; entonces las cuatro fallan con
+ *    un error explícito y no se encola nada.
+ *
+ * `update_brl_entry`/`delete_brl_entry` necesitan el id de la entrada, y la
+ * ÚNICA forma de conseguirlo es `list_brl_entries` (la nota completa en
+ * Markdown que sirve el mismo endpoint no lleva ids a propósito).
+ */
+const BRL_DATE = 'Día del registro, YYYY-MM-DD';
+
+/**
+ * Comprueba que `entryId` EXISTE en el registro de `date` antes de encolar una
+ * edición o un borrado — gemelo de `requireTaskExists` para el BRL, y por el
+ * MISMO motivo (el typo real de 2026-07-17): `/api/mutations` no valida el
+ * target server-side, así que un id mal transcrito se encolaba igual, el
+ * materializador lo descartaba en silencio y esta tool contestaba «Encolado…»
+ * tan tranquila. Medido en local el 2026-08-09 sobre la 1ª versión de estas
+ * tools: `delete_brl_entry` con un uuid inventado respondía «Encolado el
+ * borrado» sin borrar nada.
+ *
+ * De aquí sale la razón de que `update_brl_entry`/`delete_brl_entry` pidan
+ * `date` además del id: una entrada solo se puede buscar POR DÍA
+ * (`GET /api/brl/:date`), no hay lookup por id suelto como el de las tareas
+ * (`GET /api/tasks?id=`). El dato no le cuesta nada al modelo: viene en la
+ * misma llamada a `list_brl_entries` de la que sacó el id.
+ */
+async function requireBrlEntryExists(date: string, entryId: string): Promise<void> {
+	const entries = await listBrlEntries(config, date);
+	if (entries.some((entry) => entry.id === entryId)) return;
+	throw new Error(
+		`El registro del ${date} no tiene ninguna entrada con id ${entryId} (¿se transcribió mal, o ` +
+			'es de otro día?). Resuélvelo de nuevo con list_brl_entries. No se ha encolado nada.'
+	);
+}
+
+server.registerTool(
+	'list_brl_entries',
+	{
+		description:
+			'Lee el registro (BRL) de un día: entradas `-` (nota) y `=` (pensamiento), con id y hora. ' +
+			'Única forma de obtener el id que piden update_brl_entry/delete_brl_entry. No son tareas.',
+		inputSchema: {
+			date: z
+				.string()
+				.regex(/^\d{4}-\d{2}-\d{2}$/)
+				.describe(BRL_DATE)
+		}
+	},
+	async (input) => {
+		try {
+			const entries = await listBrlEntries(config, input.date);
+			if (entries.length === 0) return textResult(`El registro del ${input.date} está vacío.`);
+			return textResult(
+				[
+					`Registro del ${input.date} (${entries.length} entrada(s)):`,
+					...entries.map((e) => `${e.id}  ${e.time || '--:--'}  ${e.entry}`)
+				].join('\n')
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'add_brl_entry',
+	{
+		description:
+			'Apunta en el registro (BRL) de un día lo ocurrido (nota) o una reflexión (kind:thought). ' +
+			`NO es una tarea: no se completa ni se agenda; si hay algo que hacer, add_task. ${ASYNC_NOTE}`,
+		inputSchema: {
+			date: z
+				.string()
+				.regex(/^\d{4}-\d{2}-\d{2}$/)
+				.describe(BRL_DATE),
+			text: z.string().min(1).max(2000).describe('Texto de la entrada, SIN el marcador'),
+			kind: z
+				.enum(['note', 'thought'])
+				.optional()
+				.describe('note = nota `-` (default); thought = pensamiento `=`')
+		}
+	},
+	async (input) => {
+		try {
+			// Id PRE-GENERADO por el llamante, igual que `create_list`: es lo que da
+			// idempotencia de creación si el lote se reabre tras un fallo (ver el
+			// JSDoc de `createBrlEntry` en el repo principal).
+			const entryId = randomUUID();
+			await mutateTask(config, {
+				taskId: entryId,
+				kind: 'createBrlEntry',
+				payload: {
+					date: input.date,
+					entry: `${input.kind === 'thought' ? '=' : '-'} ${input.text}`
+				}
+			});
+			return textResult(
+				`Encolada en Lumbre una ${input.kind === 'thought' ? 'reflexión' : 'nota'} en el registro ` +
+					`del ${input.date} (id ${entryId}; se aplicará al sincronizar).`
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'update_brl_entry',
+	{
+		description:
+			'Reescribe una entrada del registro (BRL): REEMPLAZA su texto entero, y `kind` cambia ' +
+			`además su tipo. \`date\` y \`entryId\` salen de list_brl_entries. ${ASYNC_NOTE}`,
+		inputSchema: {
+			date: z
+				.string()
+				.regex(/^\d{4}-\d{2}-\d{2}$/)
+				.describe(BRL_DATE),
+			entryId: z.string().uuid().describe('Id de la entrada (ver list_brl_entries)'),
+			text: z.string().min(1).max(2000).describe('Texto nuevo, SIN el marcador'),
+			kind: z
+				.enum(['note', 'thought'])
+				.optional()
+				.describe('note = nota `-` (default); thought = pensamiento `=`')
+		}
+	},
+	async (input) => {
+		try {
+			await requireBrlEntryExists(input.date, input.entryId);
+			await mutateTask(config, {
+				taskId: input.entryId,
+				kind: 'updateBrlEntry',
+				payload: { entry: `${input.kind === 'thought' ? '=' : '-'} ${input.text}` }
+			});
+			return textResult(
+				`Encolada en Lumbre la edición de la entrada ${input.entryId} del registro ` +
+					'(se aplicará al sincronizar).'
+			);
+		} catch (err) {
+			return errorResult(err);
+		}
+	}
+);
+
+server.registerTool(
+	'delete_brl_entry',
+	{
+		description:
+			'Borra una entrada del registro (BRL). ACCIÓN DELICADA: sin confirmación inmediata ni ' +
+			`deshacer — confírmalo con el usuario antes de llamarla. ${ASYNC_NOTE}`,
+		inputSchema: {
+			date: z
+				.string()
+				.regex(/^\d{4}-\d{2}-\d{2}$/)
+				.describe(BRL_DATE),
+			entryId: z.string().uuid().describe('Id de la entrada a borrar (ver list_brl_entries)')
+		}
+	},
+	async (input) => {
+		try {
+			await requireBrlEntryExists(input.date, input.entryId);
+			await mutateTask(config, { taskId: input.entryId, kind: 'removeBrlEntry', payload: {} });
+			return textResult(
+				`Encolado en Lumbre el borrado de la entrada ${input.entryId} del registro ` +
+					'(se aplicará al sincronizar).'
 			);
 		} catch (err) {
 			return errorResult(err);

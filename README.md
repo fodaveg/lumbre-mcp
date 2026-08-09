@@ -156,6 +156,36 @@ lista (`list_tasks`/`get_task`).
   nivel. No aplica a la última lista viva ni a la Bandeja de entrada canónica
   (se ignora en silencio en ambos casos).
 
+### Registro del día (BRL — add-on experimental)
+
+El BRL es el diario del día, y **no son tareas**: una entrada es un apunte de lo
+que pasó (`-` nota) o una reflexión (`=` pensamiento). No se completan, no se
+reprograman y no salen en `list_tasks`. Requiere que el add-on esté encendido en
+la cuenta (Ajustes de Lumbre); apagado, las cuatro tools fallan con un error
+explícito y no se encola nada. Mismo criterio async/eventual que el resto de la
+Fase 2.
+
+- `list_brl_entries({ date })` — entradas de ese día con su **id** y su hora
+  (`--:--` = sin hora: una entrada nace sin hora si se apunta en un día que no
+  es hoy). Es la única forma de conseguir el id que piden las dos siguientes: la
+  nota completa en Markdown que sirve `GET /api/brl/:date` NO lleva ids a
+  propósito (es la nota que lee el usuario, no un formato de máquina).
+- `add_brl_entry({ date, text, kind? })` — apunta una entrada nueva.
+  `kind: "thought"` la marca como pensamiento (`=`); por defecto es nota (`-`).
+  El `text` va SIN el marcador; la hora la pone el servidor.
+- `update_brl_entry({ date, entryId, text, kind? })` — REEMPLAZA el texto entero
+  de una entrada; `kind` cambia además su tipo (nota ↔ pensamiento).
+- `delete_brl_entry({ date, entryId })` — borra una entrada.
+
+Las dos últimas piden `date` **además** del id, y no es redundante: una entrada
+solo se puede buscar por día (no hay lookup por id suelto como el
+`GET /api/tasks?id=` de las tareas), y con la fecha delante estas tools
+comprueban que la entrada EXISTE antes de encolar nada. Sin eso, un id mal
+transcrito se encola igual y se pierde en silencio mientras la tool contesta
+«Encolado…» — el mismo fallo que ya mordió con las tareas y que
+`requireTaskExists` cierra para ellas. La fecha viene en la misma llamada a
+`list_brl_entries` de la que sale el id.
+
 ### Ejecutar varias operaciones a la vez (`mutate_tasks`)
 
 Vía PREFERENTE en cuanto haya más de una operación seguida (crear y/o

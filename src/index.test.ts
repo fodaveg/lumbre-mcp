@@ -83,11 +83,15 @@ describe('tools/list — superficie completa', () => {
 		'move_to_list',
 		'add_subtask',
 		'complete_subtask',
-		'mutate_tasks'
+		'mutate_tasks',
+		'list_brl_entries',
+		'add_brl_entry',
+		'update_brl_entry',
+		'delete_brl_entry'
 	];
 
-	it('sigue exponiendo las 21 tools, por nombre', () => {
-		expect(tools).toHaveLength(21);
+	it('sigue exponiendo las 25 tools, por nombre', () => {
+		expect(tools).toHaveLength(25);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -111,7 +115,7 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
-	it('techo de bytes de las 21 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 25 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -129,9 +133,16 @@ describe('tools/list — superficie completa', () => {
 		// `notesSince` (consulta de precisión) en `list_tasks`: 21.596 (~985
 		// chars más que los 20.611 de arriba, sobre todo la `.describe()` de
 		// `notesSince` y el criterio ampliado de `notes`).
+		// Re-medido el 2026-08-09 tras las CUATRO tools de BRL (`list_brl_entries`
+		// + los tres verbos): 24.339 = +2.743 sobre los 21.596 de arriba
+		// (462+778+862+637 de las cuatro, más sus 4 comas). Que ese crecimiento
+		// sea superficie NUEVA —un dominio que el MCP no cubría— y no prosa
+		// recolada en las de siempre está MEDIDO, no razonado: serializando solo
+		// las 21 anteriores por este mismo camino in-memory salen 21.596 clavados,
+		// el mismo número que antes de este lote.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 22700;
+		const CHAR_CEILING = 25300;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});

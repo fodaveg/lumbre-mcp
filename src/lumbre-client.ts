@@ -430,7 +430,10 @@ export type MutationKind =
 	| 'createList'
 	| 'nestList'
 	| 'renameList'
-	| 'removeList';
+	| 'removeList'
+	| 'createBrlEntry'
+	| 'updateBrlEntry'
+	| 'removeBrlEntry';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -516,6 +519,26 @@ export interface RenameListMutationPayload {
 /** Borra la lista `MutateTaskInput.taskId`. Sin campos — espejo de
  *  `RemoveListPayload`. */
 export type RemoveListMutationPayload = Record<string, never>;
+/** Crea una entrada de registro (BRL, add-on experimental): `date` el día al
+ *  que pertenece y `entry` su texto —`- …` nota, `= …` pensamiento; sin
+ *  marcador es una nota—. El id de la entrada nueva viaja en
+ *  `MutateTaskInput.taskId` (lo genera el llamante, ver `add_brl_entry` en
+ *  `index.ts`), no aquí — MISMO criterio que `createList`. La HORA la sella el
+ *  servidor al encolar (hora del reloj si es el día en curso del usuario, sin
+ *  hora si no), así que no viaja en el payload. Espejo de
+ *  `CreateBrlEntryPayload` (`$lib/server/repos/mutations.ts` en el repo
+ *  principal). */
+export interface CreateBrlEntryMutationPayload {
+	date: string;
+	entry: string;
+}
+/** Reemplaza el texto de una entrada de registro existente. El símbolo forma
+ *  parte del texto: mandar `= …` sobre una nota la convierte en pensamiento. */
+export interface UpdateBrlEntryMutationPayload {
+	entry: string;
+}
+/** Borra la entrada de registro `MutateTaskInput.taskId`. Sin campos. */
+export type RemoveBrlEntryMutationPayload = Record<string, never>;
 
 export interface MutateTaskInput {
 	taskId: string;
@@ -533,7 +556,10 @@ export interface MutateTaskInput {
 		| CreateListMutationPayload
 		| NestListMutationPayload
 		| RenameListMutationPayload
-		| RemoveListMutationPayload;
+		| RemoveListMutationPayload
+		| CreateBrlEntryMutationPayload
+		| UpdateBrlEntryMutationPayload
+		| RemoveBrlEntryMutationPayload;
 }
 
 /**
@@ -550,6 +576,38 @@ export async function mutateTask(config: LumbreConfig, input: MutateTaskInput): 
 	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
 		throw new LumbreApiError('Lumbre no confirmó la mutación (respuesta inesperada).');
 	}
+}
+
+// ── BRL (add-on experimental): registro del día ────────────────────────────
+
+/** Una entrada del registro tal y como la devuelve
+ *  `GET /api/brl/:date?format=json`. `time` es `''` cuando la entrada nació sin
+ *  hora (se captura para un día que no es hoy) — se pinta `--:--`. */
+export interface LumbreBrlEntry {
+	id: string;
+	time: string;
+	/** Texto CANÓNICO, con su marcador: `- …` nota, `= …` pensamiento. */
+	entry: string;
+}
+
+/**
+ * `GET /api/brl/:date?format=json`: entradas del registro de un día CON SU ID.
+ *
+ * Es la única forma de resolver el id que necesitan `update_brl_entry`/
+ * `delete_brl_entry`: la representación por defecto de ese endpoint es la nota
+ * completa en Markdown, que deliberadamente NO lleva ids (es la nota que lee el
+ * usuario, no un formato de máquina). 403 si el add-on BRL está apagado en la
+ * cuenta.
+ */
+export async function listBrlEntries(
+	config: LumbreConfig,
+	date: string
+): Promise<LumbreBrlEntry[]> {
+	const body = await request(config, `/api/brl/${date}?format=json`);
+	if (!body || typeof body !== 'object' || !Array.isArray((body as { entries?: unknown }).entries)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/brl/:date.');
+	}
+	return (body as { entries: LumbreBrlEntry[] }).entries;
 }
 
 /** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
