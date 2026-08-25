@@ -560,3 +560,194 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/no existe/i);
 	});
 });
+
+describe('list_tasks({notes:"auto"}) — notas en dos fases (perf, 2026-08-25)', () => {
+	/**
+	 * `notesSeenStore` en memoria por test (no toca disco): las tareas de este
+	 * describe deciden íntegra/marcador SOLO por capa 1 (`@done`) o por
+	 * bootstrap con una `notesUpdatedAt` bien vieja (fuera de cualquier
+	 * ventana razonable) — a propósito, para que el resultado no dependa del
+	 * reloj real ni de una huella previa.
+	 */
+	function memoryNotesSeenStore() {
+		let state: Record<string, unknown> = {};
+		return {
+			async load() {
+				return state;
+			},
+			async save(next: Record<string, unknown>) {
+				state = next;
+			}
+		};
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	function textOf(result: { content: { type: string; text?: string }[] }): string {
+		const first = result.content[0];
+		return first && first.type === 'text' && typeof first.text === 'string' ? first.text : '';
+	}
+
+	async function buildClient(fetchSpy: ReturnType<typeof vi.fn>) {
+		vi.stubGlobal('fetch', fetchSpy);
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG, { notesSeenStore: memoryNotesSeenStore() });
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'two-phase-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	const DONE_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+	const MARKER_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+	const FULL_TEXT = `${'Contexto largo de seguimiento. '.repeat(10)}Fin.`;
+	const MARKER_NOTE_LEN = 55;
+
+	/** Tarea `@done` — decide SIEMPRE íntegra (capa 1, sin depender de huella
+	 *  ni reloj — ver `decideAutoNoteRender`). */
+	function doneTask(overrides: Record<string, unknown> = {}) {
+		return {
+			id: DONE_ID,
+			content: 'Cerrar informe @done',
+			notes: null,
+			notesUpdatedAt: '2020-01-01T00:00:00.000Z',
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			...overrides
+		};
+	}
+
+	/** Tarea sin tag y con `notesUpdatedAt` bien vieja — decide SIEMPRE
+	 *  marcador (fuera de cualquier ventana de bootstrap razonable). */
+	function markerTask(overrides: Record<string, unknown> = {}) {
+		return {
+			id: MARKER_ID,
+			content: 'Revisar borrador',
+			notes: null,
+			notesUpdatedAt: '2020-01-01T00:00:00.000Z',
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			...overrides
+		};
+	}
+
+	it('servidor NUEVO: fase 1 con notes=length + fase 2 SOLO con los ids que salieron íntegros', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?ids=')) return jsonResponse([doneTask({ notes: FULL_TEXT })]);
+			if (u.includes('/api/tasks?')) {
+				return jsonResponse([
+					doneTask({ notesLength: FULL_TEXT.trim().length }),
+					markerTask({ notesLength: MARKER_NOTE_LEN })
+				]);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: {} });
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
+		const phase1Url = urls.find((u) => !u.includes('ids='))!;
+		const phase2Url = urls.find((u) => u.includes('ids='))!;
+		expect(phase1Url).toContain('notes=length');
+		expect(phase2Url).toContain(`ids=${DONE_ID}`);
+		expect(phase2Url).not.toContain(MARKER_ID); // solo el id íntegro, NO el del marcador
+		expect(phase2Url).toContain('notes=full');
+
+		expect(text).toContain(FULL_TEXT.trim());
+		expect(text).toContain(`✎${MARKER_NOTE_LEN}`);
+	});
+
+	it('servidor VIEJO (sin `notesLength` en la respuesta): UNA sola petición — mismo resultado que sin esta feature', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?')) {
+				// Ignora `notes=length` (versión previa del servidor) y da las
+				// notas enteras igual — SIN el campo `notesLength`.
+				return jsonResponse([
+					doneTask({ notes: FULL_TEXT }),
+					markerTask({ notes: 'nota corta del todo' })
+				]);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: {} });
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+
+		// La aserción más importante del lote: CERO peticiones extra.
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(text).toContain(FULL_TEXT.trim());
+		expect(text).toContain(`✎${'nota corta del todo'.length}`);
+	});
+
+	it('servidor NUEVO, ninguna decisión íntegra: la fase 2 NO se manda (conjunto vacío)', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?')) return jsonResponse([markerTask({ notesLength: MARKER_NOTE_LEN })]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: {} });
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+		expect(text).toContain(`✎${MARKER_NOTE_LEN}`);
+	});
+
+	it('fase 2 no trae la tarea (borrada entre medias): repliegue a MARCADOR, nunca a medias ni vacía', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?ids=')) return jsonResponse([]); // ya no existe
+			if (u.includes('/api/tasks?')) return jsonResponse([doneTask({ notesLength: FULL_TEXT.trim().length })]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+
+		expect(text).not.toContain(FULL_TEXT.trim().slice(0, 50));
+		expect(text).toContain(`✎${FULL_TEXT.trim().length}`);
+	});
+
+	it('fase 2 falla del todo (500): repliegue a MARCADOR sin romper el listado entero', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?ids=')) return jsonResponse({ message: 'boom' }, 500);
+			if (u.includes('/api/tasks?')) return jsonResponse([doneTask({ notesLength: FULL_TEXT.trim().length })]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+
+		expect(text).not.toContain(FULL_TEXT.trim().slice(0, 50));
+		expect(text).toContain(`✎${FULL_TEXT.trim().length}`);
+	});
+});

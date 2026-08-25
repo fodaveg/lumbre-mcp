@@ -62,6 +62,19 @@ export interface ListTasksInput {
 	/** Tope de tareas a traer (la API lo capa a 500); NO expuesto como parámetro
 	 *  de la tool `list_tasks`. */
 	limit?: number;
+	/** Parámetro HTTP `notes=` de `GET /api/tasks` (feature "notas en dos
+	 *  fases", 2026-08-25): `'full'` (comportamiento de siempre, notas
+	 *  enteras), `'length'` (solo `LumbreTask.notesLength`, sin texto) o
+	 *  `'none'` (ni texto ni longitud). Deliberadamente DISTINTO del `notes`
+	 *  (`NotesMode`) que recibe la tool `list_tasks` de cara al modelo
+	 *  (`auto`/`none`/`preview`/`full`, ver `notes.ts`) — `index.ts` pasa el
+	 *  objeto de entrada de la tool tal cual a `listTasks` para el resto de
+	 *  campos, y un `input.notes` del modelo NUNCA debe colarse aquí sin
+	 *  traducir. Sin indicar, el servidor sirve notas completas (igual que
+	 *  antes de esta feature); un servidor VIEJO que no conoce el parámetro lo
+	 *  ignora y devuelve las notas enteras igual — ver `listTasks`, que es
+	 *  quien detecta esa situación. */
+	notesQuery?: 'full' | 'length' | 'none';
 }
 
 /** Metadata de un adjunto (sin bytes ni `storageKey`); los bytes se piden aparte con `getAttachment`. */
@@ -95,6 +108,19 @@ export interface LumbreTask {
 	 *  ausente/`null` en tareas viejas o si la API cambia — trátalo siempre
 	 *  como "desconocido", nunca falles por su ausencia (ver `decideAutoNoteRender`). */
 	notesUpdatedAt?: string | null;
+	/** Longitud (chars, TRAS `.trim()`) de la nota — SOLO presente cuando la
+	 *  petición llevó `notes=length` (`ListTasksInput.notesQuery`/
+	 *  `findTasksByIds`, feature "notas en dos fases", 2026-08-25): un número
+	 *  si hay nota viva, o `null` con el MISMO gateo que traía `notes` en modo
+	 *  `full` (p. ej. nota borrada). En cualquier OTRA respuesta (modo `full`
+	 *  de siempre, o un servidor que aún no conoce `notes=`) esta clave está
+	 *  AUSENTE del todo — ni siquiera `null` — y esa ausencia (comprobar con
+	 *  `'notesLength' in t`, NUNCA `t.notesLength !== undefined`, que no
+	 *  distingue "ausente" de "presente pero null") es justo la señal que usa
+	 *  `list_tasks` (`index.ts`) para detectar un servidor VIEJO que ignoró el
+	 *  parámetro y ya ha devuelto la nota entera igualmente — en ese caso no
+	 *  hay que pedirla una segunda vez. */
+	notesLength?: number | null;
 	done: boolean;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;
@@ -206,6 +232,7 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if (input.section) params.set('section', input.section);
 	if (input.includeDone) params.set('includeDone', 'true');
 	if (input.limit) params.set('limit', String(input.limit));
+	if (input.notesQuery) params.set('notes', input.notesQuery);
 	const qs = params.toString();
 	const body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
 	if (!Array.isArray(body)) {
@@ -272,30 +299,48 @@ export async function findTaskById(config: LumbreConfig, taskId: string): Promis
 	return (body as LumbreTask[])[0];
 }
 
+/** Tope de ids por petición que impone `GET /api/tasks?ids=` en el servidor
+ *  (ver su JSDoc en el repo principal) — `findTasksByIds` trocea por encima
+ *  de esto en vez de mandar un `ids=` que el servidor rechazaría. */
+const MAX_IDS_PER_REQUEST = 200;
+
 /**
  * Busca VARIAS tareas de golpe vía `GET /api/tasks?ids=` (feature batch —
- * espejo de `findTaskById`, pero para un LOTE): UNA sola petición → un `Map`
- * por `id`, en vez de una `findTaskById` por cada `taskId`/`subtaskId` a
- * comprobar. Pensado para `mutate_tasks` (`index.ts`): resuelve la existencia
- * de TODAS las tareas que targetea un lote en una sola llamada, antes de
- * mandar `runBatch`. Ids sin coincidencia (no existen, ajenas al token, o
- * repetidos) simplemente no tienen entrada en el `Map` — el llamante lo
- * distingue con `.get(id)` → `undefined`, mismo criterio que
- * `findTaskById` devolviendo `undefined`. `ids: []` no llama a la red (`Map`
- * vacío directo).
+ * espejo de `findTaskById`, pero para un LOTE): UNA sola petición (o varias
+ * en TROCEADO de `MAX_IDS_PER_REQUEST` si `ids` se pasa de ese tope, ver
+ * abajo) → un `Map` por `id`, en vez de una `findTaskById` por cada
+ * `taskId`/`subtaskId` a comprobar. Pensado tanto para `mutate_tasks`
+ * (`index.ts`, existencia de todo el lote en una sola llamada de red — o
+ * pocas, si se trocea) como para la FASE 2 de `list_tasks({notes:'auto'})`
+ * (traer el texto íntegro solo de las notas que la fase 1 decidió íntegras,
+ * ver `notesQuery`/el bloque de `list_tasks` en `index.ts`). Ids sin
+ * coincidencia (no existen, ajenas al token, o repetidos) simplemente no
+ * tienen entrada en el `Map` — el llamante lo distingue con `.get(id)` →
+ * `undefined`, mismo criterio que `findTaskById` devolviendo `undefined`.
+ * `ids: []` no llama a la red (`Map` vacío directo).
+ *
+ * `notesQuery` (mismo significado que `ListTasksInput.notesQuery`): sin
+ * indicar, el servidor sirve notas completas (comportamiento de siempre) —
+ * la fase 2 de `list_tasks` lo manda explícito (`'full'`) por claridad, pese
+ * a que ya sea el default del servidor.
  */
 export async function findTasksByIds(
 	config: LumbreConfig,
-	ids: string[]
+	ids: string[],
+	opts: { notesQuery?: 'full' | 'length' | 'none' } = {}
 ): Promise<Map<string, LumbreTask>> {
 	if (ids.length === 0) return new Map();
-	const params = new URLSearchParams({ ids: ids.join(',') });
-	const body = await request(config, `/api/tasks?${params.toString()}`);
-	if (!Array.isArray(body)) {
-		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?ids=.');
-	}
 	const map = new Map<string, LumbreTask>();
-	for (const t of body as LumbreTask[]) map.set(t.id, t);
+	for (let i = 0; i < ids.length; i += MAX_IDS_PER_REQUEST) {
+		const chunk = ids.slice(i, i + MAX_IDS_PER_REQUEST);
+		const params = new URLSearchParams({ ids: chunk.join(',') });
+		if (opts.notesQuery) params.set('notes', opts.notesQuery);
+		const body = await request(config, `/api/tasks?${params.toString()}`);
+		if (!Array.isArray(body)) {
+			throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?ids=.');
+		}
+		for (const t of body as LumbreTask[]) map.set(t.id, t);
+	}
 	return map;
 }
 

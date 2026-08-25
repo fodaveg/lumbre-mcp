@@ -46,11 +46,18 @@ export function hasDoneTag(content: string): boolean {
 	return /(?:^|\s)[@#]done(?=\s|$)/i.test(content);
 }
 
-/** `true` si la tarea tiene una nota no vacía (mismo criterio que
- *  `formatTask`/`formatTaskFull` en `format.ts` para decidir si hay línea de
- *  notas que mostrar). */
-export function hasNotes(t: Pick<LumbreTask, 'notes'>): boolean {
-	return !!t.notes && t.notes.trim() !== '';
+/** `true` si la tarea tiene una nota no vacía. Con el texto presente (`notes`,
+ *  modo `full` de siempre, o un servidor VIEJO que ignoró `notes=length`)
+ *  decide igual que siempre `formatTask`/`formatTaskFull`: por su longitud
+ *  tras `trim`. Sin texto (`notes: null` — fase 1 de `list_tasks({notes:
+ *  'auto'})` contra un servidor NUEVO, ver `ListTasksInput.notesQuery`) cae a
+ *  `notesLength`, que trae la MISMA información sin el texto (ver su JSDoc en
+ *  `lumbre-client.ts`) — antes de esto, una tarea con nota en fase 1 se leía
+ *  como "sin nota" (bug: `t.notes` vale `null` ahí aunque SÍ tenga nota) y se
+ *  quedaba fuera de `computeAutoNotesRender`. */
+export function hasNotes(t: Pick<LumbreTask, 'notes' | 'notesLength'>): boolean {
+	if (t.notes != null) return t.notes.trim() !== '';
+	return typeof t.notesLength === 'number' && t.notesLength > 0;
 }
 
 /** `Date` válida a partir de un `notesUpdatedAt` (ISO) que puede venir
@@ -100,16 +107,23 @@ export const DEFAULT_NOTES_RECENT_HOURS = 24;
  * JSDoc de `LumbreTask.notesUpdatedAt` — pero puede en tareas viejas o si la
  * API cambia): se trata como "desconocido" y cae a marcador, salvo que la
  * capa 1 (`@done`/`#done`) ya la haya resuelto íntegra. Nunca lanza.
+ *
+ * `noteLength` (chars, TRAS `.trim()`) en vez del texto de la nota — la
+ * matriz de decisión de abajo NUNCA necesitó el texto en sí, solo su
+ * longitud (para el marcador) y `content`/`notesUpdatedAt`/`previous`. Con
+ * esto puede decidir con solo `LumbreTask.notesLength` (fase 1 de
+ * `list_tasks({notes:'auto'})` contra un servidor NUEVO, ver
+ * `computeAutoNotesRender`), sin esperar a la fase 2 que trae el texto
+ * completo de las que salgan íntegras.
  */
 export function decideAutoNoteRender(
 	content: string,
-	notes: string,
+	noteLength: number,
 	notesUpdatedAt: string | null | undefined,
 	previous: NotesSeenEntry | undefined,
 	opts: { now: Date; windowHours: number }
 ): AutoNoteDecision {
-	const trimmed = notes.trim();
-	const length = trimmed.length;
+	const length = noteLength;
 	const updated = parseNotesUpdatedAt(notesUpdatedAt);
 	const updatedAt = updated ? (notesUpdatedAt as string) : null;
 
@@ -327,15 +341,20 @@ export const fileNotesSeenStore: NotesSeenStore = {
  * última vez — la próxima pasada cae al bootstrap, que es el criterio
  * correcto cuando no hay marca. Si no había NADA que borrar, tampoco hay
  * cambio: mismo fast path, misma referencia de vuelta.
+ *
+ * `noteLength` (chars, TRAS `.trim()`) en vez del texto de la nota — igual
+ * que `decideAutoNoteRender`, esto solo se guarda como dato informativo
+ * (`n`, nunca se usa para decidir), así que no hace falta el texto completo:
+ * `computeAutoNotesRender` puede llamar aquí con solo `LumbreTask.notesLength`
+ * (fase 1, servidor NUEVO), sin esperar el texto de la fase 2.
  */
 export function touchNotesSeen(
 	state: NotesSeenState,
 	taskId: string,
-	notes: string,
+	noteLength: number,
 	notesUpdatedAt: string | null | undefined,
 	maxEntries: number = MAX_STATE_ENTRIES
 ): NotesSeenState {
-	const trimmed = notes.trim();
 	const updated = parseNotesUpdatedAt(notesUpdatedAt);
 
 	if (!updated) {
@@ -346,11 +365,11 @@ export function touchNotesSeen(
 	}
 
 	const existing = readSeenEntry(state[taskId]);
-	if (existing && existing.u === notesUpdatedAt && existing.n === trimmed.length) return state;
+	if (existing && existing.u === notesUpdatedAt && existing.n === noteLength) return state;
 
 	const map = new Map(Object.entries(state));
 	map.delete(taskId);
-	const entry: NotesSeenEntry = { u: notesUpdatedAt as string, n: trimmed.length };
+	const entry: NotesSeenEntry = { u: notesUpdatedAt as string, n: noteLength };
 	map.set(taskId, entry);
 	while (map.size > maxEntries) {
 		const oldestKey = map.keys().next().value;
@@ -382,7 +401,9 @@ export async function recordNotesSeen(
 	if (entries.length === 0) return;
 	try {
 		let state = await store.load();
-		for (const e of entries) state = touchNotesSeen(state, e.taskId, e.notes, e.notesUpdatedAt);
+		for (const e of entries) {
+			state = touchNotesSeen(state, e.taskId, e.notes.trim().length, e.notesUpdatedAt);
+		}
 		await store.save(state);
 	} catch {
 		// Best-effort — ver JSDoc de arriba.
@@ -390,6 +411,17 @@ export async function recordNotesSeen(
 }
 
 // ── Modo `auto` de `list_tasks` ─────────────────────────────────────────────
+
+/** Longitud (chars, tras `.trim()`) de la nota de `t`, de donde haya:
+ *  `t.notes` si vino el texto (modo `full` de siempre, o un servidor VIEJO
+ *  que ignoró `notes=length`), si no `t.notesLength` (fase 1 contra un
+ *  servidor NUEVO — ver su JSDoc en `lumbre-client.ts`). `0` si ninguno de
+ *  los dos trae nada útil (no debería llamarse aquí en ese caso — los
+ *  llamantes de este módulo solo la usan tras filtrar por `hasNotes`). */
+function noteLengthOf(t: Pick<LumbreTask, 'notes' | 'notesLength'>): number {
+	if (t.notes != null) return t.notes.trim().length;
+	return typeof t.notesLength === 'number' ? t.notesLength : 0;
+}
 
 /** Resultado de `computeAutoNotesRender`/`computeNotesSinceRender`: la
  *  decisión por tarea + los recuentos que necesita la cabecera del listado
@@ -449,14 +481,15 @@ export async function computeAutoNotesRender(
 	let nextState = previousState;
 	for (const t of withNotes) {
 		const previous = readSeenEntry(previousState[t.id]);
-		const decision = decideAutoNoteRender(t.content, t.notes as string, t.notesUpdatedAt, previous, {
+		const length = noteLengthOf(t);
+		const decision = decideAutoNoteRender(t.content, length, t.notesUpdatedAt, previous, {
 			now,
 			windowHours
 		});
 		perTask.set(t.id, decision);
 		if (decision.kind === 'full') fullCount++;
 		else markerCount++;
-		nextState = touchNotesSeen(nextState, t.id, t.notes as string, t.notesUpdatedAt);
+		nextState = touchNotesSeen(nextState, t.id, length, t.notesUpdatedAt);
 	}
 	if (nextState !== previousState) await store.save(nextState);
 	return { perTask, fullCount, markerCount };

@@ -62,6 +62,21 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   fecha, marcador el resto (incluida una tarea `@done` con nota vieja); la
   cabecera lo declara (`tocadas desde 2026-07-20`). Úsalo para "qué ha
   cambiado desde X", no para lectura normal (para eso, el default `'auto'`).
+  Internamente, `'auto'` pide las notas EN DOS FASES (perf, 2026-08-25 —
+  medido contra datos reales: de un `scope=all` de 542 KB, 307 KB —56,6%—
+  eran texto de notas que la mayoría de las veces se tiraban en local): fase 1,
+  `GET /api/tasks?notes=length` (cada tarea trae `notesLength` en vez del
+  texto); fase 2, SOLO para las que la decisión marca íntegras, `GET
+  /api/tasks?ids=<esos ids>&notes=full` para traer su texto (trocea en lotes
+  de 200 ids si hace falta). Un servidor que aún no conozca `notes=`/
+  `notesLength` (versión previa a esta feature) ignora el parámetro y devuelve
+  las notas enteras en la fase 1 — el MCP lo detecta (ninguna tarea trae la
+  propiedad `notesLength`) y NO manda la fase 2: mismo resultado, sin el
+  ahorro, coste CERO peticiones extra. Si la fase 2 falla (red, 5xx) o
+  devuelve menos tareas de las pedidas (p. ej. una se borró entre medias), esa
+  nota se repliega a marcador — nunca a medias ni vacía haciéndose pasar por
+  "sin nota" (misma garantía de arriba). El resultado observable es idéntico
+  al de una sola petición; solo cambia cuántos bytes viajan.
 - `list_lists()` — enumera TODAS tus listas de "Algún día", con su recuento de
   tareas (vía `GET /api/tasks?includeLists=1`) — INCLUIDAS las que todavía no
   tienen ninguna tarea. A diferencia de `list_tasks({ list })`, que responde

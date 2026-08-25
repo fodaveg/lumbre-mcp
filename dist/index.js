@@ -511,13 +511,17 @@ export function createServer(config, opts = {}) {
         }
     }, async (input) => {
         try {
-            const tasks = await listTasks(config, input);
-            taskCache.setAll(tasks);
             if (input.notesSince !== undefined) {
                 const since = parseNotesSince(input.notesSince);
                 if (!since) {
                     return errorResult(new Error(`notesSince inválido: "${input.notesSince}" (usa "YYYY-MM-DD" o ISO 8601 completo).`));
                 }
+                // Consulta de precisión, siempre con las notas ENTERAS (sin
+                // `notesQuery`, ver el JSDoc de `computeNotesSinceRender`): no es el
+                // camino que optimiza esta feature, así que se queda con el
+                // comportamiento de siempre.
+                const tasks = await listTasks(config, input);
+                taskCache.setAll(tasks);
                 const autoRender = computeNotesSinceRender(tasks, since);
                 return textResult(formatTaskList(tasks, input.scope ?? 'today', {
                     notesMode: 'auto',
@@ -526,14 +530,27 @@ export function createServer(config, opts = {}) {
                 }));
             }
             const notesMode = effectiveNotesMode(input);
+            if (notesMode === 'none') {
+                // El texto no se usa para nada: una sola petición, ahorro máximo —
+                // un servidor VIEJO ignora `notes=none` y todo sigue funcionando
+                // igual, solo que sin ahorrar.
+                const tasks = await listTasks(config, { ...input, notesQuery: 'none' });
+                taskCache.setAll(tasks);
+                return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode }));
+            }
             if (notesMode === 'auto') {
-                const autoRender = await computeAutoNotesRender(tasks, { windowHours: input.notesRecentHours }, notesSeenStore);
-                return textResult(formatTaskList(tasks, input.scope ?? 'today', {
+                const { list, autoRender } = await listTasksAutoTwoPhase(input);
+                return textResult(formatTaskList(list, input.scope ?? 'today', {
                     notesMode,
                     autoRender,
                     notesWindowHours: input.notesRecentHours
                 }));
             }
+            // 'preview'/'full': notas enteras de siempre, sin optimizar ('full'
+            // las necesita TODAS íntegras, 'preview' las trunca aquí mismo a
+            // partir del texto completo).
+            const tasks = await listTasks(config, input);
+            taskCache.setAll(tasks);
             if (notesMode === 'full') {
                 // Íntegra en 'full' también cuenta como SURFACEADA — misma huella
                 // que 'auto' registra, para que una vuelta con `notes: 'full'` no
@@ -549,6 +566,79 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
+    /**
+     * `list_tasks({notes:'auto'})` (default) en DOS FASES — perf, 2026-08-25:
+     * antes, `listTasks` traía el texto de TODAS las notas siempre, aunque la
+     * mayoría (las que la decisión manda a marcador) se tiran en local (medido
+     * contra datos reales: de un `scope=all` de 542 KB, 307 KB — 56,6% — eran
+     * texto de notas, ver el encargo de esta feature).
+     *
+     * 1. Fase 1: `GET /api/tasks?notes=length` — cada tarea trae `notesLength`
+     *    en vez del texto (ver `ListTasksInput.notesQuery`).
+     * 2. Detección de servidor VIEJO (aún no conoce `notes=length`, ver el
+     *    JSDoc de `LumbreTask.notesLength`): NINGUNA tarea trae la PROPIEDAD
+     *    `notesLength` (con `in`, no comprobando si vale `null` — un servidor
+     *    NUEVO también puede mandar `notesLength: null` en una tarea sin nota)
+     *    → ya nos ha dado las notas enteras igual (ignoró el parámetro), así
+     *    que seguimos con ESE mismo lote: repliegue a coste CERO, sin 2ª
+     *    petición.
+     * 3. Servidor NUEVO: decide íntegra/marcador por tarea con lo que ya
+     *    sabemos (`computeAutoNotesRender`, que ahora sabe leer `notesLength`
+     *    sin necesitar el texto — ver `notes.ts`).
+     * 4. Fase 2: SOLO para las que la decisión marcó íntegras, `GET
+     *    /api/tasks?ids=<esos ids>&notes=full` (una petición; trocea >200 ids
+     *    — `findTasksByIds`) para traer su texto. Conjunto vacío → ninguna
+     *    petición extra.
+     * 5. GARANTÍA (README): si la fase 2 falla, o devuelve MENOS tareas de las
+     *    pedidas (p. ej. una tarea borrada entre medias) o con la nota vacía,
+     *    esa nota se REPLIEGA a marcador — con la longitud/fecha YA conocidas
+     *    de la fase 1 — en vez de colar un texto a medias o una nota vacía
+     *    disfrazada de "sin nota".
+     */
+    async function listTasksAutoTwoPhase(input) {
+        const phase1 = await listTasks(config, { ...input, notesQuery: 'length' });
+        const isNewServer = phase1.some((t) => 'notesLength' in t);
+        if (!isNewServer) {
+            taskCache.setAll(phase1);
+            const autoRender = await computeAutoNotesRender(phase1, { windowHours: input.notesRecentHours }, notesSeenStore);
+            return { list: phase1, autoRender };
+        }
+        const autoRender = await computeAutoNotesRender(phase1, { windowHours: input.notesRecentHours }, notesSeenStore);
+        const fullIds = phase1
+            .filter((t) => autoRender.perTask.get(t.id)?.kind === 'full')
+            .map((t) => t.id);
+        let fullTasksById = new Map();
+        if (fullIds.length > 0) {
+            try {
+                fullTasksById = await findTasksByIds(config, fullIds, { notesQuery: 'full' });
+            }
+            catch {
+                // La fase 2 falló DEL TODO (red, 5xx…): `fullTasksById` se queda
+                // vacío y cada tarea "íntegra" cae al mismo repliegue de abajo
+                // (tarea ausente del Map) — GARANTÍA, nunca a medias ni rompe el
+                // listado entero por un fallo que solo afecta al TEXTO de la nota.
+            }
+        }
+        const list = phase1.map((t) => {
+            const decision = autoRender.perTask.get(t.id);
+            if (decision?.kind !== 'full')
+                return t;
+            const full = fullTasksById.get(t.id);
+            if (!full || !hasNotes(full)) {
+                // Repliegue a marcador (garantía de arriba): la fase 2 no trajo esta
+                // tarea (borrada entre medias, p. ej.), falló del todo, o su nota ya
+                // no está — NUNCA texto a medias ni una nota vacía disfrazada de "sin
+                // nota".
+                autoRender.perTask.set(t.id, { ...decision, kind: 'marker' });
+                autoRender.fullCount--;
+                autoRender.markerCount++;
+                return t;
+            }
+            return { ...t, notes: full.notes };
+        });
+        taskCache.setAll(list);
+        return { list, autoRender };
+    }
     server.registerTool('list_lists', {
         description: 'Enumera TODAS las listas de "Algún día" con su recuento de tareas, incluidas las ' +
             'vacías (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacía de ' +

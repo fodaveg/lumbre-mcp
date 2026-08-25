@@ -68,22 +68,41 @@ function formatNoteMarker(length, updatedAt) {
  * (no debería pasar: `computeAutoNotesRender` cubre TODA tarea con nota del
  * mismo lote — solo ocurriría si se llama con opciones inconsistentes), cae a
  * marcador con la longitud real en vez de arriesgar un truncado.
+ *
+ * En `'auto'` la decisión se mira ANTES de mirar `t.notes` (a diferencia de
+ * `'full'`/`'preview'`, que sí dependen de tenerlo): la fase 1 de
+ * `list_tasks({notes:'auto'})` contra un servidor NUEVO (ver
+ * `ListTasksInput.notesQuery`/`index.ts`) decide con `LumbreTask.notesLength`
+ * SIN el texto, así que una tarea con nota puede llegar aquí con `t.notes:
+ * null` — si el guard mirase `t.notes` primero (como hacía antes de esta
+ * feature), un marcador `kind:'marker'` legítimo desaparecería del todo en
+ * vez de mostrarse, porque `t.notes` vale `null` aunque la tarea SÍ tenga
+ * nota (mismo bug que corrige `hasNotes` en `notes.ts`). Solo `kind:'full'`
+ * toca `t.notes` — y para llegar a `'full'` el llamante (`index.ts`) ya tuvo
+ * que rellenarlo con la fase 2 (o replegar la decisión a `'marker'` si esa
+ * fase falló, ver la garantía de arriba).
  */
 function buildNotesLine(t, opts) {
-    if (!t.notes || t.notes.trim() === '')
-        return null;
     const mode = opts.notesMode ?? 'preview';
     if (mode === 'none')
         return null;
+    if (mode === 'auto') {
+        // (o `notesSince`, que reusa este mismo camino — ver `formatTaskList`)
+        const decision = opts.autoRender?.perTask.get(t.id);
+        if (decision) {
+            return decision.kind === 'full'
+                ? notesFull(t.notes)
+                : formatNoteMarker(decision.length, decision.updatedAt);
+        }
+        if (!t.notes || t.notes.trim() === '')
+            return null;
+        return formatNoteMarker(t.notes.trim().length, t.notesUpdatedAt ?? null);
+    }
+    if (!t.notes || t.notes.trim() === '')
+        return null;
     if (mode === 'full')
         return notesFull(t.notes);
-    if (mode === 'preview')
-        return notesPreview(t.notes);
-    // 'auto' (o `notesSince`, que reusa este mismo camino — ver `formatTaskList`)
-    const decision = opts.autoRender?.perTask.get(t.id);
-    if (!decision)
-        return formatNoteMarker(t.notes.trim().length, t.notesUpdatedAt ?? null);
-    return decision.kind === 'full' ? notesFull(t.notes) : formatNoteMarker(decision.length, decision.updatedAt);
+    return notesPreview(t.notes); // 'preview'
 }
 /**
  * Normaliza el título (`content`) de una tarea para comparar duplicados:

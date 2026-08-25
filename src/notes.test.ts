@@ -11,6 +11,7 @@ import {
 	decideNotesSinceRender,
 	DEFAULT_NOTES_RECENT_HOURS,
 	hasDoneTag,
+	hasNotes,
 	loadNotesSeenState,
 	parseNotesSince,
 	recordNotesSeen,
@@ -109,12 +110,12 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 	const opts = { now: NOW, windowHours: DEFAULT_NOTES_RECENT_HOURS };
 
 	it('@done → íntegra, aunque nunca se haya visto antes ni traiga marca', () => {
-		const d = decideAutoNoteRender('Tarea @done', 'una nota cualquiera', undefined, undefined, opts);
+		const d = decideAutoNoteRender('Tarea @done', 'una nota cualquiera'.length, undefined, undefined, opts);
 		expect(d.kind).toBe('full');
 	});
 
 	it('#done → íntegra', () => {
-		const d = decideAutoNoteRender('Tarea #done', 'una nota cualquiera', undefined, undefined, opts);
+		const d = decideAutoNoteRender('Tarea #done', 'una nota cualquiera'.length, undefined, undefined, opts);
 		expect(d.kind).toBe('full');
 	});
 
@@ -123,7 +124,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 			const previous = { u: '2026-07-20T00:00:00.000Z', n: 10 };
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota nueva',
+				'nota nueva'.length,
 				'2026-07-24T00:00:00.000Z',
 				previous,
 				opts
@@ -135,7 +136,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 			const previous = { u: '2026-07-20T00:00:00.000Z', n: 10 };
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota sin cambios',
+				'nota sin cambios'.length,
 				'2026-07-20T00:00:00.000Z',
 				previous,
 				opts
@@ -147,7 +148,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 			const previous = { u: '2026-07-20T00:00:00.000Z', n: 10 };
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota',
+				'nota'.length,
 				'2026-07-19T00:00:00.000Z',
 				previous,
 				opts
@@ -157,7 +158,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 
 		it('sin marca actual (null) con huella previa → marcador (desconocido, no se arriesga)', () => {
 			const previous = { u: '2026-07-20T00:00:00.000Z', n: 10 };
-			const d = decideAutoNoteRender('Tarea sin tag', 'nota', null, previous, opts);
+			const d = decideAutoNoteRender('Tarea sin tag', 'nota'.length, null, previous, opts);
 			expect(d.kind).toBe('marker');
 		});
 	});
@@ -166,7 +167,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 		it('marca DENTRO de la ventana (hace 2h) → íntegra', () => {
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota',
+				'nota'.length,
 				'2026-07-25T10:00:00.000Z',
 				undefined,
 				opts
@@ -177,7 +178,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 		it('marca justo en el borde de la ventana (hace exactamente 24h) → íntegra', () => {
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota',
+				'nota'.length,
 				'2026-07-24T12:00:00.000Z',
 				undefined,
 				opts
@@ -188,7 +189,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 		it('marca FUERA de la ventana (hace 3 días) → marcador', () => {
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota',
+				'nota'.length,
 				'2026-07-22T12:00:00.000Z',
 				undefined,
 				opts
@@ -199,7 +200,7 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 		it('ventana más corta (6h) excluye una marca de hace 10h', () => {
 			const d = decideAutoNoteRender(
 				'Tarea sin tag',
-				'nota',
+				'nota'.length,
 				'2026-07-25T02:00:00.000Z',
 				undefined,
 				{ now: NOW, windowHours: 6 }
@@ -208,18 +209,24 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 		});
 
 		it('sin marca (null) → marcador (desconocido)', () => {
-			const d = decideAutoNoteRender('Tarea sin tag', 'nota', null, undefined, opts);
+			const d = decideAutoNoteRender('Tarea sin tag', 'nota'.length, null, undefined, opts);
 			expect(d.kind).toBe('marker');
 		});
 
 		it('marca mal formada (no parsea a fecha) → marcador, sin lanzar', () => {
-			const d = decideAutoNoteRender('Tarea sin tag', 'nota', 'no-es-una-fecha', undefined, opts);
+			const d = decideAutoNoteRender('Tarea sin tag', 'nota'.length, 'no-es-una-fecha', undefined, opts);
 			expect(d.kind).toBe('marker');
 		});
 	});
 
 	it('el marcador lleva la longitud REAL (trim, no capada a 240) y la marca usada', () => {
-		const d = decideAutoNoteRender('Tarea sin tag', LONG_NOTE, '2026-07-01T00:00:00.000Z', undefined, opts);
+		const d = decideAutoNoteRender(
+			'Tarea sin tag',
+			LONG_NOTE.trim().length,
+			'2026-07-01T00:00:00.000Z',
+			undefined,
+			opts
+		);
 		expect(d.kind).toBe('marker');
 		expect(d.length).toBe(LONG_NOTE.trim().length);
 		expect(d.length).toBeGreaterThan(240);
@@ -265,34 +272,34 @@ describe('parseNotesSince', () => {
 
 describe('touchNotesSeen — huella por MARCA + poda LRU', () => {
 	it('inserta una entrada nueva con la marca + longitud tras trim', () => {
-		const state = touchNotesSeen({}, 'task-1', '  hola  ', '2026-07-20T00:00:00.000Z');
+		const state = touchNotesSeen({}, 'task-1', '  hola  '.trim().length, '2026-07-20T00:00:00.000Z');
 		expect(state['task-1']).toEqual({ u: '2026-07-20T00:00:00.000Z', n: 4 });
 	});
 
 	it('sin marca válida (null/ausente) NO inserta entrada — nada útil que registrar', () => {
-		const state = touchNotesSeen({}, 'task-1', 'hola', null);
+		const state = touchNotesSeen({}, 'task-1', 'hola'.length, null);
 		expect(state['task-1']).toBeUndefined();
 	});
 
 	it('sin marca válida BORRA una entrada previa (propia o legado) en vez de dejarla mintiendo', () => {
-		let state: NotesSeenState = touchNotesSeen({}, 'task-1', 'hola', '2026-07-20T00:00:00.000Z');
-		state = touchNotesSeen(state, 'task-1', 'hola', null);
+		let state: NotesSeenState = touchNotesSeen({}, 'task-1', 'hola'.length, '2026-07-20T00:00:00.000Z');
+		state = touchNotesSeen(state, 'task-1', 'hola'.length, null);
 		expect(state['task-1']).toBeUndefined();
 	});
 
 	it('reinsertar una entrada existente la mueve al final (más reciente)', () => {
 		let state: NotesSeenState = {};
-		state = touchNotesSeen(state, 'a', 'nota a', '2026-07-01T00:00:00.000Z');
-		state = touchNotesSeen(state, 'b', 'nota b', '2026-07-01T00:00:00.000Z');
-		state = touchNotesSeen(state, 'a', 'nota a editada', '2026-07-02T00:00:00.000Z');
+		state = touchNotesSeen(state, 'a', 'nota a'.length, '2026-07-01T00:00:00.000Z');
+		state = touchNotesSeen(state, 'b', 'nota b'.length, '2026-07-01T00:00:00.000Z');
+		state = touchNotesSeen(state, 'a', 'nota a editada'.length, '2026-07-02T00:00:00.000Z');
 		expect(Object.keys(state)).toEqual(['b', 'a']);
 	});
 
 	it('poda la entrada MENOS reciente al superar el cap', () => {
 		let state: NotesSeenState = {};
-		state = touchNotesSeen(state, 'a', 'nota a', '2026-07-01T00:00:00.000Z', 2);
-		state = touchNotesSeen(state, 'b', 'nota b', '2026-07-01T00:00:00.000Z', 2);
-		state = touchNotesSeen(state, 'c', 'nota c', '2026-07-01T00:00:00.000Z', 2);
+		state = touchNotesSeen(state, 'a', 'nota a'.length, '2026-07-01T00:00:00.000Z', 2);
+		state = touchNotesSeen(state, 'b', 'nota b'.length, '2026-07-01T00:00:00.000Z', 2);
+		state = touchNotesSeen(state, 'c', 'nota c'.length, '2026-07-01T00:00:00.000Z', 2);
 		expect(Object.keys(state)).toEqual(['b', 'c']);
 		expect(state['a']).toBeUndefined();
 	});
@@ -300,7 +307,7 @@ describe('touchNotesSeen — huella por MARCA + poda LRU', () => {
 
 describe('estado en disco — best-effort, nunca rompe una lectura', () => {
 	it('round-trip: lo que guarda saveNotesSeenState lo devuelve loadNotesSeenState', async () => {
-		const state = touchNotesSeen({}, 'task-1', 'una nota', '2026-07-20T00:00:00.000Z');
+		const state = touchNotesSeen({}, 'task-1', 'una nota'.length, '2026-07-20T00:00:00.000Z');
 		await saveNotesSeenState(state);
 		const loaded = await loadNotesSeenState();
 		expect(loaded).toEqual(state);
@@ -664,5 +671,57 @@ describe("notesMode: 'none'/'preview'/'full' — comportamiento explícito, sin 
 		const output = formatTaskList(tasks, 'today', { notesMode: 'full' });
 		expect(output).toContain(LONG_NOTE.trim());
 		expect(output).not.toContain('…');
+	});
+});
+
+describe('notas en dos fases (perf, 2026-08-25) — fase 1 sin texto (`notes: null`, solo `notesLength`)', () => {
+	/**
+	 * Simula exactamente lo que trae la FASE 1 de `list_tasks({notes:'auto'})`
+	 * contra un servidor NUEVO (`ListTasksInput.notesQuery: 'length'`, ver
+	 * `index.ts`): `notes: null` aunque la tarea SÍ tenga nota, con
+	 * `notesLength` en su lugar — antes de esta feature, `t.notes` siempre
+	 * traía el texto, así que `hasNotes`/`buildNotesLine` nunca tuvieron que
+	 * lidiar con este caso.
+	 */
+	function phase1Task(overrides: Partial<LumbreTask> = {}): LumbreTask {
+		return task({ notes: null, ...overrides });
+	}
+
+	it('hasNotes: con `notes: null` cae a `notesLength` (bug real: antes leía "sin nota" con nota de verdad)', () => {
+		expect(hasNotes(phase1Task({ notesLength: 42 }))).toBe(true);
+		expect(hasNotes(phase1Task({ notesLength: 0 }))).toBe(false);
+		expect(hasNotes(phase1Task({ notesLength: null }))).toBe(false); // gateo (nota borrada) — igual que `notes: null` en full
+		expect(hasNotes(phase1Task())).toBe(false); // ni notes ni notesLength: sin nota, sin más
+	});
+
+	it('computeAutoNotesRender decide con `notesLength` — SIN el texto — igual que con `notes` completo', async () => {
+		const tasks: LumbreTask[] = [
+			phase1Task({ id: 'a', content: 'A @done', notesLength: 40 }),
+			phase1Task({
+				id: 'b',
+				content: 'B sin tag',
+				notesLength: 55,
+				notesUpdatedAt: '2020-01-01T00:00:00.000Z' // fuera de cualquier ventana
+			})
+		];
+		const result = await computeAutoNotesRender(tasks, { now: NOW });
+		expect(result.perTask.get('a')).toMatchObject({ kind: 'full', length: 40 });
+		expect(result.perTask.get('b')).toMatchObject({ kind: 'marker', length: 55 });
+	});
+
+	it('formatTaskList — un marcador con `t.notes: null` SIGUE mostrando la línea (bug real: el guard viejo la ocultaba del todo)', async () => {
+		const tasks: LumbreTask[] = [
+			phase1Task({
+				id: 'm-1',
+				content: 'Sin tag',
+				notesLength: 55,
+				notesUpdatedAt: '2020-01-01T00:00:00.000Z'
+			})
+		];
+		const autoRender = await computeAutoNotesRender(tasks, { now: NOW });
+		expect(autoRender.perTask.get('m-1')?.kind).toBe('marker');
+		const output = formatTaskList(tasks, 'today', { notesMode: 'auto', autoRender });
+		expect(output).toContain('notas:');
+		expect(output).toContain('✎55');
 	});
 });

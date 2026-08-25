@@ -73,6 +73,8 @@ export async function listTasks(config, input) {
         params.set('includeDone', 'true');
     if (input.limit)
         params.set('limit', String(input.limit));
+    if (input.notesQuery)
+        params.set('notes', input.notesQuery);
     const qs = params.toString();
     const body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
     if (!Array.isArray(body)) {
@@ -127,29 +129,46 @@ export async function findTaskById(config, taskId) {
     }
     return body[0];
 }
+/** Tope de ids por petición que impone `GET /api/tasks?ids=` en el servidor
+ *  (ver su JSDoc en el repo principal) — `findTasksByIds` trocea por encima
+ *  de esto en vez de mandar un `ids=` que el servidor rechazaría. */
+const MAX_IDS_PER_REQUEST = 200;
 /**
  * Busca VARIAS tareas de golpe vía `GET /api/tasks?ids=` (feature batch —
- * espejo de `findTaskById`, pero para un LOTE): UNA sola petición → un `Map`
- * por `id`, en vez de una `findTaskById` por cada `taskId`/`subtaskId` a
- * comprobar. Pensado para `mutate_tasks` (`index.ts`): resuelve la existencia
- * de TODAS las tareas que targetea un lote en una sola llamada, antes de
- * mandar `runBatch`. Ids sin coincidencia (no existen, ajenas al token, o
- * repetidos) simplemente no tienen entrada en el `Map` — el llamante lo
- * distingue con `.get(id)` → `undefined`, mismo criterio que
- * `findTaskById` devolviendo `undefined`. `ids: []` no llama a la red (`Map`
- * vacío directo).
+ * espejo de `findTaskById`, pero para un LOTE): UNA sola petición (o varias
+ * en TROCEADO de `MAX_IDS_PER_REQUEST` si `ids` se pasa de ese tope, ver
+ * abajo) → un `Map` por `id`, en vez de una `findTaskById` por cada
+ * `taskId`/`subtaskId` a comprobar. Pensado tanto para `mutate_tasks`
+ * (`index.ts`, existencia de todo el lote en una sola llamada de red — o
+ * pocas, si se trocea) como para la FASE 2 de `list_tasks({notes:'auto'})`
+ * (traer el texto íntegro solo de las notas que la fase 1 decidió íntegras,
+ * ver `notesQuery`/el bloque de `list_tasks` en `index.ts`). Ids sin
+ * coincidencia (no existen, ajenas al token, o repetidos) simplemente no
+ * tienen entrada en el `Map` — el llamante lo distingue con `.get(id)` →
+ * `undefined`, mismo criterio que `findTaskById` devolviendo `undefined`.
+ * `ids: []` no llama a la red (`Map` vacío directo).
+ *
+ * `notesQuery` (mismo significado que `ListTasksInput.notesQuery`): sin
+ * indicar, el servidor sirve notas completas (comportamiento de siempre) —
+ * la fase 2 de `list_tasks` lo manda explícito (`'full'`) por claridad, pese
+ * a que ya sea el default del servidor.
  */
-export async function findTasksByIds(config, ids) {
+export async function findTasksByIds(config, ids, opts = {}) {
     if (ids.length === 0)
         return new Map();
-    const params = new URLSearchParams({ ids: ids.join(',') });
-    const body = await request(config, `/api/tasks?${params.toString()}`);
-    if (!Array.isArray(body)) {
-        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?ids=.');
-    }
     const map = new Map();
-    for (const t of body)
-        map.set(t.id, t);
+    for (let i = 0; i < ids.length; i += MAX_IDS_PER_REQUEST) {
+        const chunk = ids.slice(i, i + MAX_IDS_PER_REQUEST);
+        const params = new URLSearchParams({ ids: chunk.join(',') });
+        if (opts.notesQuery)
+            params.set('notes', opts.notesQuery);
+        const body = await request(config, `/api/tasks?${params.toString()}`);
+        if (!Array.isArray(body)) {
+            throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?ids=.');
+        }
+        for (const t of body)
+            map.set(t.id, t);
+    }
     return map;
 }
 /** Error uniforme para un `taskId`/`subtaskId` que no aparece entre las

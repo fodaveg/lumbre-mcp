@@ -153,6 +153,50 @@ describe('findTasksByIds', () => {
 		mockFetchJson({ not: 'an-array' });
 		await expect(findTasksByIds(config, ['a'])).rejects.toThrow(/inesperada/);
 	});
+
+	it('manda `notes=` cuando se indica (fase 2 de list_tasks: notesQuery: "full")', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await findTasksByIds(config, ['a'], { notesQuery: 'full' });
+		const [url] = fetchSpy.mock.calls[0] as [string];
+		expect(url).toBe('https://lumbre.test/api/tasks?ids=a&notes=full');
+	});
+
+	it('trocea por encima de MAX_IDS_PER_REQUEST (200): dos peticiones, resultado fusionado', async () => {
+		const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`);
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = new URL(String(url));
+			const reqIds = (u.searchParams.get('ids') ?? '').split(',');
+			const tasks = reqIds.map((id) => ({
+				id,
+				content: `tarea ${id}`,
+				notes: null,
+				done: false,
+				priority: null,
+				date: null,
+				deadline: null,
+				list: null,
+				createdAt: new Date().toISOString()
+			}));
+			return new Response(JSON.stringify(tasks), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const map = await findTasksByIds(config, ids);
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		const firstIds = new URL(String(fetchSpy.mock.calls[0][0])).searchParams.get('ids')!.split(',');
+		const secondIds = new URL(String(fetchSpy.mock.calls[1][0])).searchParams.get('ids')!.split(',');
+		expect(firstIds).toHaveLength(200);
+		expect(secondIds).toHaveLength(50);
+		expect(map.size).toBe(250);
+		for (const id of ids) expect(map.get(id)?.id).toBe(id);
+	});
 });
 
 // b00303b5: `list_lists` — lee TODAS las listas, incluidas las de recuento 0
