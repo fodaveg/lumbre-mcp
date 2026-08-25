@@ -56,6 +56,49 @@ Validar ANTES de recargar: el `reload` de Caddy es en caliente y no corta
 conexiones vivas, pero una config inválida deja el borde entero (Lumbre, Senda,
 fodaveg, Vega y las demos) sirviendo la anterior sin avisar de por qué.
 
+### La pieza que NO está en este repo
+
+El silencio del log de este host son DOS piezas, y la segunda vive en
+`/srv/edge/Caddyfile` (el bloque global del borde, que no es de este repo ni
+está en git en ninguna parte). Si alguna vez se reconstruye ese fichero, esto
+tiene que volver a entrar o el token vuelve a caer en el log:
+
+```
+{
+	email {$ACME_EMAIL}
+
+	log mcp_errores {
+		output discard
+		include http.log.error.mcp
+	}
+}
+
+import conf.d/*.caddy
+```
+
+Por qué hacen falta las dos: el bloque `log mcp { output discard }` del sitio
+solo tapa `http.log.access.mcp`. La entrada que lleva la URI completa (y por
+tanto el token del path) sale por `http.log.error.mcp`, y el `include` que la
+atrapa no se admite dentro del bloque `log` de un sitio, solo en el global.
+
+**Cómo se comprueba, porque validar y recargar NO lo prueban** (el bloque puede
+estar puesto y no tapar nada; pasó dos veces el 25 ago 2026):
+
+```bash
+ssh lumbre 'docker stop lumbre-mcp'
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://mcp.lumbre.pro/mcp/f00dfacef00dfacef00dfacef00dface   # 502 esperado
+ssh lumbre 'docker start lumbre-mcp
+  docker logs edge-caddy --since 2m 2>&1 | grep -c f00dface'    # tiene que ser 0
+```
+
+El token del `curl` es FALSO a propósito: si la prueba sale mal, lo que queda
+escrito en el log no es un secreto de verdad. Y el control que hace falta al
+lado: `docker exec edge-caddy wget -q -O - http://127.0.0.1:2019/config/` y
+mirar `logging.logs.default.exclude`, que debe listar SOLO
+`http.log.access.mcp` y `http.log.error.mcp`. Si excluye más cosas, has
+apagado el registro de otro host sin querer.
+
 ## Smoke test tras cada deploy
 
 `scripts/smoke-remote.mjs` es el guardarraíl del deploy: sin dependencias,

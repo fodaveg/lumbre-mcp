@@ -17,12 +17,46 @@
 # Sin `encode`: las respuestas son JSON pequeño y el transporte puede abrir
 # SSE, donde comprimir por buffer solo añade latencia.
 mcp.lumbre.pro {
-	reverse_proxy lumbre-mcp:8787 {
-		# Streamable HTTP mantiene abierta la respuesta SSE mientras dura la
-		# petición; sin flush inmediato los eventos se quedarían en el buffer
-		# del proxy. Mismo motivo por el que `senda.caddy` sube el
-		# `read_timeout` de PocketBase.
-		flush_interval -1
+	# ── El token del path NUNCA debe llegar a un log ──────────────────────
+	#
+	# Desde que la app de Claude se conecta con el token dentro de la URL
+	# (`/mcp/<token>`, porque no deja configurar cabeceras), esa URI es un
+	# secreto. Y Caddy vuelca la URI COMPLETA en sus entradas de
+	# `http.log.error` (502, timeout...), que van al log del contenedor
+	# `edge-caddy`.
+	#
+	# MEDIDO el 25 ago 2026, y por eso este bloque es así y no de otra
+	# manera: un `log { output discard }` en el sitio NO basta. Solo tapa
+	# `http.log.access.log0`; el error sale por `http.log.error.log0`, que
+	# ese bloque no incluye. Se comprobó parando el contenedor `lumbre-mcp`
+	# y pidiendo `/mcp/deadbeef...` con un token FALSO: el 502 dejó el
+	# segmento escrito en claro en el log del borde.
+	#
+	# La vía que sí funciona es no dejar que el token entre en el pipeline:
+	# se saca del path con un matcher, se reescribe la URI a `/mcp` ANTES de
+	# cualquier handler, y se reinyecta como cabecera `Authorization` hacia
+	# el upstream. Lo que se registre, se registre: la URI ya no lo lleva.
+	#
+	# El servidor MCP sigue aceptando el token en el path por su cuenta (ver
+	# `src/http.ts`): esto no lo sustituye, lo cubre por delante. Si alguien
+	# apunta al contenedor sin pasar por este borde, sigue autenticando.
+	@token_en_path path_regexp tok ^/mcp/([0-9a-f]{32})$
+	handle @token_en_path {
+		rewrite * /mcp
+		reverse_proxy lumbre-mcp:8787 {
+			header_up Authorization "Bearer {re.tok.1}"
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy lumbre-mcp:8787 {
+			# Streamable HTTP mantiene abierta la respuesta SSE mientras dura
+			# la petición; sin flush inmediato los eventos se quedarían en el
+			# buffer del proxy. Mismo motivo por el que `senda.caddy` sube el
+			# `read_timeout` de PocketBase.
+			flush_interval -1
+		}
 	}
 
 	header {
@@ -30,18 +64,30 @@ mcp.lumbre.pro {
 		-Server
 	}
 
-	# Sin log en este host (tarea M2b, token-en-el-path): este servicio no
-	# registra las peticiones que le llegan bien (el acceso normal ni
-	# siquiera está cableado), pero Caddy SÍ vuelca la URI completa en sus
-	# entradas de error (`http.log.error` — 502, timeout…), y desde que el
-	# token puede viajar en el path (`/mcp/<token>`) eso lo dejaría en claro
-	# dentro del log del contenedor `edge-caddy`. `discard` en vez de quitar
-	# el bloque entero para que quede explícito que es una decisión, no un
-	# olvido. Coste: este host se queda SIN registro de errores en el borde;
-	# el diagnóstico de un 502/timeout se hace con el log del contenedor
-	# `lumbre-mcp` (que sí distingue método + status, nunca el token — ver
-	# `logRequest` en `src/http.ts`), no con el de Caddy.
-	log {
+	# Este host no escribe NINGÚN log en el borde, ni de acceso ni de error.
+	# Hacen falta DOS piezas, y este bloque es solo la primera (el acceso).
+	#
+	# ⚠️ LA SEGUNDA VIVE EN `/srv/edge/Caddyfile`, el bloque global del borde,
+	# que NO está en este repo. Es un logger llamado `mcp_errores` con
+	# `output discard` e `include http.log.error.mcp`. Sin ella, esto NO
+	# protege nada: está medido (dos veces, parando el contenedor
+	# `lumbre-mcp` y pidiendo `/mcp/<token falso>`, el 502 dejaba el segmento
+	# en claro en el log de `edge-caddy`). Un `log { output discard }` a
+	# secas solo tapa `http.log.access.<nombre>`; la entrada que lleva la URI
+	# completa sale por `http.log.error.<nombre>`, y el `include` que la
+	# atrapa NO se admite dentro del bloque `log` de un sitio, solo en el
+	# global. El contenido exacto está en `deploy/README-deploy.md`.
+	#
+	# El logger se NOMBRA (`mcp`) a propósito: sin nombre, Caddy lo llama
+	# `log0` por orden de aparición, y el día que otro fragmento del borde
+	# estrene un bloque `log` antes que este, el nombre se desplaza y el
+	# `include` del global dejaría de casar EN SILENCIO.
+	#
+	# Coste: sin registro en el borde para este host. El diagnóstico de un
+	# 502 o un timeout se hace con el log del contenedor `lumbre-mcp`, que
+	# distingue método y estado y redacta el token (ver `logRequest` en
+	# `src/http.ts`).
+	log mcp {
 		output discard
 	}
 }
