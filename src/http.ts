@@ -19,6 +19,18 @@ import { createServer } from './index.js';
  * app.lumbre.pro (ver `lumbre-client.ts`). Sin header, 401 fail-closed: nunca
  * se intenta una petición sin auth "a ver qué pasa".
  *
+ * SEGUNDA FORMA (tarea M2b, 2026-08-25): `POST /mcp/<token>` — el token va en
+ * el PATH en vez de la cabecera. Motivo: claude.ai (web/móvil) no deja
+ * configurar cabeceras en un conector personalizado y, si el servidor
+ * responde 401, exige un flujo OAuth 2.1 completo que este relé no tiene
+ * (M3, sin hacer). Es la vía barata, igual que ya hace Lumbre con el feed ICS
+ * y los buzones: el token vive en la URL. `/mcp` sigue funcionando exactamente
+ * igual para quien sí puede mandar cabecera (Claude Code, ver
+ * `deploy/README-deploy.md`). Si llegan las dos formas a la vez, GANA la
+ * cabecera (`extractToken`, más abajo) — es la menos expuesta de las dos (no
+ * queda guardada en ningún sitio salvo la config del cliente), así que ante
+ * ambigüedad se prefiere la buena en vez de fallar o mezclar.
+ *
  * Modo STATELESS (`sessionIdGenerator: undefined`, ver el JSDoc de
  * `StreamableHTTPServerTransport` en el SDK): un `McpServer` + un transporte
  * NUEVOS por petición HTTP, cerrados al terminar. No hay sesión que fugue
@@ -82,11 +94,28 @@ function isAllowedOrigin(req: IncomingMessage): boolean {
 	return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
 }
 
-function extractToken(req: IncomingMessage): string | undefined {
+function tokenFromHeader(req: IncomingMessage): string | undefined {
 	const header = req.headers.authorization;
 	if (!header || !header.startsWith('Bearer ')) return undefined;
 	const token = header.slice('Bearer '.length).trim();
 	return token.length > 0 ? token : undefined;
+}
+
+/** Forma del token de email-to-task de Lumbre: 32 chars hexadecimales. Un
+ *  segmento de path que no case NO es "un token raro" — es "sin token": no se
+ *  recorta ni se normaliza, se trata exactamente igual que si no hubiera
+ *  nada, y el 401 de siempre lo cubre. */
+const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/i;
+
+function isWellFormedPathToken(segment: string): boolean {
+	return TOKEN_PATH_PATTERN.test(segment);
+}
+
+/** Combina las dos formas de traer el token, cabecera primero. `pathToken` ya
+ *  ha pasado (o no) `isWellFormedPathToken` en el llamador — aquí solo se
+ *  decide la prioridad. */
+function extractToken(req: IncomingMessage, pathToken: string | undefined): string | undefined {
+	return tokenFromHeader(req) ?? pathToken;
 }
 
 function sendJsonRpcError(res: ServerResponse, status: number, code: number, message: string): void {
@@ -119,26 +148,41 @@ function logRequest(method: string, status: number): void {
 	console.error(`[lumbre-mcp-http] ${method} ${status}`);
 }
 
-async function handleMcpRequest(req: IncomingMessage, res: ServerResponse, baseUrl: string): Promise<void> {
+/**
+ * `routeLabel` es SOLO para el log: `/mcp` o `/mcp/<redactado>` — nunca el
+ * segmento real del path, esté o no bien formado (un token mal transcrito por
+ * un solo carácter sigue siendo un token que no debe acabar en un log). El
+ * body ya lo lee `handleMcpRequest` sin volcarlo tampoco (`describeMethod`).
+ */
+async function handleMcpRequest(
+	req: IncomingMessage,
+	res: ServerResponse,
+	baseUrl: string,
+	pathToken: string | undefined,
+	routeLabel: string
+): Promise<void> {
 	if (req.method !== 'POST') {
-		sendJsonRpcError(res, 405, -32000, 'Method not allowed. Modo stateless: solo POST /mcp.');
-		logRequest(`${req.method ?? '?'} /mcp`, 405);
+		sendJsonRpcError(res, 405, -32000, `Method not allowed. Modo stateless: solo POST ${routeLabel}.`);
+		logRequest(`${req.method ?? '?'} ${routeLabel}`, 405);
 		return;
 	}
 
 	if (!isAllowedHost(req) || !isAllowedOrigin(req)) {
 		sendJsonRpcError(res, 403, -32000, 'Host/Origin no permitido.');
-		logRequest('POST /mcp', 403);
+		logRequest(`POST ${routeLabel}`, 403);
 		return;
 	}
 
 	// Fail-closed: sin token no se llega ni a leer el body. El servidor NO
 	// tiene token propio — es el de ESTA petición el que se usa para hablar
-	// con app.lumbre.pro (ver el JSDoc de cabecera).
-	const token = extractToken(req);
+	// con app.lumbre.pro (ver el JSDoc de cabecera). Cabecera gana sobre path
+	// (`extractToken`); un `pathToken` mal formado ya llega aquí como
+	// `undefined` (ver `createHttpApp`), así que un path con la forma
+	// incorrecta cae exactamente por esta misma rama, como "sin credencial".
+	const token = extractToken(req, pathToken);
 	if (!token) {
-		sendJsonRpcError(res, 401, -32001, 'Falta Authorization: Bearer <token>.');
-		logRequest('POST /mcp', 401);
+		sendJsonRpcError(res, 401, -32001, 'Falta Authorization: Bearer <token> o un token válido en el path.');
+		logRequest(`POST ${routeLabel}`, 401);
 		return;
 	}
 
@@ -150,7 +194,7 @@ async function handleMcpRequest(req: IncomingMessage, res: ServerResponse, baseU
 		methodLabel = describeMethod(parsedBody);
 	} catch {
 		sendJsonRpcError(res, 400, -32700, 'Parse error: el cuerpo no es JSON válido.');
-		logRequest('POST /mcp', 400);
+		logRequest(`POST ${routeLabel}`, 400);
 		return;
 	}
 
@@ -172,7 +216,7 @@ async function handleMcpRequest(req: IncomingMessage, res: ServerResponse, baseU
 		console.error('[lumbre-mcp-http] error interno:', err instanceof Error ? err.message : String(err));
 		if (!res.headersSent) sendJsonRpcError(res, 500, -32603, 'Internal server error');
 	} finally {
-		logRequest(`POST /mcp ${methodLabel}`, res.statusCode);
+		logRequest(`POST ${routeLabel} ${methodLabel}`, res.statusCode);
 		res.on('close', () => {
 			void transport.close();
 			void mcpServer.close();
@@ -196,7 +240,24 @@ export function createHttpApp(baseUrl: string = process.env.LUMBRE_BASE_URL?.tri
 		}
 
 		if (url.pathname === '/mcp') {
-			void handleMcpRequest(req, res, baseUrl);
+			void handleMcpRequest(req, res, baseUrl, undefined, '/mcp');
+			return;
+		}
+
+		// `/mcp/<token>` (segunda forma, ver el JSDoc de cabecera). Cualquier
+		// cosa bajo el prefijo `/mcp/` entra aquí, no solo un único segmento
+		// hexadecimal bien formado — `/mcp/` (vacío), `/mcp/algo/mas` (varios
+		// segmentos) o un segmento con caracteres raros llegan igual a
+		// `handleMcpRequest` con `pathToken: undefined`, y caen por el mismo
+		// 401 de "sin credencial" que hoy. No hay recorte ni normalización: o
+		// el resto del path es EXACTAMENTE un segmento que casa
+		// `TOKEN_PATH_PATTERN`, o no hay token.
+		const MCP_PATH_PREFIX = '/mcp/';
+		if (url.pathname.startsWith(MCP_PATH_PREFIX)) {
+			const remainder = url.pathname.slice(MCP_PATH_PREFIX.length);
+			const isSingleSegment = remainder.length > 0 && !remainder.includes('/');
+			const pathToken = isSingleSegment && isWellFormedPathToken(remainder) ? remainder : undefined;
+			void handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>');
 			return;
 		}
 

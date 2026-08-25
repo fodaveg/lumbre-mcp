@@ -14,7 +14,14 @@
  *   MCP_URL=https://mcp.lumbre.pro/mcp LUMBRE_TOKEN=xxx node scripts/smoke-remote.mjs
  *
  * `<url>` es la del endpoint MCP completo (con `/mcp`), no la base del host.
- * Exit 0 si las 5 comprobaciones pasan, 1 en cualquier otro caso, con un
+ * Además del camino de cabecera, comprueba la SEGUNDA forma de auth
+ * (`/mcp/<token>`, tarea M2b, para claude.ai que no deja configurar
+ * cabeceras): el camino feliz con un token bien formado y el NEGATIVO con uno
+ * mal formado — sin este último, un fail-open en la validación de forma del
+ * path pasaría desapercibido (ver `src/http.test.ts`, mismo sabotaje
+ * comprobado allí).
+ *
+ * Exit 0 si TODAS las comprobaciones pasan, 1 en cualquier otro caso, con un
  * mensaje por comprobación.
  */
 
@@ -46,12 +53,14 @@ const JSON_RPC_HEADERS = {
 
 let requestId = 0;
 
-/** POST JSON-RPC crudo. `withAuth: false` es el caso negativo del guardarraíl. */
-async function rpc(method, params, { withAuth = true } = {}) {
+/** POST JSON-RPC crudo. `withAuth: false` es el caso negativo del
+ *  guardarraíl. `targetUrl` (default `url`) deja apuntar a `<url>/<token>`
+ *  para probar la segunda forma de auth sin duplicar esta función. */
+async function rpc(method, params, { withAuth = true, targetUrl = url } = {}) {
 	requestId += 1;
 	const headers = { ...JSON_RPC_HEADERS };
 	if (withAuth) headers.authorization = `Bearer ${token}`;
-	const res = await fetch(url, {
+	const res = await fetch(targetUrl, {
 		method: 'POST',
 		headers,
 		body: JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params: params ?? {} })
@@ -100,6 +109,29 @@ async function main() {
 	// 3. Caso NEGATIVO: sin token, 401 fail-closed.
 	const noAuth = await rpc('tools/list', undefined, { withAuth: false });
 	check('sin Authorization: 401 (fail-closed)', noAuth.status === 401, `status=${noAuth.status}`);
+
+	// 4. Token en el PATH (segunda forma, para claude.ai — ver JSDoc de
+	// cabecera): mismo `initialize` + `tools/list`, pero contra `<url>/<token>`
+	// y SIN cabecera, para no tapar un bug que solo se dispare cuando la
+	// cabecera falta de verdad.
+	const pathUrl = `${url}/${token}`;
+	const pathInit = await rpc(
+		'initialize',
+		{ protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke-remote-path', version: '0.0.0' } },
+		{ withAuth: false, targetUrl: pathUrl }
+	);
+	check('token en el path: initialize responde HTTP 200', pathInit.status === 200, `status=${pathInit.status}`);
+	const pathList = await rpc('tools/list', undefined, { withAuth: false, targetUrl: pathUrl });
+	check('token en el path: tools/list responde HTTP 200', pathList.status === 200, `status=${pathList.status}`);
+
+	// 5. Caso NEGATIVO del path: un segmento que NO tiene forma de token (el
+	// token real de email-to-task son 32 hex) tiene que dar 401 exactamente
+	// igual que sin credencial — sin esta comprobación, un fail-open en la
+	// validación de forma del path (aceptar cualquier segmento no vacío)
+	// pasaría desapercibido. Mismo sabotaje comprobado en `src/http.test.ts`.
+	const malformedPathUrl = `${url}/no-es-un-token-valido`;
+	const badPath = await rpc('tools/list', undefined, { withAuth: false, targetUrl: malformedPathUrl });
+	check('token mal formado en el path: 401 (fail-closed)', badPath.status === 401, `status=${badPath.status}`);
 
 	if (failed) {
 		console.error(`\nsmoke-remote: ${checks.filter((c) => !c.ok).length}/${checks.length} comprobaciones en rojo.`);

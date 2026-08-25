@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -151,6 +151,100 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// Ninguna de las dos trae `mcp-session-id`: modo stateless de verdad.
 		expect(first.headers.get('mcp-session-id')).toBeNull();
 		expect(second.headers.get('mcp-session-id')).toBeNull();
+	});
+});
+
+describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)', () => {
+	const VALID_PATH_TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+
+	it('token bien formado en el path autentica igual que la cabecera: 200', async () => {
+		const res = await fetch(`${baseUrl}/mcp/${VALID_PATH_TOKEN}`, {
+			method: 'POST',
+			headers: JSON_RPC_HEADERS,
+			body: JSON.stringify(initializeBody())
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { result: { serverInfo: { name: string } } };
+		expect(body.result.serverInfo.name).toBe('lumbre-mcp');
+	});
+
+	it('tools/list también funciona por el path', async () => {
+		const res = await fetch(`${baseUrl}/mcp/${VALID_PATH_TOKEN}`, {
+			method: 'POST',
+			headers: JSON_RPC_HEADERS,
+			body: JSON.stringify(toolsListBody())
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { result: { tools: unknown[] } };
+		expect(body.result.tools).toHaveLength(25);
+	});
+
+	it('si vienen las dos formas, gana la cabecera', async () => {
+		// El token del path es deliberadamente inválido (mal formado): si
+		// ganase el path, `createServer` se llamaría con ÉL y el smoke no
+		// distinguiría cuál se usó — en vez de eso, forzamos que el path esté
+		// mal formado para comprobar que NO tumba la petición: como pierde
+		// frente a la cabecera, ni se llega a mirar su forma.
+		const res = await fetch(`${baseUrl}/mcp/no-es-un-token-valido`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-de-cabecera' },
+			body: JSON.stringify(initializeBody())
+		});
+		expect(res.status).toBe(200);
+	});
+
+	it('path mal formado y SIN cabecera: 401, igual que sin token', async () => {
+		const res = await fetch(`${baseUrl}/mcp/no-es-un-token-valido`, {
+			method: 'POST',
+			headers: JSON_RPC_HEADERS,
+			body: JSON.stringify(initializeBody())
+		});
+		expect(res.status).toBe(401);
+	});
+
+	it('/mcp/ (segmento vacío): 401', async () => {
+		const res = await fetch(`${baseUrl}/mcp/`, {
+			method: 'POST',
+			headers: JSON_RPC_HEADERS,
+			body: JSON.stringify(initializeBody())
+		});
+		expect(res.status).toBe(401);
+	});
+
+	it('/mcp/algo/mas (varios segmentos): 401, no 404', async () => {
+		const res = await fetch(`${baseUrl}/mcp/algo/mas`, {
+			method: 'POST',
+			headers: JSON_RPC_HEADERS,
+			body: JSON.stringify(initializeBody())
+		});
+		expect(res.status).toBe(401);
+	});
+
+	it('GET /healthz sigue sin pedir token (el path token no lo toca)', async () => {
+		const res = await fetch(`${baseUrl}/healthz`);
+		expect(res.status).toBe(200);
+	});
+
+	it('el log de la petición NUNCA contiene el token, ni el bien formado ni el mal formado', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await fetch(`${baseUrl}/mcp/${VALID_PATH_TOKEN}`, {
+				method: 'POST',
+				headers: JSON_RPC_HEADERS,
+				body: JSON.stringify(initializeBody())
+			});
+			const malformedToken = 'no-es-un-token-valido-pero-tampoco-deberia-salir';
+			await fetch(`${baseUrl}/mcp/${malformedToken}`, {
+				method: 'POST',
+				headers: JSON_RPC_HEADERS,
+				body: JSON.stringify(initializeBody())
+			});
+			const loggedLines = errSpy.mock.calls.map((call) => call.join(' ')).join('\n');
+			expect(loggedLines).not.toContain(VALID_PATH_TOKEN);
+			expect(loggedLines).not.toContain(malformedToken);
+		} finally {
+			errSpy.mockRestore();
+		}
 	});
 });
 

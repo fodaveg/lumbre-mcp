@@ -65,14 +65,18 @@ habla Streamable HTTP crudo contra la URL ya desplegada.
 node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp "$LUMBRE_TOKEN"
 ```
 
-Comprueba `initialize` + `tools/list` con token (200, 25 tools, techo de
-bytes) y el caso NEGATIVO sin token (401 fail-closed). Un deploy no se da
-por bueno solo con el camino feliz en verde: si el caso negativo alguna vez
-sale distinto de 401 (por ejemplo 200, o un 500 que delate un fail-open), el
-script sale con exit 1 igual que si fallara el camino feliz.
+Comprueba `initialize` + `tools/list` con token en cabecera (200, 25 tools,
+techo de bytes) y el caso NEGATIVO sin token (401 fail-closed); y las dos
+mismas comprobaciones con el token en el PATH (`<url>/<token>`, la forma que
+usa la app de Claude), más su propio NEGATIVO con un segmento mal formado.
+Un deploy no se da por bueno solo con el camino feliz en verde: si un caso
+negativo alguna vez sale distinto de 401 (por ejemplo 200, o un 500 que
+delate un fail-open), el script sale con exit 1 igual que si fallara el
+camino feliz.
 
-Exit 0 = las 6 comprobaciones en verde. Exit 1 = al menos una en rojo, con
-el detalle impreso por comprobación.
+Exit 0 = todas las comprobaciones en verde (9 a fecha de este párrafo — el
+propio script imprime `N/N` al final, no hace falta contar a mano). Exit 1 =
+al menos una en rojo, con el detalle impreso por comprobación.
 
 **El smoke no prueba el relé.** `initialize` y `tools/list` los contesta el
 servidor MCP sin hablar con `app.lumbre.pro`: pasarían igual con la API caída o
@@ -96,5 +100,24 @@ claude mcp add --transport http lumbre https://mcp.lumbre.pro/mcp \
 ```
 
 claude.ai (web y móvil) NO acepta cabecera estática salvo que la cuenta tenga
-la beta de `static_headers`; sin ella hace falta OAuth 2.1 (tarea M3). El
-transporte stdio de siempre sigue funcionando y no se retira.
+la beta de `static_headers`; sin ella exigiría OAuth 2.1 completo, que este
+relé no tiene (M3 se descartó por caro — ver `README.md`, "Autenticación").
+En su lugar, la app de Claude se conecta con el token en la propia URL:
+
+```
+https://mcp.lumbre.pro/mcp/<tu-token-de-email-to-task>
+```
+
+En "Añadir conector personalizado" pega esa URL completa (sin cabeceras: la
+app no deja configurarlas). El transporte stdio de siempre sigue funcionando
+y no se retira.
+
+**Este cambio toca las DOS piezas del deploy, no solo el contenedor**: además
+de `./deploy/publicar.sh` (recompila y sube `dist/`), hay que volver a subir
+`deploy/mcp-lumbre-pro.caddy` con los pasos de "Cambiar el fragmento de
+Caddy" de arriba — trae el bloque `log` que apaga el registro del borde para
+este host (necesario porque Caddy vuelca la URI completa en sus entradas de
+error, y con el token en el path eso lo dejaría en claro en el log del
+contenedor `edge-caddy`). Publicar solo el contenedor sin recargar Caddy deja
+el borde sirviendo la config vieja: sin el bloque `log`, el token seguiría
+cayendo en `http.log.error` cada 502 o timeout.
