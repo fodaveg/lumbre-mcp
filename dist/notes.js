@@ -222,6 +222,16 @@ export const fileNotesSeenStore = {
  * `MAX_STATE_ENTRIES`. Función PURA (no toca disco) — separada de
  * `saveNotesSeenState` para poder testear la poda sin filesystem.
  *
+ * Fast path SIN CAMBIOS (perf, 2026-08-25 — evita que `computeAutoNotesRender`
+ * reescriba el fichero de huellas ENTERO en cada listado aunque nada haya
+ * cambiado de verdad): si ya hay una entrada NUEVA (`readSeenEntry`, no
+ * legado) para `taskId` con la MISMA `u`/`n` que se le iba a poner, no toca
+ * el `Map` en absoluto y devuelve `state` — la MISMA referencia, sin copiar —
+ * para que el llamante pueda detectar "no hubo cambio" con `!==` sin tener
+ * que comparar el contenido. Solo cuenta como "sin cambio" volver a ver la
+ * MISMA marca; una entrada nueva, una `notesUpdatedAt` distinta o la poda por
+ * el cap SIEMPRE devuelven un objeto nuevo.
+ *
  * Sin `notesUpdatedAt` válido (ausente/`null`/mal formado — no debería pasar
  * ya, ver el JSDoc de `LumbreTask.notesUpdatedAt`) no hay nada útil que
  * registrar: la capa 2 compara marcas, no ya un hash de texto, así que una
@@ -229,15 +239,24 @@ export const fileNotesSeenStore = {
  * previa de esa tarea (propia o en formato legado `{h,n}`, ver
  * `readSeenEntry`) en vez de dejarla ahí mintiendo sobre cuándo se vio por
  * última vez — la próxima pasada cae al bootstrap, que es el criterio
- * correcto cuando no hay marca.
+ * correcto cuando no hay marca. Si no había NADA que borrar, tampoco hay
+ * cambio: mismo fast path, misma referencia de vuelta.
  */
 export function touchNotesSeen(state, taskId, notes, notesUpdatedAt, maxEntries = MAX_STATE_ENTRIES) {
     const trimmed = notes.trim();
     const updated = parseNotesUpdatedAt(notesUpdatedAt);
+    if (!updated) {
+        if (!(taskId in state))
+            return state;
+        const map = new Map(Object.entries(state));
+        map.delete(taskId);
+        return Object.fromEntries(map);
+    }
+    const existing = readSeenEntry(state[taskId]);
+    if (existing && existing.u === notesUpdatedAt && existing.n === trimmed.length)
+        return state;
     const map = new Map(Object.entries(state));
     map.delete(taskId);
-    if (!updated)
-        return Object.fromEntries(map);
     const entry = { u: notesUpdatedAt, n: trimmed.length };
     map.set(taskId, entry);
     while (map.size > maxEntries) {
@@ -299,6 +318,14 @@ export async function recordNotesSeen(entries, store = fileNotesSeenStore) {
  *
  * `store` (default `fileNotesSeenStore`) es la costura de portabilidad — ver
  * su JSDoc más arriba.
+ *
+ * `store.save` se llama SOLO si la huella cambió de verdad (perf, 2026-08-25):
+ * `touchNotesSeen` devuelve la MISMA referencia de `state` cuando una tarea ya
+ * estaba registrada con la misma marca (ver su JSDoc) — si NINGUNA tarea del
+ * lote la cambió, `nextState` sigue siendo `=== previousState` al final del
+ * bucle y no hace falta reescribir el fichero. Antes se guardaba SIEMPRE que
+ * hubiera al menos una tarea con nota, aunque el listado fuera idéntico al
+ * anterior.
  */
 export async function computeAutoNotesRender(tasks, opts = {}, store = fileNotesSeenStore) {
     const withNotes = tasks.filter(hasNotes);
@@ -324,7 +351,8 @@ export async function computeAutoNotesRender(tasks, opts = {}, store = fileNotes
             markerCount++;
         nextState = touchNotesSeen(nextState, t.id, t.notes, t.notesUpdatedAt);
     }
-    await store.save(nextState);
+    if (nextState !== previousState)
+        await store.save(nextState);
     return { perTask, fullCount, markerCount };
 }
 /**

@@ -111,18 +111,61 @@ function buildNotesLine(t: LumbreTask, opts: FormatTaskOptions): string | null {
 	return decision.kind === 'full' ? notesFull(t.notes) : formatNoteMarker(decision.length, decision.updatedAt);
 }
 
-/** Una tarea → una línea compacta y legible (NO JSON crudo, para no saturar al modelo). */
-function formatTask(t: LumbreTask, opts: FormatTaskOptions = {}): string {
+/**
+ * Normaliza el título (`content`) de una tarea para comparar duplicados:
+ * `trim` + minúsculas, sin tocar tags/emoji/puntuación — dos tareas con el
+ * MISMO texto salvo mayúsculas o espacios de sobra cuentan como la misma
+ * (ver `duplicateTitleKeys`, más abajo, para el porqué de NO quitar `@done`/
+ * `#done`).
+ */
+function normalizeTaskTitle(content: string): string {
+	return content.trim().toLowerCase();
+}
+
+/**
+ * Títulos (normalizados con `normalizeTaskTitle`) que aparecen 2+ veces en
+ * `tasks` — el lote COMPLETO que se está formateando (`formatTaskList`, no
+ * solo el grupo de sección de turno), para que dos duplicados repartidos en
+ * secciones distintas se sigan detectando. Deliberadamente NO se quita
+ * `@done`/`#done` del texto antes de comparar: esa etiqueta vive en el
+ * `content` como texto normal elegido por quien creó la tarea (el estado
+ * REAL es el campo `done`, ya visible en el `[x]`/`[ ]` de la línea — ver
+ * `hasDoneTag` en `notes.ts`, que es sobre las NOTAS, no sobre esto), así que
+ * "Pagar factura" y "Pagar factura @done" son títulos distintos a ojos de
+ * esta función, no el mismo título con y sin marca.
+ */
+function duplicateTitleKeys(tasks: LumbreTask[]): Set<string> {
+	const counts = new Map<string, number>();
+	for (const t of tasks) {
+		const key = normalizeTaskTitle(t.content);
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const duplicates = new Set<string>();
+	for (const [key, count] of counts) {
+		if (count >= 2) duplicates.add(key);
+	}
+	return duplicates;
+}
+
+/** Una tarea → una línea compacta y legible (NO JSON crudo, para no saturar
+ *  al modelo). `isDuplicateTitle` (ver `duplicateTitleKeys`, calculado UNA
+ *  vez por `formatTaskList` sobre el lote entero): solo cuando es `true` se
+ *  añade el tag `creada:<timestamp>` — su ÚNICO uso es desempatar cuál es la
+ *  más nueva entre dos tareas con el mismo título; en el caso normal (título
+ *  único en el lote) no aporta nada y solo alarga la línea. */
+function formatTask(t: LumbreTask, opts: FormatTaskOptions, isDuplicateTitle: boolean): string {
 	const box = t.done ? '[x]' : '[ ]';
 	const tags: string[] = [];
 	const prio = priorityLabel(t.priority);
 	if (prio) tags.push(prio);
 	if (t.date) tags.push(t.date);
 	if (t.deadline) tags.push(`⚑${t.deadline}`);
-	// `createdAt` recortado a minuto (sin segundos/ms): sirve para desempatar
-	// duplicados ("deja el más nuevo") sin alargar la línea de más.
-	tags.push(`creada:${t.createdAt.slice(0, 16)}`);
-	const suffix = ` (${tags.join(', ')})`;
+	// `createdAt` recortado a minuto (sin segundos/ms): SOLO si hay otra tarea
+	// con el mismo título en este mismo lote — sirve para desempatar
+	// duplicados ("deja el más nuevo") sin alargar la línea de más en el caso
+	// normal (título único), que es la inmensa mayoría.
+	if (isDuplicateTitle) tags.push(`creada:${t.createdAt.slice(0, 16)}`);
+	const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
 	// El id (UUID) al final de la línea: TODAS las tools de mutación
 	// (update_task, complete_task, reschedule_task, delete_task, set_section) lo
 	// EXIGEN, y `list_tasks` es el único sitio donde el modelo puede obtenerlo.
@@ -266,6 +309,11 @@ function autoNotesHeaderLine(
  * criterio completo por modo. En `'auto'`, además, la cabecera declara los
  * recuentos (`autoNotesHeaderLine`) — la instrucción tiene que viajar EN la
  * salida porque la sesión que la lea mañana no tendrá este contexto.
+ *
+ * `creada:<timestamp>` (tag de `formatTask`) se calcula UNA vez aquí sobre
+ * el lote ENTERO (`duplicateTitleKeys`), antes de agrupar por sección — así
+ * dos tareas con el mismo título repartidas en secciones/listas distintas
+ * también se detectan como duplicado, no solo las que caen en el mismo grupo.
  */
 export function formatTaskList(
 	tasks: LumbreTask[],
@@ -288,9 +336,12 @@ export function formatTaskList(
 	const prefixLines = [...(notesHeaderLine ? [notesHeaderLine] : []), ...legend];
 	const prefix = prefixLines.length > 0 ? [...prefixLines, ''] : [];
 
+	const duplicateTitles = duplicateTitleKeys(tasks);
+	const isDuplicateTitle = (t: LumbreTask) => duplicateTitles.has(normalizeTaskTitle(t.content));
+
 	const hasAnySection = tasks.some((t) => t.section);
 	if (!hasAnySection) {
-		return [...prefix, header, ...tasks.map((t) => formatTask(t, opts))].join('\n');
+		return [...prefix, header, ...tasks.map((t) => formatTask(t, opts, isDuplicateTitle(t)))].join('\n');
 	}
 
 	// "Listas distintas" = valores de t.list no nulos, deduplicados. Si el lote
@@ -310,7 +361,7 @@ export function formatTaskList(
 		if (group) group.tasks.push(t);
 		else groups.push({ key, label, tasks: [t] });
 	}
-	const body = groups.flatMap((g) => [`## ${g.label}`, ...g.tasks.map((t) => formatTask(t, opts))]);
+	const body = groups.flatMap((g) => [`## ${g.label}`, ...g.tasks.map((t) => formatTask(t, opts, isDuplicateTitle(t)))]);
 	return [...prefix, header, ...body].join('\n');
 }
 

@@ -282,11 +282,19 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
  * Schema EXPUESTO de un elemento de `ops` (ver el JSDoc de
  * `mutateTasksStrictOpSchema` de arriba para el porqué de tenerlos
  * separados): plano, los 21 campos que usan las 15 ops TODOS opcionales
- * (salvo `op`), cada uno con su `.describe()` UNA sola vez. `.strict()` aquí
- * solo pilla un nombre de campo que no es NINGUNO de los 21 conocidos
- * (typo); que un campo válido en general no aplique a la `op` concreta de
- * ESE elemento lo pilla `mutateTasksStrictOpSchema` en el handler, no este
- * schema.
+ * (salvo `op`). Poda de superficie (2026-08-25, medido: bajó el JSON Schema
+ * EXPUESTO de este objeto de 3.994 a 3.683 caracteres — ver el test de
+ * superficie en `index.test.ts`): cada campo tiene `.describe()` SOLO si
+ * aporta algo que el nombre del campo + su
+ * tipo/patrón no dicen ya (semántica de `null`, default al omitir, o el
+ * comportamiento no obvio de un campo como `list`/`notes`) — `text`,
+ * `content`, `name`, `deadline`, `icon` y `recurrence` se quedan sin
+ * `.describe()` propio porque esa info ya vive en el nombre del campo, en
+ * `recurrenceSchema`, o en la tool individual (`create_list` para `icon`).
+ * `.strict()` aquí solo pilla un nombre de campo que no es NINGUNO de los 21
+ * conocidos (typo); que un campo válido en general no aplique a la `op`
+ * concreta de ESE elemento lo pilla `mutateTasksStrictOpSchema` en el
+ * handler, no este schema.
  */
 export const mutateTasksOpSchema = z
     .object({
@@ -308,37 +316,46 @@ export const mutateTasksOpSchema = z
         'rename_list',
         'remove_list'
     ])
-        .describe('Operación a ejecutar — contrato por-op en la description de `ops`, más abajo'),
-    taskId: z.string().uuid().optional().describe('Id de la tarea (o subtarea, según la op) — ver list_tasks/get_task'),
+        .describe('Operación a ejecutar — contrato por-op en la description de `ops`'),
+    taskId: z.string().uuid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
     subtaskId: z.string().uuid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
-    sectionId: z.string().uuid().optional().describe('Id de la sección — ver el campo `sectionId` en list_tasks/get_task'),
+    sectionId: z.string().uuid().optional().describe('Id de la sección — ver list_tasks/get_task'),
     listId: z
         .union([z.string().uuid(), z.null()])
         .optional()
-        .describe('Id ESTABLE de una lista: destino, padre, o PRE-GENERADO por ti (create_list, para encadenar)'),
-    text: z.string().min(1).max(2000).optional().describe('Texto de la tarea nueva'),
-    content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
-    name: z.string().min(1).max(200).optional().describe('Nombre de la lista'),
+        .describe('Id de lista: destino, padre, o uno que tú generes para encadenar con create_list'),
+    // `text`/`content`/`name`/`deadline`: sin describe propio — el nombre
+    // del campo ya lo dice todo (texto de la tarea nueva o su nuevo
+    // texto/título, nombre de la lista, fecha límite) y no hay semántica
+    // extra (null, default, autocreación…) que documentar; qué op usa cuál
+    // ya está en la description de `ops`.
+    text: z.string().min(1).max(2000).optional(),
+    content: z.string().min(1).max(2000).optional(),
+    name: z.string().min(1).max(200).optional(),
     list: z.string().max(200).optional().describe('Nombre de la lista destino (se crea si no existe)'),
-    section: z.string().max(200).nullable().optional().describe('Nombre de la sección/heading, o null para quitarla'),
-    notes: z.string().max(10000).optional().describe('Notas/descripción (reemplaza las anteriores enteras)'),
-    priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente … p4 = ninguna/quitar la prioridad'),
+    section: z.string().max(200).nullable().optional().describe('Nombre de la sección, o null para quitarla'),
+    notes: z.string().max(10000).optional().describe('Notas (reemplaza las anteriores enteras)'),
+    priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente … p4 = ninguna'),
     date: z
         .union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
         .optional()
-        .describe('Día YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada'),
-    deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
+        .describe('YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada'),
+    deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     time: z
         .union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
         .optional()
-        .describe('Hora "HH:MM" (24h); null la quita'),
-    recurrence: recurrenceSchema.optional().describe('Recurrencia simple (freq + interval)'),
-    subtasks: z.array(z.string()).optional().describe('Textos de las subtareas a añadir/crear, en orden'),
+        .describe('24h; null la quita'),
+    // `recurrence`: sin describe propio — `recurrenceSchema` ya documenta
+    // `freq`/`interval` campo a campo (compartido con `add_task`).
+    recurrence: recurrenceSchema.optional(),
+    subtasks: z.array(z.string()).optional().describe('Textos de las subtareas, en orden'),
     done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
     cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar'),
     color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
-    icon: z.string().max(16).optional().describe('Emoji/icono de la lista'),
-    parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id de la lista padre destino, o null para desanidar')
+    // `icon`: sin describe propio — mismo criterio que `text`/`name`, y ya
+    // documentado con más detalle en `create_list` (tool individual).
+    icon: z.string().max(16).optional(),
+    parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id de la lista padre, o null para desanidar')
 })
     .strict();
 /**

@@ -16,7 +16,8 @@ import {
 	recordNotesSeen,
 	saveNotesSeenState,
 	touchNotesSeen,
-	type NotesSeenState
+	type NotesSeenState,
+	type NotesSeenStore
 } from './notes.js';
 
 /**
@@ -418,6 +419,65 @@ describe('computeAutoNotesRender — huella real, dos pasadas consecutivas', () 
 		expect(result.fullCount).toBe(2);
 		expect(result.markerCount).toBe(1);
 		expect(result.perTask.has('4')).toBe(false); // sin nota, no entra
+	});
+});
+
+describe('computeAutoNotesRender — `store.save` solo si la huella cambió de verdad (perf)', () => {
+	/** `NotesSeenStore` en memoria con espía en `save`, para contar llamadas
+	 *  sin tocar disco — el mismo patrón de "store inyectado" que ya usa
+	 *  `createServer` (M1, `index.ts`), aplicado aquí para no depender del
+	 *  filesystem real. */
+	function spyStore(initial: NotesSeenState = {}): NotesSeenStore & { saveCalls: number } {
+		let state = initial;
+		return {
+			saveCalls: 0,
+			async load() {
+				return state;
+			},
+			async save(next) {
+				state = next;
+				this.saveCalls++;
+			}
+		};
+	}
+
+	it('un listado repetido, SIN cambios, no llama a `save` la segunda vez', async () => {
+		const t = task({
+			id: 'dirty-1',
+			content: 'Tarea sin tag',
+			notes: 'nota original',
+			notesUpdatedAt: '2026-07-25T10:00:00.000Z'
+		});
+		const store = spyStore();
+
+		await computeAutoNotesRender([t], { now: NOW }, store);
+		expect(store.saveCalls).toBe(1); // 1ª vez: entrada nueva → cambia de verdad
+
+		await computeAutoNotesRender([t], { now: NOW }, store);
+		expect(store.saveCalls).toBe(1); // misma tarea, misma marca → sin cambio, sin `save`
+	});
+
+	it('un listado con una nota editada (`notesUpdatedAt` distinto) SÍ llama a `save`', async () => {
+		const t = task({
+			id: 'dirty-2',
+			content: 'Tarea sin tag',
+			notes: 'nota original',
+			notesUpdatedAt: '2026-07-25T10:00:00.000Z'
+		});
+		const store = spyStore();
+		await computeAutoNotesRender([t], { now: NOW }, store);
+		expect(store.saveCalls).toBe(1);
+
+		const edited = { ...t, notes: 'nota ya editada de verdad', notesUpdatedAt: '2026-07-25T11:00:00.000Z' };
+		await computeAutoNotesRender([edited], { now: NOW }, store);
+		expect(store.saveCalls).toBe(2);
+	});
+
+	it('un lote SIN ninguna nota no llama a `load` ni a `save`', async () => {
+		const t = task({ id: 'no-notes', notes: null });
+		const store = spyStore();
+		await computeAutoNotesRender([t], { now: NOW }, store);
+		expect(store.saveCalls).toBe(0);
 	});
 });
 

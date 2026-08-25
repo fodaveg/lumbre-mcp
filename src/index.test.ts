@@ -141,9 +141,14 @@ describe('tools/list — superficie completa', () => {
 		// libreta de papel con su hora, en vez de la hora del reloj al llamar a
 		// la tool): 24.669 = +330 sobre los 24.339 de arriba, solo el campo
 		// nuevo y su `.describe()`.
+		// Re-medido el 2026-08-25 tras podar `mutateTasksOpSchema` (ver su
+		// JSDoc en index.ts): 24.358 = -311 sobre los 24.669 de arriba (el
+		// `inputSchema` de `mutate_tasks`, medido aparte, bajó de 3.994 a
+		// 3.683 caracteres). Techo bajado junto con el número medido, para
+		// que la ganancia quede bloqueada.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 25900;
+		const CHAR_CEILING = 25600;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});

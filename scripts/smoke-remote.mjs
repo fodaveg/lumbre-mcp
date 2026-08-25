@@ -23,11 +23,11 @@ const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
 
 // Techo de bytes de `tools/list` para las 25 tools reales — MISMA fuente que
 // `src/index.test.ts` ("techo de bytes de las 25 tools", `CHAR_CEILING`):
-// medido 24.669 tras `add_brl_entry({ time })` (2026-08-24) + ~5% de
+// medido 24.358 tras la poda de `mutate_tasks` (2026-08-25) + ~5% de
 // holgura. Si ese test cambia su techo, este número se actualiza a la vez —
 // no hay forma de importarlo desde un script standalone sin dependencias, así
 // que va documentado y buscable por el mismo comentario en ambos ficheros.
-const CHAR_CEILING = 25900;
+const CHAR_CEILING = 25600;
 const EXPECTED_TOOL_COUNT = 25;
 
 if (!url) {
