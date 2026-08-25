@@ -29,4 +29,19 @@ mcp.lumbre.pro {
 		Strict-Transport-Security "max-age=31536000"
 		-Server
 	}
+
+	# Sin log en este host (tarea M2b, token-en-el-path): este servicio no
+	# registra las peticiones que le llegan bien (el acceso normal ni
+	# siquiera está cableado), pero Caddy SÍ vuelca la URI completa en sus
+	# entradas de error (`http.log.error` — 502, timeout…), y desde que el
+	# token puede viajar en el path (`/mcp/<token>`) eso lo dejaría en claro
+	# dentro del log del contenedor `edge-caddy`. `discard` en vez de quitar
+	# el bloque entero para que quede explícito que es una decisión, no un
+	# olvido. Coste: este host se queda SIN registro de errores en el borde;
+	# el diagnóstico de un 502/timeout se hace con el log del contenedor
+	# `lumbre-mcp` (que sí distingue método + status, nunca el token — ver
+	# `logRequest` en `src/http.ts`), no con el de Caddy.
+	log {
+		output discard
+	}
 }

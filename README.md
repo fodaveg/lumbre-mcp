@@ -332,3 +332,36 @@ LUMBRE_TOKEN=tu-token node dist/index.js
 
 (no imprime nada por stdout salvo el protocolo MCP; los errores de arranque
 van a stderr).
+
+## Transporte HTTP remoto (`mcp.lumbre.pro`)
+
+Además del stdio de arriba (un proceso local por cliente, token fijo por
+`env`), este repo también sirve un transporte Streamable HTTP compartido en
+`https://mcp.lumbre.pro/mcp` (`src/http.ts`, desplegado — ver
+`deploy/README-deploy.md`). Es un **relé stateless**: no guarda ningún token,
+cada petición trae el suyo y ese token es el que habla con `app.lumbre.pro`
+para ESA petición.
+
+### Autenticación — dos formas, una por cliente
+
+| Forma | Cómo | Para qué cliente |
+|---|---|---|
+| Cabecera | `Authorization: Bearer <token>` contra `POST /mcp` | Claude Code (`claude mcp add --transport http … --header "Authorization: Bearer …"`) |
+| Path | `POST /mcp/<token>` (mismo endpoint, token al final de la URL) | claude.ai web/móvil — no deja configurar cabeceras en un conector personalizado, y sin OAuth 2.1 (que este relé no implementa) un 401 ahí bloquea la conexión entera |
+
+Si una petición trae **las dos** (cabecera Y path), **gana la cabecera**: es
+la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
+la config del cliente), así que ante ambigüedad se prefiere la buena en vez
+de fallar o mezclar. El token del path se valida de FORMA antes de usarse
+(32 caracteres hexadecimales, la forma del token de email-to-task): un
+segmento que no case — vacío, con más de un tramo, con caracteres fuera de
+`[0-9a-f]` — se trata exactamente como "sin credencial" y responde 401, sin
+recortes ni normalizaciones.
+
+**El coste de la forma del path**: el token queda guardado en la
+configuración del conector del lado de Anthropic (claude.ai) y visible en
+cualquier registro intermedio que guarde URLs (proxies, logs de acceso de
+terceros por los que pase la conexión). Rotar el token de email-to-task
+obliga a **volver a pegar la URL entera** en la config del conector, no solo
+a cambiar una cabecera. Úsala solo donde la cabecera no es una opción; con
+Claude Code, usa siempre la cabecera.
