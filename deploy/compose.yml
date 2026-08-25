@@ -1,0 +1,65 @@
+# Servicio del transporte HTTP remoto (`mcp.lumbre.pro`, tarea M2).
+#
+# Se despliega en `/srv/lumbre-mcp` del VPS (clon de este repo) y se une a la
+# red Docker externa `edge`, que es de donde cuelga el Caddy que termina TLS
+# (vive en `/srv/edge`; ver `deploy/README-deploy.md`).
+#
+#   docker compose -f deploy/compose.yml up -d --build
+#
+# NO publica puertos al host A PROPÓSITO: Caddy lo alcanza por el DNS de la
+# red `edge` con el nombre del contenedor (`lumbre-mcp:8787`), igual que hace
+# con `lumbre-app:3000`. Publicar 8787 en el host sería un segundo camino de
+# entrada, sin TLS y sin las cabeceras del borde, hacia un endpoint que acepta
+# tokens.
+name: lumbre-mcp
+
+services:
+  mcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: lumbre-mcp:latest
+    container_name: lumbre-mcp
+    restart: unless-stopped
+    environment:
+      PORT: '8787'
+      LUMBRE_BASE_URL: 'https://app.lumbre.pro'
+      # La huella de notas vistas (`notes-seen.json`) se escribe bajo
+      # `XDG_STATE_HOME` (ver `stateDir()` en `src/notes.ts`). Se apunta a un
+      # volumen para que sobreviva a los reinicios: sin él, cada `up -d`
+      # borraría la huella y las notas ya vistas volverían a salir íntegras
+      # durante la ventana de bootstrap (24 h).
+      #
+      # ⚠️ La huella NO está segmentada por token: es un solo fichero para todo
+      # el contenedor. Hoy da igual (un único usuario, el token de David), pero
+      # si este endpoint llega a servir a más de una persona hay que meter el
+      # hash del token en la clave ANTES, o cada uno marcaría como vistas las
+      # notas del otro.
+      XDG_STATE_HOME: /state
+      # NO hay `LUMBRE_TOKEN` aquí: el servidor es un relé stateless y cada
+      # petición trae el suyo en `Authorization: Bearer` (ver el JSDoc de
+      # cabecera de `src/http.ts`). Sin token, 401.
+    volumes:
+      - state:/state
+    networks:
+      - edge
+    healthcheck:
+      # `/healthz` responde 200 sin tocar la API de Lumbre ni pedir token.
+      test: ['CMD', 'wget', '--quiet', '--spider', 'http://127.0.0.1:8787/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+volumes:
+  state:
+
+networks:
+  edge:
+    external: true
+    name: edge

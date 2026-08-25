@@ -1,0 +1,10 @@
+# El Dockerfile solo copia `package.json`, `package-lock.json` y `dist/`, así
+# que esto no cambia la imagen: recorta el CONTEXTO que se manda al daemon
+# (node_modules son ~150 MB y viajarían enteros en cada build).
+node_modules
+.git
+.claude
+src
+scripts
+deploy
+*.md
