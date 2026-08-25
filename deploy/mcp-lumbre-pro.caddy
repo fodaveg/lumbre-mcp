@@ -1,0 +1,32 @@
+# Fragmento de Caddy del borde compartido, para `/srv/edge/conf.d/` del VPS.
+#
+# ⚠️ Vive AQUÍ y no en el repo `edge-infra` por dos motivos: (1) `/srv/edge` del
+# VPS NO es un checkout de git y ese repo lleva divergido desde el 31 jul 2026
+# (le faltan `app-lumbre-pro.caddy`, `admin`, `preview`, `demo-lumbre-pro`,
+# `lumbre-staging` y `vega.caddy`), así que no es la fuente de verdad de nada;
+# (2) el servicio que describe es de este repo. Se publica con:
+#
+#   scp deploy/mcp-lumbre-pro.caddy lumbre:/srv/edge/conf.d/
+#   ssh lumbre 'cd /srv/edge && docker compose --env-file .env exec caddy \
+#     caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile'
+#
+# El servicio vive en `/srv/lumbre-mcp` con su propio Compose
+# (`deploy/compose.yml`) y no publica puertos al host: se alcanza solo por el
+# DNS de la red `edge`, igual que `lumbre-app`.
+#
+# Sin `encode`: las respuestas son JSON pequeño y el transporte puede abrir
+# SSE, donde comprimir por buffer solo añade latencia.
+mcp.lumbre.pro {
+	reverse_proxy lumbre-mcp:8787 {
+		# Streamable HTTP mantiene abierta la respuesta SSE mientras dura la
+		# petición; sin flush inmediato los eventos se quedarían en el buffer
+		# del proxy. Mismo motivo por el que `senda.caddy` sube el
+		# `read_timeout` de PocketBase.
+		flush_interval -1
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
