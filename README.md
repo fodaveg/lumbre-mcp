@@ -256,6 +256,22 @@ Requiere **Node ≥ 22**. Con Node 24 el toolchain revienta
 apunta el `command` de la config al binario de Node 22 en vez de al `node`
 del PATH (ver más abajo).
 
+### Actualizar sin toolchain
+
+Desde este commit `dist/` va versionado en el repo, así que en una máquina
+que ya tiene el clon (y ya apunta su config MCP a `dist/index.js`) actualizar
+es solo:
+
+```bash
+git pull
+```
+
+sin `npm install` ni `npm run build` de por medio. Si en vez de apuntar la
+config al `dist/` del clon lo instalaste global, actualiza con `npm i -g .`
+después del `git pull` para que se recoja el `dist/` nuevo. Aviso: quien
+toque `src/` tiene que recompilar (`npm run build`) y commitear `dist/` en
+el MISMO commit, porque de momento nada lo vigila automáticamente.
+
 ## Configurar en Claude Code
 
 Necesitas tu **token de email-to-task**: en la app de Lumbre, Ajustes →
