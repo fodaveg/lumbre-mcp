@@ -204,6 +204,14 @@ export async function saveNotesSeenState(state) {
         // Best-effort — ver JSDoc de arriba.
     }
 }
+/** Implementación por defecto de `NotesSeenStore`: el fichero de huellas en
+ *  disco (`loadNotesSeenState`/`saveNotesSeenState` de arriba) — la que usa
+ *  el arranque stdio de `createServer` (`index.ts`) cuando no se le inyecta
+ *  otra. */
+export const fileNotesSeenStore = {
+    load: loadNotesSeenState,
+    save: saveNotesSeenState
+};
 /**
  * Marca `taskId` como visto CON `notesUpdatedAt` (la marca de la nota que se
  * acaba de mostrar) — inserta/reemplaza su entrada y la mueve al FINAL (más
@@ -251,15 +259,18 @@ export function touchNotesSeen(state, taskId, notes, notesUpdatedAt, maxEntries 
  * `NotesMode`); tampoco en `notesSince`, que es una consulta explícita SIN
  * estado (ver `computeNotesSinceRender`) — no lee ni escribe este fichero.
  * Best-effort de principio a fin: nunca lanza.
+ *
+ * `store` (default `fileNotesSeenStore`) es la costura de portabilidad — ver
+ * su JSDoc más arriba.
  */
-export async function recordNotesSeen(entries) {
+export async function recordNotesSeen(entries, store = fileNotesSeenStore) {
     if (entries.length === 0)
         return;
     try {
-        let state = await loadNotesSeenState();
+        let state = await store.load();
         for (const e of entries)
             state = touchNotesSeen(state, e.taskId, e.notes, e.notesUpdatedAt);
-        await saveNotesSeenState(state);
+        await store.save(state);
     }
     catch {
         // Best-effort — ver JSDoc de arriba.
@@ -285,15 +296,18 @@ export async function recordNotesSeen(entries) {
  * entonces. La cabecera del listado (`formatTaskList`) es la mitigación:
  * declara cuántas quedaron con marcador y recuerda `get_task` antes de darlas
  * por revisadas.
+ *
+ * `store` (default `fileNotesSeenStore`) es la costura de portabilidad — ver
+ * su JSDoc más arriba.
  */
-export async function computeAutoNotesRender(tasks, opts = {}) {
+export async function computeAutoNotesRender(tasks, opts = {}, store = fileNotesSeenStore) {
     const withNotes = tasks.filter(hasNotes);
     const perTask = new Map();
     if (withNotes.length === 0)
         return { perTask, fullCount: 0, markerCount: 0 };
     const now = opts.now ?? new Date();
     const windowHours = opts.windowHours ?? DEFAULT_NOTES_RECENT_HOURS;
-    const previousState = await loadNotesSeenState();
+    const previousState = await store.load();
     let fullCount = 0;
     let markerCount = 0;
     let nextState = previousState;
@@ -310,7 +324,7 @@ export async function computeAutoNotesRender(tasks, opts = {}) {
             markerCount++;
         nextState = touchNotesSeen(nextState, t.id, t.notes, t.notesUpdatedAt);
     }
-    await saveNotesSeenState(nextState);
+    await store.save(nextState);
     return { perTask, fullCount, markerCount };
 }
 /**

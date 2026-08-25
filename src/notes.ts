@@ -210,6 +210,23 @@ function readSeenEntry(value: unknown): NotesSeenEntry | undefined {
 	return undefined;
 }
 
+/**
+ * Costura de portabilidad (M1): `loadNotesSeenState`/`saveNotesSeenState` de
+ * más abajo son la implementación de FICHERO (XDG_STATE_HOME) — la que usa el
+ * arranque stdio, vía `fileNotesSeenStore`. `computeAutoNotesRender`/
+ * `recordNotesSeen` (los dos chokepoints reales que consumen la huella) la
+ * reciben INYECTADA con este shape, en vez de llamar a las funciones de
+ * fichero directamente — un futuro transporte no-stdio (HTTP) podría pasar
+ * otra implementación (p. ej. en memoria, o por sesión) sin tocar la lógica
+ * de decisión. El default de ambas sigue siendo `fileNotesSeenStore`, así que
+ * ninguna llamada existente (`index.ts`, tests) necesita cambiar para seguir
+ * funcionando igual que antes.
+ */
+export interface NotesSeenStore {
+	load(): Promise<NotesSeenState>;
+	save(state: NotesSeenState): Promise<void>;
+}
+
 /** Hay 4+ procesos MCP vivos a la vez (una sesión de Claude Code por
  *  ventana), cada uno con su propio servidor stdio — todos pueden leer/
  *  escribir este fichero a la vez. No hay lock: una carrera perdida hace, como
@@ -272,6 +289,15 @@ export async function saveNotesSeenState(state: NotesSeenState): Promise<void> {
 	}
 }
 
+/** Implementación por defecto de `NotesSeenStore`: el fichero de huellas en
+ *  disco (`loadNotesSeenState`/`saveNotesSeenState` de arriba) — la que usa
+ *  el arranque stdio de `createServer` (`index.ts`) cuando no se le inyecta
+ *  otra. */
+export const fileNotesSeenStore: NotesSeenStore = {
+	load: loadNotesSeenState,
+	save: saveNotesSeenState
+};
+
 /**
  * Marca `taskId` como visto CON `notesUpdatedAt` (la marca de la nota que se
  * acaba de mostrar) — inserta/reemplaza su entrada y la mueve al FINAL (más
@@ -325,15 +351,19 @@ export function touchNotesSeen(
  * `NotesMode`); tampoco en `notesSince`, que es una consulta explícita SIN
  * estado (ver `computeNotesSinceRender`) — no lee ni escribe este fichero.
  * Best-effort de principio a fin: nunca lanza.
+ *
+ * `store` (default `fileNotesSeenStore`) es la costura de portabilidad — ver
+ * su JSDoc más arriba.
  */
 export async function recordNotesSeen(
-	entries: { taskId: string; notes: string; notesUpdatedAt?: string | null }[]
+	entries: { taskId: string; notes: string; notesUpdatedAt?: string | null }[],
+	store: NotesSeenStore = fileNotesSeenStore
 ): Promise<void> {
 	if (entries.length === 0) return;
 	try {
-		let state = await loadNotesSeenState();
+		let state = await store.load();
 		for (const e of entries) state = touchNotesSeen(state, e.taskId, e.notes, e.notesUpdatedAt);
-		await saveNotesSeenState(state);
+		await store.save(state);
 	} catch {
 		// Best-effort — ver JSDoc de arriba.
 	}
@@ -370,10 +400,14 @@ export interface AutoNotesResult {
  * entonces. La cabecera del listado (`formatTaskList`) es la mitigación:
  * declara cuántas quedaron con marcador y recuerda `get_task` antes de darlas
  * por revisadas.
+ *
+ * `store` (default `fileNotesSeenStore`) es la costura de portabilidad — ver
+ * su JSDoc más arriba.
  */
 export async function computeAutoNotesRender(
 	tasks: LumbreTask[],
-	opts: { now?: Date; windowHours?: number } = {}
+	opts: { now?: Date; windowHours?: number } = {},
+	store: NotesSeenStore = fileNotesSeenStore
 ): Promise<AutoNotesResult> {
 	const withNotes = tasks.filter(hasNotes);
 	const perTask = new Map<string, AutoNoteDecision>();
@@ -381,7 +415,7 @@ export async function computeAutoNotesRender(
 
 	const now = opts.now ?? new Date();
 	const windowHours = opts.windowHours ?? DEFAULT_NOTES_RECENT_HOURS;
-	const previousState = await loadNotesSeenState();
+	const previousState = await store.load();
 	let fullCount = 0;
 	let markerCount = 0;
 	let nextState = previousState;
@@ -396,7 +430,7 @@ export async function computeAutoNotesRender(
 		else markerCount++;
 		nextState = touchNotesSeen(nextState, t.id, t.notes as string, t.notesUpdatedAt);
 	}
-	await saveNotesSeenState(nextState);
+	await store.save(nextState);
 	return { perTask, fullCount, markerCount };
 }
 

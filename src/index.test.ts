@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { z } from 'zod';
 
@@ -9,19 +9,14 @@ import type { z } from 'zod';
  * abajo) y contra que el aplanado de `mutate_tasks` haya dejado colar/
  * bloqueado algo que no debía.
  *
- * `LUMBRE_TOKEN` tiene que existir ANTES de importar `./index.js`
- * (`loadConfig` hace `process.exit(1)` sin él) — de ahí el `import()`
- * dinámico dentro de `beforeAll` en vez de un `import` estático de nivel de
- * módulo (que se resolvería antes de que este fichero tenga ocasión de fijar
- * la env var). Importar el módulo real conecta, como en producción, un
- * `StdioServerTransport` de verdad a `process.stdin`/`stdout` — inofensivo en
- * test (nadie escribe en `stdin`, así que nunca procesa ningún mensaje), pero
- * hay que `server.close()` esa conexión antes de poder reconectar `server` a
- * un transporte in-memory de test (`Protocol.connect` lanza si ya está
- * conectado a algo). Sobre ESE transporte de test se aplica la MISMA
- * `stripToolsListSchema` que usa producción (no una réplica de su lógica),
- * para poder comprobar el `tools/list` REAL que vería un cliente, incluida la
- * limpieza de `$schema`.
+ * Desde M1 (portabilidad, ver `createServer`/`CreateServerOptions` en
+ * `index.ts`): importar `./index.js` ya no hace NADA por sí solo (ni
+ * `loadConfig()`, que puede `process.exit(1)`, ni conectar ningún
+ * transporte) — el setup de abajo construye el servidor a mano con
+ * `createServer(config)` y lo conecta a un `InMemoryTransport` de test, sobre
+ * el que se aplica la MISMA `stripToolsListSchema` que usa `main()` en
+ * producción (no una réplica de su lógica), para poder comprobar el
+ * `tools/list` REAL que vería un cliente, incluida la limpieza de `$schema`.
  */
 
 let tools: Tool[];
@@ -29,22 +24,24 @@ let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
 let effectiveNotesMode: (input: { notes?: string; fullNotes?: boolean }) => string;
 
-beforeAll(async () => {
-	process.env.LUMBRE_TOKEN = 'test-token-para-index-test';
+/** Config de prueba — ningún test de este fichero toca red de verdad sin
+ *  mockear `fetch` antes (ver el describe de la caché, más abajo). */
+const TEST_CONFIG = { baseUrl: 'https://lumbre.test', token: 'test-token-para-index-test' };
 
+beforeAll(async () => {
 	const indexModule = await import('./index.js');
 	mutateTasksOpSchema = indexModule.mutateTasksOpSchema;
 	mutateTasksStrictOpSchema = indexModule.mutateTasksStrictOpSchema;
 	effectiveNotesMode = indexModule.effectiveNotesMode;
 
-	await indexModule.server.close();
+	const server = indexModule.createServer(TEST_CONFIG);
 
 	const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
 	const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	indexModule.stripToolsListSchema(serverTransport);
-	await indexModule.server.connect(serverTransport);
+	await server.connect(serverTransport);
 
 	const client = new Client({ name: 'index-test-client', version: '0.0.0' });
 	await client.connect(clientTransport);
@@ -420,5 +417,141 @@ describe('effectiveNotesMode — resuelve el modo de notas de list_tasks (con el
 
 	it('`notes` explícito GANA a `fullNotes` si ambos vienen', () => {
 		expect(effectiveNotesMode({ notes: 'none', fullNotes: true })).toBe('none');
+	});
+});
+
+describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () => {
+	/**
+	 * Prueba de extremo a extremo (servidor real vía `createServer` + un
+	 * cliente MCP in-memory + `fetch` mockeado): la caché en sí ya se testea
+	 * aislada en `existence-cache.test.ts` (hit/expiración/invalidación,
+	 * `now` inyectado directo); aquí lo que importa es que `requireTaskExists`
+	 * REALMENTE evita/repite el `GET /api/tasks?id=` en el flujo completo de
+	 * una tool call, y que una mutación real la invalida.
+	 */
+	const TASK_ID = '11111111-1111-1111-1111-111111111111';
+
+	function lumbreTask(overrides: Record<string, unknown> = {}) {
+		return {
+			id: TASK_ID,
+			content: 'tarea de prueba',
+			notes: null,
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			parentId: null,
+			...overrides
+		};
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	/** Cuenta las llamadas a `GET /api/tasks?id=` (el chequeo de existencia
+	 *  de `findTaskById` dentro de `requireTaskExists`) — separado de
+	 *  cualquier otra llamada a `/api/tasks` (list_tasks, mutate_tasks). */
+	function countExistenceGets(fetchSpy: ReturnType<typeof vi.fn>): number {
+		return fetchSpy.mock.calls.filter((call) => String(call[0]).includes('/api/tasks?id=')).length;
+	}
+
+	function firstResultText(result: { content: { type: string; text?: string }[] }): string {
+		const first = result.content[0];
+		return first && first.type === 'text' && typeof first.text === 'string' ? first.text : '';
+	}
+
+	async function buildClient(opts: { now?: () => number } = {}) {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG, opts);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'cache-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('un hit dentro del TTL evita el segundo GET de existencia', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		// get_task puebla `taskCache` (no consulta la caché, siempre trae fresco).
+		await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } });
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+
+		// complete_task → requireTaskExists reutiliza el hit: SIN GET nuevo.
+		const result = await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		expect(result.isError).not.toBe(true);
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+	});
+
+	it('tras expirar el TTL, requireTaskExists vuelve a pedir', async () => {
+		const { EXISTENCE_CACHE_TTL_MS } = await import('./existence-cache.js');
+		let now = 1_000_000;
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient({ now: () => now });
+		await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } });
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+
+		now += EXISTENCE_CACHE_TTL_MS; // justo al TTL: ya expiró (ver TaskExistenceCache.get)
+		await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		expect(countExistenceGets(fetchSpy)).toBe(2);
+	});
+
+	it('una mutación LOCAL sobre el id invalida la caché — la siguiente vuelve a pedir', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } });
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+
+		await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		expect(countExistenceGets(fetchSpy)).toBe(1); // hit — sin GET nuevo
+
+		// complete_task mutó localmente el mismo id → invalida `taskCache`.
+		await client.callTool({ name: 'cancel_task', arguments: { taskId: TASK_ID } });
+		expect(countExistenceGets(fetchSpy)).toBe(2);
+	});
+
+	it('un id inexistente sigue dando el error claro de siempre (sin caché de por medio)', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([]); // no existe
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/no existe/i);
 	});
 });
