@@ -1,0 +1,219 @@
+#!/usr/bin/env node
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { pathToFileURL } from 'node:url';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { LumbreConfig } from './lumbre-client.js';
+import { stripToolsListSchema } from './schema-strip.js';
+
+// CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
+// integrado). `createServer(config)` cae en los defaults de `opts` (fichero
+// para la huella de notas) — es lo mismo que hace `main()` en modo stdio.
+import { createServer } from './index.js';
+
+/**
+ * Transporte HTTP remoto de lumbre-mcp (mcp.lumbre.pro, tarea M2). A
+ * diferencia de `index.ts` (stdio, un proceso por cliente, token fijo por
+ * `env`), este servidor es un RELÉ compartido: NO tiene token propio — cada
+ * petición trae el suyo en `Authorization: Bearer <token>` y ese token se
+ * convierte en el `config.token` con el que ESA petición habla con
+ * app.lumbre.pro (ver `lumbre-client.ts`). Sin header, 401 fail-closed: nunca
+ * se intenta una petición sin auth "a ver qué pasa".
+ *
+ * Modo STATELESS (`sessionIdGenerator: undefined`, ver el JSDoc de
+ * `StreamableHTTPServerTransport` en el SDK): un `McpServer` + un transporte
+ * NUEVOS por petición HTTP, cerrados al terminar. No hay sesión que fugue
+ * entre el token de un cliente y el de otro — la alternativa (un server
+ * reutilizado con sesiones) obligaría a atar cada sesión a un token y a
+ * expirarlas; más superficie para un conector que hoy sirve peticiones
+ * sueltas de Claude, no streams largos.
+ *
+ * `PORT` (env, default 8787 — arbitrario, elegido por no chocar con los
+ * puertos que ya usan otros servicios locales del entorno: 3000/5000/8080).
+ * `LUMBRE_BASE_URL` (env, default `https://app.lumbre.pro`, igual que
+ * `index.ts`) — a diferencia del token, SÍ es del servidor: todas las
+ * peticiones relevan hacia la MISMA instancia de Lumbre.
+ */
+
+const DEFAULT_PORT = 8787;
+const DEFAULT_BASE_URL = 'https://app.lumbre.pro';
+
+/**
+ * Hosts permitidos, tanto para el header `Host` (protección DNS-rebinding
+ * mínima: si alguien resuelve `mcp.lumbre.pro` a este proceso desde un
+ * hostname distinto, se corta aquí) como para `Origin` (peticiones desde un
+ * navegador). `localhost`/`127.0.0.1`/`::1` cubren desarrollo local; el
+ * puerto NO se valida (cambia según quién lo levante en local).
+ *
+ * El SDK trae `allowedHosts`/`allowedOrigins`/`enableDnsRebindingProtection`
+ * en `StreamableHTTPServerTransportOptions`, pero están `@deprecated` a favor
+ * de "usa middleware externo" (ver `webStandardStreamableHttp.d.ts`) — de ahí
+ * que la validación viva aquí, ANTES de construir el transporte, en vez de
+ * pasada como opción.
+ */
+const ALLOWED_HOSTNAMES = new Set(['mcp.lumbre.pro', 'localhost', '127.0.0.1', '::1']);
+
+function hostnameOf(headerValue: string | string[] | undefined): string | undefined {
+	const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+	if (!raw) return undefined;
+	try {
+		// El header `Host` no lleva esquema (`mcp.lumbre.pro:443`); `Origin` sí
+		// (`https://mcp.lumbre.pro`). `URL` exige uno, así que si no trae `://`
+		// se le pone uno neutro solo para poder parsear el hostname.
+		const withScheme = raw.includes('://') ? raw : `http://${raw}`;
+		return new URL(withScheme).hostname;
+	} catch {
+		return undefined;
+	}
+}
+
+function isAllowedHost(req: IncomingMessage): boolean {
+	const hostname = hostnameOf(req.headers.host);
+	return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
+}
+
+/** Sin `Origin` (curl, el SDK de un cliente MCP no-navegador) no hay ataque de
+ *  DNS-rebinding que proteger — ese vector es específicamente "una página en
+ *  el navegador de la víctima habla con localhost", y exige `Origin`. Con
+ *  `Origin` presente, SÍ se exige que esté en la lista. */
+function isAllowedOrigin(req: IncomingMessage): boolean {
+	const origin = req.headers.origin;
+	if (!origin) return true;
+	const hostname = hostnameOf(origin);
+	return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
+}
+
+function extractToken(req: IncomingMessage): string | undefined {
+	const header = req.headers.authorization;
+	if (!header || !header.startsWith('Bearer ')) return undefined;
+	const token = header.slice('Bearer '.length).trim();
+	return token.length > 0 ? token : undefined;
+}
+
+function sendJsonRpcError(res: ServerResponse, status: number, code: number, message: string): void {
+	res.writeHead(status, { 'content-type': 'application/json' });
+	res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const chunks: Buffer[] = [];
+		req.on('data', (chunk: Buffer) => chunks.push(chunk));
+		req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+		req.on('error', reject);
+	});
+}
+
+/** Solo para el log — nunca vuelca el body ni el token, solo el nombre del
+ *  método JSON-RPC (o `batch(N)` si es una petición en lote). */
+function describeMethod(body: unknown): string {
+	if (Array.isArray(body)) return `batch(${body.length})`;
+	if (body && typeof body === 'object' && typeof (body as { method?: unknown }).method === 'string') {
+		return (body as { method: string }).method;
+	}
+	return 'unknown';
+}
+
+/** Log mínimo a stderr (stdout queda libre para no ensuciar nada que lo lea):
+ *  método JSON-RPC + status HTTP, NUNCA el token ni el body. */
+function logRequest(method: string, status: number): void {
+	console.error(`[lumbre-mcp-http] ${method} ${status}`);
+}
+
+async function handleMcpRequest(req: IncomingMessage, res: ServerResponse, baseUrl: string): Promise<void> {
+	if (req.method !== 'POST') {
+		sendJsonRpcError(res, 405, -32000, 'Method not allowed. Modo stateless: solo POST /mcp.');
+		logRequest(`${req.method ?? '?'} /mcp`, 405);
+		return;
+	}
+
+	if (!isAllowedHost(req) || !isAllowedOrigin(req)) {
+		sendJsonRpcError(res, 403, -32000, 'Host/Origin no permitido.');
+		logRequest('POST /mcp', 403);
+		return;
+	}
+
+	// Fail-closed: sin token no se llega ni a leer el body. El servidor NO
+	// tiene token propio — es el de ESTA petición el que se usa para hablar
+	// con app.lumbre.pro (ver el JSDoc de cabecera).
+	const token = extractToken(req);
+	if (!token) {
+		sendJsonRpcError(res, 401, -32001, 'Falta Authorization: Bearer <token>.');
+		logRequest('POST /mcp', 401);
+		return;
+	}
+
+	let parsedBody: unknown;
+	let methodLabel = 'unknown';
+	try {
+		const raw = await readBody(req);
+		parsedBody = raw.length > 0 ? JSON.parse(raw) : undefined;
+		methodLabel = describeMethod(parsedBody);
+	} catch {
+		sendJsonRpcError(res, 400, -32700, 'Parse error: el cuerpo no es JSON válido.');
+		logRequest('POST /mcp', 400);
+		return;
+	}
+
+	const config: LumbreConfig = { baseUrl, token };
+	// CONTRATO M1: la única LLAMADA a la factory real de `index.ts`.
+	const mcpServer = createServer(config);
+	// `enableJsonResponse: true`: respuesta JSON directa en vez de un stream
+	// SSE — este endpoint sirve llamadas sueltas de tool (petición → una
+	// respuesta), no notificaciones de servidor a mitad de una tarea larga.
+	// Simplifica también al cliente: `fetch` + `res.json()`, sin parsear
+	// `text/event-stream` a mano (ver `scripts/smoke-remote.mjs`).
+	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+	stripToolsListSchema(transport);
+
+	try {
+		await mcpServer.connect(transport);
+		await transport.handleRequest(req, res, parsedBody);
+	} catch (err) {
+		console.error('[lumbre-mcp-http] error interno:', err instanceof Error ? err.message : String(err));
+		if (!res.headersSent) sendJsonRpcError(res, 500, -32603, 'Internal server error');
+	} finally {
+		logRequest(`POST /mcp ${methodLabel}`, res.statusCode);
+		res.on('close', () => {
+			void transport.close();
+			void mcpServer.close();
+		});
+	}
+}
+
+/**
+ * Construye la app sin arrancar el listener — separado de `main()` para que
+ * los tests puedan levantarla en un puerto efímero (`app.listen(0)`) sin
+ * pisar el `PORT` real.
+ */
+export function createHttpApp(baseUrl: string = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL) {
+	return createHttpServer((req, res) => {
+		const url = new URL(req.url ?? '/', 'http://localhost');
+
+		if (url.pathname === '/healthz' && req.method === 'GET') {
+			res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+			res.end('ok');
+			return;
+		}
+
+		if (url.pathname === '/mcp') {
+			void handleMcpRequest(req, res, baseUrl);
+			return;
+		}
+
+		res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+		res.end('Not found');
+	});
+}
+
+// Arranca el listener solo si este módulo es el entrypoint del proceso
+// (`node dist/http.js`) — importarlo desde un test (`createHttpApp`) no debe
+// abrir un puerto real.
+const isMainModule = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMainModule) {
+	const port = Number(process.env.PORT) || DEFAULT_PORT;
+	const baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL;
+	const app = createHttpApp(baseUrl);
+	app.listen(port, () => {
+		console.error(`[lumbre-mcp-http] escuchando en :${port} (relé hacia ${baseUrl})`);
+	});
+}
