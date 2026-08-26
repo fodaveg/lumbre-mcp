@@ -1,4 +1,5 @@
-import { DEFAULT_NOTES_RECENT_HOURS } from './notes.js';
+import { DEFAULT_NOTES_RECENT_HOURS, formatNoteMarker } from './notes.js';
+import { refCounts, renderRefs } from './refs.js';
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority) {
     return priority ? `p${priority}` : '';
@@ -23,41 +24,6 @@ function notesPreview(notes) {
 function notesFull(notes) {
     return notes.trim();
 }
-/** Meses en español, abreviados a 3 letras minúsculas — sufijo de fecha del
- *  marcador (`✎N ↻DDmmm`, ver `formatNoteMarker`). */
-const SPANISH_MONTHS = [
-    'ene',
-    'feb',
-    'mar',
-    'abr',
-    'may',
-    'jun',
-    'jul',
-    'ago',
-    'sep',
-    'oct',
-    'nov',
-    'dic'
-];
-/** `DDmmm` (p. ej. `24jul`) a partir de un ISO — `''` si no es una fecha
- *  válida (el llamante, `formatNoteMarker`, cae al marcador sin fecha). */
-function formatMarkerDate(iso) {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime()))
-        return '';
-    const day = String(d.getUTCDate()).padStart(2, '0');
-    return `${day}${SPANISH_MONTHS[d.getUTCMonth()]}`;
-}
-/** Marcador `✎N` (tamaño) + `↻DDmmm` (fecha de la última edición de la
- *  nota, si se conoce) — compacto a propósito: es lo que hace honesto el
- *  hueco que queda del bootstrap de `notes: 'auto'` (ver `notes.ts`), porque
- *  incluso sin el texto permite juzgar si la nota se tocó DESPUÉS de cerrar
- *  la tarea. `updatedAt: null` (no debería pasar ya, ver el JSDoc de
- *  `LumbreTask.notesUpdatedAt`) cae al marcador legado, solo con el tamaño. */
-function formatNoteMarker(length, updatedAt) {
-    const dateSuffix = updatedAt ? formatMarkerDate(updatedAt) : '';
-    return dateSuffix ? `✎${length} ↻${dateSuffix}` : `✎${length}`;
-}
 /**
  * Texto de la línea de notas de `t` según `opts.notesMode`, o `null` si no
  * hay que mostrar ninguna (sin nota, o `notesMode: 'none'`). GARANTÍA de
@@ -81,6 +47,12 @@ function formatNoteMarker(length, updatedAt) {
  * toca `t.notes` — y para llegar a `'full'` el llamante (`index.ts`) ya tuvo
  * que rellenarlo con la fase 2 (o replegar la decisión a `'marker'` si esa
  * fase falló, ver la garantía de arriba).
+ *
+ * Las referencias `[[task:…]]`/`[[list:…]]` de la nota se resuelven ANTES de
+ * recortar (`opts.refs`, ver `refs.ts`): al revés, el recorte de `'preview'`
+ * podría partir un token por la mitad y dejarlo sin resolver. La LONGITUD del
+ * marcador, en cambio, es siempre la de la nota REAL guardada — es el tamaño de
+ * lo que queda por leer, no el del texto ya expandido.
  */
 function buildNotesLine(t, opts) {
     const mode = opts.notesMode ?? 'preview';
@@ -91,7 +63,7 @@ function buildNotesLine(t, opts) {
         const decision = opts.autoRender?.perTask.get(t.id);
         if (decision) {
             return decision.kind === 'full'
-                ? notesFull(t.notes)
+                ? notesFull(renderRefs(t.notes, opts.refs))
                 : formatNoteMarker(decision.length, decision.updatedAt);
         }
         if (!t.notes || t.notes.trim() === '')
@@ -100,9 +72,10 @@ function buildNotesLine(t, opts) {
     }
     if (!t.notes || t.notes.trim() === '')
         return null;
+    const notes = renderRefs(t.notes, opts.refs);
     if (mode === 'full')
-        return notesFull(t.notes);
-    return notesPreview(t.notes); // 'preview'
+        return notesFull(notes);
+    return notesPreview(notes); // 'preview'
 }
 /**
  * Normaliza el título (`content`) de una tarea para comparar duplicados:
@@ -167,7 +140,10 @@ function formatTask(t, opts, isDuplicateTitle) {
     // EXIGEN, y `list_tasks` es el único sitio donde el modelo puede obtenerlo.
     // Sin esto sus descripciones ("resuélvelo antes con list_tasks") eran
     // imposibles de cumplir y las mutaciones quedaban de facto inservibles.
-    let line = `- ${box} ${t.content}${suffix}  · id: ${t.id}`;
+    // El texto de la tarea también puede llevar referencias (la app solo las
+    // inserta en notas, pero nada impide teclear una en el título): se resuelven
+    // con el mismo lote ya pedido, sin coste extra.
+    let line = `- ${box} ${renderRefs(t.content, opts.refs)}${suffix}  · id: ${t.id}`;
     // Línea aparte con las notas (si las hay y el modo no es 'none') — ver
     // `buildNotesLine` para el criterio completo por `notesMode`.
     const notesLine = buildNotesLine(t, opts);
@@ -193,11 +169,15 @@ function formatTask(t, opts, isDuplicateTitle) {
  * `LumbreTask.subtasks`): una línea `[x]`/`[ ]` por subtarea, con SU id — es
  * el ÚNICO sitio donde el modelo puede obtener el id de una subtarea, para
  * poder pasárselo después a `complete_subtask`.
+ *
+ * `refs` (opcional): resolución EN VIVO de las referencias del texto, las notas
+ * y las subtareas (`refs.ts`) — mismo trato que en el listado, porque una nota
+ * leída entera es justo donde más referencias hay.
  */
-export function formatTaskFull(t) {
+export function formatTaskFull(t, refs) {
     const lines = [
         `Tarea ${t.id}`,
-        `- contenido: ${t.content}`,
+        `- contenido: ${renderRefs(t.content, refs)}`,
         `- estado: ${t.done ? 'hecha' : 'pendiente'}`,
         `- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
         `- fecha: ${t.date ?? '(sin fecha)'}`,
@@ -207,7 +187,7 @@ export function formatTaskFull(t) {
         `- creada: ${t.createdAt}`
     ];
     if (t.notes && t.notes.trim() !== '') {
-        lines.push(`- notas:\n${notesFull(t.notes)}`);
+        lines.push(`- notas:\n${notesFull(renderRefs(t.notes, refs))}`);
     }
     else {
         lines.push('- notas: (sin notas)');
@@ -218,7 +198,7 @@ export function formatTaskFull(t) {
     if (t.subtasks && t.subtasks.length > 0) {
         lines.push('- subtareas:');
         for (const s of t.subtasks) {
-            lines.push(`  ${s.done ? '[x]' : '[ ]'} ${s.content}  · id: ${s.id}`);
+            lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}  · id: ${s.id}`);
         }
     }
     return lines.join('\n');
@@ -278,6 +258,36 @@ function autoNotesHeaderLine(autoRender, opts) {
         `${markerCount} con marcador → SIN LEER, usa get_task antes de darlas por revisadas`);
 }
 /**
+ * Cabecera de referencias (`refs.ts`): cuántos destinos enlazados trae el lote
+ * y en qué estado. `null` si el lote no tiene NINGUNA referencia — que es el
+ * caso normal, así que no cuesta nada cuando no aporta.
+ *
+ * Lleva la instrucción DENTRO de la salida, igual que la de notas: una
+ * referencia no es decoración, es contexto que quien lee debería ir a buscar
+ * (David, 2026-07-26). `con nota ✎` son las que traen sustancia y justifican el
+ * `get_task`; `rotas` avisa de que ese id ya no lleva a ninguna parte.
+ */
+function refsHeaderLine(refs) {
+    if (!refs)
+        return null;
+    const { live, broken, unresolved, withNotes, total } = refCounts(refs);
+    if (total === 0)
+        return null;
+    const parts = [`${live} viva${live === 1 ? '' : 's'}`];
+    if (withNotes > 0)
+        parts.push(`${withNotes} con nota ✎ → léela con get_task, ahí está el contexto`);
+    // "borrada o archivada": el auto-archivado de la app (`auto-archive.ts`) saca
+    // de la vista tareas viejas ya cerradas, y `?ids=` tampoco las devuelve — así
+    // que una ROTA no siempre significa "borrada". La app pinta el mismo chip
+    // roto en los dos casos; aquí al menos se dice de qué puede venir.
+    if (broken > 0) {
+        parts.push(`${broken} ROTA${broken === 1 ? '' : 'S'} (ese id ya no resuelve: borrada o archivada)`);
+    }
+    if (unresolved > 0)
+        parts.push(`${unresolved} sin resolver`);
+    return `refs: ${parts.join(' · ')}`;
+}
+/**
  * Lista completa → texto compacto con cabecera de recuento + alcance,
  * agrupado por sección (Fase B, listas=proyectos): una cabecera `## <sección>`
  * por grupo, en el orden en que aparecen en la respuesta del servidor (ya
@@ -305,6 +315,11 @@ function autoNotesHeaderLine(autoRender, opts) {
  * el lote ENTERO (`duplicateTitleKeys`), antes de agrupar por sección — así
  * dos tareas con el mismo título repartidas en secciones/listas distintas
  * también se detectan como duplicado, no solo las que caen en el mismo grupo.
+ *
+ * `opts.refs` (si el lote traía referencias `[[task:…]]`/`[[list:…]]`): cada
+ * una se pinta ya resuelta contra el estado real (título ACTUAL + estado + id +
+ * marcador de nota, o ROTA), y la cabecera añade su propio recuento —
+ * `refsHeaderLine`.
  */
 export function formatTaskList(tasks, scope, opts = {}) {
     if (tasks.length === 0)
@@ -320,7 +335,12 @@ export function formatTaskList(tasks, scope, opts = {}) {
     // de cada una sin tocar el formato por-tarea, que se deja intacto para no
     // añadir ruido repetido línea a línea.
     const legend = listLegend(tasks);
-    const prefixLines = [...(notesHeaderLine ? [notesHeaderLine] : []), ...legend];
+    const refsLine = refsHeaderLine(opts.refs);
+    const prefixLines = [
+        ...(notesHeaderLine ? [notesHeaderLine] : []),
+        ...(refsLine ? [refsLine] : []),
+        ...legend
+    ];
     const prefix = prefixLines.length > 0 ? [...prefixLines, ''] : [];
     const duplicateTitles = duplicateTitleKeys(tasks);
     const isDuplicateTitle = (t) => duplicateTitles.has(normalizeTaskTitle(t.content));

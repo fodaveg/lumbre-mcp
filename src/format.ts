@@ -1,5 +1,11 @@
 import type { LumbreListSummary, LumbreTask, TaskScope } from './lumbre-client.js';
-import { DEFAULT_NOTES_RECENT_HOURS, type AutoNotesResult, type NotesMode } from './notes.js';
+import {
+	DEFAULT_NOTES_RECENT_HOURS,
+	formatNoteMarker,
+	type AutoNotesResult,
+	type NotesMode
+} from './notes.js';
+import { refCounts, renderRefs, type RefResolution } from './refs.js';
 
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority: LumbreTask['priority']): string {
@@ -28,43 +34,6 @@ function notesFull(notes: string): string {
 	return notes.trim();
 }
 
-/** Meses en español, abreviados a 3 letras minúsculas — sufijo de fecha del
- *  marcador (`✎N ↻DDmmm`, ver `formatNoteMarker`). */
-const SPANISH_MONTHS = [
-	'ene',
-	'feb',
-	'mar',
-	'abr',
-	'may',
-	'jun',
-	'jul',
-	'ago',
-	'sep',
-	'oct',
-	'nov',
-	'dic'
-];
-
-/** `DDmmm` (p. ej. `24jul`) a partir de un ISO — `''` si no es una fecha
- *  válida (el llamante, `formatNoteMarker`, cae al marcador sin fecha). */
-function formatMarkerDate(iso: string): string {
-	const d = new Date(iso);
-	if (Number.isNaN(d.getTime())) return '';
-	const day = String(d.getUTCDate()).padStart(2, '0');
-	return `${day}${SPANISH_MONTHS[d.getUTCMonth()]}`;
-}
-
-/** Marcador `✎N` (tamaño) + `↻DDmmm` (fecha de la última edición de la
- *  nota, si se conoce) — compacto a propósito: es lo que hace honesto el
- *  hueco que queda del bootstrap de `notes: 'auto'` (ver `notes.ts`), porque
- *  incluso sin el texto permite juzgar si la nota se tocó DESPUÉS de cerrar
- *  la tarea. `updatedAt: null` (no debería pasar ya, ver el JSDoc de
- *  `LumbreTask.notesUpdatedAt`) cae al marcador legado, solo con el tamaño. */
-function formatNoteMarker(length: number, updatedAt: string | null): string {
-	const dateSuffix = updatedAt ? formatMarkerDate(updatedAt) : '';
-	return dateSuffix ? `✎${length} ↻${dateSuffix}` : `✎${length}`;
-}
-
 /** Opciones de formateo de un listado de tareas. `notesMode` (default
  *  `'preview'`, aunque `index.ts` SIEMPRE pasa uno explícito — `list_tasks`
  *  por defecto usa `'auto'`): qué mostrar en la línea de notas de cada tarea
@@ -74,10 +43,15 @@ function formatNoteMarker(length: number, updatedAt: string | null): string {
  *  `notes.ts` — este módulo no toca el fichero de huellas, solo pinta lo que
  *  ya se decidió). `notesWindowHours`/`notesSinceLabel` son SOLO para la
  *  cabecera (`autoNotesHeaderLine`): qué criterio se aplicó — ver
- *  `notesSince` en `index.ts`. */
+ *  `notesSince` en `index.ts`. `refs` (opcional) es la resolución EN VIVO de
+ *  las referencias `[[task:…]]`/`[[list:…]]` del lote, ya hecha por
+ *  `resolveRefs` (`refs.ts`): sin ella el texto sale con la etiqueta congelada
+ *  del enlace, como antes. */
 interface FormatTaskOptions {
 	notesMode?: NotesMode;
 	autoRender?: AutoNotesResult;
+	/** Referencias del lote ya resueltas contra el estado real — ver `refs.ts`. */
+	refs?: RefResolution;
 	/** Ventana de bootstrap (horas) usada por `computeAutoNotesRender` en
 	 *  esta llamada (`notesRecentHours` de `list_tasks`) — solo informativa,
 	 *  para el texto de la cabecera. */
@@ -111,6 +85,12 @@ interface FormatTaskOptions {
  * toca `t.notes` — y para llegar a `'full'` el llamante (`index.ts`) ya tuvo
  * que rellenarlo con la fase 2 (o replegar la decisión a `'marker'` si esa
  * fase falló, ver la garantía de arriba).
+ *
+ * Las referencias `[[task:…]]`/`[[list:…]]` de la nota se resuelven ANTES de
+ * recortar (`opts.refs`, ver `refs.ts`): al revés, el recorte de `'preview'`
+ * podría partir un token por la mitad y dejarlo sin resolver. La LONGITUD del
+ * marcador, en cambio, es siempre la de la nota REAL guardada — es el tamaño de
+ * lo que queda por leer, no el del texto ya expandido.
  */
 function buildNotesLine(t: LumbreTask, opts: FormatTaskOptions): string | null {
 	const mode = opts.notesMode ?? 'preview';
@@ -121,7 +101,7 @@ function buildNotesLine(t: LumbreTask, opts: FormatTaskOptions): string | null {
 		const decision = opts.autoRender?.perTask.get(t.id);
 		if (decision) {
 			return decision.kind === 'full'
-				? notesFull(t.notes as string)
+				? notesFull(renderRefs(t.notes as string, opts.refs))
 				: formatNoteMarker(decision.length, decision.updatedAt);
 		}
 		if (!t.notes || t.notes.trim() === '') return null;
@@ -129,8 +109,9 @@ function buildNotesLine(t: LumbreTask, opts: FormatTaskOptions): string | null {
 	}
 
 	if (!t.notes || t.notes.trim() === '') return null;
-	if (mode === 'full') return notesFull(t.notes);
-	return notesPreview(t.notes); // 'preview'
+	const notes = renderRefs(t.notes, opts.refs);
+	if (mode === 'full') return notesFull(notes);
+	return notesPreview(notes); // 'preview'
 }
 
 /**
@@ -193,7 +174,10 @@ function formatTask(t: LumbreTask, opts: FormatTaskOptions, isDuplicateTitle: bo
 	// EXIGEN, y `list_tasks` es el único sitio donde el modelo puede obtenerlo.
 	// Sin esto sus descripciones ("resuélvelo antes con list_tasks") eran
 	// imposibles de cumplir y las mutaciones quedaban de facto inservibles.
-	let line = `- ${box} ${t.content}${suffix}  · id: ${t.id}`;
+	// El texto de la tarea también puede llevar referencias (la app solo las
+	// inserta en notas, pero nada impide teclear una en el título): se resuelven
+	// con el mismo lote ya pedido, sin coste extra.
+	let line = `- ${box} ${renderRefs(t.content, opts.refs)}${suffix}  · id: ${t.id}`;
 	// Línea aparte con las notas (si las hay y el modo no es 'none') — ver
 	// `buildNotesLine` para el criterio completo por `notesMode`.
 	const notesLine = buildNotesLine(t, opts);
@@ -218,11 +202,15 @@ function formatTask(t: LumbreTask, opts: FormatTaskOptions, isDuplicateTitle: bo
  * `LumbreTask.subtasks`): una línea `[x]`/`[ ]` por subtarea, con SU id — es
  * el ÚNICO sitio donde el modelo puede obtener el id de una subtarea, para
  * poder pasárselo después a `complete_subtask`.
+ *
+ * `refs` (opcional): resolución EN VIVO de las referencias del texto, las notas
+ * y las subtareas (`refs.ts`) — mismo trato que en el listado, porque una nota
+ * leída entera es justo donde más referencias hay.
  */
-export function formatTaskFull(t: LumbreTask): string {
+export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 	const lines = [
 		`Tarea ${t.id}`,
-		`- contenido: ${t.content}`,
+		`- contenido: ${renderRefs(t.content, refs)}`,
 		`- estado: ${t.done ? 'hecha' : 'pendiente'}`,
 		`- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
 		`- fecha: ${t.date ?? '(sin fecha)'}`,
@@ -232,7 +220,7 @@ export function formatTaskFull(t: LumbreTask): string {
 		`- creada: ${t.createdAt}`
 	];
 	if (t.notes && t.notes.trim() !== '') {
-		lines.push(`- notas:\n${notesFull(t.notes)}`);
+		lines.push(`- notas:\n${notesFull(renderRefs(t.notes, refs))}`);
 	} else {
 		lines.push('- notas: (sin notas)');
 	}
@@ -244,7 +232,7 @@ export function formatTaskFull(t: LumbreTask): string {
 	if (t.subtasks && t.subtasks.length > 0) {
 		lines.push('- subtareas:');
 		for (const s of t.subtasks) {
-			lines.push(`  ${s.done ? '[x]' : '[ ]'} ${s.content}  · id: ${s.id}`);
+			lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}  · id: ${s.id}`);
 		}
 	}
 	return lines.join('\n');
@@ -309,6 +297,33 @@ function autoNotesHeaderLine(
 }
 
 /**
+ * Cabecera de referencias (`refs.ts`): cuántos destinos enlazados trae el lote
+ * y en qué estado. `null` si el lote no tiene NINGUNA referencia — que es el
+ * caso normal, así que no cuesta nada cuando no aporta.
+ *
+ * Lleva la instrucción DENTRO de la salida, igual que la de notas: una
+ * referencia no es decoración, es contexto que quien lee debería ir a buscar
+ * (David, 2026-07-26). `con nota ✎` son las que traen sustancia y justifican el
+ * `get_task`; `rotas` avisa de que ese id ya no lleva a ninguna parte.
+ */
+function refsHeaderLine(refs: RefResolution | undefined): string | null {
+	if (!refs) return null;
+	const { live, broken, unresolved, withNotes, total } = refCounts(refs);
+	if (total === 0) return null;
+	const parts = [`${live} viva${live === 1 ? '' : 's'}`];
+	if (withNotes > 0) parts.push(`${withNotes} con nota ✎ → léela con get_task, ahí está el contexto`);
+	// "borrada o archivada": el auto-archivado de la app (`auto-archive.ts`) saca
+	// de la vista tareas viejas ya cerradas, y `?ids=` tampoco las devuelve — así
+	// que una ROTA no siempre significa "borrada". La app pinta el mismo chip
+	// roto en los dos casos; aquí al menos se dice de qué puede venir.
+	if (broken > 0) {
+		parts.push(`${broken} ROTA${broken === 1 ? '' : 'S'} (ese id ya no resuelve: borrada o archivada)`);
+	}
+	if (unresolved > 0) parts.push(`${unresolved} sin resolver`);
+	return `refs: ${parts.join(' · ')}`;
+}
+
+/**
  * Lista completa → texto compacto con cabecera de recuento + alcance,
  * agrupado por sección (Fase B, listas=proyectos): una cabecera `## <sección>`
  * por grupo, en el orden en que aparecen en la respuesta del servidor (ya
@@ -336,6 +351,11 @@ function autoNotesHeaderLine(
  * el lote ENTERO (`duplicateTitleKeys`), antes de agrupar por sección — así
  * dos tareas con el mismo título repartidas en secciones/listas distintas
  * también se detectan como duplicado, no solo las que caen en el mismo grupo.
+ *
+ * `opts.refs` (si el lote traía referencias `[[task:…]]`/`[[list:…]]`): cada
+ * una se pinta ya resuelta contra el estado real (título ACTUAL + estado + id +
+ * marcador de nota, o ROTA), y la cabecera añade su propio recuento —
+ * `refsHeaderLine`.
  */
 export function formatTaskList(
 	tasks: LumbreTask[],
@@ -355,7 +375,12 @@ export function formatTaskList(
 	// de cada una sin tocar el formato por-tarea, que se deja intacto para no
 	// añadir ruido repetido línea a línea.
 	const legend = listLegend(tasks);
-	const prefixLines = [...(notesHeaderLine ? [notesHeaderLine] : []), ...legend];
+	const refsLine = refsHeaderLine(opts.refs);
+	const prefixLines = [
+		...(notesHeaderLine ? [notesHeaderLine] : []),
+		...(refsLine ? [refsLine] : []),
+		...legend
+	];
 	const prefix = prefixLines.length > 0 ? [...prefixLines, ''] : [];
 
 	const duplicateTitles = duplicateTitleKeys(tasks);

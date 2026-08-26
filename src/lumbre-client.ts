@@ -46,10 +46,21 @@ export interface AddTaskInput {
 	subtasks?: string[];
 }
 
-export type TaskScope = 'today' | 'week' | 'inbox' | 'someday' | 'overdue' | 'all';
+/** Alcances que acepta `GET /api/tasks`. `upcoming` (2026-07-26) es la ventana
+ *  RODANTE de N días CONTANDO hoy — existe porque `week` es la semana de
+ *  CALENDARIO y en domingo (o en viernes) apenas tiene nada por delante: son
+ *  dos preguntas distintas ("qué queda de esta semana" vs "qué viene"). Ver el
+ *  JSDoc de ese endpoint en el repo principal. */
+export type TaskScope = 'today' | 'week' | 'upcoming' | 'inbox' | 'someday' | 'overdue' | 'all';
 
 export interface ListTasksInput {
 	scope?: TaskScope;
+	/** Nº de días de la ventana de `scope: 'upcoming'`, CONTANDO hoy (default 7
+	 *  server-side, tope 14). Con cualquier otro scope el servidor responde 400
+	 *  a propósito (un parámetro que no hace nada es un bug esperando): se
+	 *  reenvía tal cual, sin filtrarlo aquí, para no tener DOS versiones de esa
+	 *  regla — la del endpoint es la única. */
+	days?: number;
 	/** Nombre (case-insensitive) de una lista de "Algún día"; filtra las tareas
 	 *  que pertenecen a ella. Sin `scope` explícito, el servidor amplía el
 	 *  alcance temporal a "all" (ver `GET /api/tasks` en el repo principal). */
@@ -122,6 +133,15 @@ export interface LumbreTask {
 	 *  hay que pedirla una segunda vez. */
 	notesLength?: number | null;
 	done: boolean;
+	/** Cancelada ("no se hizo ni se hará", `cancelledAt` en el CRDT), si la API
+	 *  lo dice. HOY NO LO DICE: `serializeTask` (`/api/tasks` en el repo
+	 *  principal) no expone `cancelledAt`, y una tarea cancelada viaja con
+	 *  `done: true` — así que se lee como "hecha". Declarado igualmente porque
+	 *  es el único campo que le falta a la resolución de referencias
+	 *  (`refs.ts`) para distinguir los TRES estados del contrato de tarea
+	 *  (docs/18): en cuanto el endpoint lo exponga, `taskStateLabel` empieza a
+	 *  pintar "cancelada" sin más cambios. Trátalo siempre como opcional. */
+	cancelled?: boolean;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;
 	deadline: string | null;
@@ -228,6 +248,7 @@ export async function addTask(config: LumbreConfig, input: AddTaskInput): Promis
 export async function listTasks(config: LumbreConfig, input: ListTasksInput): Promise<LumbreTask[]> {
 	const params = new URLSearchParams();
 	if (input.scope) params.set('scope', input.scope);
+	if (input.days !== undefined) params.set('days', String(input.days));
 	if (input.list) params.set('list', input.list);
 	if (input.section) params.set('section', input.section);
 	if (input.includeDone) params.set('includeDone', 'true');

@@ -65,6 +65,8 @@ export async function listTasks(config, input) {
     const params = new URLSearchParams();
     if (input.scope)
         params.set('scope', input.scope);
+    if (input.days !== undefined)
+        params.set('days', String(input.days));
     if (input.list)
         params.set('list', input.list);
     if (input.section)

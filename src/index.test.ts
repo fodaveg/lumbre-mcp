@@ -23,6 +23,11 @@ let tools: Tool[];
 let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
 let effectiveNotesMode: (input: { notes?: string; fullNotes?: boolean }) => string;
+let refTexts: (
+	tasks: { id: string; content: string; notes: string | null }[],
+	notesMode: string,
+	autoRender?: { perTask: Map<string, { kind: string }> }
+) => (string | null | undefined)[];
 
 /** Config de prueba — ningún test de este fichero toca red de verdad sin
  *  mockear `fetch` antes (ver el describe de la caché, más abajo). */
@@ -33,6 +38,7 @@ beforeAll(async () => {
 	mutateTasksOpSchema = indexModule.mutateTasksOpSchema;
 	mutateTasksStrictOpSchema = indexModule.mutateTasksStrictOpSchema;
 	effectiveNotesMode = indexModule.effectiveNotesMode;
+	refTexts = indexModule.refTexts as typeof refTexts;
 
 	const server = indexModule.createServer(TEST_CONFIG);
 
@@ -130,6 +136,10 @@ describe('tools/list — superficie completa', () => {
 		// `notesSince` (consulta de precisión) en `list_tasks`: 21.596 (~985
 		// chars más que los 20.611 de arriba, sobre todo la `.describe()` de
 		// `notesSince` y el criterio ampliado de `notes`).
+		// Re-medido el 2026-07-26 tras añadir `scope: 'upcoming'` + `days` (ventana
+		// rodante, paridad con `GET /api/tasks?scope=upcoming`): 21.863 (+267).
+		// La resolución EN VIVO de referencias (`refs.ts`) NO suma nada aquí: no
+		// añade ningún parámetro ni tool, solo cambia lo que se PINTA en la salida.
 		// Re-medido el 2026-08-09 tras las CUATRO tools de BRL (`list_brl_entries`
 		// + los tres verbos): 24.339 = +2.743 sobre los 21.596 de arriba
 		// (462+778+862+637 de las cuatro, más sus 4 comas). Que ese crecimiento
@@ -146,6 +156,8 @@ describe('tools/list — superficie completa', () => {
 		// `inputSchema` de `mutate_tasks`, medido aparte, bajó de 3.994 a
 		// 3.683 caracteres). Techo bajado junto con el número medido, para
 		// que la ganancia quede bloqueada.
+		// Re-medido tras integrar refs+upcoming/days en `list_tasks` (merge del
+		// 26 ago): el número real se comprueba abajo, ver CHAR_CEILING.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
 		const CHAR_CEILING = 25600;
@@ -749,5 +761,59 @@ describe('list_tasks({notes:"auto"}) — notas en dos fases (perf, 2026-08-25)',
 
 		expect(text).not.toContain(FULL_TEXT.trim().slice(0, 50));
 		expect(text).toContain(`✎${FULL_TEXT.trim().length}`);
+	});
+});
+
+describe('list_tasks — scope "upcoming" (ventana rodante) y su `days`', () => {
+	function listTasksSchema() {
+		return (
+			tools.find((t) => t.name === 'list_tasks')!.inputSchema as {
+				properties: Record<string, { enum?: string[]; type?: string; minimum?: number; maximum?: number }>;
+			}
+		).properties;
+	}
+
+	it('el enum de `scope` incluye "upcoming" junto a los seis de siempre', () => {
+		expect(listTasksSchema().scope.enum).toEqual([
+			'today',
+			'week',
+			'upcoming',
+			'inbox',
+			'someday',
+			'overdue',
+			'all'
+		]);
+	});
+
+	it('`days` existe y está topado a 1..14 (el mismo techo que la app)', () => {
+		const days = listTasksSchema().days;
+		expect(days).toBeDefined();
+		expect(days.minimum).toBe(1);
+		expect(days.maximum).toBe(14);
+	});
+});
+
+describe('refTexts — qué textos se escanean buscando referencias', () => {
+	const conNota = { id: 'a', content: 'tarea A', notes: 'nota de A' };
+	const sinNota = { id: 'b', content: 'tarea B', notes: null };
+
+	it('siempre el contenido; las notas solo si se van a pintar', () => {
+		expect(refTexts([conNota, sinNota], 'full')).toEqual([
+			'tarea A',
+			'nota de A',
+			'tarea B',
+			null
+		]);
+	});
+
+	it('`notes: "none"` no escanea ninguna nota (no se va a mostrar)', () => {
+		expect(refTexts([conNota], 'none')).toEqual(['tarea A']);
+	});
+
+	it('`auto`: solo las notas que salen ÍNTEGRAS, no las que salen como marcador', () => {
+		const autoRender = { perTask: new Map([['a', { kind: 'marker' }]]) };
+		expect(refTexts([conNota], 'auto', autoRender)).toEqual(['tarea A']);
+		const full = { perTask: new Map([['a', { kind: 'full' }]]) };
+		expect(refTexts([conNota], 'auto', full)).toEqual(['tarea A', 'nota de A']);
 	});
 });

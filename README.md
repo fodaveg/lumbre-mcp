@@ -22,8 +22,16 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   `list` (nombre, se crea si no existe) o `listId` (id ESTABLE de la lista,
   preferente sobre `list`, inmune a renames — sácalo de `list_tasks`).
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
-  por `scope`: `today` (default), `week`, `inbox`/`someday` (sin fecha),
-  `overdue` o `all`; puede incluir completadas con `includeDone`. `list`
+  por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
+  fecha), `overdue` o `all`; puede incluir completadas con `includeDone`.
+  `upcoming` es la ventana RODANTE de `days` días **contando hoy** (default 7,
+  máximo 14) y existe porque `week` es la semana de CALENDARIO: un domingo
+  —o un viernes— `week` apenas tiene nada por delante, así que responde a
+  «qué queda de esta semana», no a «qué viene». `days` con cualquier otro
+  scope es un error del servidor (400), no un parámetro que se ignora. (Ojo:
+  `upcoming` lo sirve la APP; hasta que la versión con ese scope esté
+  desplegada, pedirlo responde `scope inválido` — comprobado contra prod el
+  2026-07-26.) `list`
   filtra además por el nombre (case-insensitive) de una lista de "Algún
   día"/proyecto — sin `scope` explícito junto con `list`, el alcance temporal
   por defecto pasa a `all` (la mayoría de las tareas de una lista no tienen
@@ -97,6 +105,44 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   importa ver lo más reciente. **Límite**: solo garantiza lo que YA llegó al
   servidor por WebSocket — los cambios de un dispositivo offline que aún no
   los mandó no se pueden recuperar desde aquí.
+
+### Referencias a otras tareas/listas, resueltas EN VIVO
+
+Una nota (o el texto de una tarea) puede llevar referencias
+`[[task:ID|Etiqueta]]` / `[[list:ID|Etiqueta]]`, que la app pinta como chips
+resolviéndolas contra el estado real en cada render. El MCP hacía lo contrario:
+reenviaba la **etiqueta congelada** del momento en que se creó el enlace, así
+que una tarea renombrada, completada o borrada seguía leyéndose con su texto
+viejo — y una referencia rota era **indistinguible** de una viva. Desde
+2026-07-26, `list_tasks` y `get_task` las resuelven:
+
+```
+→tarea[pendiente] "Título ACTUAL" ✎573 ↻24jul id:<uuid>
+→tarea[hecha] "Título ACTUAL" id:<uuid>
+→tarea[ROTA] id:<uuid>
+→lista "Nombre ACTUAL" id:<uuid>
+```
+
+- Manda el **id**, no la etiqueta: si el título cambió, se enseña el ACTUAL (la
+  etiqueta guardada es una copia caducada y no se pinta nunca).
+- Una referencia cuyo destino ya no resuelve se **declara ROTA** con su id
+  (borrada o archivada), en vez de enseñar un texto que ya no corresponde a
+  nada. El id sigue visible siempre, para poder actuar sobre esa tarea sin una
+  segunda llamada.
+- El marcador `✎N ↻fecha` (el mismo de las notas sin leer) dice si la tarea
+  referenciada **tiene nota** y de qué tamaño/fecha: una referencia es contexto
+  que conviene ir a buscar, y así se decide con datos si toca un `get_task`. La
+  nota referenciada **no** se vuelca en el listado (sería recursivo, dispara el
+  tamaño de la respuesta y hay ciclos posibles: A→B y B→A).
+- Coste: **cero** peticiones extra si el lote no tiene referencias; UNA
+  (`GET /api/tasks?ids=`, con todos los ids de golpe, tope 200) si las tiene; y
+  una segunda (`?includeLists=1`) solo si además hay referencias a listas. Nunca
+  una petición por referencia. Si esa llamada falla, la referencia sale como
+  `sin resolver` (nunca como rota) y el listado se devuelve igual.
+- La cabecera del listado resume lo que hay (`refs: 2 vivas · 1 con nota ✎ …`).
+- Límite conocido: la API no expone `cancelledAt`, así que una tarea CANCELADA
+  llega como `done: true` y se lee «hecha». El render ya sabe pintar
+  `→tarea[cancelada]` en cuanto `GET /api/tasks` exponga ese campo.
 
 ## Qué hace (Fase 2 — mutar una tarea existente)
 

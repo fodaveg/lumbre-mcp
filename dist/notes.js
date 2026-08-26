@@ -138,6 +138,50 @@ export function parseNotesSince(raw) {
     const d = new Date(iso);
     return Number.isNaN(d.getTime()) ? undefined : d;
 }
+// ── Marcador `✎N ↻DDmmm` (tamaño + fecha de la última edición) ─────────────
+/** Meses en español, abreviados a 3 letras minúsculas — sufijo de fecha del
+ *  marcador (`✎N ↻DDmmm`, ver `formatNoteMarker`). */
+const SPANISH_MONTHS = [
+    'ene',
+    'feb',
+    'mar',
+    'abr',
+    'may',
+    'jun',
+    'jul',
+    'ago',
+    'sep',
+    'oct',
+    'nov',
+    'dic'
+];
+/** `DDmmm` (p. ej. `24jul`) a partir de un ISO — `''` si no es una fecha
+ *  válida (el llamante, `formatNoteMarker`, cae al marcador sin fecha). */
+function formatMarkerDate(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime()))
+        return '';
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${day}${SPANISH_MONTHS[d.getUTCMonth()]}`;
+}
+/**
+ * Marcador `✎N` (tamaño) + `↻DDmmm` (fecha de la última edición de la nota, si
+ * se conoce) — compacto a propósito: es lo que hace honesto el hueco que queda
+ * del bootstrap de `notes: 'auto'`, porque incluso sin el texto permite juzgar
+ * si la nota se tocó DESPUÉS de cerrar la tarea. `updatedAt: null` (no debería
+ * pasar ya, ver el JSDoc de `LumbreTask.notesUpdatedAt`) cae al marcador
+ * legado, solo con el tamaño.
+ *
+ * Vive aquí (y no en `format.ts`, donde nació) porque lo usan DOS pintores: la
+ * línea de notas de un listado (`format.ts`) y la resolución en vivo de una
+ * referencia `[[task:…]]` (`refs.ts`), que anuncia con el MISMO marcador si la
+ * tarea referenciada trae sustancia que merezca un `get_task`. Un solo formato
+ * de marcador en todo el MCP: si cambia, cambia en los dos sitios a la vez.
+ */
+export function formatNoteMarker(length, updatedAt) {
+    const dateSuffix = updatedAt ? formatMarkerDate(updatedAt) : '';
+    return dateSuffix ? `✎${length} ↻${dateSuffix}` : `✎${length}`;
+}
 /** Cap de entradas del fichero de huellas — sin esto crece sin límite (una
  *  entrada por tarea que haya pasado alguna vez por `list_tasks`/`get_task`
  *  desde que existe este fichero). 2.000 sobra de sobra para las ~200 tareas
