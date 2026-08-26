@@ -5,9 +5,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { stripToolsListSchema } from './schema-strip.js';
 import { z } from 'zod';
-import { addTask, assertTaskUsable, buildBatchFromOps, collectExistenceCheckIds, findTaskById, findTasksByIds, getAttachment, listBrlEntries, listLists, listTasks, mutateTask, priorityToLevel, refreshSync, runBatch, taskNotFoundError, LumbreApiError } from './lumbre-client.js';
+import { addTask, assertTaskUsable, buildBatchFromOps, collectExistenceCheckIds, findTaskById, findTasksByIds, getAttachment, listBrlEntries, listLists, listTasks, mutateTask, priorityToLevel, refreshSync, runBatch, taskNotFoundError, uploadAttachment, LumbreApiError } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
+import { readLocalAttachment } from './attachments.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, fileNotesSeenStore, hasNotes, parseNotesSince, recordNotesSeen } from './notes.js';
 import { BrlExistenceCache, EXISTENCE_CACHE_TTL_MS, TaskExistenceCache } from './existence-cache.js';
 /**
@@ -16,6 +17,10 @@ import { BrlExistenceCache, EXISTENCE_CACHE_TTL_MS, TaskExistenceCache } from '.
  * `GET /api/tasks`, incluye los adjuntos de cada tarea). `read_attachment` lee
  * los BYTES de un adjunto (vía `GET /api/attachments/:id`, mismo token
  * ampliado para servirlos por `Authorization: Bearer` además de por sesión).
+ * `add_attachment` es la vía inversa: sube un fichero LOCAL (por ruta, ver
+ * `attachments.ts`) y lo enlaza a una tarea vía `POST /api/attachments` —a
+ * diferencia de TODO lo demás en esta lista, es SÍNCRONA: no se encola, el
+ * adjunto ya está enlazado cuando la tool responde (ver su JSDoc, más abajo).
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
  * `delete_task`/`set_section`/`move_to_list`/`add_subtask`/`complete_subtask`/
  * `remove_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
@@ -407,7 +412,7 @@ function formatOpShapeError(op, error) {
     return `${op}: ${parts.join('; ')}`;
 }
 /**
- * Factory del servidor MCP de Lumbre: registra las 25 tools con `config`
+ * Factory del servidor MCP de Lumbre: registra las 26 tools con `config`
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; un futuro
@@ -756,6 +761,40 @@ export function createServer(config, opts = {}) {
             return textResult(`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
                 'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
                 'servidor MCP; no hay forma de mostrártelo a partir de aquí).');
+        }
+        catch (err) {
+            return errorResult(err);
+        }
+    });
+    server.registerTool('add_attachment', {
+        description: 'Sube un fichero LOCAL (ruta absoluta o "~/…", tope 25 MB) y lo deja adjunto a una tarea. ' +
+            'A diferencia de add_task/mutate_tasks, es SÍNCRONA: ya está enlazado al responder. Ver ' +
+            'README para el detalle de mimes/límites.',
+        inputSchema: {
+            taskId: z.string().uuid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
+            file_path: z
+                .string()
+                .min(1)
+                .describe('Ruta LOCAL del fichero, absoluta o "~/…" — una relativa se rechaza'),
+            filename: z
+                .string()
+                .min(1)
+                .optional()
+                .describe('Nombre con el que se guarda; por defecto el basename de file_path')
+        }
+    }, async (input) => {
+        try {
+            await requireTaskExists(input.taskId, { allowSubtask: false });
+            const file = await readLocalAttachment(input.file_path, input.filename);
+            const attachment = await uploadAttachment(config, {
+                taskId: input.taskId,
+                filename: file.filename,
+                mime: file.mime,
+                bytes: file.bytes
+            });
+            return textResult(`Adjunto subido a Lumbre: "${attachment.filename}" (${attachment.mime}, ${attachment.size} ` +
+                `bytes, id ${attachment.id}) en la tarea ${input.taskId}. Ya está enlazado (esta vía es ` +
+                'SÍNCRONA): léelo con read_attachment cuando quieras, sin esperar a ningún sync.');
         }
         catch (err) {
             return errorResult(err);

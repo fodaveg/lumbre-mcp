@@ -9,6 +9,7 @@ import {
 	runBatch,
 	subtaskNotAllowedError,
 	taskNotFoundError,
+	uploadAttachment,
 	type BatchResultItem,
 	type LumbreConfig,
 	type LumbreTask,
@@ -442,4 +443,87 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+});
+
+// ── uploadAttachment (POST /api/attachments?taskId=) ────────────────────────
+
+describe('uploadAttachment', () => {
+	const TASK_ID = '11111111-1111-1111-1111-111111111111';
+	const RESPONSE_BODY = {
+		id: 'att-1',
+		taskId: TASK_ID,
+		filename: 'informe año.pdf',
+		mime: 'application/pdf',
+		size: 9,
+		storageKey: 'attachments/att-1',
+		createdAt: 1_700_000_000_000
+	};
+
+	function mockUploadResponse(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		return fetchSpy;
+	}
+
+	it('camino feliz: PUT del cuerpo binario, mime, nombre URL-encodeado, taskId en la query, Bearer', async () => {
+		const fetchSpy = mockUploadResponse(RESPONSE_BODY);
+		const bytes = Buffer.from('contenido');
+
+		const got = await uploadAttachment(config, {
+			taskId: TASK_ID,
+			filename: 'informe año.pdf',
+			mime: 'application/pdf',
+			bytes
+		});
+
+		expect(got).toEqual(RESPONSE_BODY);
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe(`https://lumbre.test/api/attachments?taskId=${TASK_ID}`);
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe(bytes);
+		const headers = init.headers as Record<string, string>;
+		expect(headers.authorization).toBe('Bearer tok-123');
+		expect(headers['content-type']).toBe('application/pdf');
+		// espacio → %20, "ñ" → %C3%B1 (UTF-8) — encodeURIComponent exacto, no una
+		// aproximación con solo espacios escapados.
+		expect(headers['x-lumbre-filename']).toBe(encodeURIComponent('informe año.pdf'));
+		expect(headers['x-lumbre-filename']).toBe('informe%20a%C3%B1o.pdf');
+	});
+
+	it('404: la tarea no existe/borrada/archivada — mensaje del servidor si lo hay', async () => {
+		mockUploadResponse({ message: 'La tarea no existe, está borrada o archivada' }, 404);
+		await expect(
+			uploadAttachment(config, { taskId: TASK_ID, filename: 'a.pdf', mime: 'application/pdf', bytes: Buffer.from('x') })
+		).rejects.toThrow(/no existe, está borrada o archivada/);
+	});
+
+	it('413: propaga el mensaje EXACTO del servidor (distingue tamaño vs cuota, este cliente no lo adivina)', async () => {
+		mockUploadResponse({ message: 'Cuota de adjuntos agotada para esta cuenta' }, 413);
+		await expect(
+			uploadAttachment(config, { taskId: TASK_ID, filename: 'a.pdf', mime: 'application/pdf', bytes: Buffer.from('x') })
+		).rejects.toThrow(/Cuota de adjuntos agotada/);
+	});
+
+	it('429: mensaje de rate limit, igual que el resto del cliente', async () => {
+		mockUploadResponse({ message: 'rate limited' }, 429);
+		await expect(
+			uploadAttachment(config, { taskId: TASK_ID, filename: 'a.pdf', mime: 'application/pdf', bytes: Buffer.from('x') })
+		).rejects.toThrow(/Demasiadas peticiones/);
+	});
+
+	it('401: mensaje de token inválido, igual que el resto del cliente', async () => {
+		mockUploadResponse({ message: 'unauthorized' }, 401);
+		await expect(
+			uploadAttachment(config, { taskId: TASK_ID, filename: 'a.pdf', mime: 'application/pdf', bytes: Buffer.from('x') })
+		).rejects.toThrow(/Token inválido/);
+	});
+
+	it('respuesta 200 sin `id`: LumbreApiError, no un adjunto a medias', async () => {
+		mockUploadResponse({ ok: true });
+		await expect(
+			uploadAttachment(config, { taskId: TASK_ID, filename: 'a.pdf', mime: 'application/pdf', bytes: Buffer.from('x') })
+		).rejects.toThrow(/no confirmó la subida/);
+	});
 });

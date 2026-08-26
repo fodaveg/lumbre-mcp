@@ -98,6 +98,34 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   pendiente — es la ÚNICA forma de obtener el id de una subtarea (`list_tasks`
   nunca las lista), necesario para `complete_subtask`. Da error si el `taskId`
   no existe entre las tareas visibles del usuario.
+- `read_attachment({ attachment_id })` — descarga los BYTES de un adjunto de
+  una tarea (vía `GET /api/attachments/:id`, sácalo del campo `attachments`
+  de `list_tasks`/`get_task`). Si es una imagen, se devuelve para verla
+  directamente; para cualquier otro tipo (PDF, etc.) solo trae su metadata —
+  no hay forma de leer su contenido con esta tool.
+- `add_attachment({ taskId, file_path, filename? })` — sube un fichero LOCAL
+  (por RUTA, no en base64: el servidor MCP corre en tu misma máquina, y 25 MB
+  en base64 serían ~33 MB de contexto) y lo deja adjunto y **enlazado** a una
+  tarea (vía `POST /api/attachments?taskId=`). `file_path` debe ser absoluta o
+  empezar por `~/` — una relativa se resolvería contra el cwd del PROCESO MCP,
+  no el de tu sesión, y se rechaza. `filename` (opcional) es el nombre con el
+  que se guarda; por defecto el basename de `file_path`. Tope **25 MB** por
+  fichero, comprobado en el cliente (mensaje con el tamaño real) y de forma
+  AUTORITATIVA en el servidor. No admite subtareas. A diferencia de TODO lo
+  demás en Fase 1/Fase 2 (que se encola), **esta vía es SÍNCRONA**: el
+  servidor escribe la metadata al CRDT antes de responder 200, así que el
+  adjunto ya está enlazado y visible cuando la tool contesta — no hace falta
+  esperar a ningún sync.
+
+  Ojo con el `Content-Type` de un `.txt`/`.log`: SvelteKit rechaza con **403
+  mudo** (antes de llegar a nuestro handler) cualquier POST sin cabecera
+  `Origin` cuyo Content-Type sea `application/x-www-form-urlencoded`,
+  `multipart/form-data`, `text/plain` o `application/x-sveltekit-formdata`
+  (`is_form_content_type`, `@sveltejs/kit`) — y el MCP, al correr fuera del
+  navegador, nunca manda `Origin`. Por eso el mapa de mimes de
+  `attachments.ts` degrada esos cuatro a `application/octet-stream` antes de
+  mandar (en la práctica, el único que se cruza es `text/plain`: `.md`/`.csv`
+  no están en esa lista y viajan con su mime real).
 - `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
   `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
   ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket

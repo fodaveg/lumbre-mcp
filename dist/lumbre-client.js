@@ -256,6 +256,71 @@ export async function getAttachment(config, id) {
     };
 }
 /**
+ * `POST /api/attachments?taskId=<uuid>`: sube los bytes de un fichero y lo
+ * deja adjunto y ENLAZADO a esa tarea — a diferencia de `addTask`/`mutateTask`
+ * (encolan, se aplican al sincronizar), este endpoint escribe la metadata al
+ * CRDT él mismo antes de responder 200: cuando responde, el adjunto YA está
+ * visible, sin esperar a ningún sync (ver `add_attachment` en `index.ts`).
+ *
+ * No pasa por `request()`: el cuerpo no es JSON (son los bytes crudos del
+ * fichero) y la cabecera del nombre necesita ir URL-encodeada, nunca en la
+ * query (acabaría en los access-logs). `mime` debe venir YA degradado si hace
+ * falta (ver `mimeForFilename` en `attachments.ts`): un `Content-Type` como
+ * `text/plain` hace que SvelteKit devuelva 403 ANTES de llegar al handler
+ * (`is_form_content_type`, ver el JSDoc de `SVELTEKIT_FORM_CONTENT_TYPES`) —
+ * este cliente no lo sabe ni le corresponde saberlo, solo manda lo que le dan.
+ */
+export async function uploadAttachment(config, input) {
+    const params = new URLSearchParams({ taskId: input.taskId });
+    const url = `${config.baseUrl.replace(/\/$/, '')}/api/attachments?${params.toString()}`;
+    let res;
+    try {
+        res = await fetch(url, {
+            method: 'POST',
+            headers: {
+                authorization: `Bearer ${config.token}`,
+                'content-type': input.mime,
+                'x-lumbre-filename': encodeURIComponent(input.filename)
+            },
+            // `Buffer<ArrayBufferLike>` vs el `BodyInit` de los tipos DOM de fetch:
+            // Buffer ES un Uint8Array en runtime (Node lo implementa así), el cast
+            // es solo para el checker de tipos.
+            body: input.bytes
+        });
+    }
+    catch (err) {
+        const cause = err instanceof Error ? err.message : String(err);
+        throw new LumbreApiError(`No se pudo conectar con Lumbre en ${config.baseUrl} (${cause}). ¿Es correcto LUMBRE_BASE_URL?`);
+    }
+    const contentType = res.headers.get('content-type') ?? '';
+    const body = contentType.includes('application/json')
+        ? await res.json().catch(() => null)
+        : await res.text().catch(() => null);
+    if (!res.ok) {
+        if (res.status === 401) {
+            throw new LumbreApiError('Token inválido o no configurado (LUMBRE_TOKEN). Consíguelo en Ajustes → email entrante de Lumbre.', 401);
+        }
+        if (res.status === 404) {
+            throw new LumbreApiError(extractMessage(body) ?? 'La tarea no existe, está borrada o archivada.', 404);
+        }
+        if (res.status === 413) {
+            // DOS causas distintas (fichero > 25 MiB, o cuota agregada de la cuenta
+            // agotada) — el servidor ya las distingue en su mensaje, así que se
+            // propaga TAL CUAL en vez de generalizar a "demasiado grande".
+            throw new LumbreApiError(extractMessage(body) ?? 'Lumbre rechazó el adjunto (413): demasiado grande, o cuota agotada.', 413);
+        }
+        if (res.status === 429) {
+            throw new LumbreApiError('Demasiadas peticiones a Lumbre; espera un momento y reintenta.', 429);
+        }
+        const detail = extractMessage(body) ?? (typeof body === 'string' ? body : JSON.stringify(body));
+        throw new LumbreApiError(`Lumbre respondió ${res.status} al subir el adjunto: ${detail}`, res.status);
+    }
+    if (!body || typeof body !== 'object' || typeof body.id !== 'string') {
+        throw new LumbreApiError('Lumbre no confirmó la subida del adjunto (respuesta inesperada).');
+    }
+    return body;
+}
+/**
  * `POST /api/sync/flush`: fuerza el flush del sync ANTES de leer (bug:
  * ventana de debounce del persister — ver ese endpoint en el repo
  * principal). Sin cuerpo. Útil justo antes de un `listTasks` cuando importa

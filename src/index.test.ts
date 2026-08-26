@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { z } from 'zod';
 
@@ -72,6 +72,7 @@ describe('tools/list — superficie completa', () => {
 		'list_lists',
 		'get_task',
 		'read_attachment',
+		'add_attachment',
 		'complete_task',
 		'cancel_task',
 		'update_task',
@@ -93,8 +94,8 @@ describe('tools/list — superficie completa', () => {
 		'delete_brl_entry'
 	];
 
-	it('sigue exponiendo las 25 tools, por nombre', () => {
-		expect(tools).toHaveLength(25);
+	it('sigue exponiendo las 26 tools, por nombre', () => {
+		expect(tools).toHaveLength(26);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -118,7 +119,7 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
-	it('techo de bytes de las 25 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 26 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -156,11 +157,13 @@ describe('tools/list — superficie completa', () => {
 		// `inputSchema` de `mutate_tasks`, medido aparte, bajó de 3.994 a
 		// 3.683 caracteres). Techo bajado junto con el número medido, para
 		// que la ganancia quede bloqueada.
-		// Re-medido tras integrar refs+upcoming/days en `list_tasks` (merge del
-		// 26 ago): el número real se comprueba abajo, ver CHAR_CEILING.
+		// Re-medido el 2026-08-26 tras integrar refs+upcoming/days en
+		// `list_tasks` (merge de e6534ee) y añadir `add_attachment` (sube un
+		// fichero LOCAL, ver `attachments.ts`): 25.399 sobre transporte
+		// in-memory (26 tools). Techo subido junto con el número medido.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 25600;
+		const CHAR_CEILING = 26700;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -570,6 +573,265 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		const result = await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
 		expect(result.isError).toBe(true);
 		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/no existe/i);
+	});
+});
+
+describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍNCRONO)', () => {
+	const TASK_ID = '22222222-2222-2222-2222-222222222222';
+	const SUB_ID = '33333333-3333-3333-3333-333333333333';
+
+	function lumbreTask(overrides: Record<string, unknown> = {}) {
+		return {
+			id: TASK_ID,
+			content: 'tarea con adjunto',
+			notes: null,
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			parentId: null,
+			...overrides
+		};
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	function firstResultText(result: { content: { type: string; text?: string }[] }): string {
+		const first = result.content[0];
+		return first && first.type === 'text' && typeof first.text === 'string' ? first.text : '';
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'add-attachment-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	let tmpDir: string;
+	let filePath: string;
+
+	beforeEach(async () => {
+		const { mkdtemp, writeFile } = await import('node:fs/promises');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		tmpDir = await mkdtemp(join(tmpdir(), 'lumbre-mcp-add-attachment-test-'));
+		filePath = join(tmpDir, 'informe.pdf');
+		await writeFile(filePath, Buffer.from('%PDF-1.4 contenido de prueba'));
+	});
+
+	afterEach(async () => {
+		const { rm } = await import('node:fs/promises');
+		await rm(tmpDir, { recursive: true, force: true });
+		vi.unstubAllGlobals();
+	});
+
+	it('camino feliz: comprueba la tarea, sube los bytes, y NUNCA menciona "sincronizar" (es SÍNCRONO)', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/attachments?taskId=')) {
+				expect(init?.method).toBe('POST');
+				const headers = init?.headers as Record<string, string>;
+				expect(headers.authorization).toBe('Bearer test-token-para-index-test');
+				expect(headers['content-type']).toBe('application/pdf');
+				return jsonResponse({
+					id: 'att-1',
+					taskId: TASK_ID,
+					filename: 'informe.pdf',
+					mime: 'application/pdf',
+					size: 28,
+					storageKey: 'attachments/att-1',
+					createdAt: 1_700_000_000_000
+				});
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath }
+		});
+		expect(result.isError).not.toBe(true);
+		const text = firstResultText(result as { content: { type: string; text?: string }[] });
+		expect(text).toContain('att-1');
+		expect(text).not.toMatch(/sincroniz/i);
+	});
+
+	it('taskId inexistente: error claro, y NINGUNA llamada a /api/attachments', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/no existe/i);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
+	});
+
+	it('taskId de una SUBTAREA: rechazada, igual que update_task/move_to_list', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask({ id: SUB_ID, parentId: TASK_ID })]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: SUB_ID, file_path: filePath }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/subtarea/i);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
+	});
+
+	it('fichero local inexistente: error legible y NINGUNA llamada a /api/attachments', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const { join } = await import('node:path');
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: join(tmpDir, 'no-existe.pdf') }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/No existe/);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
+	});
+
+	it('ruta relativa: rechazada, y NUNCA llega a /api/attachments (la tarea sí existe)', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: 'informe.pdf' }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/absoluta/);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
+	});
+
+	it('404 del servidor al subir (tarea borrada entre medias): mensaje legible', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/attachments?taskId=')) {
+				return jsonResponse({ message: 'La tarea no existe, está borrada o archivada' }, 404);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(
+			/no existe, está borrada o archivada/
+		);
+	});
+
+	it('413 del servidor: propaga el mensaje EXACTO (tamaño vs cuota)', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/attachments?taskId=')) {
+				return jsonResponse({ message: 'Cuota de adjuntos agotada para esta cuenta' }, 413);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(
+			/Cuota de adjuntos agotada/
+		);
+	});
+
+	it('429 del servidor: mensaje de rate limit', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/attachments?taskId=')) return jsonResponse({ message: 'rate limited' }, 429);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/Demasiadas peticiones/);
+	});
+
+	it('`filename` explícito gana sobre el basename de `file_path`', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/attachments?taskId=')) {
+				const headers = init?.headers as Record<string, string>;
+				expect(headers['x-lumbre-filename']).toBe(encodeURIComponent('informe año.pdf'));
+				return jsonResponse({
+					id: 'att-2',
+					taskId: TASK_ID,
+					filename: 'informe año.pdf',
+					mime: 'application/pdf',
+					size: 28,
+					storageKey: 'attachments/att-2',
+					createdAt: 1_700_000_000_000
+				});
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath, filename: 'informe año.pdf' }
+		});
+		expect(result.isError).not.toBe(true);
 	});
 });
 
