@@ -28,14 +28,21 @@
 const url = process.argv[2] ?? process.env.MCP_URL;
 const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
 
-// Techo de bytes de `tools/list` para las 25 tools reales — MISMA fuente que
-// `src/index.test.ts` ("techo de bytes de las 25 tools", `CHAR_CEILING`):
-// medido 24.358 tras la poda de `mutate_tasks` (2026-08-25) + ~5% de
+// Techo de bytes de `tools/list` para las 26 tools reales — MISMA fuente que
+// `src/index.test.ts` ("techo de bytes de las 26 tools", `CHAR_CEILING`):
+// medido 25.399 tras añadir `add_attachment` (2026-08-26) + ~5% de
 // holgura. Si ese test cambia su techo, este número se actualiza a la vez —
 // no hay forma de importarlo desde un script standalone sin dependencias, así
 // que va documentado y buscable por el mismo comentario en ambos ficheros.
-const CHAR_CEILING = 25600;
-const EXPECTED_TOOL_COUNT = 25;
+//
+// Esta pareja de números YA se quedó atrás una vez: el lote de
+// `add_attachment` (26 ago 2026) subió el techo en `index.test.ts` y
+// `http.test.ts` y dejó estos dos en 25/25600, así que el deploy salió con el
+// smoke en rojo por un recuento congelado, no por un fallo real. Si tocas el
+// número de tools, `grep -rn "CHAR_CEILING\|EXPECTED_TOOL_COUNT" src scripts`
+// enseña los TRES sitios de golpe.
+const CHAR_CEILING = 26700;
+const EXPECTED_TOOL_COUNT = 26;
 
 if (!url) {
 	console.error('smoke-remote: falta la URL. Uso: node scripts/smoke-remote.mjs <url> <token>');
@@ -102,7 +109,14 @@ async function main() {
 	check('tools/list responde HTTP 200', list.status === 200, `status=${list.status}`);
 	const tools = list.body?.result?.tools;
 	const toolCount = Array.isArray(tools) ? tools.length : -1;
-	check('tools/list expone exactamente 25 tools', toolCount === EXPECTED_TOOL_COUNT, `count=${toolCount}`);
+	// La etiqueta interpola la constante a propósito: escrita a mano decía
+	// "exactamente 25 tools" al lado de un `count=26` en VERDE, que es peor que
+	// no decir nada.
+	check(
+		`tools/list expone exactamente ${EXPECTED_TOOL_COUNT} tools`,
+		toolCount === EXPECTED_TOOL_COUNT,
+		`count=${toolCount}`
+	);
 	const size = tools ? JSON.stringify(tools).length : -1;
 	check(`tools/list <= ${CHAR_CEILING} chars`, size >= 0 && size <= CHAR_CEILING, `size=${size}`);
 
