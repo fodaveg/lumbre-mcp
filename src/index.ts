@@ -1648,7 +1648,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				`para VARIAS entradas del registro (BRL) de golpe: añade, reescribe o borra en una sola ` +
 				`llamada. Contrato por-op en la description de \`ops\`. Éxito PARCIAL: una op inválida no ` +
 				`bloquea las demás — el resultado detalla qué falló por posición y el \`id\` de cada \`add\` ` +
-				`encolado. ${ASYNC_NOTE}`,
+				`encolado. La op \`delete\` es DELICADA: sin deshacer — confírmala con el usuario antes. ` +
+				`${ASYNC_NOTE}`,
 			inputSchema: {
 				ops: z
 					.array(mutateBrlOpSchema)
