@@ -44,7 +44,6 @@ import {
 	type NotesSeenStore
 } from './notes.js';
 import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-cache.js';
-import { clearMutationPending, isMutationPending, markMutationPending } from './sync-flush.js';
 
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
@@ -656,72 +655,11 @@ export interface CreateServerOptions {
  */
 export function createServer(config: LumbreConfig, opts: CreateServerOptions = {}): McpServer {
 	const notesSeenStore = opts.notesSeenStore ?? fileNotesSeenStore;
-	const nowFn = opts.now ?? Date.now;
-	const { taskCache, brlCache } = getExistenceCachesForToken(config.token, EXISTENCE_CACHE_TTL_MS, nowFn);
+	const { taskCache, brlCache } = getExistenceCachesForToken(config.token, EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
 	const localFilesystem = opts.localFilesystem ?? true;
 	const toolset = opts.toolset ?? 'all';
 
 	const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
-
-	/**
-	 * Refresca el sync SOLO si `config.token` tiene una mutación de ESTE MCP
-	 * pendiente de flush (`sync-flush.ts`) — se llama al PRINCIPIO de toda
-	 * tool de LECTURA (`list_tasks`, `get_task`, `list_lists`,
-	 * `list_brl_entries`, `read_attachment`, vía `withAutoFlush` más abajo),
-	 * ANTES de pedir nada a la API, para que la lectura ya vea lo fresco. Sin
-	 * marca pendiente, esto es un `isMutationPending` de coste cero — cero
-	 * peticiones de más, que es justo lo que evita convertir esto en un
-	 * `refresh_sync` incondicional (ver el JSDoc de `refresh_sync`, más abajo,
-	 * sobre por qué esa vía SÍ sigue haciendo el flush siempre).
-	 *
-	 * GARANTÍA: un fallo del flush NUNCA convierte una lectura que funciona en
-	 * un error. Si `refreshSync` lanza, la marca se deja SIN limpiar (para
-	 * reintentar en la próxima lectura) y esta función devuelve una línea de
-	 * aviso en vez de propagar la excepción — el llamante (`withAutoFlush`) la
-	 * añade al resultado, pero la lectura en sí sigue su curso con los datos
-	 * que consiga traer.
-	 */
-	async function autoFlushSyncIfPending(): Promise<string | undefined> {
-		if (!isMutationPending(config.token, nowFn)) return undefined;
-		try {
-			await refreshSync(config);
-			clearMutationPending(config.token, nowFn);
-			return undefined;
-		} catch (err) {
-			const message = err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err);
-			return (
-				`⚠️ El flush automático de sync (por una mutación previa de este MCP) falló: ${message}. ` +
-				'Esta lectura puede salir rancia; se reintentará en la próxima lectura de esta sesión.'
-			);
-		}
-	}
-
-	/** Añade `note` como un bloque de texto MÁS al final de `result.content` —
-	 *  no-op si `note` es `undefined` (el caso normal, sin flush pendiente o
-	 *  flush que salió bien). */
-	function appendFlushNote<R extends { content: Array<{ type: string; [k: string]: unknown }> }>(
-		result: R,
-		note: string | undefined
-	): R {
-		if (!note) return result;
-		return { ...result, content: [...result.content, { type: 'text' as const, text: note }] };
-	}
-
-	/**
-	 * Envuelve el handler de una tool de LECTURA con el flush automático de
-	 * arriba: espera a `autoFlushSyncIfPending` ANTES de `handler` (para que
-	 * la lectura, si hacía falta refrescar, ya vea el sync fresco) y, si el
-	 * flush falló, añade su aviso al resultado de `handler` como una línea
-	 * más (ver `appendFlushNote`) — nunca lo sustituye ni lo convierte en
-	 * error.
-	 */
-	async function withAutoFlush<R extends { content: Array<{ type: string; [k: string]: unknown }> }>(
-		handler: () => Promise<R>
-	): Promise<R> {
-		const flushNote = await autoFlushSyncIfPending();
-		const result = await handler();
-		return appendFlushNote(result, flushNote);
-	}
 
 	const addTaskTool = server.registerTool(
 		'add_task',
@@ -772,7 +710,6 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		async (input) => {
 			try {
 				await addTask(config, input);
-				markMutationPending(config.token, nowFn);
 				return textResult(`Tarea añadida a Lumbre: “${input.text}”.`);
 			} catch (err) {
 				return errorResult(err);
@@ -784,21 +721,15 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'refresh_sync',
 		{
 			description:
-				'Fuerza el flush de sync de Lumbre. NO hace falta llamarla antes de leer por una ' +
-				'mutación hecha con ESTE MCP — list_tasks/get_task/list_lists/list_brl_entries/' +
-				'read_attachment ya se refrescan solas cuando detectan que hubo una. Sigue haciendo ' +
-				'falta cuando el cambio viene de FUERA de este MCP (la app/móvil del usuario) y quieres ' +
-				'que se vea de inmediato en la próxima lectura — este MCP no se entera de esos cambios ' +
-				'por sí solo. Solo garantiza lo que YA llegó al servidor por WebSocket — si el ' +
-				'dispositivo del usuario está offline, sus cambios sin enviar no se pueden recuperar. ' +
-				'Sin parámetros.',
+				'Fuerza el flush de sync de Lumbre antes de leer (evita que list_tasks devuelva estado ' +
+				'rancio). Solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
+				'del usuario está offline, sus cambios sin enviar no se pueden recuperar. Sin parámetros.',
 
 			inputSchema: {}
 		},
 		async () => {
 			try {
 				await refreshSync(config);
-				clearMutationPending(config.token, nowFn);
 				return textResult('Sync de Lumbre refrescado: el servidor ya tiene persistido todo lo que le había llegado.');
 			} catch (err) {
 				return errorResult(err);
@@ -887,84 +818,83 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					)
 			}
 		},
-		async (input) =>
-			withAutoFlush(async () => {
-				try {
-					if (input.notesSince !== undefined) {
-						const since = parseNotesSince(input.notesSince);
-						if (!since) {
-							return errorResult(
-								new Error(
-									`notesSince inválido: "${input.notesSince}" (usa "YYYY-MM-DD" o ISO 8601 completo).`
-								)
-							);
-						}
-						// Consulta de precisión, siempre con las notas ENTERAS (sin
-						// `notesQuery`, ver el JSDoc de `computeNotesSinceRender`): no es el
-						// camino que optimiza esta feature, así que se queda con el
-						// comportamiento de siempre.
-						const tasks = await listTasks(config, input);
-						taskCache.setAll(tasks);
-						const autoRender = computeNotesSinceRender(tasks, since);
-						const refs = await resolveRefs(config, refTexts(tasks, 'auto', autoRender));
-						return textResult(
-							formatTaskList(tasks, input.scope ?? 'today', {
-								notesMode: 'auto',
-								autoRender,
-								notesSinceLabel: input.notesSince,
-								refs
-							})
+		async (input) => {
+			try {
+				if (input.notesSince !== undefined) {
+					const since = parseNotesSince(input.notesSince);
+					if (!since) {
+						return errorResult(
+							new Error(
+								`notesSince inválido: "${input.notesSince}" (usa "YYYY-MM-DD" o ISO 8601 completo).`
+							)
 						);
 					}
-
-					const notesMode = effectiveNotesMode(input);
-
-					if (notesMode === 'none') {
-						// El texto no se usa para nada: una sola petición, ahorro máximo —
-						// un servidor VIEJO ignora `notes=none` y todo sigue funcionando
-						// igual, solo que sin ahorrar.
-						const tasks = await listTasks(config, { ...input, notesQuery: 'none' });
-						taskCache.setAll(tasks);
-						const refs = await resolveRefs(config, refTexts(tasks, notesMode));
-						return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
-					}
-
-					if (notesMode === 'auto') {
-						const { list, autoRender } = await listTasksAutoTwoPhase(input);
-						const refs = await resolveRefs(config, refTexts(list, notesMode, autoRender));
-						return textResult(
-							formatTaskList(list, input.scope ?? 'today', {
-								notesMode,
-								autoRender,
-								notesWindowHours: input.notesRecentHours,
-								refs
-							})
-						);
-					}
-
-					// 'preview'/'full': notas enteras de siempre, sin optimizar ('full'
-					// las necesita TODAS íntegras, 'preview' las trunca aquí mismo a
-					// partir del texto completo).
+					// Consulta de precisión, siempre con las notas ENTERAS (sin
+					// `notesQuery`, ver el JSDoc de `computeNotesSinceRender`): no es el
+					// camino que optimiza esta feature, así que se queda con el
+					// comportamiento de siempre.
 					const tasks = await listTasks(config, input);
 					taskCache.setAll(tasks);
-					if (notesMode === 'full') {
-						// Íntegra en 'full' también cuenta como SURFACEADA — misma huella
-						// que 'auto' registra, para que una vuelta con `notes: 'full'` no
-						// haga que la siguiente en 'auto' vuelva a marcar "cambió" sin
-						// haber cambiado — ver el JSDoc de `recordNotesSeen`.
-						await recordNotesSeen(
-							tasks
-								.filter(hasNotes)
-								.map((t) => ({ taskId: t.id, notes: t.notes as string, notesUpdatedAt: t.notesUpdatedAt })),
-							notesSeenStore
-						);
-					}
+					const autoRender = computeNotesSinceRender(tasks, since);
+					const refs = await resolveRefs(config, refTexts(tasks, 'auto', autoRender));
+					return textResult(
+						formatTaskList(tasks, input.scope ?? 'today', {
+							notesMode: 'auto',
+							autoRender,
+							notesSinceLabel: input.notesSince,
+							refs
+						})
+					);
+				}
+
+				const notesMode = effectiveNotesMode(input);
+
+				if (notesMode === 'none') {
+					// El texto no se usa para nada: una sola petición, ahorro máximo —
+					// un servidor VIEJO ignora `notes=none` y todo sigue funcionando
+					// igual, solo que sin ahorrar.
+					const tasks = await listTasks(config, { ...input, notesQuery: 'none' });
+					taskCache.setAll(tasks);
 					const refs = await resolveRefs(config, refTexts(tasks, notesMode));
 					return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
-				} catch (err) {
-					return errorResult(err);
 				}
-			})
+
+				if (notesMode === 'auto') {
+					const { list, autoRender } = await listTasksAutoTwoPhase(input);
+					const refs = await resolveRefs(config, refTexts(list, notesMode, autoRender));
+					return textResult(
+						formatTaskList(list, input.scope ?? 'today', {
+							notesMode,
+							autoRender,
+							notesWindowHours: input.notesRecentHours,
+							refs
+						})
+					);
+				}
+
+				// 'preview'/'full': notas enteras de siempre, sin optimizar ('full'
+				// las necesita TODAS íntegras, 'preview' las trunca aquí mismo a
+				// partir del texto completo).
+				const tasks = await listTasks(config, input);
+				taskCache.setAll(tasks);
+				if (notesMode === 'full') {
+					// Íntegra en 'full' también cuenta como SURFACEADA — misma huella
+					// que 'auto' registra, para que una vuelta con `notes: 'full'` no
+					// haga que la siguiente en 'auto' vuelva a marcar "cambió" sin
+					// haber cambiado — ver el JSDoc de `recordNotesSeen`.
+					await recordNotesSeen(
+						tasks
+							.filter(hasNotes)
+							.map((t) => ({ taskId: t.id, notes: t.notes as string, notesUpdatedAt: t.notesUpdatedAt })),
+						notesSeenStore
+					);
+				}
+				const refs = await resolveRefs(config, refTexts(tasks, notesMode));
+				return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
 	);
 
 	/**
@@ -1064,15 +994,14 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 
 			inputSchema: {}
 		},
-		async () =>
-			withAutoFlush(async () => {
-				try {
-					const lists = await listLists(config);
-					return textResult(formatListSummaries(lists));
-				} catch (err) {
-					return errorResult(err);
-				}
-			})
+		async () => {
+			try {
+				const lists = await listLists(config);
+				return textResult(formatListSummaries(lists));
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
 	);
 
 	const getTaskTool = server.registerTool(
@@ -1087,35 +1016,34 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)')
 			}
 		},
-		async (input) =>
-			withAutoFlush(async () => {
-				try {
-					const task = await findTaskById(config, input.taskId);
-					if (!task) return errorResult(taskNotFoundError(input.taskId));
-					taskCache.set(task);
-					// La nota (si la hay) sale SIEMPRE íntegra aquí (`formatTaskFull`) — se
-					// registra como vista, misma huella que `list_tasks({notes:'auto'})`
-					// consulta (ver `notes.ts`); best-effort, nunca puede romper esta
-					// lectura.
-					if (hasNotes(task)) {
-						await recordNotesSeen(
-							[{ taskId: task.id, notes: task.notes as string, notesUpdatedAt: task.notesUpdatedAt }],
-							notesSeenStore
-						);
-					}
-					// Referencias EN VIVO del texto, la nota (que aquí sale siempre íntegra)
-					// y las subtareas — ver `refs.ts`. Cero peticiones extra si no hay
-					// ninguna referencia, que es el caso normal.
-					const refs = await resolveRefs(config, [
-						task.content,
-						task.notes,
-						...(task.subtasks ?? []).map((s) => s.content)
-					]);
-					return textResult(formatTaskFull(task, refs));
-				} catch (err) {
-					return errorResult(err);
+		async (input) => {
+			try {
+				const task = await findTaskById(config, input.taskId);
+				if (!task) return errorResult(taskNotFoundError(input.taskId));
+				taskCache.set(task);
+				// La nota (si la hay) sale SIEMPRE íntegra aquí (`formatTaskFull`) — se
+				// registra como vista, misma huella que `list_tasks({notes:'auto'})`
+				// consulta (ver `notes.ts`); best-effort, nunca puede romper esta
+				// lectura.
+				if (hasNotes(task)) {
+					await recordNotesSeen(
+						[{ taskId: task.id, notes: task.notes as string, notesUpdatedAt: task.notesUpdatedAt }],
+						notesSeenStore
+					);
 				}
-			})
+				// Referencias EN VIVO del texto, la nota (que aquí sale siempre íntegra)
+				// y las subtareas — ver `refs.ts`. Cero peticiones extra si no hay
+				// ninguna referencia, que es el caso normal.
+				const refs = await resolveRefs(config, [
+					task.content,
+					task.notes,
+					...(task.subtasks ?? []).map((s) => s.content)
+				]);
+				return textResult(formatTaskFull(task, refs));
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
 	);
 
 	server.registerTool(
@@ -1132,26 +1060,25 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.describe('Id del adjunto (ver el campo `attachments` de list_tasks)')
 			}
 		},
-		async (input) =>
-			withAutoFlush(async () => {
-				try {
-					const { contentType, bytes } = await getAttachment(config, input.attachment_id);
-					if (contentType.startsWith('image/')) {
-						return {
-							content: [
-								{ type: 'image' as const, data: bytes.toString('base64'), mimeType: contentType }
-							]
-						};
-					}
-					return textResult(
-						`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
-							'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
-							'servidor MCP; no hay forma de mostrártelo a partir de aquí).'
-					);
-				} catch (err) {
-					return errorResult(err);
+		async (input) => {
+			try {
+				const { contentType, bytes } = await getAttachment(config, input.attachment_id);
+				if (contentType.startsWith('image/')) {
+					return {
+						content: [
+							{ type: 'image' as const, data: bytes.toString('base64'), mimeType: contentType }
+						]
+					};
 				}
-			})
+				return textResult(
+					`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
+						'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
+						'servidor MCP; no hay forma de mostrártelo a partir de aquí).'
+				);
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
 	);
 
 	server.registerTool(
@@ -1241,7 +1168,6 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					mime: file.mime,
 					bytes: file.bytes
 				});
-				markMutationPending(config.token, nowFn);
 				return textResult(
 					`Adjunto subido a Lumbre: "${attachment.filename}" (${attachment.mime}, ${attachment.size} ` +
 						`bytes, id ${attachment.id}) en la tarea ${input.taskId}. Ya está enlazado (esta vía es ` +
@@ -1303,16 +1229,11 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	 * viaja en el mismo campo `taskId` de `MutateTaskInput` — ver su JSDoc en
 	 * `lumbre-client.ts`) es un no-op inofensivo, así que este wrapper reemplaza
 	 * TODAS las llamadas a `mutateTask` de las tools de tarea/lista/sección de
-	 * aquí abajo, no solo las que de verdad tocan una tarea cacheada. También
-	 * marca la mutación pendiente de flush (`sync-flush.ts`) para las tools de
-	 * LECTURA — cubre `complete_task`/`cancel_task`/`update_task`/
-	 * `reschedule_task`/`delete_task`/`set_section`/`remove_section`/
-	 * `add_subtask`/`complete_subtask`, que pasan TODAS por este wrapper.
+	 * aquí abajo, no solo las que de verdad tocan una tarea cacheada.
 	 */
 	async function mutateTaskInvalidating(input: Parameters<typeof mutateTask>[1]): Promise<void> {
 		await mutateTask(config, input);
 		taskCache.invalidate(input.taskId);
-		markMutationPending(config.token, nowFn);
 	}
 
 	const completeTaskTool = server.registerTool(
@@ -1690,22 +1611,21 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.describe(BRL_DATE)
 			}
 		},
-		async (input) =>
-			withAutoFlush(async () => {
-				try {
-					const entries = await listBrlEntries(config, input.date);
-					brlCache.setAll(input.date, entries);
-					if (entries.length === 0) return textResult(`El registro del ${input.date} está vacío.`);
-					return textResult(
-						[
-							`Registro del ${input.date} (${entries.length} entrada(s)):`,
-							...entries.map((e) => `${e.id}  ${e.time || '--:--'}  ${e.entry}`)
-						].join('\n')
-					);
-				} catch (err) {
-					return errorResult(err);
-				}
-			})
+		async (input) => {
+			try {
+				const entries = await listBrlEntries(config, input.date);
+				brlCache.setAll(input.date, entries);
+				if (entries.length === 0) return textResult(`El registro del ${input.date} está vacío.`);
+				return textResult(
+					[
+						`Registro del ${input.date} (${entries.length} entrada(s)):`,
+						...entries.map((e) => `${e.id}  ${e.time || '--:--'}  ${e.entry}`)
+					].join('\n')
+				);
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
 	);
 
 	/**
@@ -1794,9 +1714,6 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			}
 
 			const okCount = results.filter((r) => r.ok).length;
-			// Éxito PARCIAL: se marca con que AL MENOS una op se encoló bien, no
-			// que todas lo hicieran — igual que `mutate_tasks`, más abajo.
-			if (okCount > 0) markMutationPending(config.token, nowFn);
 			const idLines = results
 				.filter((r) => r.ok)
 				.map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: id ${r.id}`);
@@ -1912,9 +1829,6 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					}
 				});
 				const okCount = results.filter((r) => r.ok).length;
-				// Éxito PARCIAL: se marca con que AL MENOS una op se encoló bien, no
-				// que todas lo hicieran (ver `mutate_brl`, mismo criterio).
-				if (okCount > 0) markMutationPending(config.token, nowFn);
 				failures.sort((a, b) => a.index - b.index);
 				succeededWithId.sort((a, b) => a.index - b.index);
 
