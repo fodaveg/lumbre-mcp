@@ -723,23 +723,43 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	 * fresca SIN ningún flush por medio. Cinco corridas contra el servidor
 	 * real con el binario ANTERIOR a esta descripción (o sea, sin nada que
 	 * refrescara solo), por los DOS caminos de escritura que existen
-	 * (`add_task`, que va a `/api/tasks`, y `mutate_tasks`, que va a
-	 * `/api/batch`): en las cinco, la tarea recién creada aparecía en el
-	 * `list_tasks` inmediatamente siguiente. La mutación tarda ~4,4 s en
-	 * responder, y para cuando responde el servidor ya la tiene aplicada.
+	 * (`add_task` → `POST /api/ingest` y `mutate_tasks` → `POST /api/batch`):
+	 * en las cinco, la tarea recién creada aparecía en el `list_tasks`
+	 * inmediatamente siguiente.
 	 *
-	 * O sea que los `refresh_sync` que el modelo encadenaba detrás de sus
-	 * propias mutaciones no compraban nada: cada uno cuesta en el servidor un
-	 * upsert del blob CRDT ENTERO de la cuenta, y el coste crece con el
-	 * tamaño de la cuenta. Se midieron 506 llamadas en 2.056 transcripts.
+	 * DE QUÉ DEPENDE ESA FRESCURA, que no es lo que parece. NO es «las
+	 * escrituras van por REST y el rebote solo afecta al WebSocket». Es que
+	 * los tres handlers de escritura del repo principal
+	 * (`/api/ingest:289`, `/api/batch:253` — uno solo para todo el lote — y
+	 * `/api/mutations:148`) llaman a `runHeadlessDrain`
+	 * (`src/lib/server/sync/drain.ts:96-107`) ANTES de responder, y ese
+	 * drenaje persiste en sus dos ramas: con la app del usuario abierta
+	 * fuerza el guardado en vez de esperar al rebote de 250 ms, y sin ella
+	 * hidrata un store efímero del blob, materializa y vuelve a persistir a
+	 * mano. Dato de la sesión que mantiene ese repo, 2026-08-27.
+	 *
+	 * O sea que la propiedad se apoya en un drenaje SÍNCRONO al final del
+	 * handler ajeno. Si alguien lo mueve a segundo plano para bajar la
+	 * latencia (y hay motivo: la mutación tarda ~4,4 s en responder, que es
+	 * justo ese drenaje), esta descripción pasa a mentir y NINGÚN test de
+	 * este repo se entera. Si la app empieza a leer viejo justo después de
+	 * escribir, mira ahí antes que aquí.
 	 *
 	 * Lo que esta tool SÍ sigue arreglando es el otro caso, que no se puede
-	 * medir desde aquí y por eso no se toca: un cambio que el usuario hizo
-	 * FUERA de este MCP (su app, su móvil) llega al servidor por WebSocket y
-	 * se queda sin persistir; las lecturas del MCP van por la API REST, que
-	 * lee lo persistido, así que ese cambio no se ve hasta que alguien fuerza
-	 * el flush. Por eso NO se convierte en no-op cuando «no hay nada que este
-	 * MCP haya mutado»: este MCP no se entera de esos cambios.
+	 * medir desde aquí y por eso no se toca: el rancio que arregla no lo
+	 * produce este MCP, lo produce un cliente conectado cuyos cambios están
+	 * en la room y aún no han bajado al blob. Las lecturas del MCP van por
+	 * REST y leen lo persistido, así que ese cambio no se ve hasta que
+	 * alguien fuerza el flush. Por eso NO se convierte en no-op cuando «no
+	 * hay nada que este MCP haya mutado»: este MCP no se entera de esos
+	 * cambios.
+	 *
+	 * Y no es gratis saltárselo mal: `flushPersister` llama a `save()`
+	 * incondicionalmente y acaba en un SELECT más un `insert … on conflict`
+	 * con el blob ENTERO, haya cambiado algo o no. Con la app del usuario
+	 * CERRADA sí es barato de verdad, porque `flushSyncRoom` corta en la
+	 * primera línea al no haber room. Se midieron 506 llamadas en 2.056
+	 * transcripts.
 	 */
 	const refreshSyncTool = server.registerTool(
 		'refresh_sync',

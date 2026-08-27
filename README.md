@@ -146,12 +146,16 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   llegado por WebSocket no se ve.
   **Cuándo hace falta y cuándo NO** (medido el 27 ago 2026, ver el JSDoc de la
   tool en `src/index.ts`): NO hace falta detrás de una mutación hecha con este
-  mismo MCP. Las escrituras del MCP van por REST y no pasan por ese rebote:
-  cinco corridas contra el servidor real, por los dos caminos de escritura
-  (`add_task` → `/api/tasks` y `mutate_tasks` → `/api/batch`), y en las cinco
-  la tarea recién creada salía ya en el `list_tasks` inmediatamente siguiente
-  sin ningún flush por medio. SÍ hace falta cuando el cambio lo hizo el
-  usuario FUERA del MCP (su app, su móvil).
+  mismo MCP. Cinco corridas contra el servidor real, por los dos caminos de
+  escritura (`add_task` → `POST /api/ingest` y `mutate_tasks` →
+  `POST /api/batch`), y en las cinco la tarea recién creada salía ya en el
+  `list_tasks` inmediatamente siguiente sin ningún flush por medio. SÍ hace
+  falta cuando el cambio lo hizo el usuario FUERA del MCP (su app, su móvil).
+  **De qué depende eso**, que no es lo que parece: no de que las escrituras
+  vayan por REST, sino de que los handlers de escritura del repo principal
+  llamen a `runHeadlessDrain` de forma SÍNCRONA antes de responder. Si eso se
+  mueve a segundo plano, esta sección pasa a mentir y ningún test de este repo
+  se entera.
   **Límite**: solo garantiza lo que YA llegó al servidor por WebSocket — los
   cambios de un dispositivo offline que aún no los mandó no se pueden
   recuperar desde aquí.
