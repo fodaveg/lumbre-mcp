@@ -22,21 +22,25 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * diferencia de TODO lo demás en esta lista, es SÍNCRONA: no se encola, el
  * adjunto ya está enlazado cuando la tool responde (ver su JSDoc, más abajo).
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
- * `delete_task`/`set_section`/`move_to_list`/`add_subtask`/`complete_subtask`/
+ * `delete_task`/`set_section`/`add_subtask`/`complete_subtask`/
  * `remove_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
- * PHASE2.md; `remove_section` es la excepción, muta una SECCIÓN).
- * `create_list`/`nest_list`/`rename_list`/`remove_list` (paridad UI↔MCP —
- * gestión de listas de "Algún día", `docs/20-contrato-lista.md`): mutan una
- * LISTA, no una tarea; `create_list` es la única que CREA (genera su propio
- * id con `randomUUID()` antes de encolar, ver su JSDoc más abajo). `list_lists`
- * (fix b00303b5) lee TODAS las listas vivas con su recuento vía
- * `GET /api/tasks?includeLists=1` — a diferencia de `list_tasks({list})`, SÍ
- * distingue una lista que existe pero está vacía de una que no existe (ambas
- * dan `[]` en `list_tasks`, ver su JSDoc).
- * `list_brl_entries`/`add_brl_entry`/`update_brl_entry`/`delete_brl_entry`
- * (BRL, add-on experimental): leen y mutan el REGISTRO del día —entradas `-`
- * (nota) y `=` (pensamiento)—, que NO son tareas y no salen en `list_tasks`;
- * ver el bloque «BRL» más abajo. Todas
+ * PHASE2.md; `remove_section` es la excepción, muta una SECCIÓN). La gestión
+ * de listas de "Algún día" (crear/anidar/renombrar/borrar una lista, mover
+ * una tarea a otra lista — paridad UI↔MCP, `docs/20-contrato-lista.md`) YA NO
+ * tiene tool suelta (podadas el 2026-08-27, medido: 3.506 bytes de
+ * `tools/list` por 19 llamadas/mes de uso real): son las ops
+ * `create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list` de
+ * `mutate_tasks`, que ya las cubría entera — `create_list.listId` es incluso
+ * un SUPERCONJUNTO (encadenar dentro del mismo lote, cosa que la tool suelta
+ * no tenía). `list_lists` (fix b00303b5) lee TODAS las listas vivas con su
+ * recuento vía `GET /api/tasks?includeLists=1` — a diferencia de
+ * `list_tasks({list})`, SÍ distingue una lista que existe pero está vacía de
+ * una que no existe (ambas dan `[]` en `list_tasks`, ver su JSDoc).
+ * `list_brl_entries`/`mutate_brl` (BRL, add-on experimental): leen y mutan el
+ * REGISTRO del día —entradas `-` (nota) y `=` (pensamiento)—, que NO son
+ * tareas y no salen en `list_tasks`; ver el bloque «BRL» más abajo (los tres
+ * verbos sueltos, `add`/`update`/`delete_brl_entry`, se podaron el mismo día
+ * que las de lista — mismo criterio: `mutate_brl` los cubre entero). Todas
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
@@ -96,7 +100,7 @@ function errorResult(err) {
  * Comando `claude mcp add` LISTO PARA COPIAR del conector stdio local acotado
  * a adjuntos (`LUMBRE_MCP_TOOLSET=attachments`, ver `CreateServerOptions` y
  * `toolsetFromEnv`): solo registra `add_attachment`/`read_attachment`
- * (2 tools, no 26) para poder tenerlo enchufado A LA VEZ que el conector
+ * (2 tools, no 19) para poder tenerlo enchufado A LA VEZ que el conector
  * remoto sin duplicar la superficie de `tools/list` en el contexto de cada
  * sesión. Usado tanto en `remoteFileAccessError` (el error que ve el modelo
  * en el momento en que lo necesita) como en el README.
@@ -427,17 +431,19 @@ export const mutateTasksOpSchema = z
     done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
     cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar'),
     color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
-    // `icon`: sin describe propio — mismo criterio que `text`/`name`, y ya
-    // documentado con más detalle en `create_list` (tool individual).
+    // `icon`: sin describe propio — mismo criterio que `text`/`name`; su
+    // semántica (emoji/icono de la lista) ya la dice el nombre del campo.
     icon: z.string().max(16).optional(),
     parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id de la lista padre, o null para desanidar')
 })
     .strict();
 /**
  * Mensaje legible para un elemento de `ops` que no encaja en la forma
- * ESTRICTA de su `op` (`mutateTasksStrictOpSchema`): identifica la op y,
- * campo a campo, qué falta o qué sobra — para que el modelo pueda corregir
- * ESE elemento concreto sin adivinar cuál de los 21 campos venía mal.
+ * ESTRICTA de su `op` (`mutateTasksStrictOpSchema`/`mutateBrlStrictOpSchema`,
+ * más abajo): identifica la op y, campo a campo, qué falta o qué sobra —
+ * para que el modelo pueda corregir ESE elemento concreto sin adivinar cuál
+ * campo venía mal. Compartida por `mutate_tasks` y `mutate_brl`: la forma del
+ * mensaje no depende de qué dominio mutan.
  */
 function formatOpShapeError(op, error) {
     const parts = error.issues.map((issue) => {
@@ -450,17 +456,83 @@ function formatOpShapeError(op, error) {
     return `${op}: ${parts.join('; ')}`;
 }
 /**
+ * Mismo par de schemas que `mutateTasksOpSchema`/`mutateTasksStrictOpSchema`
+ * (ver su JSDoc arriba para el porqué de tenerlos separados), pero para las
+ * 3 ops del BRL (`add`/`update`/`delete`, podadas de `add_brl_entry`/
+ * `update_brl_entry`/`delete_brl_entry` el 2026-08-27 — ver el bloque «BRL»
+ * en `createServer`). `mutateBrlStrictOpSchema` (INTERNO, nunca se
+ * serializa): las 3 formas por-op EXACTAS que tenían las tres tools sueltas,
+ * `.strict()` cada una — el handler de `mutate_brl` la usa para re-validar
+ * cada elemento de `ops` antes de tocar red, igual que `mutate_tasks` con la
+ * suya. `mutateBrlOpSchema` (EXPUESTO, más abajo): un objeto plano con los 5
+ * campos que usan las 3 ops, todos opcionales salvo `op`/`date` (`date` es
+ * obligatorio en las 3, así que no gana nada quedando opcional). A
+ * diferencia de `mutateTasksOpSchema` (15 ops, 21 campos), aquí el ahorro de
+ * aplanar es pequeño — 3 ops con casi los mismos 2-3 campos cada una— así que
+ * el peso real de este schema sale de medirlo (ver el test de superficie en
+ * `index.test.ts`), no se asume solo por copiar el patrón.
+ */
+export const mutateBrlStrictOpSchema = z.discriminatedUnion('op', [
+    z
+        .object({
+        op: z.literal('add'),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        text: z.string().min(1).max(2000),
+        kind: z.enum(['note', 'thought']).optional(),
+        time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
+    })
+        .strict(),
+    z
+        .object({
+        op: z.literal('update'),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        entryId: z.string().uuid(),
+        text: z.string().min(1).max(2000),
+        kind: z.enum(['note', 'thought']).optional()
+    })
+        .strict(),
+    z
+        .object({
+        op: z.literal('delete'),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        entryId: z.string().uuid()
+    })
+        .strict()
+]);
+export const mutateBrlOpSchema = z
+    .object({
+    op: z
+        .enum(['add', 'update', 'delete'])
+        .describe('Operación a ejecutar — contrato por-op en la description de `ops`'),
+    date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe(BRL_DATE),
+    entryId: z.string().uuid().optional().describe('Id de la entrada (ver list_brl_entries)'),
+    // `text`: sin describe propio — mismo criterio que `mutateTasksOpSchema`,
+    // el contrato por-op (obligatorio en add/update, ajeno a delete) ya vive
+    // en la description de `ops`.
+    text: z.string().min(1).max(2000).optional(),
+    kind: z.enum(['note', 'thought']).optional().describe('note = nota `-` (default); thought = pensamiento `=`'),
+    time: z
+        .string()
+        .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+        .optional()
+        .describe('Hora "HH:MM" (24h) — solo add; sin ella, hora del reloj si `date` es hoy')
+})
+    .strict();
+/**
  * Factory del servidor MCP de Lumbre: registra las tools con `config`
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
- * transporte remoto). Registra las 26 de siempre salvo que
+ * transporte remoto). Registra las 19 de siempre salvo que
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
  * quedan `add_attachment`/`read_attachment` — las demás se registran igual
- * (para no bifurcar cada una de las 24 llamadas a `registerTool` con un
+ * (para no bifurcar cada una de las 17 llamadas a `registerTool` con un
  * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
- * estado intermedio de "26 registradas".
+ * estado intermedio de "19 registradas".
  *
  * `taskCache`/`brlCache` (cachés cortas de existencia, ver
  * `existence-cache.ts`) salen del registro de MÓDULO indexado por
@@ -1131,148 +1203,18 @@ export function createServer(config, opts = {}) {
     });
     // ── Gestión de listas de "Algún día" (paridad UI↔MCP, docs/20-contrato-lista.md) ──
     //
-    // `create_list`/`nest_list`/`rename_list`/`remove_list` mutan una LISTA, no
-    // una tarea; `create_list` es la única que CREA (genera su propio id con
-    // `randomUUID()` antes de encolar, ver su comentario más abajo). Identidad =
-    // el id, no el nombre (`rename_list` no la cambia). `remove_list` nunca
-    // pierde tareas (se reasignan) ni permite borrar la última lista viva ni la
-    // Bandeja de entrada canónica (§5 "Prohibidos" del contrato). Detalle
-    // completo del contrato de lista en `docs/20-contrato-lista.md`.
-    const createListTool = server.registerTool('create_list', {
-        description: `Crea una lista/proyecto de "Algún día" nueva. Devuelve el \`listId\` generado: úsalo ` +
-            `después en add_task (\`listId\`), move_to_list o nest_list. ${ASYNC_NOTE}`,
-        inputSchema: {
-            name: z.string().min(1).max(200).describe('Nombre de la lista (obligatorio)'),
-            color: z
-                .string()
-                .max(20)
-                .optional()
-                .describe('Color de la lista: uno de red|amber|green|blue|violet|pink, o un hex libre "#rrggbb". ' +
-                'Sin color por defecto.'),
-            icon: z.string().max(16).optional().describe('Emoji/icono de la lista. Sin icono por defecto.')
-        }
-    }, async (input) => {
-        try {
-            // El id lo genera esta tool, ANTES de encolar (mismo criterio que
-            // `clientTaskId` para `add_task`): `create_list` es la ÚNICA mutación
-            // de lista que CREA en vez de mutar algo existente, así que no hay un
-            // `listId` previo que targetear — ver el JSDoc de `MUTATION_KINDS`
-            // (`$lib/server/repos/mutations.ts` en el repo principal).
-            const listId = randomUUID();
-            await mutateTaskInvalidating({
-                taskId: listId,
-                kind: 'createList',
-                payload: {
-                    name: input.name,
-                    ...(input.color !== undefined ? { color: input.color } : {}),
-                    ...(input.icon !== undefined ? { icon: input.icon } : {})
-                }
-            });
-            return textResult(`Encolada en Lumbre la lista "${input.name}" (listId ${listId}; se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const nestListTool = server.registerTool('nest_list', {
-        description: `Fija el padre de una lista existente (la anida), o la deja de primer nivel con ` +
-            `parentId:null. Un anidado inválido (ciclo, auto-anidado, o la Bandeja de entrada) o ` +
-            `un id inexistente se descarta en silencio. ${ASYNC_NOTE}`,
-        inputSchema: {
-            listId: z.string().uuid().describe('Id de la lista a anidar/desanidar'),
-            parentId: z
-                .union([z.string().uuid(), z.null()])
-                .describe('Id de la lista padre destino, o null para dejarla de primer nivel')
-        }
-    }, async (input) => {
-        try {
-            await mutateTaskInvalidating({
-                taskId: input.listId,
-                kind: 'nestList',
-                payload: { parentId: input.parentId }
-            });
-            const target = input.parentId === null ? '(primer nivel)' : `bajo la lista ${input.parentId}`;
-            return textResult(`Encolado en Lumbre: anidar la lista ${input.listId} ${target} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const renameListTool = server.registerTool('rename_list', {
-        description: `Renombra una lista EXISTENTE; su identidad (id) y sus tareas no cambian. ${ASYNC_NOTE}`,
-        inputSchema: {
-            listId: z.string().uuid().describe('Id de la lista a renombrar'),
-            name: z.string().min(1).max(200).describe('Nuevo nombre')
-        }
-    }, async (input) => {
-        try {
-            await mutateTaskInvalidating({
-                taskId: input.listId,
-                kind: 'renameList',
-                payload: { name: input.name }
-            });
-            return textResult(`Encolado en Lumbre: renombrar la lista ${input.listId} a "${input.name}" ` +
-                '(se aplicará al sincronizar).');
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const removeListTool = server.registerTool('remove_list', {
-        description: `Borra una lista existente; sus tareas no se pierden (se reasignan o quedan como ` +
-            `tarea normal) y sus hijas pasan a primer nivel. No aplica a la última lista viva ni ` +
-            `a la Bandeja de entrada: se ignora. ${ASYNC_NOTE}`,
-        inputSchema: {
-            listId: z.string().uuid().describe('Id de la lista a borrar')
-        }
-    }, async (input) => {
-        try {
-            await mutateTaskInvalidating({ taskId: input.listId, kind: 'removeList', payload: {} });
-            return textResult(`Encolado en Lumbre el borrado de la lista ${input.listId} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const moveToListTool = server.registerTool('move_to_list', {
-        description: `Mueve una tarea existente a otra lista, o la desvincula con listId:null. Prefiere ` +
-            `\`listId\` (estable) sobre \`list\` (nombre, se crea si no existe). Conserva fecha, ` +
-            `limpia sección. NO aplica a subtareas. ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
-            listId: z
-                .union([z.string().uuid(), z.null()])
-                .optional()
-                .describe('Id ESTABLE de la lista destino (ver list_tasks), PREFERENTE sobre `list`. ' +
-                'null = desvincular la tarea de su lista actual.'),
-            list: z
-                .string()
-                .max(200)
-                .optional()
-                .describe('Nombre de la lista destino (se crea si no existe); se ignora si se indica `listId`.')
-        }
-    }, async (input) => {
-        if (input.listId === undefined && input.list === undefined) {
-            return errorResult(new Error('Indica `listId` o `list` (la lista destino).'));
-        }
-        try {
-            await requireTaskExists(input.taskId, { allowSubtask: false });
-            await mutateTaskInvalidating({
-                taskId: input.taskId,
-                kind: 'moveToList',
-                payload: input.listId !== undefined ? { listId: input.listId } : { list: input.list }
-            });
-            const target = input.listId === null
-                ? '(ninguna lista)'
-                : input.listId !== undefined
-                    ? `listId ${input.listId}`
-                    : `"${input.list}"`;
-            return textResult(`Encolado en Lumbre: mover la tarea ${input.taskId} a ${target} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
+    // `create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list` NO
+    // tienen tool suelta desde el 2026-08-27 (podadas: 3.506 bytes de
+    // `tools/list`, 5 tools por 19 llamadas/mes de uso real medido sobre un
+    // mes de transcripts): son las ops del mismo nombre en `mutate_tasks`
+    // (`mutateTasksOpSchema`/`mutateTasksStrictOpSchema`/`translateOp`), que ya
+    // las implementaba entero — `create_list.listId` es incluso un
+    // SUPERCONJUNTO (encadenar dentro del mismo lote, cosa que la tool suelta
+    // no tenía). Identidad = el id, no el nombre (`rename_list` no la
+    // cambia). `remove_list` nunca pierde tareas (se reasignan) ni permite
+    // borrar la última lista viva ni la Bandeja de entrada canónica (§5
+    // "Prohibidos" del contrato). Detalle completo del contrato de lista en
+    // `docs/20-contrato-lista.md`.
     const addSubtaskTool = server.registerTool('add_subtask', {
         description: `Añade subtareas (checklist) a una tarea existente. Un solo nivel: si \`taskId\` ya ` +
             `es subtarea, se descarta en silencio. Para crearlas junto con la tarea, usa add_task ` +
@@ -1360,7 +1302,7 @@ export function createServer(config, opts = {}) {
     }
     const listBrlEntriesTool = server.registerTool('list_brl_entries', {
         description: 'Lee el registro (BRL) de un día: entradas `-` (nota) y `=` (pensamiento), con id y hora. ' +
-            'Única forma de obtener el id que piden update_brl_entry/delete_brl_entry. No son tareas.',
+            'Única forma de obtener el id que pide mutate_brl (ops update/delete). No son tareas.',
         inputSchema: {
             date: z
                 .string()
@@ -1382,108 +1324,108 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    const addBrlEntryTool = server.registerTool('add_brl_entry', {
-        description: 'Apunta en el registro (BRL) de un día lo ocurrido (nota) o una reflexión (kind:thought). ' +
-            `NO es una tarea: no se completa ni se agenda; si hay algo que hacer, add_task. ${ASYNC_NOTE}`,
+    /**
+     * Sustituye a `add_brl_entry`/`update_brl_entry`/`delete_brl_entry`
+     * (podadas el 2026-08-27, cero llamadas medidas en un mes para las tres —
+     * el BRL en sí NO se toca, David lo usa desde el móvil/web, fuera de esa
+     * medición): mismo criterio de agrupar que `mutate_tasks`, pero SIN
+     * `runBatch` — no hay `POST /api/batch` para el BRL (ese endpoint es solo
+     * tareas, ver `BatchOp` en `lumbre-client.ts`), así que esto es un
+     * `mutateTask`/`requireBrlEntryExists` por op, en el ORDEN pedido,
+     * exactamente lo que hacía cada tool suelta — solo que en UNA tool call.
+     * Éxito PARCIAL igual que `mutate_tasks`: una op que falla (forma
+     * inválida o `entryId` inexistente) no aborta las siguientes.
+     */
+    const mutateBrlTool = server.registerTool('mutate_brl', {
+        description: `Vía PREFERENTE (y desde el 2026-08-27, ÚNICA — sustituye a add/update/delete_brl_entry) ` +
+            `para VARIAS entradas del registro (BRL) de golpe: añade, reescribe o borra en una sola ` +
+            `llamada. Contrato por-op en la description de \`ops\`. Éxito PARCIAL: una op inválida no ` +
+            `bloquea las demás — el resultado detalla qué falló por posición y el \`id\` de cada \`add\` ` +
+            `encolado. ${ASYNC_NOTE}`,
         inputSchema: {
-            date: z
-                .string()
-                .regex(/^\d{4}-\d{2}-\d{2}$/)
-                .describe(BRL_DATE),
-            text: z.string().min(1).max(2000).describe('Texto de la entrada, SIN el marcador'),
-            kind: z
-                .enum(['note', 'thought'])
-                .optional()
-                .describe('note = nota `-` (default); thought = pensamiento `=`'),
-            time: z
-                .string()
-                .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
-                .optional()
-                .describe('Hora "HH:MM" (24h) de la entrada, para volcar apuntes tomados en papel a la hora que ' +
-                'de verdad marcaban (en vez de la hora del reloj al llamar a esta tool). Sin ella, se ' +
-                'sella con el reloj del servidor si `date` es hoy, o sin hora si es otro día.')
+            ops: z
+                .array(mutateBrlOpSchema)
+                .min(1)
+                .max(200)
+                .describe('Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
+                '(`*` = obligatorio, el resto opcional): add: date*, text* [kind, time] · update: ' +
+                'date*, entryId*, text* [kind] · delete: date*, entryId*')
         }
     }, async (input) => {
-        try {
-            // Id PRE-GENERADO por el llamante, igual que `create_list`: es lo que da
-            // idempotencia de creación si el lote se reabre tras un fallo (ver el
-            // JSDoc de `createBrlEntry` en el repo principal).
-            const entryId = randomUUID();
-            await mutateTask(config, {
-                taskId: entryId,
-                kind: 'createBrlEntry',
-                payload: {
-                    date: input.date,
-                    entry: `${input.kind === 'thought' ? '=' : '-'} ${input.text}`,
-                    ...(input.time !== undefined ? { time: input.time } : {})
+        const rawOps = input.ops;
+        const results = [];
+        for (let i = 0; i < rawOps.length; i++) {
+            const raw = rawOps[i];
+            const parsed = mutateBrlStrictOpSchema.safeParse(raw);
+            if (!parsed.success) {
+                results.push({ index: i, ok: false, error: formatOpShapeError(String(raw.op), parsed.error) });
+                continue;
+            }
+            const op = parsed.data;
+            try {
+                if (op.op === 'add') {
+                    // Id PRE-GENERADO aquí, igual que `add_brl_entry` (idempotencia de
+                    // creación si el lote se reabre tras un fallo, ver `createBrlEntry`
+                    // en el repo principal).
+                    const entryId = randomUUID();
+                    await mutateTask(config, {
+                        taskId: entryId,
+                        kind: 'createBrlEntry',
+                        payload: {
+                            date: op.date,
+                            entry: `${op.kind === 'thought' ? '=' : '-'} ${op.text}`,
+                            ...(op.time !== undefined ? { time: op.time } : {})
+                        }
+                    });
+                    results.push({ index: i, ok: true, id: entryId });
                 }
-            });
-            return textResult(`Encolada en Lumbre una ${input.kind === 'thought' ? 'reflexión' : 'nota'} en el registro ` +
-                `del ${input.date} (id ${entryId}; se aplicará al sincronizar).`);
+                else if (op.op === 'update') {
+                    await requireBrlEntryExists(op.date, op.entryId);
+                    await mutateTask(config, {
+                        taskId: op.entryId,
+                        kind: 'updateBrlEntry',
+                        payload: { entry: `${op.kind === 'thought' ? '=' : '-'} ${op.text}` }
+                    });
+                    brlCache.invalidate(op.date, op.entryId);
+                    results.push({ index: i, ok: true, id: op.entryId });
+                }
+                else {
+                    await requireBrlEntryExists(op.date, op.entryId);
+                    await mutateTask(config, { taskId: op.entryId, kind: 'removeBrlEntry', payload: {} });
+                    brlCache.invalidate(op.date, op.entryId);
+                    results.push({ index: i, ok: true, id: op.entryId });
+                }
+            }
+            catch (err) {
+                results.push({
+                    index: i,
+                    ok: false,
+                    error: err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err)
+                });
+            }
         }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const updateBrlEntryTool = server.registerTool('update_brl_entry', {
-        description: 'Reescribe una entrada del registro (BRL): REEMPLAZA su texto entero, y `kind` cambia ' +
-            `además su tipo. \`date\` y \`entryId\` salen de list_brl_entries. ${ASYNC_NOTE}`,
-        inputSchema: {
-            date: z
-                .string()
-                .regex(/^\d{4}-\d{2}-\d{2}$/)
-                .describe(BRL_DATE),
-            entryId: z.string().uuid().describe('Id de la entrada (ver list_brl_entries)'),
-            text: z.string().min(1).max(2000).describe('Texto nuevo, SIN el marcador'),
-            kind: z
-                .enum(['note', 'thought'])
-                .optional()
-                .describe('note = nota `-` (default); thought = pensamiento `=`')
-        }
-    }, async (input) => {
-        try {
-            await requireBrlEntryExists(input.date, input.entryId);
-            await mutateTask(config, {
-                taskId: input.entryId,
-                kind: 'updateBrlEntry',
-                payload: { entry: `${input.kind === 'thought' ? '=' : '-'} ${input.text}` }
-            });
-            brlCache.invalidate(input.date, input.entryId);
-            return textResult(`Encolada en Lumbre la edición de la entrada ${input.entryId} del registro ` +
-                '(se aplicará al sincronizar).');
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const deleteBrlEntryTool = server.registerTool('delete_brl_entry', {
-        description: 'Borra una entrada del registro (BRL). ACCIÓN DELICADA: sin confirmación inmediata ni ' +
-            `deshacer — confírmalo con el usuario antes de llamarla. ${ASYNC_NOTE}`,
-        inputSchema: {
-            date: z
-                .string()
-                .regex(/^\d{4}-\d{2}-\d{2}$/)
-                .describe(BRL_DATE),
-            entryId: z.string().uuid().describe('Id de la entrada a borrar (ver list_brl_entries)')
-        }
-    }, async (input) => {
-        try {
-            await requireBrlEntryExists(input.date, input.entryId);
-            await mutateTask(config, { taskId: input.entryId, kind: 'removeBrlEntry', payload: {} });
-            brlCache.invalidate(input.date, input.entryId);
-            return textResult(`Encolado en Lumbre el borrado de la entrada ${input.entryId} del registro ` +
-                '(se aplicará al sincronizar).');
-        }
-        catch (err) {
-            return errorResult(err);
-        }
+        const okCount = results.filter((r) => r.ok).length;
+        const idLines = results
+            .filter((r) => r.ok)
+            .map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: id ${r.id}`);
+        const failureLines = results
+            .filter((r) => !r.ok)
+            .map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: ${r.error}`);
+        let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) encoladas.`;
+        if (idLines.length > 0)
+            summary += `\nids asignados:\n${idLines.join('\n')}`;
+        if (failureLines.length > 0)
+            summary += `\n${failureLines.length} fallaron:\n${failureLines.join('\n')}`;
+        summary += `\n\n${ASYNC_NOTE}`;
+        return textResult(summary);
     });
     // ── Feature batch (`plan-batch.md`): N operaciones en UNA sola tool call ───
     const mutateTasksTool = server.registerTool('mutate_tasks', {
         description: `Vía PREFERENTE para VARIAS operaciones de golpe (crear y/o mutar): resuelve existencias y ` +
             `encola en UNA sola llamada, en vez de una tool call por operación. Cada elemento de \`ops\` ` +
-            `equivale a su tool individual (mapeo op↔tool en el README); contrato por-op en la description ` +
-            `de \`ops\`. Las tools sueltas siguen existiendo. Éxito PARCIAL: una op inválida no bloquea las ` +
+            `equivale a su tool individual (mapeo op↔tool en el README) — salvo las ops de LISTA, sin ` +
+            `tool suelta desde el 2026-08-27: mutate_tasks es su ÚNICA vía. Contrato por-op en la ` +
+            `description de \`ops\`. Éxito PARCIAL: una op inválida no bloquea las ` +
             `demás — el resultado detalla qué falló por posición y el \`id\` de cada una encolada ` +
             `(create_list→listId, add_task→taskId). Encadenar un create_list con otra op del MISMO lote: ` +
             `dale tú el \`listId\` (uuid v4) al crearla. ${ASYNC_NOTE}`,
@@ -1592,11 +1534,11 @@ export function createServer(config, opts = {}) {
         }
     });
     // Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
-    // retira las 24 tools que NO son `add_attachment`/`read_attachment` —
-    // TODAS se registraron arriba igual (para no bifurcar cada una de las 24
+    // retira las 17 tools que NO son `add_attachment`/`read_attachment` —
+    // TODAS se registraron arriba igual (para no bifurcar cada una de las 17
     // llamadas a `registerTool` con un `if`), así que aquí solo se deshace lo
     // que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
-    // cliente llega a ver el `tools/list` de 26 en el intermedio.
+    // cliente llega a ver el `tools/list` de 19 en el intermedio.
     if (toolset === 'attachments') {
         for (const tool of [
             addTaskTool,
@@ -1611,17 +1553,10 @@ export function createServer(config, opts = {}) {
             deleteTaskTool,
             setSectionTool,
             removeSectionTool,
-            createListTool,
-            nestListTool,
-            renameListTool,
-            removeListTool,
-            moveToListTool,
             addSubtaskTool,
             completeSubtaskTool,
             listBrlEntriesTool,
-            addBrlEntryTool,
-            updateBrlEntryTool,
-            deleteBrlEntryTool,
+            mutateBrlTool,
             mutateTasksTool
         ]) {
             tool.remove();
@@ -1639,7 +1574,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
  * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
  * `read_attachment`, pensado para un SEGUNDO conector stdio local dedicado
- * (David enchufa a la vez el remoto de las 26 tools y este, sin duplicar
+ * (David enchufa a la vez el remoto de las 19 tools y este, sin duplicar
  * superficie — ver README). Cualquier otro valor (incluido no ponerla) cae
  * al default `'all'` de `createServer` — nunca falla por un valor raro, un
  * typo en la env simplemente no acota nada.

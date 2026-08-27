@@ -22,6 +22,8 @@ import type { z } from 'zod';
 let tools: Tool[];
 let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
+let mutateBrlOpSchema: z.ZodTypeAny;
+let mutateBrlStrictOpSchema: z.ZodTypeAny;
 let effectiveNotesMode: (input: { notes?: string; fullNotes?: boolean }) => string;
 let refTexts: (
 	tasks: { id: string; content: string; notes: string | null }[],
@@ -37,6 +39,8 @@ beforeAll(async () => {
 	const indexModule = await import('./index.js');
 	mutateTasksOpSchema = indexModule.mutateTasksOpSchema;
 	mutateTasksStrictOpSchema = indexModule.mutateTasksStrictOpSchema;
+	mutateBrlOpSchema = indexModule.mutateBrlOpSchema;
+	mutateBrlStrictOpSchema = indexModule.mutateBrlStrictOpSchema;
 	effectiveNotesMode = indexModule.effectiveNotesMode;
 	refTexts = indexModule.refTexts as typeof refTexts;
 
@@ -91,22 +95,16 @@ describe('tools/list — superficie completa', () => {
 		'delete_task',
 		'set_section',
 		'remove_section',
-		'create_list',
-		'nest_list',
-		'rename_list',
-		'remove_list',
-		'move_to_list',
 		'add_subtask',
 		'complete_subtask',
 		'mutate_tasks',
 		'list_brl_entries',
-		'add_brl_entry',
-		'update_brl_entry',
-		'delete_brl_entry'
+		'mutate_brl'
 	];
 
-	it('sigue exponiendo las 26 tools, por nombre', () => {
-		expect(tools).toHaveLength(26);
+	it('sigue exponiendo las 19 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27)', () => {
+		expect(tools).toHaveLength(19);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -130,7 +128,7 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
-	it('techo de bytes de las 26 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 19 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -179,36 +177,52 @@ describe('tools/list — superficie completa', () => {
 		// para explicar cuándo usar cada vía). Sigue siendo 26 tools —
 		// ninguna tool nueva, solo más superficie en la existente. Techo
 		// subido junto con el número medido.
+		// Re-medido el mismo día (lote "bajar el coste de tools/list", 2
+		// cambios independientes): (1) las 5 tools sueltas de lista
+		// (`create_list`/`nest_list`/`rename_list`/`remove_list`/
+		// `move_to_list`) se BORRAN — `mutate_tasks` ya cubría exactamente las
+		// mismas ops, con el mismo shape (`translateOp` en `lumbre-client.ts`).
+		// (2) `add_brl_entry`/`update_brl_entry`/`delete_brl_entry` se
+		// SUSTITUYEN por `mutate_brl` (mismo patrón que `mutate_tasks`, pero
+		// SIN `runBatch` — no hay `/api/batch` para el BRL, así que es un
+		// `mutateTask` por op, en el orden pedido). `list_brl_entries` se
+		// queda tal cual. Resultado: 19 tools, 22.198 caracteres — -4.380
+		// sobre los 26.578 de arriba (-16,5%). `mutate_brl` completo (nombre +
+		// description + inputSchema) pesa 1.684 — medido aparte porque el
+		// riesgo conocido de agrupar ops bajo un discriminante es que arrastre
+		// los campos de todas las variantes y no compre nada; 1.684 sigue
+		// bajo el resto de tools de escritura). Techo bajado junto con el
+		// número medido, para que la ganancia quede bloqueada.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 27900;
+		const CHAR_CEILING = 23300;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
 
 	// David, 9 ago 2026: apunta el BRL en una libreta de papel CON su hora y
-	// luego lo vuelca a Lumbre — sin `time` en `add_brl_entry`, la API solo
-	// sabía sellar la hora del reloj al llamar a la tool. `time` es opcional
-	// (Zod `.optional()`), así que NO puede aparecer en `required` — mismo
-	// criterio que `date`/`deadline` en `add_task`, que tampoco están.
-	it('`add_brl_entry` expone `time` "HH:MM" (24h) OPCIONAL, con el mismo patrón que `add_task`', () => {
-		const addBrlEntry = tools.find((t) => t.name === 'add_brl_entry');
-		expect(addBrlEntry).toBeDefined();
-		const schema = addBrlEntry!.inputSchema as {
-			properties?: Record<string, { type?: string; pattern?: string }>;
-			required?: string[];
-		};
-		expect(schema.properties?.time).toMatchObject({
+	// luego lo vuelca a Lumbre — sin `time`, la API solo sabía sellar la hora
+	// del reloj al llamar a la tool. Migrado a `mutate_brl` el 2026-08-27
+	// (`add_brl_entry` ya no existe): `time` sigue opcional (Zod
+	// `.optional()`), así que NO puede aparecer en `required` — mismo criterio
+	// que `date`/`deadline` en `add_task`, que tampoco están.
+	it('`mutate_brl` expone `ops[].time` "HH:MM" (24h) OPCIONAL, con el mismo patrón que `add_task`', () => {
+		const mutateBrl = tools.find((t) => t.name === 'mutate_brl');
+		expect(mutateBrl).toBeDefined();
+		const opsSchema = (mutateBrl!.inputSchema as { properties?: Record<string, unknown> }).properties?.ops as
+			| { items?: { properties?: Record<string, { type?: string; pattern?: string }>; required?: string[] } }
+			| undefined;
+		expect(opsSchema?.items?.properties?.time).toMatchObject({
 			type: 'string',
 			pattern: '^([01]\\d|2[0-3]):[0-5]\\d$'
 		});
-		expect(schema.required ?? []).not.toContain('time');
+		expect(opsSchema?.items?.required ?? []).not.toContain('time');
 
 		const addTask = tools.find((t) => t.name === 'add_task');
 		const addTaskSchema = addTask!.inputSchema as {
 			properties?: Record<string, { pattern?: string }>;
 		};
-		expect(schema.properties?.time?.pattern).toBe(addTaskSchema.properties?.time?.pattern);
+		expect(opsSchema?.items?.properties?.time?.pattern).toBe(addTaskSchema.properties?.time?.pattern);
 	});
 
 	it('`mutate_tasks` sigue siendo, con diferencia, la tool con más superficie', () => {
@@ -221,6 +235,15 @@ describe('tools/list — superficie completa', () => {
 			| { items?: { properties?: { op?: { enum?: string[] } } } }
 			| undefined;
 		expect(opsSchema?.items?.properties?.op?.enum).toHaveLength(15);
+	});
+
+	it('`mutate_brl` expone las 3 ops (add/update/delete)', () => {
+		const mutateBrl = tools.find((t) => t.name === 'mutate_brl');
+		expect(mutateBrl).toBeDefined();
+		const opsSchema = (mutateBrl!.inputSchema as { properties?: Record<string, unknown> }).properties?.ops as
+			| { items?: { properties?: { op?: { enum?: string[] } } } }
+			| undefined;
+		expect(opsSchema?.items?.properties?.op?.enum?.sort()).toEqual(['add', 'delete', 'update']);
 	});
 });
 
@@ -428,6 +451,94 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 			// `done`, no un campo válido en otra op (ver el test de arriba para
 			// ESE caso, que el schema EXPUESTO SÍ deja pasar a propósito).
 			donee: true
+		});
+		expect(result.success).toBe(false);
+	});
+});
+
+describe('mutate_brl — las 3 `op` siguen aceptándose (esquema estricto interno)', () => {
+	/** Mismo criterio que las de `mutate_tasks` arriba: un caso por op, con
+	 *  variantes INVÁLIDAS por campo que falta y por campo que sobra (ajeno a
+	 *  esa op, pero válido en general) — el rechazo de campos ajenos vive en
+	 *  `mutateBrlStrictOpSchema` (interno), no en el schema EXPUESTO
+	 *  (`mutateBrlOpSchema`, deliberadamente laxo, igual que el de tareas). */
+	const cases: {
+		op: string;
+		valid: Record<string, unknown>;
+		missingField: string;
+		extraField: Record<string, unknown>;
+	}[] = [
+		{
+			op: 'add',
+			valid: { op: 'add', date: '2026-08-27', text: 'Comprado el pan' },
+			missingField: 'text',
+			extraField: { op: 'add', date: '2026-08-27', text: 'x', entryId: '11111111-1111-1111-1111-111111111111' }
+		},
+		{
+			op: 'update',
+			valid: {
+				op: 'update',
+				date: '2026-08-27',
+				entryId: '11111111-1111-1111-1111-111111111111',
+				text: 'Texto nuevo'
+			},
+			missingField: 'text',
+			extraField: {
+				op: 'update',
+				date: '2026-08-27',
+				entryId: '11111111-1111-1111-1111-111111111111',
+				text: 'x',
+				time: '09:00'
+			}
+		},
+		{
+			op: 'delete',
+			valid: { op: 'delete', date: '2026-08-27', entryId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'entryId',
+			extraField: {
+				op: 'delete',
+				date: '2026-08-27',
+				entryId: '11111111-1111-1111-1111-111111111111',
+				text: 'x'
+			}
+		}
+	];
+
+	it('cubre las 3 operaciones (guardarraíl del propio test)', () => {
+		expect(cases.map((c) => c.op).sort()).toEqual(['add', 'delete', 'update']);
+	});
+
+	for (const { op, valid, missingField, extraField } of cases) {
+		describe(`op: ${op}`, () => {
+			it('caso VÁLIDO: pasa el schema EXPUESTO (tools/list) y el ESTRICTO (handler)', () => {
+				expect(mutateBrlOpSchema.safeParse(valid).success).toBe(true);
+				expect(mutateBrlStrictOpSchema.safeParse(valid).success).toBe(true);
+			});
+
+			it(`caso INVÁLIDO (falta \`${missingField}\`): el schema ESTRICTO lo rechaza`, () => {
+				const { [missingField]: _omitted, ...withoutField } = valid;
+				expect(mutateBrlStrictOpSchema.safeParse(withoutField).success).toBe(false);
+			});
+
+			it('caso INVÁLIDO (campo ajeno a esta op): el schema ESTRICTO lo rechaza', () => {
+				expect(mutateBrlStrictOpSchema.safeParse(extraField).success).toBe(false);
+			});
+		});
+	}
+
+	it('op desconocida: ambos schemas la rechazan', () => {
+		const bogus = { op: 'not_a_real_op', date: '2026-08-27' };
+		expect(mutateBrlOpSchema.safeParse(bogus).success).toBe(false);
+		expect(mutateBrlStrictOpSchema.safeParse(bogus).success).toBe(false);
+	});
+
+	it('campo con nombre desconocido (typo): el schema EXPUESTO ya lo rechaza (`.strict()`)', () => {
+		const result = mutateBrlOpSchema.safeParse({
+			op: 'add',
+			date: '2026-08-27',
+			text: 'x',
+			// `kindd` no es ninguno de los 5 campos conocidos — typo de `kind`.
+			kindd: 'note'
 		});
 		expect(result.success).toBe(false);
 	});
@@ -1021,16 +1132,16 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 26 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(26);
+	it('sin `toolset` (default): las 19 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(19);
 	});
 
 	it('`toolset: "attachments"`: SOLO add_attachment/read_attachment', async () => {
 		expect(await toolNamesOf({ toolset: 'attachments' })).toEqual(['add_attachment', 'read_attachment']);
 	});
 
-	it('`toolset: "all"` (explícito): las 26, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(26);
+	it('`toolset: "all"` (explícito): las 19, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(19);
 	});
 });
 

@@ -118,7 +118,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		expect(body.result.serverInfo.name).toBe('lumbre-mcp');
 	});
 
-	it('tools/list responde con las 26 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
+	it('tools/list responde con las 19 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, {
 			method: 'POST',
 			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
@@ -126,13 +126,16 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: Array<{ name: string; inputSchema: unknown }> } };
-		expect(body.result.tools).toHaveLength(26);
+		expect(body.result.tools).toHaveLength(19);
 		expect(JSON.stringify(body.result.tools)).not.toMatch(/\$schema/);
 		// Mismo techo que `index.test.ts` (medido allí sobre transporte
 		// in-memory) — aquí se confirma que el mismo `stripToolsListSchema`
 		// aplicado sobre `StreamableHTTPServerTransport` da el mismo resultado
 		// que sobre stdio/in-memory, no un tamaño distinto por transporte.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(27900);
+		// Bajado a 19 tools/23.300 el 2026-08-27 (podadas create_list/
+		// nest_list/rename_list/remove_list/move_to_list, mergeadas add/
+		// update/delete_brl_entry en mutate_brl — ver `index.test.ts`).
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(23300);
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {
@@ -289,7 +292,7 @@ describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)'
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: unknown[] } };
-		expect(body.result.tools).toHaveLength(26);
+		expect(body.result.tools).toHaveLength(19);
 	});
 
 	it('si vienen las dos formas, gana la cabecera', async () => {
