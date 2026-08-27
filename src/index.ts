@@ -43,7 +43,7 @@ import {
 	type NotesMode,
 	type NotesSeenStore
 } from './notes.js';
-import { BrlExistenceCache, EXISTENCE_CACHE_TTL_MS, TaskExistenceCache } from './existence-cache.js';
+import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-cache.js';
 
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
@@ -569,16 +569,19 @@ export interface CreateServerOptions {
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
  * estado intermedio de "26 registradas".
  *
- * Cada llamada crea sus PROPIAS `taskCache`/`brlCache` (cachés cortas de
- * existencia, ver `existence-cache.ts`) — viven en esta instancia, no en
- * módulo, precisamente para que un transporte stateless futuro pueda nacer
- * limpio en cada petición en vez de compartir caché entre peticiones de
- * usuarios distintos.
+ * `taskCache`/`brlCache` (cachés cortas de existencia, ver
+ * `existence-cache.ts`) salen del registro de MÓDULO indexado por
+ * `config.token` — no de una instancia nueva por llamada: en el transporte
+ * HTTP remoto (`http.ts`) esta factory se invoca DENTRO de cada petición, así
+ * que una caché de instancia nacía y moría con ella sin llegar a acertar
+ * nunca (medido: 0 aciertos en remoto). El registro sí sobrevive entre
+ * llamadas — vive mientras viva el proceso — y aísla por token (ver el
+ * JSDoc de `getExistenceCachesForToken`), así que dos credenciales
+ * distintas nunca comparten caché.
  */
 export function createServer(config: LumbreConfig, opts: CreateServerOptions = {}): McpServer {
 	const notesSeenStore = opts.notesSeenStore ?? fileNotesSeenStore;
-	const taskCache = new TaskExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
-	const brlCache = new BrlExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
+	const { taskCache, brlCache } = getExistenceCachesForToken(config.token, EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
 	const localFilesystem = opts.localFilesystem ?? true;
 	const toolset = opts.toolset ?? 'all';
 

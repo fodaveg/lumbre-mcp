@@ -3,11 +3,17 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { pathToFileURL } from 'node:url';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { LumbreConfig } from './lumbre-client.js';
+import { nullNotesSeenStore } from './notes.js';
 import { stripToolsListSchema } from './schema-strip.js';
 
 // CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
-// integrado). `createServer(config)` cae en los defaults de `opts` (fichero
-// para la huella de notas) — es lo mismo que hace `main()` en modo stdio.
+// integrado). `createServer(config, opts)` NO cae en los defaults de `opts`
+// enteros: `localFilesystem: false` (ver más abajo) y `notesSeenStore:
+// nullNotesSeenStore` — a diferencia de `main()` (stdio), este proceso es
+// COMPARTIDO entre todos los dispositivos de David con el mismo token, así
+// que ni el disco ni la huella de notas por fichero (`fileNotesSeenStore`,
+// el default) tienen sentido aquí — ver el JSDoc de `nullNotesSeenStore` en
+// `notes.ts` para el porqué completo.
 import { createServer } from './index.js';
 
 /**
@@ -205,8 +211,11 @@ async function handleMcpRequest(
 	// vería el disco correcto desde aquí (medido el 2026-08-27: "no existe el
 	// fichero" contra un fichero que sí existía en el Mac del usuario, porque
 	// el `fs.stat` corría aquí). Ver el JSDoc de `CreateServerOptions` en
-	// `index.ts`.
-	const mcpServer = createServer(config, { localFilesystem: false });
+	// `index.ts`. `notesSeenStore: nullNotesSeenStore` — mismo motivo de
+	// fondo (proceso compartido, no una máquina por dispositivo): el fichero
+	// de huellas por defecto no distingue de qué dispositivo viene cada
+	// petición, ver el JSDoc de `nullNotesSeenStore` en `notes.ts`.
+	const mcpServer = createServer(config, { localFilesystem: false, notesSeenStore: nullNotesSeenStore });
 	// `enableJsonResponse: true`: respuesta JSON directa en vez de un stream
 	// SSE — este endpoint sirve llamadas sueltas de tool (petición → una
 	// respuesta), no notificaciones de servidor a mitad de una tarea larga.

@@ -50,8 +50,8 @@ function subtask(overrides: Partial<LumbreTask> = {}): LumbreTask {
 
 describe('assertTaskUsable', () => {
 	it('taskId inexistente (`task` undefined): lanza SIEMPRE, con o sin allowSubtask', () => {
-		expect(() => assertTaskUsable(undefined, 'no-existe')).toThrow(/no existe/i);
-		expect(() => assertTaskUsable(undefined, 'no-existe', { allowSubtask: true })).toThrow(/no existe/i);
+		expect(() => assertTaskUsable(undefined, 'no-existe')).toThrow(/no está entre/i);
+		expect(() => assertTaskUsable(undefined, 'no-existe', { allowSubtask: true })).toThrow(/no está entre/i);
 	});
 
 	it('tarea de primer nivel: SIEMPRE se acepta, con o sin allowSubtask', () => {
@@ -89,6 +89,16 @@ describe('assertTaskUsable', () => {
 	it('los mensajes de error mencionan explícitamente cómo seguir (list_tasks/get_task/complete_subtask)', () => {
 		expect(taskNotFoundError('x').message).toMatch(/list_tasks/);
 		expect(subtaskNotAllowedError('x').message).toMatch(/complete_subtask/);
+	});
+
+	it('taskNotFoundError NO afirma que la tarea no existe — nombra la posibilidad de que esté archivada', () => {
+		// Regresión: `findTaskById` filtra las ARCHIVADAS incluso con
+		// `includeDone=true` (ver su JSDoc en lumbre-client.ts), así que "no
+		// existe" es falso en ese caso — dos sesiones dieron por buenas tareas
+		// que en realidad estaban archivadas por culpa de este mensaje.
+		const message = taskNotFoundError('x').message;
+		expect(message).not.toMatch(/no existe ninguna tarea/i);
+		expect(message).toMatch(/archivad/i);
 	});
 });
 
@@ -336,7 +346,7 @@ describe('buildBatchFromOps', () => {
 		const { batchOps, originalIndexes, skipped } = buildBatchFromOps(ops, new Map());
 		expect(batchOps).toEqual([]);
 		expect(originalIndexes).toEqual([]);
-		expect(skipped).toEqual([{ index: 0, error: expect.stringMatching(/no existe/i) }]);
+		expect(skipped).toEqual([{ index: 0, error: expect.stringMatching(/no está entre/i) }]);
 	});
 
 	it('una op fallida no impide las demás — el índice ORIGINAL se conserva pese al hueco', () => {

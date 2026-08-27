@@ -272,6 +272,58 @@ export const fileNotesSeenStore = {
     save: saveNotesSeenState
 };
 /**
+ * `NotesSeenStore` NULO: `load` siempre `{}`, `save` no-op — nunca registra
+ * NADA ni encuentra nada, así que la capa 2 de `decideAutoNoteRender` cae
+ * SIEMPRE al bootstrap (sin `previous`), el mismo trato que la PRIMERA vez
+ * que el MCP ve una tarea. No es un descuido: es el store que necesita el
+ * transporte HTTP remoto (`http.ts`) en vez de `fileNotesSeenStore`.
+ *
+ * Motivo (bug medido el 26 ago 2026, `notes-seen.json` del VPS: 132 entradas,
+ * la más vieja del 17 jul): `fileNotesSeenStore` es UN fichero en el volumen
+ * del contenedor, compartido por TODAS las peticiones — y en el relé remoto
+ * eso es TODOS los dispositivos de David que usan el mismo token (Claude
+ * Code, claude.ai web/móvil…), porque el transporte es stateless
+ * (`sessionIdGenerator: undefined`) y el `clientInfo` de `initialize` no
+ * llega a las peticiones de `tools/call` siguientes — comprobado antes de
+ * escribir esto: no hay NADA en un POST de tool call que identifique de qué
+ * dispositivo viene. Segmentar el fichero por TOKEN (lo que propone el
+ * comentario de `deploy/compose.yml`) no arregla nada: sigue siendo una
+ * persona con varios dispositivos y el MISMO token. Efecto real con el
+ * fichero compartido: una nota que se mostró íntegra desde el móvil sale
+ * como marcador `✎N` en Claude Code aunque David nunca la haya visto ahí —
+ * el sistema CREE que sí.
+ *
+ * Criterio de este lote (decisión de quien lo encargó — NO pedida por
+ * David, y marcada como tal a propósito): el coste de enseñar una nota de
+ * más son BYTES; el coste de esconderla es que David no la lea NUNCA.
+ * Asimétrico. Ante la duda, la nota va ÍNTEGRA — así que en el modo de
+ * proceso compartido la huella no debe poder suprimir nada, y la única forma
+ * de garantizar eso sin poder distinguir dispositivos es no guardar huella
+ * en absoluto.
+ *
+ * Coste medido (reconstrucción sobre la distribución real de David del
+ * 2026-07-25 documentada arriba — `24h → 31 notas / 32k chars`, ver
+ * `DEFAULT_NOTES_RECENT_HOURS` —, no una segunda medición en vivo: este
+ * entorno no tiene acceso al MCP; script en el informe del lote): en la
+ * PRIMERA llamada de una sesión no hay diferencia (las dos caen a bootstrap
+ * igual, ~32 KB de notas dentro de la ventana de 24h). Es la SEGUNDA llamada
+ * (y siguientes, patrón real: varias tool calls seguidas en la misma sesión)
+ * donde se paga: con huella persistida esas 31 notas ya se vieron y bajan a
+ * marcador (~370 bytes); con la huella nula se re-evalúan como si fuera la
+ * primera vez y siguen íntegras (~32 KB) — **~31.6 KB de más por cada
+ * `list_tasks` repetido mientras esas notas sigan dentro de la ventana de
+ * 24h**. Aceptado a propósito: es justo el precio de la asimetría de arriba,
+ * pagado en bytes de contexto, nunca en una nota que David no llegó a ver.
+ *
+ * NUNCA se usa en `main()` (stdio, un proceso POR DISPOSITIVO — ahí la
+ * huella funciona bien de verdad y es la que hace útil el modo `auto`, no se
+ * toca): solo `http.ts` la pasa.
+ */
+export const nullNotesSeenStore = {
+    load: async () => ({}),
+    save: async () => { }
+};
+/**
  * Marca `taskId` como visto CON `notesUpdatedAt` (la marca de la nota que se
  * acaba de mostrar) — inserta/reemplaza su entrada y la mueve al FINAL (más
  * reciente); `state` es un objeto plano, pero `Map` preserva orden de

@@ -173,12 +173,27 @@ export async function findTasksByIds(config, ids, opts = {}) {
     }
     return map;
 }
-/** Error uniforme para un `taskId`/`subtaskId` que no aparece entre las
- *  tareas visibles del usuario — ver `assertTaskUsable`. */
+/**
+ * Error uniforme para un `taskId`/`subtaskId` que no aparece entre las
+ * tareas visibles del usuario — ver `assertTaskUsable`.
+ *
+ * El mensaje dice SOLO lo que este chequeo sabe de verdad: que el id no
+ * salió en `GET /api/tasks?id=`. NO afirma que la tarea "no existe" a
+ * secas — `findTaskById` (ver su JSDoc) filtra las tareas ARCHIVADAS
+ * incluso pidiendo `includeDone=true`, así que un id de una tarea archivada
+ * cae exactamente por esta misma rama, y "no existe" sería falso en ese
+ * caso. Antes decía justo eso y empujaba a la hipótesis equivocada
+ * ("¿se transcribió mal?"): dos sesiones dieron por hecho que unas tareas
+ * NUNCA habían existido, cuando estaban archivadas. `includeArchived` existe
+ * en el servidor de Lumbre pero no está desplegado todavía — no se expone
+ * aquí (lote posterior); este mensaje solo deja de mentir sobre lo que ya
+ * sabe.
+ */
 export function taskNotFoundError(taskId) {
-    return new Error(`No existe ninguna tarea (ni subtarea) con id ${taskId} entre las visibles del usuario (¿se ` +
-        'transcribió mal? resuélvelo de nuevo con list_tasks, o con get_task de la tarea padre si es ' +
-        'una subtarea). No se ha encolado ninguna mutación.');
+    return new Error(`El id ${taskId} no está entre las tareas (ni subtareas) que devuelve el servidor para este ` +
+        'usuario. Puede que se transcribiera mal (resuélvelo de nuevo con list_tasks, o con get_task ' +
+        'de la tarea padre si es una subtarea), pero también puede estar ARCHIVADA: el listado no ' +
+        'incluye archivadas aunque se pida includeDone. No se ha encolado ninguna mutación.');
 }
 /** Error uniforme cuando `taskId` SÍ existe pero es una subtarea y la tool no
  *  aplica ahí — ver `assertTaskUsable`. */

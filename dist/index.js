@@ -10,7 +10,7 @@ import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js
 import { resolveRefs } from './refs.js';
 import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, fileNotesSeenStore, hasNotes, parseNotesSince, recordNotesSeen } from './notes.js';
-import { BrlExistenceCache, EXISTENCE_CACHE_TTL_MS, TaskExistenceCache } from './existence-cache.js';
+import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-cache.js';
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
  * `add_task` (escribe vía `/api/ingest`) y `list_tasks` (lee vía
@@ -462,16 +462,19 @@ function formatOpShapeError(op, error) {
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
  * estado intermedio de "26 registradas".
  *
- * Cada llamada crea sus PROPIAS `taskCache`/`brlCache` (cachés cortas de
- * existencia, ver `existence-cache.ts`) — viven en esta instancia, no en
- * módulo, precisamente para que un transporte stateless futuro pueda nacer
- * limpio en cada petición en vez de compartir caché entre peticiones de
- * usuarios distintos.
+ * `taskCache`/`brlCache` (cachés cortas de existencia, ver
+ * `existence-cache.ts`) salen del registro de MÓDULO indexado por
+ * `config.token` — no de una instancia nueva por llamada: en el transporte
+ * HTTP remoto (`http.ts`) esta factory se invoca DENTRO de cada petición, así
+ * que una caché de instancia nacía y moría con ella sin llegar a acertar
+ * nunca (medido: 0 aciertos en remoto). El registro sí sobrevive entre
+ * llamadas — vive mientras viva el proceso — y aísla por token (ver el
+ * JSDoc de `getExistenceCachesForToken`), así que dos credenciales
+ * distintas nunca comparten caché.
  */
 export function createServer(config, opts = {}) {
     const notesSeenStore = opts.notesSeenStore ?? fileNotesSeenStore;
-    const taskCache = new TaskExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
-    const brlCache = new BrlExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
+    const { taskCache, brlCache } = getExistenceCachesForToken(config.token, EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
     const localFilesystem = opts.localFilesystem ?? true;
     const toolset = opts.toolset ?? 'all';
     const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });

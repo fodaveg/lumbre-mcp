@@ -64,6 +64,17 @@ beforeAll(async () => {
 	tools = JSON.parse(JSON.stringify(result.tools));
 }, 20000);
 
+// El registro de `taskCache`/`brlCache` (`existence-cache.ts`) es de MÓDULO,
+// indexado por token (M2) — y TODOS los tests de este fichero comparten
+// `TEST_CONFIG.token`. Sin este reset, un `taskId` reciclado entre tests (o
+// el bundle entero, con su `now` congelado) se colaría de un test al
+// siguiente en vez de partir de una caché limpia, como pasaba antes de M2
+// (una `taskCache` nueva por cada `createServer`).
+beforeEach(async () => {
+	const { resetExistenceCacheRegistryForTests } = await import('./existence-cache.js');
+	resetExistenceCacheRegistryForTests();
+});
+
 describe('tools/list — superficie completa', () => {
 	const EXPECTED_TOOL_NAMES = [
 		'add_task',
@@ -579,7 +590,9 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		const client = await buildClient();
 		const result = await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
 		expect(result.isError).toBe(true);
-		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/no existe/i);
+		// La propiedad que importa no es el TEXTO del mensaje (eso se reescribe),
+		// es que sea un error y que nombre el taskId pedido: es lo que lo hace accionable.
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toContain(TASK_ID);
 	});
 });
 
@@ -692,7 +705,9 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 			arguments: { taskId: TASK_ID, file_path: filePath }
 		});
 		expect(result.isError).toBe(true);
-		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/no existe/i);
+		// La propiedad que importa no es el TEXTO del mensaje (eso se reescribe),
+		// es que sea un error y que nombre el taskId pedido: es lo que lo hace accionable.
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toContain(TASK_ID);
 		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
 	});
 

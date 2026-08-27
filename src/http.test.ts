@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
@@ -151,6 +151,119 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// Ninguna de las dos trae `mcp-session-id`: modo stateless de verdad.
 		expect(first.headers.get('mcp-session-id')).toBeNull();
 		expect(second.headers.get('mcp-session-id')).toBeNull();
+	});
+});
+
+describe('POST /mcp — la caché de existencia SOBREVIVE entre peticiones HTTP (bug medido el 26 ago 2026)', () => {
+	/**
+	 * `getExistenceCachesForToken` (`existence-cache.ts`) vive en un registro
+	 * de MÓDULO justo por esto: `handleMcpRequest` llama a `createServer`
+	 * DENTRO de cada `POST` (transporte stateless, ver el JSDoc de cabecera de
+	 * `http.ts`), así que un test que solo comprobara "la caché acierta" con
+	 * UN `McpServer` in-memory (como el de `index.test.ts`) pasa en verde con
+	 * el bug intacto: nunca cruza dos peticiones HTTP reales, que es donde
+	 * `createServer` se llama dos veces. Este test sí — dos `fetch` de verdad
+	 * contra el `server.listen(0)` de `beforeAll`, el mismo camino que
+	 * `scripts/smoke-remote.mjs` usa contra producción.
+	 *
+	 * El `fetch` global se mockea para DOS destinos a la vez: las llamadas del
+	 * propio test contra `baseUrl` (el server HTTP local, real) se dejan pasar
+	 * al `fetch` original; las que `lumbre-client.ts` hace contra
+	 * `https://app.lumbre.test` (el `baseUrl` que `createHttpApp` recibió en
+	 * `beforeAll`) se responden con los fixtures de abajo — mismo patrón que
+	 * `index.test.ts` (`countExistenceGets`/`jsonResponse`), llevado al
+	 * transporte HTTP.
+	 */
+	const TASK_ID = '44444444-4444-4444-4444-444444444444';
+	const originalFetch = globalThis.fetch;
+
+	function lumbreTask(overrides: Record<string, unknown> = {}) {
+		return {
+			id: TASK_ID,
+			content: 'tarea de prueba (http)',
+			notes: null,
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			parentId: null,
+			...overrides
+		};
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	/** Cuenta las llamadas a `GET /api/tasks?id=` (el chequeo de existencia
+	 *  de `findTaskById` dentro de `requireTaskExists`) — separado de la
+	 *  llamada del propio test contra el server HTTP local. */
+	function countExistenceGets(fetchSpy: ReturnType<typeof vi.fn>): number {
+		return fetchSpy.mock.calls.filter((call) => String(call[0]).includes('/api/tasks?id=')).length;
+	}
+
+	function stubUpstreamFetch(): ReturnType<typeof vi.fn> {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.startsWith(baseUrl)) return originalFetch(url, init); // el propio server HTTP local
+			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		return fetchSpy;
+	}
+
+	async function toolCall(
+		token: string,
+		id: number,
+		name: string,
+		args: Record<string, unknown>
+	): Promise<{ status: number; isError?: boolean }> {
+		const res = await fetch(`${baseUrl}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: `Bearer ${token}` },
+			body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
+		});
+		const body = (await res.json()) as { result?: { isError?: boolean } };
+		return { status: res.status, isError: body.result?.isError };
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('dos peticiones HTTP con el MISMO token: la segunda no repite el GET de existencia', async () => {
+		const fetchSpy = stubUpstreamFetch();
+		const token = 'tok-cache-mismo';
+
+		// get_task puebla la caché (siempre trae fresco, ver su JSDoc en index.ts).
+		const first = await toolCall(token, 101, 'get_task', { taskId: TASK_ID });
+		expect(first.isError).not.toBe(true);
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+
+		// complete_task, PETICIÓN HTTP DISTINTA, mismo token: si `createServer`
+		// instanciara la caché por petición (el bug de 26 ago), esto repetiría
+		// el GET. Con el registro por token, reutiliza el hit.
+		const second = await toolCall(token, 102, 'complete_task', { taskId: TASK_ID });
+		expect(second.isError).not.toBe(true);
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+	});
+
+	it('aislamiento: dos peticiones con tokens DISTINTOS no comparten caché', async () => {
+		const fetchSpy = stubUpstreamFetch();
+
+		const first = await toolCall('tok-cache-a', 201, 'get_task', { taskId: TASK_ID });
+		expect(first.isError).not.toBe(true);
+		expect(countExistenceGets(fetchSpy)).toBe(1);
+
+		// Mismo taskId, TOKEN DISTINTO: no debe heredar el hit del token anterior
+		// — dos credenciales no comparten (ni invalidan) la caché de la otra.
+		const second = await toolCall('tok-cache-b', 202, 'complete_task', { taskId: TASK_ID });
+		expect(second.isError).not.toBe(true);
+		expect(countExistenceGets(fetchSpy)).toBe(2);
 	});
 });
 
