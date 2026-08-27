@@ -139,13 +139,16 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   **403 mudo** que dispara `is_form_content_type` de SvelteKit cuando una
   petición sin `Origin` (el caso de este MCP, que corre fuera del navegador)
   trae uno de sus cuatro Content-Type de formulario.
-- `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
-  `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
-  ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket
-  con un pequeño rebote/debounce). Útil justo antes de `list_tasks` cuando
-  importa ver lo más reciente. **Límite**: solo garantiza lo que YA llegó al
-  servidor por WebSocket — los cambios de un dispositivo offline que aún no
-  los mandó no se pueden recuperar desde aquí.
+- `refresh_sync()` — fuerza el flush del sync (vía `POST /api/sync/flush`).
+  **No hace falta llamarla antes de leer por una mutación hecha con ESTE MCP**:
+  `list_tasks`/`get_task`/`list_lists`/`list_brl_entries`/`read_attachment` ya
+  detectan solas que hubo una (una marca de proceso por token, ver
+  `src/sync-flush.ts`) y se refrescan ANTES de responder, sin gastar una
+  llamada aparte. Sigue haciendo falta cuando el cambio viene de **fuera** de
+  este MCP (la app/móvil del usuario) y quieres verlo ya en la próxima
+  lectura — este MCP no se entera de esos cambios por sí solo. **Límite**:
+  solo garantiza lo que YA llegó al servidor por WebSocket — los cambios de un
+  dispositivo offline que aún no los mandó no se pueden recuperar desde aquí.
 
 ### Referencias a otras tareas/listas, resueltas EN VIVO
 

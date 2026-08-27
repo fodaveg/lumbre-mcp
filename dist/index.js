@@ -11,6 +11,7 @@ import { resolveRefs } from './refs.js';
 import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, fileNotesSeenStore, hasNotes, parseNotesSince, recordNotesSeen } from './notes.js';
 import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-cache.js';
+import { clearMutationPending, isMutationPending, markMutationPending } from './sync-flush.js';
 /**
  * Conector MCP de Lumbre (transporte stdio, pensado para Claude Code). Fase 1:
  * `add_task` (escribe vía `/api/ingest`) y `list_tasks` (lee vía
@@ -546,10 +547,64 @@ export const mutateBrlOpSchema = z
  */
 export function createServer(config, opts = {}) {
     const notesSeenStore = opts.notesSeenStore ?? fileNotesSeenStore;
-    const { taskCache, brlCache } = getExistenceCachesForToken(config.token, EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
+    const nowFn = opts.now ?? Date.now;
+    const { taskCache, brlCache } = getExistenceCachesForToken(config.token, EXISTENCE_CACHE_TTL_MS, nowFn);
     const localFilesystem = opts.localFilesystem ?? true;
     const toolset = opts.toolset ?? 'all';
     const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
+    /**
+     * Refresca el sync SOLO si `config.token` tiene una mutación de ESTE MCP
+     * pendiente de flush (`sync-flush.ts`) — se llama al PRINCIPIO de toda
+     * tool de LECTURA (`list_tasks`, `get_task`, `list_lists`,
+     * `list_brl_entries`, `read_attachment`, vía `withAutoFlush` más abajo),
+     * ANTES de pedir nada a la API, para que la lectura ya vea lo fresco. Sin
+     * marca pendiente, esto es un `isMutationPending` de coste cero — cero
+     * peticiones de más, que es justo lo que evita convertir esto en un
+     * `refresh_sync` incondicional (ver el JSDoc de `refresh_sync`, más abajo,
+     * sobre por qué esa vía SÍ sigue haciendo el flush siempre).
+     *
+     * GARANTÍA: un fallo del flush NUNCA convierte una lectura que funciona en
+     * un error. Si `refreshSync` lanza, la marca se deja SIN limpiar (para
+     * reintentar en la próxima lectura) y esta función devuelve una línea de
+     * aviso en vez de propagar la excepción — el llamante (`withAutoFlush`) la
+     * añade al resultado, pero la lectura en sí sigue su curso con los datos
+     * que consiga traer.
+     */
+    async function autoFlushSyncIfPending() {
+        if (!isMutationPending(config.token, nowFn))
+            return undefined;
+        try {
+            await refreshSync(config);
+            clearMutationPending(config.token, nowFn);
+            return undefined;
+        }
+        catch (err) {
+            const message = err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err);
+            return (`⚠️ El flush automático de sync (por una mutación previa de este MCP) falló: ${message}. ` +
+                'Esta lectura puede salir rancia; se reintentará en la próxima lectura de esta sesión.');
+        }
+    }
+    /** Añade `note` como un bloque de texto MÁS al final de `result.content` —
+     *  no-op si `note` es `undefined` (el caso normal, sin flush pendiente o
+     *  flush que salió bien). */
+    function appendFlushNote(result, note) {
+        if (!note)
+            return result;
+        return { ...result, content: [...result.content, { type: 'text', text: note }] };
+    }
+    /**
+     * Envuelve el handler de una tool de LECTURA con el flush automático de
+     * arriba: espera a `autoFlushSyncIfPending` ANTES de `handler` (para que
+     * la lectura, si hacía falta refrescar, ya vea el sync fresco) y, si el
+     * flush falló, añade su aviso al resultado de `handler` como una línea
+     * más (ver `appendFlushNote`) — nunca lo sustituye ni lo convierte en
+     * error.
+     */
+    async function withAutoFlush(handler) {
+        const flushNote = await autoFlushSyncIfPending();
+        const result = await handler();
+        return appendFlushNote(result, flushNote);
+    }
     const addTaskTool = server.registerTool('add_task', {
         description: 'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
             '"recuérdame", "añade a mi lista/tarea". Se encola y se materializa al sincronizar. ' +
@@ -589,6 +644,7 @@ export function createServer(config, opts = {}) {
     }, async (input) => {
         try {
             await addTask(config, input);
+            markMutationPending(config.token, nowFn);
             return textResult(`Tarea añadida a Lumbre: “${input.text}”.`);
         }
         catch (err) {
@@ -596,13 +652,19 @@ export function createServer(config, opts = {}) {
         }
     });
     const refreshSyncTool = server.registerTool('refresh_sync', {
-        description: 'Fuerza el flush de sync de Lumbre antes de leer (evita que list_tasks devuelva estado ' +
-            'rancio). Solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
-            'del usuario está offline, sus cambios sin enviar no se pueden recuperar. Sin parámetros.',
+        description: 'Fuerza el flush de sync de Lumbre. NO hace falta llamarla antes de leer por una ' +
+            'mutación hecha con ESTE MCP — list_tasks/get_task/list_lists/list_brl_entries/' +
+            'read_attachment ya se refrescan solas cuando detectan que hubo una. Sigue haciendo ' +
+            'falta cuando el cambio viene de FUERA de este MCP (la app/móvil del usuario) y quieres ' +
+            'que se vea de inmediato en la próxima lectura — este MCP no se entera de esos cambios ' +
+            'por sí solo. Solo garantiza lo que YA llegó al servidor por WebSocket — si el ' +
+            'dispositivo del usuario está offline, sus cambios sin enviar no se pueden recuperar. ' +
+            'Sin parámetros.',
         inputSchema: {}
     }, async () => {
         try {
             await refreshSync(config);
+            clearMutationPending(config.token, nowFn);
             return textResult('Sync de Lumbre refrescado: el servidor ya tiene persistido todo lo que le había llegado.');
         }
         catch (err) {
@@ -675,7 +737,7 @@ export function createServer(config, opts = {}) {
                 'la consulta impredecible): úsalo para "qué ha cambiado desde X", no para lectura ' +
                 'normal.')
         }
-    }, async (input) => {
+    }, async (input) => withAutoFlush(async () => {
         try {
             if (input.notesSince !== undefined) {
                 const since = parseNotesSince(input.notesSince);
@@ -737,7 +799,7 @@ export function createServer(config, opts = {}) {
         catch (err) {
             return errorResult(err);
         }
-    });
+    }));
     /**
      * `list_tasks({notes:'auto'})` (default) en DOS FASES — perf, 2026-08-25:
      * antes, `listTasks` traía el texto de TODAS las notas siempre, aunque la
@@ -816,7 +878,7 @@ export function createServer(config, opts = {}) {
             'vacías (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacía de ' +
             'inexistente. Sin parámetros.',
         inputSchema: {}
-    }, async () => {
+    }, async () => withAutoFlush(async () => {
         try {
             const lists = await listLists(config);
             return textResult(formatListSummaries(lists));
@@ -824,7 +886,7 @@ export function createServer(config, opts = {}) {
         catch (err) {
             return errorResult(err);
         }
-    });
+    }));
     const getTaskTool = server.registerTool('get_task', {
         description: 'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
             'lista/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
@@ -832,7 +894,7 @@ export function createServer(config, opts = {}) {
         inputSchema: {
             taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)')
         }
-    }, async (input) => {
+    }, async (input) => withAutoFlush(async () => {
         try {
             const task = await findTaskById(config, input.taskId);
             if (!task)
@@ -858,7 +920,7 @@ export function createServer(config, opts = {}) {
         catch (err) {
             return errorResult(err);
         }
-    });
+    }));
     server.registerTool('read_attachment', {
         description: 'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
             'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
@@ -869,7 +931,7 @@ export function createServer(config, opts = {}) {
                 .uuid()
                 .describe('Id del adjunto (ver el campo `attachments` de list_tasks)')
         }
-    }, async (input) => {
+    }, async (input) => withAutoFlush(async () => {
         try {
             const { contentType, bytes } = await getAttachment(config, input.attachment_id);
             if (contentType.startsWith('image/')) {
@@ -886,7 +948,7 @@ export function createServer(config, opts = {}) {
         catch (err) {
             return errorResult(err);
         }
-    });
+    }));
     server.registerTool('add_attachment', {
         description: 'Sube un fichero y lo deja adjunto a una tarea (SÍNCRONA, a diferencia de add_task/' +
             'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
@@ -958,6 +1020,7 @@ export function createServer(config, opts = {}) {
                 mime: file.mime,
                 bytes: file.bytes
             });
+            markMutationPending(config.token, nowFn);
             return textResult(`Adjunto subido a Lumbre: "${attachment.filename}" (${attachment.mime}, ${attachment.size} ` +
                 `bytes, id ${attachment.id}) en la tarea ${input.taskId}. Ya está enlazado (esta vía es ` +
                 'SÍNCRONA): léelo con read_attachment cuando quieras, sin esperar a ningún sync.');
@@ -1012,11 +1075,16 @@ export function createServer(config, opts = {}) {
      * viaja en el mismo campo `taskId` de `MutateTaskInput` — ver su JSDoc en
      * `lumbre-client.ts`) es un no-op inofensivo, así que este wrapper reemplaza
      * TODAS las llamadas a `mutateTask` de las tools de tarea/lista/sección de
-     * aquí abajo, no solo las que de verdad tocan una tarea cacheada.
+     * aquí abajo, no solo las que de verdad tocan una tarea cacheada. También
+     * marca la mutación pendiente de flush (`sync-flush.ts`) para las tools de
+     * LECTURA — cubre `complete_task`/`cancel_task`/`update_task`/
+     * `reschedule_task`/`delete_task`/`set_section`/`remove_section`/
+     * `add_subtask`/`complete_subtask`, que pasan TODAS por este wrapper.
      */
     async function mutateTaskInvalidating(input) {
         await mutateTask(config, input);
         taskCache.invalidate(input.taskId);
+        markMutationPending(config.token, nowFn);
     }
     const completeTaskTool = server.registerTool('complete_task', {
         description: `Marca una tarea (o SUBTAREA, aunque para eso es más claro complete_subtask) como hecha, o ` +
@@ -1309,7 +1377,7 @@ export function createServer(config, opts = {}) {
                 .regex(/^\d{4}-\d{2}-\d{2}$/)
                 .describe(BRL_DATE)
         }
-    }, async (input) => {
+    }, async (input) => withAutoFlush(async () => {
         try {
             const entries = await listBrlEntries(config, input.date);
             brlCache.setAll(input.date, entries);
@@ -1323,7 +1391,7 @@ export function createServer(config, opts = {}) {
         catch (err) {
             return errorResult(err);
         }
-    });
+    }));
     /**
      * Sustituye a `add_brl_entry`/`update_brl_entry`/`delete_brl_entry`
      * (podadas el 2026-08-27, cero llamadas medidas en un mes para las tres —
@@ -1406,6 +1474,10 @@ export function createServer(config, opts = {}) {
             }
         }
         const okCount = results.filter((r) => r.ok).length;
+        // Éxito PARCIAL: se marca con que AL MENOS una op se encoló bien, no
+        // que todas lo hicieran — igual que `mutate_tasks`, más abajo.
+        if (okCount > 0)
+            markMutationPending(config.token, nowFn);
         const idLines = results
             .filter((r) => r.ok)
             .map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: id ${r.id}`);
@@ -1513,6 +1585,10 @@ export function createServer(config, opts = {}) {
                 }
             });
             const okCount = results.filter((r) => r.ok).length;
+            // Éxito PARCIAL: se marca con que AL MENOS una op se encoló bien, no
+            // que todas lo hicieran (ver `mutate_brl`, mismo criterio).
+            if (okCount > 0)
+                markMutationPending(config.token, nowFn);
             failures.sort((a, b) => a.index - b.index);
             succeededWithId.sort((a, b) => a.index - b.index);
             // `op` se lee del elemento CRUDO (`rawOps`), no de `validated` (que no
