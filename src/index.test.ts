@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { z } from 'zod';
+import type { NotesMode } from './notes.js';
 
 /**
  * Test de regresión de la superficie de tools del MCP (tarea "bajar el coste
@@ -24,7 +25,7 @@ let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
 let mutateBrlOpSchema: z.ZodTypeAny;
 let mutateBrlStrictOpSchema: z.ZodTypeAny;
-let effectiveNotesMode: (input: { notes?: string; fullNotes?: boolean }) => string;
+let effectiveNotesMode: (input: { notes?: NotesMode; fullNotes?: boolean }) => NotesMode;
 let refTexts: (
 	tasks: { id: string; content: string; notes: string | null }[],
 	notesMode: string,
