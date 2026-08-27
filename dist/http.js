@@ -2,16 +2,13 @@
 import { createServer as createHttpServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { nullNotesSeenStore } from './notes.js';
 import { stripToolsListSchema } from './schema-strip.js';
 // CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
 // integrado). `createServer(config, opts)` NO cae en los defaults de `opts`
-// enteros: `localFilesystem: false` (ver más abajo) y `notesSeenStore:
-// nullNotesSeenStore` — a diferencia de `main()` (stdio), este proceso es
-// COMPARTIDO entre todos los dispositivos de David con el mismo token, así
-// que ni el disco ni la huella de notas por fichero (`fileNotesSeenStore`,
-// el default) tienen sentido aquí — ver el JSDoc de `nullNotesSeenStore` en
-// `notes.ts` para el porqué completo.
+// enteros: `localFilesystem: false` (ver más abajo) va explícito, pero la
+// huella de notas vistas (`notesSeenStore`) SÍ se deja en su default,
+// `fileNotesSeenStore` — ver el porqué en el punto donde se llama a
+// `createServer`, más abajo.
 import { createServer } from './index.js';
 /**
  * Transporte HTTP remoto de lumbre-mcp (mcp.lumbre.pro, tarea M2). A
@@ -190,11 +187,23 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel) {
     // vería el disco correcto desde aquí (medido el 2026-08-27: "no existe el
     // fichero" contra un fichero que sí existía en el Mac del usuario, porque
     // el `fs.stat` corría aquí). Ver el JSDoc de `CreateServerOptions` en
-    // `index.ts`. `notesSeenStore: nullNotesSeenStore` — mismo motivo de
-    // fondo (proceso compartido, no una máquina por dispositivo): el fichero
-    // de huellas por defecto no distingue de qué dispositivo viene cada
-    // petición, ver el JSDoc de `nullNotesSeenStore` en `notes.ts`.
-    const mcpServer = createServer(config, { localFilesystem: false, notesSeenStore: nullNotesSeenStore });
+    // `index.ts`.
+    //
+    // `notesSeenStore` SIN pasar, así que cae al default (`fileNotesSeenStore`,
+    // el fichero en disco) también aquí, a propósito: es UNA sola huella
+    // compartida por todos los dispositivos que usan el mismo token (Claude
+    // Code, claude.ai web/móvil…), porque este proceso es un relé, no una
+    // máquina por dispositivo. El efecto es que una nota vista desde OTRO
+    // cliente sale aquí como marcador (`✎N`) aunque este dispositivo no la
+    // haya visto — pero el marcador no afirma que se leyó: dice literalmente
+    // "SIN LEER, usa get_task antes de darlas por revisadas" (`format.ts`), así
+    // que lo único que cuesta es un `get_task` de más, nunca perder la nota.
+    // Se probó lo contrario (una huella nula que nunca suprime nada,
+    // `nullNotesSeenStore`) y se midió el precio: en un `list_tasks` de 31
+    // tareas con nota, con huella 3.340 bytes, sin huella 33.224 — ~29,9 KB de
+    // más por llamada, contra el coste real de la huella compartida (un viaje
+    // ocasional de más). No compensa; revertido.
+    const mcpServer = createServer(config, { localFilesystem: false });
     // `enableJsonResponse: true`: respuesta JSON directa en vez de un stream
     // SSE — este endpoint sirve llamadas sueltas de tool (petición → una
     // respuesta), no notificaciones de servidor a mitad de una tarea larga.
