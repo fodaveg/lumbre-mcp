@@ -38,7 +38,8 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   fecha). Un `list` que no existe (aún) devuelve una lista vacía, no un error.
   Si alguna tarea del lote tiene lista, la respuesta empieza con una leyenda
   (`· lista "Nombre" — listId: <uuid>`), una línea por lista distinta, para
-  que puedas usar ese `listId` en `add_task`/`move_to_list` sin ambigüedad.
+  que puedas usar ese `listId` en `add_task` o en `mutate_tasks` (`op:
+  "move_to_list"`) sin ambigüedad.
   Cada tarea muestra su `createdAt` (recortado a minuto) para desempatar
   duplicados. `notes` controla las notas de cada tarea, default `'auto'`
   (2026-07-25, sustituye al viejo truncado fijo a 240 chars): GARANTÍA — una
@@ -214,11 +215,6 @@ server-side, ver ese endpoint).
 - `delete_task({ taskId })` — borra (soft-delete) la tarea. **Acción
   delicada**: sin confirmación inmediata ni deshacer desde la tool; confírmalo
   con el usuario antes de llamarla.
-- `move_to_list({ taskId, listId?, list? })` — mueve la tarea a otra lista de
-  "Algún día"/proyecto. `listId` (id ESTABLE, ver la leyenda de listas al
-  principio de `list_tasks`) es preferente sobre `list` (nombre, se crea si
-  no existe); `listId: null` desvincula la tarea de su lista actual. Conserva
-  la fecha de la tarea y limpia su sección.
 - `add_subtask({ taskId, subtasks })` — añade una o más subtareas (checklist,
   #17) a `taskId`. Anidamiento de UN nivel: si `taskId` ya es una subtarea, se
   descarta en silencio (no hay forma de confirmarlo desde la tool; comprueba
@@ -236,22 +232,31 @@ server-side, ver ese endpoint).
 
 ### Gestión de listas de "Algún día" (paridad UI↔MCP)
 
-Mismo criterio async/eventual que el resto de Fase 2. Sin una tool
-`list_lists` todavía: resuelve un `listId` existente con el que devolvió
-`create_list`, o con el campo `somedayListId` de una tarea que ya viva en esa
-lista (`list_tasks`/`get_task`).
+Sin tool suelta desde el 2026-08-27 (podadas `create_list`/`nest_list`/
+`rename_list`/`remove_list`/`move_to_list`: cero o casi cero uso real medido
+—19 llamadas/mes en total, 12 de ellas `move_to_list`— y `mutate_tasks` ya
+las cubría entero, ver "Ejecutar varias operaciones a la vez" más abajo).
+Mueve una tarea a otra lista, crea/anida/renombra/borra una lista con
+`mutate_tasks({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
+"rename_list"|"remove_list", ... }] })` — un solo elemento en `ops` para una
+operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
 
-- `create_list({ name, color?, icon? })` — crea una lista/proyecto nueva;
-  devuelve su `listId` (úsalo luego en `add_task`, `move_to_list` o
-  `nest_list`). `color` acepta uno de `red|amber|green|blue|violet|pink` o un
-  hex `#rrggbb`; sin color/icono por defecto.
-- `nest_list({ listId, parentId })` — fija el padre de una lista EXISTENTE (la
-  anida), o la deja de primer nivel con `parentId: null` (desanidar). Un
+- `move_to_list`: `taskId*`, uno de [`listId`, `list`]. `listId` (id ESTABLE,
+  ver la leyenda de listas al principio de `list_tasks`) es preferente sobre
+  `list` (nombre, se crea si no existe); `listId: null` desvincula la tarea
+  de su lista actual. Conserva la fecha de la tarea y limpia su sección.
+- `create_list`: `name*` [`color`, `icon`, `listId`] — crea una lista/proyecto
+  nueva; el resultado trae el `listId` generado (o el que tú le hayas dado,
+  ver "Encadenar dentro del MISMO lote" más abajo). `color` acepta uno de
+  `red|amber|green|blue|violet|pink` o un hex `#rrggbb`; sin color/icono por
+  defecto.
+- `nest_list`: `listId*`, `parentId*` — fija el padre de una lista EXISTENTE
+  (la anida), o la deja de primer nivel con `parentId: null` (desanidar). Un
   anidado rechazado (ciclo, auto-anidado, o la Bandeja de entrada, que nunca
   es anidable) se descarta en silencio.
-- `rename_list({ listId, name })` — renombra una lista EXISTENTE; su identidad
-  y sus tareas no cambian.
-- `remove_list({ listId })` — borra una lista EXISTENTE. Sus tareas NUNCA se
+- `rename_list`: `listId*`, `name*` — renombra una lista EXISTENTE; su
+  identidad y sus tareas no cambian.
+- `remove_list`: `listId*` — borra una lista EXISTENTE. Sus tareas NUNCA se
   pierden (las sin fecha se reasignan a otra lista viva; las "prestadas" con
   fecha quedan como tarea de día normal); sus listas hijas pasan a primer
   nivel. No aplica a la última lista viva ni a la Bandeja de entrada canónica
@@ -262,55 +267,67 @@ lista (`list_tasks`/`get_task`).
 El BRL es el diario del día, y **no son tareas**: una entrada es un apunte de lo
 que pasó (`-` nota) o una reflexión (`=` pensamiento). No se completan, no se
 reprograman y no salen en `list_tasks`. Requiere que el add-on esté encendido en
-la cuenta (Ajustes de Lumbre); apagado, las cuatro tools fallan con un error
+la cuenta (Ajustes de Lumbre); apagado, las dos tools fallan con un error
 explícito y no se encola nada. Mismo criterio async/eventual que el resto de la
 Fase 2.
 
 - `list_brl_entries({ date })` — entradas de ese día con su **id** y su hora
   (`--:--` = sin hora: una entrada nace sin hora si se apunta en un día que no
-  es hoy). Es la única forma de conseguir el id que piden las dos siguientes: la
-  nota completa en Markdown que sirve `GET /api/brl/:date` NO lleva ids a
-  propósito (es la nota que lee el usuario, no un formato de máquina).
-- `add_brl_entry({ date, text, kind? })` — apunta una entrada nueva.
-  `kind: "thought"` la marca como pensamiento (`=`); por defecto es nota (`-`).
-  El `text` va SIN el marcador; la hora la pone el servidor.
-- `update_brl_entry({ date, entryId, text, kind? })` — REEMPLAZA el texto entero
-  de una entrada; `kind` cambia además su tipo (nota ↔ pensamiento).
-- `delete_brl_entry({ date, entryId })` — borra una entrada.
+  es hoy). Es la única forma de conseguir el id que pide `mutate_brl` (ops
+  `update`/`delete`): la nota completa en Markdown que sirve
+  `GET /api/brl/:date` NO lleva ids a propósito (es la nota que lee el
+  usuario, no un formato de máquina).
+- `mutate_brl({ ops })` — añade, reescribe o borra una o varias entradas de
+  golpe (`ops`, máx. 200; sustituye a `add_brl_entry`/`update_brl_entry`/
+  `delete_brl_entry`, podadas el 2026-08-27, cero llamadas medidas en un mes).
+  Cada elemento es `{ op: "add"|"update"|"delete", date, ... }`:
+  - `add`: `date*`, `text*` [`kind`, `time`] — apunta una entrada nueva.
+    `kind: "thought"` la marca como pensamiento (`=`); por defecto es nota
+    (`-`). El `text` va SIN el marcador. `time` ("HH:MM", 24h) es para volcar
+    apuntes tomados en papel a la hora que de verdad marcaban; sin ella, la
+    pone el servidor.
+  - `update`: `date*`, `entryId*`, `text*` [`kind`] — REEMPLAZA el texto
+    entero de una entrada; `kind` cambia además su tipo (nota ↔ pensamiento).
+  - `delete`: `date*`, `entryId*` — borra una entrada.
 
-Las dos últimas piden `date` **además** del id, y no es redundante: una entrada
-solo se puede buscar por día (no hay lookup por id suelto como el
-`GET /api/tasks?id=` de las tareas), y con la fecha delante estas tools
-comprueban que la entrada EXISTE antes de encolar nada. Sin eso, un id mal
-transcrito se encola igual y se pierde en silencio mientras la tool contesta
-«Encolado…» — el mismo fallo que ya mordió con las tareas y que
-`requireTaskExists` cierra para ellas. La fecha viene en la misma llamada a
-`list_brl_entries` de la que sale el id.
+  `update`/`delete` piden `date` **además** del id, y no es redundante: una
+  entrada solo se puede buscar por día (no hay lookup por id suelto como el
+  `GET /api/tasks?id=` de las tareas), y con la fecha delante `mutate_brl`
+  comprueba que la entrada EXISTE antes de encolar nada. Sin eso, un id mal
+  transcrito se encola igual y se pierde en silencio mientras la tool
+  contesta «Encolado…» — el mismo fallo que ya mordió con las tareas y que
+  `requireTaskExists` cierra para ellas. La fecha viene en la misma llamada a
+  `list_brl_entries` de la que sale el id. Éxito PARCIAL igual que
+  `mutate_tasks`: una op inválida no bloquea las demás.
 
 ### Ejecutar varias operaciones a la vez (`mutate_tasks`)
 
 Vía PREFERENTE en cuanto haya más de una operación seguida (crear y/o
 mutar): resuelve TODAS las existencias de tarea del lote en una sola
 comprobación y las encola en una sola petición (`ops`, máx. 200), en vez de
-una tool call por operación. Las tools individuales de arriba SIGUEN
-existiendo para una operación suelta. Éxito PARCIAL: una op inválida
-(`taskId` inexistente, subtarea donde no aplica, forma equivocada para esa
-`op`) no impide las demás — el resultado detalla, por posición 0-indexada en
-`ops`, qué falló y por qué, y el `id` de cada una que sí se encoló (el de un
-`create_list` es su `listId`; el de un `add_task`, su `taskId` nuevo).
+una tool call por operación. La mayoría de las tools individuales de arriba
+SIGUEN existiendo para una operación suelta — excepto las 5 ops de LISTA
+(`create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list`), sin
+tool suelta desde el 2026-08-27: `mutate_tasks` es su ÚNICA vía. Éxito
+PARCIAL: una op inválida (`taskId` inexistente, subtarea donde no aplica,
+forma equivocada para esa `op`) no impide las demás — el resultado detalla,
+por posición 0-indexada en `ops`, qué falló y por qué, y el `id` de cada una
+que sí se encoló (el de un `create_list` es su `listId`; el de un `add_task`,
+su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`, con el mismo
-significado que la tool individual equivalente: `op:"add_task"` = `add_task`,
-`op:"complete"` = `complete_task`, `op:"cancel"` = `cancel_task`,
-`op:"update"` = `update_task`, `op:"reschedule"` = `reschedule_task`,
-`op:"delete"` = `delete_task`, `op:"set_section"` = `set_section`,
-`op:"move_to_list"` = `move_to_list`, `op:"add_subtask"` = `add_subtask`,
-`op:"complete_subtask"` = `complete_subtask`, `op:"remove_section"` =
-`remove_section`, `op:"create_list"` = `create_list`, `op:"nest_list"` =
-`nest_list`, `op:"rename_list"` = `rename_list`, `op:"remove_list"` =
-`remove_list`. El schema que expone la tool es deliberadamente laxo (los 21
-campos que usan las 15 ops, todos opcionales); el contrato real por-op
-(`*` = obligatorio) es:
+significado que la tool individual equivalente cuando existe: `op:"add_task"`
+= `add_task`, `op:"complete"` = `complete_task`, `op:"cancel"` =
+`cancel_task`, `op:"update"` = `update_task`, `op:"reschedule"` =
+`reschedule_task`, `op:"delete"` = `delete_task`, `op:"set_section"` =
+`set_section`, `op:"add_subtask"` = `add_subtask`, `op:"complete_subtask"` =
+`complete_subtask`, `op:"remove_section"` = `remove_section`. Las 5 restantes
+(`op:"move_to_list"`, `op:"create_list"`, `op:"nest_list"`,
+`op:"rename_list"`, `op:"remove_list"`) son gestión de listas de "Algún día"
+(paridad UI↔MCP) y ya NO tienen tool suelta equivalente — ver esa sección más
+arriba para el detalle campo a campo de cada una. El schema que expone la
+tool es deliberadamente laxo (los 21 campos que usan las 15 ops, todos
+opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
 add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes]
@@ -462,11 +479,11 @@ desde ahí (ver la tool en "Qué hace" más arriba). Para un fichero grande
 stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
-registre SOLO `add_attachment`/`read_attachment` en vez de las 26 tools de
+registre SOLO `add_attachment`/`read_attachment` en vez de las 19 tools de
 siempre — así no duplicas la superficie de `tools/list` en el contexto de
-cada sesión (pesa ~26 KB de JSON; dos copias son el doble, y el modelo
+cada sesión (pesa ~22 KB de JSON; dos copias son el doble, y el modelo
 encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 26, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 19, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

@@ -28,13 +28,15 @@
 const url = process.argv[2] ?? process.env.MCP_URL;
 const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
 
-// Techo de bytes de `tools/list` para las 26 tools reales — MISMA fuente que
-// `src/index.test.ts` ("techo de bytes de las 26 tools", `CHAR_CEILING`):
-// medido 26.578 tras ampliar `add_attachment` a DOS vías (`file_path`/
-// `content_base64`, 2026-08-27) + ~5% de holgura. Si ese test cambia su
-// techo, este número se actualiza a la vez — no hay forma de importarlo desde
-// un script standalone sin dependencias, así que va documentado y buscable
-// por el mismo comentario en ambos ficheros.
+// Techo de bytes de `tools/list` para las 19 tools reales — MISMA fuente que
+// `src/index.test.ts` ("techo de bytes de las 19 tools", `CHAR_CEILING`):
+// medido 22.198 tras podar las 5 tools sueltas de lista (create_list/
+// nest_list/rename_list/remove_list/move_to_list, cubiertas entero por
+// mutate_tasks) y sustituir add_brl_entry/update_brl_entry/delete_brl_entry
+// por mutate_brl (2026-08-27) + ~5% de holgura. Si ese test cambia su techo,
+// este número se actualiza a la vez — no hay forma de importarlo desde un
+// script standalone sin dependencias, así que va documentado y buscable por
+// el mismo comentario en ambos ficheros.
 //
 // Esta pareja de números YA se quedó atrás una vez: el lote de
 // `add_attachment` (26 ago 2026) subió el techo en `index.test.ts` y
@@ -42,8 +44,8 @@ const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
 // smoke en rojo por un recuento congelado, no por un fallo real. Si tocas el
 // número de tools, `grep -rn "CHAR_CEILING\|EXPECTED_TOOL_COUNT" src scripts`
 // enseña los TRES sitios de golpe.
-const CHAR_CEILING = 27900;
-const EXPECTED_TOOL_COUNT = 26;
+const CHAR_CEILING = 23300;
+const EXPECTED_TOOL_COUNT = 19;
 
 if (!url) {
 	console.error('smoke-remote: falta la URL. Uso: node scripts/smoke-remote.mjs <url> <token>');
