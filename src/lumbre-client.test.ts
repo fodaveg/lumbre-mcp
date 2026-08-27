@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	assertTaskUsable,
+	ATTACHMENT_CONTENT_TYPE_HEADER,
 	buildBatchFromOps,
 	collectExistenceCheckIds,
 	findTasksByIds,
@@ -485,11 +486,37 @@ describe('uploadAttachment', () => {
 		expect(init.body).toBe(bytes);
 		const headers = init.headers as Record<string, string>;
 		expect(headers.authorization).toBe('Bearer tok-123');
-		expect(headers['content-type']).toBe('application/pdf');
+		// `Content-Type` fijo, NUNCA el mime real (ver el JSDoc de
+		// `uploadAttachment`) — el mime real viaja en `ATTACHMENT_CONTENT_TYPE_HEADER`.
+		expect(headers['content-type']).toBe('application/octet-stream');
+		expect(headers[ATTACHMENT_CONTENT_TYPE_HEADER]).toBe('application/pdf');
 		// espacio → %20, "ñ" → %C3%B1 (UTF-8) — encodeURIComponent exacto, no una
 		// aproximación con solo espacios escapados.
 		expect(headers['x-lumbre-filename']).toBe(encodeURIComponent('informe año.pdf'));
 		expect(headers['x-lumbre-filename']).toBe('informe%20a%C3%B1o.pdf');
+	});
+
+	/**
+	 * EL GUARDARRAÍL REAL (movido aquí desde `attachments.test.ts` el
+	 * 2026-08-27, ver el JSDoc de `uploadAttachment`): el `Content-Type` que
+	 * sale por el cable NUNCA es uno de los cuatro que `is_form_content_type`
+	 * de SvelteKit intercepta como formulario (`application/octet-stream` no
+	 * está en esa lista, por construcción), pase lo que pase con el mapa de
+	 * mimes de `mimeForFilename` — el mime real viaja aparte, en
+	 * `x-lumbre-content-type`. Antes esto se comprobaba degradando el mime
+	 * ANTES de llegar aquí; ahora `uploadAttachment` lo garantiza siempre, así
+	 * que se comprueba para un `.png` (nunca degradaba) Y un `.txt` (sí
+	 * degradaba) — los dos tienen que salir con el MISMO `Content-Type` fijo.
+	 */
+	it('Content-Type SIEMPRE application/octet-stream; el mime real va en x-lumbre-content-type (.png y .txt)', async () => {
+		for (const mime of ['image/png', 'text/plain']) {
+			const fetchSpy = mockUploadResponse(RESPONSE_BODY);
+			await uploadAttachment(config, { taskId: TASK_ID, filename: 'f', mime, bytes: Buffer.from('x') });
+			const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+			const headers = init.headers as Record<string, string>;
+			expect(headers['content-type']).toBe('application/octet-stream');
+			expect(headers[ATTACHMENT_CONTENT_TYPE_HEADER]).toBe(mime);
+		}
 	});
 
 	it('404: la tarea no existe/borrada/archivada — mensaje del servidor si lo hay', async () => {

@@ -132,7 +132,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// in-memory) — aquí se confirma que el mismo `stripToolsListSchema`
 		// aplicado sobre `StreamableHTTPServerTransport` da el mismo resultado
 		// que sobre stdio/in-memory, no un tamaño distinto por transporte.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(26700);
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(27900);
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {

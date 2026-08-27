@@ -161,9 +161,16 @@ describe('tools/list — superficie completa', () => {
 		// `list_tasks` (merge de e6534ee) y añadir `add_attachment` (sube un
 		// fichero LOCAL, ver `attachments.ts`): 25.399 sobre transporte
 		// in-memory (26 tools). Techo subido junto con el número medido.
+		// Re-medido el 2026-08-27 tras ampliar `add_attachment` a DOS vías
+		// (`file_path`/`content_base64`, ver `remoteFileAccessError` en
+		// index.ts): 26.578 = +1.179 sobre los 25.399 de arriba (el segundo
+		// campo, su `filename` ahora condicional, y la description ampliada
+		// para explicar cuándo usar cada vía). Sigue siendo 26 tools —
+		// ninguna tool nueva, solo más superficie en la existente. Techo
+		// subido junto con el número medido.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 26700;
+		const CHAR_CEILING = 27900;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -605,9 +612,9 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 		return first && first.type === 'text' && typeof first.text === 'string' ? first.text : '';
 	}
 
-	async function buildClient() {
+	async function buildClient(opts: { localFilesystem?: boolean } = {}) {
 		const indexModule = await import('./index.js');
-		const server = indexModule.createServer(TEST_CONFIG);
+		const server = indexModule.createServer(TEST_CONFIG, opts);
 		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
 		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -644,7 +651,8 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 				expect(init?.method).toBe('POST');
 				const headers = init?.headers as Record<string, string>;
 				expect(headers.authorization).toBe('Bearer test-token-para-index-test');
-				expect(headers['content-type']).toBe('application/pdf');
+				expect(headers['content-type']).toBe('application/octet-stream');
+				expect(headers['x-lumbre-content-type']).toBe('application/pdf');
 				return jsonResponse({
 					id: 'att-1',
 					taskId: TASK_ID,
@@ -832,6 +840,182 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 			arguments: { taskId: TASK_ID, file_path: filePath, filename: 'informe año.pdf' }
 		});
 		expect(result.isError).not.toBe(true);
+	});
+
+	it('ni file_path ni content_base64: error claro, SIN tocar red', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			throw new Error(`fetch no mockeado en este test: ${String(url)}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'add_attachment', arguments: { taskId: TASK_ID } });
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/file_path|content_base64/);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('file_path Y content_base64 a la vez: error claro, SIN tocar red', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			throw new Error(`fetch no mockeado en este test: ${String(url)}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_attachment',
+			arguments: { taskId: TASK_ID, file_path: filePath, content_base64: Buffer.from('x').toString('base64') }
+		});
+		expect(result.isError).toBe(true);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/una sola vía/i);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	describe('content_base64 — vía SIN disco (funciona con y sin acceso al filesystem)', () => {
+		it('camino feliz (con disco): sube los bytes decodificados, con `filename` obligatorio', async () => {
+			const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+				const u = String(url);
+				if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+				if (u.includes('/api/attachments?taskId=')) {
+					const headers = init?.headers as Record<string, string>;
+					expect(headers['content-type']).toBe('application/octet-stream');
+					expect(headers['x-lumbre-content-type']).toBe('text/plain');
+					return jsonResponse({
+						id: 'att-b64',
+						taskId: TASK_ID,
+						filename: 'nota.txt',
+						mime: 'text/plain',
+						size: 5,
+						storageKey: 'attachments/att-b64',
+						createdAt: 1_700_000_000_000
+					});
+				}
+				throw new Error(`fetch no mockeado en este test: ${u}`);
+			});
+			vi.stubGlobal('fetch', fetchSpy);
+
+			const client = await buildClient();
+			const result = await client.callTool({
+				name: 'add_attachment',
+				arguments: { taskId: TASK_ID, content_base64: Buffer.from('hola!').toString('base64'), filename: 'nota.txt' }
+			});
+			expect(result.isError).not.toBe(true);
+			expect(firstResultText(result as { content: { type: string; text?: string }[] })).toContain('att-b64');
+		});
+
+		it('sin `filename`: error claro, y NINGUNA llamada de red', async () => {
+			const fetchSpy = vi.fn(async (url: string | URL) => {
+				throw new Error(`fetch no mockeado en este test: ${String(url)}`);
+			});
+			vi.stubGlobal('fetch', fetchSpy);
+
+			const client = await buildClient();
+			const result = await client.callTool({
+				name: 'add_attachment',
+				arguments: { taskId: TASK_ID, content_base64: Buffer.from('x').toString('base64') }
+			});
+			expect(result.isError).toBe(true);
+			expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/filename/);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		});
+
+		it('base64 por encima de 1 MiB decodificado: error con el tamaño REAL, SIN llamar a requireTaskExists ni a /api/attachments', async () => {
+			const fetchSpy = vi.fn(async (url: string | URL) => {
+				throw new Error(`fetch no mockeado en este test: ${String(url)}`);
+			});
+			vi.stubGlobal('fetch', fetchSpy);
+
+			const oversized = Buffer.alloc(1024 * 1024 + 1).toString('base64');
+			const client = await buildClient();
+			const result = await client.callTool({
+				name: 'add_attachment',
+				arguments: { taskId: TASK_ID, content_base64: oversized, filename: 'grande.bin' }
+			});
+			expect(result.isError).toBe(true);
+			expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/1\.0 MB/);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		});
+
+		it('funciona IGUAL en un servidor SIN acceso al disco (localFilesystem: false)', async () => {
+			const fetchSpy = vi.fn(async (url: string | URL) => {
+				const u = String(url);
+				if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
+				if (u.includes('/api/attachments?taskId=')) {
+					return jsonResponse({
+						id: 'att-remote-b64',
+						taskId: TASK_ID,
+						filename: 'nota.txt',
+						mime: 'text/plain',
+						size: 5,
+						storageKey: 'attachments/att-remote-b64',
+						createdAt: 1_700_000_000_000
+					});
+				}
+				throw new Error(`fetch no mockeado en este test: ${u}`);
+			});
+			vi.stubGlobal('fetch', fetchSpy);
+
+			const client = await buildClient({ localFilesystem: false });
+			const result = await client.callTool({
+				name: 'add_attachment',
+				arguments: { taskId: TASK_ID, content_base64: Buffer.from('hola!').toString('base64'), filename: 'nota.txt' }
+			});
+			expect(result.isError).not.toBe(true);
+			expect(firstResultText(result as { content: { type: string; text?: string }[] })).toContain('att-remote-b64');
+		});
+	});
+
+	describe('file_path — servidor SIN acceso al disco del usuario (localFilesystem: false, ej. mcp.lumbre.pro)', () => {
+		it('file_path da un error EXPLICATIVO (no "no existe el fichero") y NO toca red en absoluto', async () => {
+			const fetchSpy = vi.fn(async (url: string | URL) => {
+				throw new Error(`fetch no mockeado en este test: ${String(url)}`);
+			});
+			vi.stubGlobal('fetch', fetchSpy);
+
+			const client = await buildClient({ localFilesystem: false });
+			const result = await client.callTool({
+				name: 'add_attachment',
+				arguments: { taskId: TASK_ID, file_path: filePath }
+			});
+			expect(result.isError).toBe(true);
+			const text = firstResultText(result as { content: { type: string; text?: string }[] });
+			expect(text).toMatch(/mcp\.lumbre\.pro/);
+			expect(text).toMatch(/content_base64/);
+			expect(text).toMatch(/claude mcp add/);
+			// El mensaje VIEJO era literalmente `No existe el fichero "<ruta>".` —
+			// ese formato exacto (con la ruta entre comillas) ya no debe salir:
+			// sonaría a error del usuario, cuando la causa real es de topología.
+			expect(text).not.toMatch(/No existe el fichero "/);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		});
+	});
+});
+
+describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TOOLSET=attachments)', () => {
+	async function toolNamesOf(opts: { toolset?: 'all' | 'attachments' } = {}) {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG, opts);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'toolset-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		const result = await client.listTools();
+		return result.tools.map((t) => t.name).sort();
+	}
+
+	it('sin `toolset` (default): las 26 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(26);
+	});
+
+	it('`toolset: "attachments"`: SOLO add_attachment/read_attachment', async () => {
+		expect(await toolNamesOf({ toolset: 'attachments' })).toEqual(['add_attachment', 'read_attachment']);
+	});
+
+	it('`toolset: "all"` (explícito): las 26, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(26);
 	});
 });
 

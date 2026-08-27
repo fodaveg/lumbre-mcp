@@ -2,7 +2,14 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAX_ATTACHMENT_BYTES, mimeForFilename, readLocalAttachment, resolveLocalPath } from './attachments.js';
+import {
+	decodeBase64Attachment,
+	MAX_ATTACHMENT_BYTES,
+	MAX_BASE64_ATTACHMENT_BYTES,
+	mimeForFilename,
+	readLocalAttachment,
+	resolveLocalPath
+} from './attachments.js';
 
 let dir: string;
 
@@ -28,20 +35,22 @@ describe('mimeForFilename', () => {
 	});
 
 	/**
-	 * LA LANDMINE (ver el JSDoc de `SVELTEKIT_FORM_CONTENT_TYPES` en
-	 * `attachments.ts`): `text/plain` es uno de los cuatro Content-Type que
-	 * `is_form_content_type` de `@sveltejs/kit` intercepta ANTES de nuestro
-	 * handler cuando la petición no trae `Origin` (el caso de este MCP) — un
-	 * `.txt`/`.log` con su mime "correcto" se rechazaría con 403 mudo. Este
-	 * test es lo único que impide que alguien "arregle" el mapa poniendo el
-	 * mime real y rompa la subida en producción sin que nada se ponga rojo.
+	 * Hasta 2026-08-26 `.txt`/`.log` degradaban a `application/octet-stream`
+	 * (landmine de SvelteKit, ver el JSDoc de `uploadAttachment` en
+	 * `lumbre-client.ts`): esa degradación se ha MOVIDO — ahora el
+	 * `Content-Type` que sale por el cable es SIEMPRE `application/octet-stream`
+	 * (decidido en `uploadAttachment`, no aquí) y el mime real viaja en
+	 * `x-lumbre-content-type`, así que `mimeForFilename` vuelve a devolver el
+	 * mime real sin excepciones. El guardarraíl real (nunca uno de los cuatro
+	 * Content-Type de SvelteKit sale por el cable) se mueve con el test de
+	 * `uploadAttachment` en `lumbre-client.test.ts`.
 	 */
-	it('.txt degrada a application/octet-stream (si no, 403 mudo de SvelteKit)', () => {
-		expect(mimeForFilename('notas.txt')).toBe('application/octet-stream');
-		expect(mimeForFilename('salida.log')).toBe('application/octet-stream');
+	it('.txt/.log YA NO degradan: devuelven su mime real (la degradación viajó a uploadAttachment)', () => {
+		expect(mimeForFilename('notas.txt')).toBe('text/plain');
+		expect(mimeForFilename('salida.log')).toBe('application/octet-stream'); // .log no está en el mapa
 	});
 
-	it('text/markdown y text/csv NO están en la lista de SvelteKit: viajan con su mime real', () => {
+	it('text/markdown y text/csv viajan con su mime real (nunca degradaron)', () => {
 		expect(mimeForFilename('a.md')).toBe('text/markdown');
 		expect(mimeForFilename('a.csv')).toBe('text/csv');
 	});
@@ -109,5 +118,42 @@ describe('readLocalAttachment', () => {
 
 	it('ruta relativa: rechazada antes de tocar el disco', async () => {
 		await expect(readLocalAttachment('informe.pdf')).rejects.toThrow(/absoluta/);
+	});
+});
+
+describe('decodeBase64Attachment', () => {
+	it('camino feliz: decodifica los bytes y decide el mime sobre `filename`', () => {
+		const bytes = Buffer.from('contenido de prueba');
+		const result = decodeBase64Attachment(bytes.toString('base64'), 'notas.txt');
+		expect(result.bytes.toString()).toBe('contenido de prueba');
+		expect(result.filename).toBe('notas.txt');
+		expect(result.mime).toBe('text/plain');
+	});
+
+	it('tolera saltos de línea dentro del base64 (el modelo puede envolver el argumento)', () => {
+		const bytes = Buffer.from('a'.repeat(60));
+		const wrapped = bytes.toString('base64').replace(/(.{10})/g, '$1\n');
+		const result = decodeBase64Attachment(wrapped, 'a.txt');
+		expect(result.bytes.equals(bytes)).toBe(true);
+	});
+
+	it('filename vacío o en blanco: error legible', () => {
+		const bytes = Buffer.from('x').toString('base64');
+		expect(() => decodeBase64Attachment(bytes, '')).toThrow(/filename/);
+		expect(() => decodeBase64Attachment(bytes, '   ')).toThrow(/filename/);
+	});
+
+	it('base64 mal formado (caracteres fuera de alfabeto, longitud no múltiplo de 4): error legible', () => {
+		expect(() => decodeBase64Attachment('no-es-base64!!!', 'a.txt')).toThrow(/base64/);
+		expect(() => decodeBase64Attachment('abc', 'a.txt')).toThrow(/base64/);
+	});
+
+	it('cadena vacía: error legible (no decodifica silenciosamente a 0 bytes)', () => {
+		expect(() => decodeBase64Attachment('', 'a.txt')).toThrow(/base64/);
+	});
+
+	it('supera el tope de 1 MiB decodificado: el mensaje trae el tamaño REAL', () => {
+		const oversized = Buffer.alloc(MAX_BASE64_ATTACHMENT_BYTES + 1).toString('base64');
+		expect(() => decodeBase64Attachment(oversized, 'grande.bin')).toThrow(/1\.0 MB/);
 	});
 });

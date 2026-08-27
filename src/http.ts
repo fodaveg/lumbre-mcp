@@ -200,7 +200,13 @@ async function handleMcpRequest(
 
 	const config: LumbreConfig = { baseUrl, token };
 	// CONTRATO M1: la única LLAMADA a la factory real de `index.ts`.
-	const mcpServer = createServer(config);
+	// `localFilesystem: false` — este proceso corre en el VPS compartido, no
+	// en la máquina de quien pregunta: `add_attachment({ file_path })` NUNCA
+	// vería el disco correcto desde aquí (medido el 2026-08-27: "no existe el
+	// fichero" contra un fichero que sí existía en el Mac del usuario, porque
+	// el `fs.stat` corría aquí). Ver el JSDoc de `CreateServerOptions` en
+	// `index.ts`.
+	const mcpServer = createServer(config, { localFilesystem: false });
 	// `enableJsonResponse: true`: respuesta JSON directa en vez de un stream
 	// SSE — este endpoint sirve llamadas sueltas de tool (petición → una
 	// respuesta), no notificaciones de servidor a mitad de una tarea larga.

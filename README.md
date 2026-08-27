@@ -103,29 +103,41 @@ y también de otros ámbitos que tocaron esta carpeta de paso).
   de `list_tasks`/`get_task`). Si es una imagen, se devuelve para verla
   directamente; para cualquier otro tipo (PDF, etc.) solo trae su metadata —
   no hay forma de leer su contenido con esta tool.
-- `add_attachment({ taskId, file_path, filename? })` — sube un fichero LOCAL
-  (por RUTA, no en base64: el servidor MCP corre en tu misma máquina, y 25 MB
-  en base64 serían ~33 MB de contexto) y lo deja adjunto y **enlazado** a una
-  tarea (vía `POST /api/attachments?taskId=`). `file_path` debe ser absoluta o
-  empezar por `~/` — una relativa se resolvería contra el cwd del PROCESO MCP,
-  no el de tu sesión, y se rechaza. `filename` (opcional) es el nombre con el
-  que se guarda; por defecto el basename de `file_path`. Tope **25 MB** por
-  fichero, comprobado en el cliente (mensaje con el tamaño real) y de forma
-  AUTORITATIVA en el servidor. No admite subtareas. A diferencia de TODO lo
-  demás en Fase 1/Fase 2 (que se encola), **esta vía es SÍNCRONA**: el
-  servidor escribe la metadata al CRDT antes de responder 200, así que el
-  adjunto ya está enlazado y visible cuando la tool contesta — no hace falta
-  esperar a ningún sync.
+- `add_attachment({ taskId, file_path?, content_base64?, filename? })` — sube
+  un fichero y lo deja adjunto y **enlazado** a una tarea (vía
+  `POST /api/attachments?taskId=`). Acepta **exactamente una** de dos vías,
+  según DÓNDE corre este conector:
+  - `file_path` — ruta LOCAL, absoluta o `~/…` (una relativa se rechaza), tope
+    **25 MB**. Solo funciona si el conector corre en TU máquina (stdio local,
+    ver "Configurar en Claude Code" más abajo): `resolveLocalPath`/`fs.stat`
+    se resuelven contra el disco de quien ejecuta el proceso. Contra el
+    **conector remoto** (`mcp.lumbre.pro`, ver más abajo) esta vía no funciona
+    — el proceso corre en el VPS de Lumbre, no en tu Mac — y la tool lo dice
+    con un error explícito (nunca un "no existe el fichero", que sonaría a
+    error tuyo cuando el problema es de topología) que incluye el comando
+    para enchufar el conector local dedicado a adjuntos.
+  - `content_base64` — los bytes en base64, funciona en CUALQUIER conector
+    (local o remoto). Pensado **solo para ficheros de unos KB** (un `.txt`
+    corto, un `.log`): ese argumento lo emite el MODELO dentro de la tool
+    call, y base64 infla ~33% — 480 KB de captura real son ~640 KB en base64,
+    ~160k tokens, inviable. Tope **1 MB** decodificado (mucho más bajo que
+    los 25 MB de `file_path`, a propósito). `filename` es OBLIGATORIO con
+    esta vía (no hay ruta de la que sacar un basename).
 
-  Ojo con el `Content-Type` de un `.txt`/`.log`: SvelteKit rechaza con **403
-  mudo** (antes de llegar a nuestro handler) cualquier POST sin cabecera
-  `Origin` cuyo Content-Type sea `application/x-www-form-urlencoded`,
-  `multipart/form-data`, `text/plain` o `application/x-sveltekit-formdata`
-  (`is_form_content_type`, `@sveltejs/kit`) — y el MCP, al correr fuera del
-  navegador, nunca manda `Origin`. Por eso el mapa de mimes de
-  `attachments.ts` degrada esos cuatro a `application/octet-stream` antes de
-  mandar (en la práctica, el único que se cruza es `text/plain`: `.md`/`.csv`
-  no están en esa lista y viajan con su mime real).
+  `filename` es opcional con `file_path` (por defecto su basename) y
+  obligatorio con `content_base64`. Tope de tamaño comprobado en el cliente
+  (mensaje con el tamaño real) y de forma AUTORITATIVA en el servidor. No
+  admite subtareas. A diferencia de TODO lo demás en Fase 1/Fase 2 (que se
+  encola), **esta vía es SÍNCRONA**: el servidor escribe la metadata al CRDT
+  antes de responder 200, así que el adjunto ya está enlazado y visible
+  cuando la tool contesta — no hace falta esperar a ningún sync.
+
+  El `Content-Type` que sale por el cable es SIEMPRE `application/octet-stream`
+  (el mime real viaja aparte, en `x-lumbre-content-type`) — así que un
+  `.txt`/`.log` conserva su mime real de cara al servidor sin arriesgarse al
+  **403 mudo** que dispara `is_form_content_type` de SvelteKit cuando una
+  petición sin `Origin` (el caso de este MCP, que corre fuera del navegador)
+  trae uno de sus cuatro Content-Type de formulario.
 - `refresh_sync()` — fuerza el flush del sync ANTES de leer (vía
   `POST /api/sync/flush`), para evitar que `list_tasks` devuelva un estado
   ligeramente rancio (el servidor guarda los cambios recibidos por WebSocket
@@ -439,3 +451,29 @@ terceros por los que pase la conexión). Rotar el token de email-to-task
 obliga a **volver a pegar la URL entera** en la config del conector, no solo
 a cambiar una cabecera. Úsala solo donde la cabecera no es una opción; con
 Claude Code, usa siempre la cabecera.
+
+### Adjuntos GRANDES con el conector remoto: un SEGUNDO conector stdio local
+
+El conector remoto (`mcp.lumbre.pro`) corre en el VPS de Lumbre, no en tu
+máquina — así que `add_attachment({ file_path })` no puede leer tu disco
+desde ahí (ver la tool en "Qué hace" más arriba). Para un fichero grande
+(una captura, un PDF) con el conector remoto ya enchufado, la vía es tener
+**los dos a la vez**: el remoto para todo lo demás, y un segundo conector
+stdio **acotado a adjuntos** para `file_path`.
+
+`LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
+registre SOLO `add_attachment`/`read_attachment` en vez de las 26 tools de
+siempre — así no duplicas la superficie de `tools/list` en el contexto de
+cada sesión (pesa ~26 KB de JSON; dos copias son el doble, y el modelo
+encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
+Cualquier otro valor (o no ponerla) registra las 26, igual que siempre.
+
+```bash
+claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js
+```
+
+Sustituye `tu-token` por tu token de email-to-task (el mismo de siempre) y la
+ruta por la de tu clon compilado (ver "Compilar" más arriba). Con este
+conector enchufado, `add_attachment` en `lumbre-adjuntos` acepta `file_path`
+con normalidad — el error explicativo de arriba solo sale al llamarla desde
+el conector `mcp.lumbre.pro` sin este segundo conector a mano.

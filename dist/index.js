@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { addTask, assertTaskUsable, buildBatchFromOps, collectExistenceCheckIds, findTaskById, findTasksByIds, getAttachment, listBrlEntries, listLists, listTasks, mutateTask, priorityToLevel, refreshSync, runBatch, taskNotFoundError, uploadAttachment, LumbreApiError } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
-import { readLocalAttachment } from './attachments.js';
+import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, fileNotesSeenStore, hasNotes, parseNotesSince, recordNotesSeen } from './notes.js';
 import { BrlExistenceCache, EXISTENCE_CACHE_TTL_MS, TaskExistenceCache } from './existence-cache.js';
 /**
@@ -91,6 +91,44 @@ function textResult(text) {
 function errorResult(err) {
     const message = err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err);
     return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
+}
+/**
+ * Comando `claude mcp add` LISTO PARA COPIAR del conector stdio local acotado
+ * a adjuntos (`LUMBRE_MCP_TOOLSET=attachments`, ver `CreateServerOptions` y
+ * `toolsetFromEnv`): solo registra `add_attachment`/`read_attachment`
+ * (2 tools, no 26) para poder tenerlo enchufado A LA VEZ que el conector
+ * remoto sin duplicar la superficie de `tools/list` en el contexto de cada
+ * sesión. Usado tanto en `remoteFileAccessError` (el error que ve el modelo
+ * en el momento en que lo necesita) como en el README.
+ */
+const LOCAL_ATTACHMENTS_CONNECTOR_COMMAND = 'claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments ' +
+    '-- node /ruta/absoluta/a/lumbre-mcp/dist/index.js';
+/**
+ * Error de `add_attachment({ file_path })` cuando este servidor NO ve el
+ * disco del usuario (`localFilesystem: false`, ver `CreateServerOptions` —
+ * hoy, el transporte HTTP remoto de `http.ts`/`mcp.lumbre.pro`). A propósito
+ * NO reintenta ni delega en `readLocalAttachment`/`fs.stat`: contra ESTE
+ * proceso, cualquier ruta —exista o no en la máquina del usuario— resolvería
+ * contra el disco del VPS, así que un "No existe el fichero" ahí sería un
+ * error LITERALMENTE CIERTO pero sobre la máquina equivocada — el bug real
+ * que motiva esta pieza (medido el 2026-08-27: la captura sí existía en el
+ * Mac de David en ese mismo instante). Explica la topología y las dos
+ * salidas: `content_base64` para algo pequeño, o el conector local de arriba
+ * para algo grande.
+ */
+function remoteFileAccessError() {
+    return ('Este conector corre en mcp.lumbre.pro (transporte HTTP remoto) y no tiene forma de ver ' +
+        'el disco de tu ordenador — "file_path" no funciona aquí, y un "no existe el fichero" ' +
+        'sería sobre el disco del SERVIDOR, no el tuyo, así que ni se ha intentado leer. Dos ' +
+        'alternativas:\n' +
+        '  1. Fichero pequeño (unos KB — un .txt, un .log): pásalo con `content_base64` en vez ' +
+        'de `file_path` (y `filename`, obligatorio en ese modo).\n' +
+        '  2. Fichero grande (una captura, un PDF): añade el conector LOCAL de Lumbre, que sí ' +
+        'corre en tu máquina y ve tu disco:\n\n' +
+        `     ${LOCAL_ATTACHMENTS_CONNECTOR_COMMAND}\n\n` +
+        '     (sustituye "tu-token" por tu token de email-to-task y la ruta por la de tu clon; ' +
+        'ver README, "Transporte HTTP remoto"). Con ese conector enchufado, add_attachment ahí ' +
+        'sí puede usar file_path.');
 }
 const recurrenceSchema = z
     .object({
@@ -412,11 +450,17 @@ function formatOpShapeError(op, error) {
     return `${op}: ${parts.join('; ')}`;
 }
 /**
- * Factory del servidor MCP de Lumbre: registra las 26 tools con `config`
+ * Factory del servidor MCP de Lumbre: registra las tools con `config`
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
- * eso es cosa del llamante (`main`, más abajo, para stdio; un futuro
- * transporte HTTP crearía una instancia por conexión/petición).
+ * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
+ * transporte remoto). Registra las 26 de siempre salvo que
+ * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
+ * quedan `add_attachment`/`read_attachment` — las demás se registran igual
+ * (para no bifurcar cada una de las 24 llamadas a `registerTool` con un
+ * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
+ * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
+ * estado intermedio de "26 registradas".
  *
  * Cada llamada crea sus PROPIAS `taskCache`/`brlCache` (cachés cortas de
  * existencia, ver `existence-cache.ts`) — viven en esta instancia, no en
@@ -428,8 +472,10 @@ export function createServer(config, opts = {}) {
     const notesSeenStore = opts.notesSeenStore ?? fileNotesSeenStore;
     const taskCache = new TaskExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
     const brlCache = new BrlExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
+    const localFilesystem = opts.localFilesystem ?? true;
+    const toolset = opts.toolset ?? 'all';
     const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
-    server.registerTool('add_task', {
+    const addTaskTool = server.registerTool('add_task', {
         description: 'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
             '"recuérdame", "añade a mi lista/tarea". Se encola y se materializa al sincronizar. ' +
             '`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
@@ -474,7 +520,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('refresh_sync', {
+    const refreshSyncTool = server.registerTool('refresh_sync', {
         description: 'Fuerza el flush de sync de Lumbre antes de leer (evita que list_tasks devuelva estado ' +
             'rancio). Solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
             'del usuario está offline, sus cambios sin enviar no se pueden recuperar. Sin parámetros.',
@@ -488,7 +534,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('list_tasks', {
+    const listTasksTool = server.registerTool('list_tasks', {
         description: 'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
             'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
             'vacío igual que una lista vacía existente — usa list_lists para distinguir. `section` ' +
@@ -690,7 +736,7 @@ export function createServer(config, opts = {}) {
         taskCache.setAll(list);
         return { list, autoRender };
     }
-    server.registerTool('list_lists', {
+    const listListsTool = server.registerTool('list_lists', {
         description: 'Enumera TODAS las listas de "Algún día" con su recuento de tareas, incluidas las ' +
             'vacías (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacía de ' +
             'inexistente. Sin parámetros.',
@@ -704,7 +750,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('get_task', {
+    const getTaskTool = server.registerTool('get_task', {
         description: 'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
             'lista/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
             'obtener el id de una subtarea. Error si el taskId no existe.',
@@ -767,25 +813,70 @@ export function createServer(config, opts = {}) {
         }
     });
     server.registerTool('add_attachment', {
-        description: 'Sube un fichero LOCAL (ruta absoluta o "~/…", tope 25 MB) y lo deja adjunto a una tarea. ' +
-            'A diferencia de add_task/mutate_tasks, es SÍNCRONA: ya está enlazado al responder. Ver ' +
-            'README para el detalle de mimes/límites.',
+        description: 'Sube un fichero y lo deja adjunto a una tarea (SÍNCRONA, a diferencia de add_task/' +
+            'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
+            '`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
+            'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
+            'devuelve un error explicativo, nunca intenta leer tu disco. `content_base64` funciona ' +
+            'siempre, pero es SOLO para ficheros de unos KB (un .txt, un .log): el argumento lo emites ' +
+            'TÚ como modelo, y una imagen de unos cientos de KB son ~100-200k tokens en base64 — tope ' +
+            '1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
+            'sacar un nombre). Ver README para el detalle de mimes/límites y el conector local dedicado.',
         inputSchema: {
             taskId: z.string().uuid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
             file_path: z
                 .string()
                 .min(1)
-                .describe('Ruta LOCAL del fichero, absoluta o "~/…" — una relativa se rechaza'),
+                .optional()
+                .describe('Ruta LOCAL del fichero, absoluta o "~/…" (una relativa se rechaza). Exactamente uno ' +
+                'de file_path/content_base64. Solo funciona si ESTE conector corre en tu máquina ' +
+                '(stdio local) — contra el conector remoto da un error explicativo con la alternativa.'),
+            content_base64: z
+                .string()
+                .min(1)
+                .optional()
+                .describe('Bytes del fichero en base64, para cuando no hay file_path posible (conector remoto) ' +
+                'o el fichero es pequeño. SOLO para unos KB (un .txt/.log corto) — tope 1 MB ' +
+                'decodificado; para algo más grande usa file_path con el conector local. Exactamente ' +
+                'uno de file_path/content_base64. Requiere `filename`.'),
             filename: z
                 .string()
                 .min(1)
                 .optional()
-                .describe('Nombre con el que se guarda; por defecto el basename de file_path')
+                .describe('Nombre con el que se guarda. Con file_path, opcional (por defecto su basename); con ' +
+                'content_base64, OBLIGATORIO (no hay ruta de la que sacarlo).')
         }
     }, async (input) => {
         try {
-            await requireTaskExists(input.taskId, { allowSubtask: false });
-            const file = await readLocalAttachment(input.file_path, input.filename);
+            const hasFilePath = input.file_path !== undefined;
+            const hasBase64 = input.content_base64 !== undefined;
+            if (hasFilePath === hasBase64) {
+                return errorResult(new Error(hasFilePath
+                    ? 'Indica UNA sola vía: file_path o content_base64, no las dos a la vez.'
+                    : 'Indica una vía para el fichero: file_path (conector local) o content_base64 ' +
+                        '(cualquier conector, ficheros pequeños).'));
+            }
+            let file;
+            if (hasBase64) {
+                if (!input.filename?.trim()) {
+                    return errorResult(new Error('filename es obligatorio con content_base64 (no hay ruta de la que sacarlo).'));
+                }
+                // Decodifica/valida ANTES de tocar red (`requireTaskExists` incluida)
+                // — un base64 inválido o por encima del tope no debe gastar la
+                // llamada de existencia.
+                file = decodeBase64Attachment(input.content_base64, input.filename);
+                await requireTaskExists(input.taskId, { allowSubtask: false });
+            }
+            else if (!localFilesystem) {
+                // Ni requireTaskExists ni uploadAttachment: contra este disco NO
+                // existe una ruta correcta que probar (ver `remoteFileAccessError`),
+                // así que ni se toca la red.
+                return errorResult(new Error(remoteFileAccessError()));
+            }
+            else {
+                await requireTaskExists(input.taskId, { allowSubtask: false });
+                file = await readLocalAttachment(input.file_path, input.filename);
+            }
             const attachment = await uploadAttachment(config, {
                 taskId: input.taskId,
                 filename: file.filename,
@@ -852,7 +943,7 @@ export function createServer(config, opts = {}) {
         await mutateTask(config, input);
         taskCache.invalidate(input.taskId);
     }
-    server.registerTool('complete_task', {
+    const completeTaskTool = server.registerTool('complete_task', {
         description: `Marca una tarea (o SUBTAREA, aunque para eso es más claro complete_subtask) como hecha, o ` +
             `la desmarca con done:false. ${ASYNC_NOTE}`,
         inputSchema: {
@@ -874,7 +965,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('cancel_task', {
+    const cancelTaskTool = server.registerTool('cancel_task', {
         description: `Cancela una tarea existente ("no se hizo ni se hará", distinto de completarla); sale ` +
             `igual de pendientes/rollover. Dispara con "cancela"/"descarta" (sin borrarla). ` +
             `cancelled:false la restaura. ${ASYNC_NOTE}`,
@@ -897,7 +988,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('update_task', {
+    const updateTaskTool = server.registerTool('update_task', {
         description: `Edita texto, notas, prioridad u hora de una tarea existente (NO subtareas: rechaza su id ` +
             `con error). Los campos que omitas no cambian; \`notes\` REEMPLAZA las anteriores enteras. ` +
             `${ASYNC_NOTE}`,
@@ -943,7 +1034,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('reschedule_task', {
+    const rescheduleTaskTool = server.registerTool('reschedule_task', {
         description: `Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada con date:null. ` +
             `NO aplica a una SUBTAREA (rechaza su id con error). ${ASYNC_NOTE}`,
         inputSchema: {
@@ -967,7 +1058,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('delete_task', {
+    const deleteTaskTool = server.registerTool('delete_task', {
         description: `Borra (soft-delete) una tarea existente, o una SUBTAREA suya (borra solo esa). ACCIÓN ` +
             `DELICADA: sin confirmación inmediata ni deshacer — confírmalo con el usuario antes de ` +
             `llamarla. ${ASYNC_NOTE}`,
@@ -984,7 +1075,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('set_section', {
+    const setSectionTool = server.registerTool('set_section', {
         description: 'Mueve una tarea existente a una sección dentro de SU lista (se crea si no existe), o ' +
             'la saca con section:null. Se ignora si la tarea no tiene lista propia. NO aplica a ' +
             'subtareas. ' + ASYNC_NOTE,
@@ -1012,7 +1103,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('remove_section', {
+    const removeSectionTool = server.registerTool('remove_section', {
         description: 'Borra una sección dentro de una lista; sus tareas no se borran, solo quedan sueltas ' +
             'en la MISMA lista. Resuelve `sectionId` desde una tarea que viva ahí ' +
             '(list_tasks/get_task); si no existe, se ignora. ' + ASYNC_NOTE,
@@ -1044,7 +1135,7 @@ export function createServer(config, opts = {}) {
     // pierde tareas (se reasignan) ni permite borrar la última lista viva ni la
     // Bandeja de entrada canónica (§5 "Prohibidos" del contrato). Detalle
     // completo del contrato de lista en `docs/20-contrato-lista.md`.
-    server.registerTool('create_list', {
+    const createListTool = server.registerTool('create_list', {
         description: `Crea una lista/proyecto de "Algún día" nueva. Devuelve el \`listId\` generado: úsalo ` +
             `después en add_task (\`listId\`), move_to_list o nest_list. ${ASYNC_NOTE}`,
         inputSchema: {
@@ -1080,7 +1171,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('nest_list', {
+    const nestListTool = server.registerTool('nest_list', {
         description: `Fija el padre de una lista existente (la anida), o la deja de primer nivel con ` +
             `parentId:null. Un anidado inválido (ciclo, auto-anidado, o la Bandeja de entrada) o ` +
             `un id inexistente se descarta en silencio. ${ASYNC_NOTE}`,
@@ -1104,7 +1195,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('rename_list', {
+    const renameListTool = server.registerTool('rename_list', {
         description: `Renombra una lista EXISTENTE; su identidad (id) y sus tareas no cambian. ${ASYNC_NOTE}`,
         inputSchema: {
             listId: z.string().uuid().describe('Id de la lista a renombrar'),
@@ -1124,7 +1215,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('remove_list', {
+    const removeListTool = server.registerTool('remove_list', {
         description: `Borra una lista existente; sus tareas no se pierden (se reasignan o quedan como ` +
             `tarea normal) y sus hijas pasan a primer nivel. No aplica a la última lista viva ni ` +
             `a la Bandeja de entrada: se ignora. ${ASYNC_NOTE}`,
@@ -1140,7 +1231,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('move_to_list', {
+    const moveToListTool = server.registerTool('move_to_list', {
         description: `Mueve una tarea existente a otra lista, o la desvincula con listId:null. Prefiere ` +
             `\`listId\` (estable) sobre \`list\` (nombre, se crea si no existe). Conserva fecha, ` +
             `limpia sección. NO aplica a subtareas. ${ASYNC_NOTE}`,
@@ -1179,7 +1270,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('add_subtask', {
+    const addSubtaskTool = server.registerTool('add_subtask', {
         description: `Añade subtareas (checklist) a una tarea existente. Un solo nivel: si \`taskId\` ya ` +
             `es subtarea, se descarta en silencio. Para crearlas junto con la tarea, usa add_task ` +
             `con \`subtasks\`. ${ASYNC_NOTE}`,
@@ -1211,7 +1302,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('complete_subtask', {
+    const completeSubtaskTool = server.registerTool('complete_subtask', {
         description: `Marca hecha (o desmarca con done:false) una SUBTAREA por su id — mismo mecanismo que ` +
             `complete_task, sin cascada sobre la tarea padre. Resuelve \`subtaskId\` con ` +
             `get_task(taskId) de su padre. ${ASYNC_NOTE}`,
@@ -1264,7 +1355,7 @@ export function createServer(config, opts = {}) {
         throw new Error(`El registro del ${date} no tiene ninguna entrada con id ${entryId} (¿se transcribió mal, o ` +
             'es de otro día?). Resuélvelo de nuevo con list_brl_entries. No se ha encolado nada.');
     }
-    server.registerTool('list_brl_entries', {
+    const listBrlEntriesTool = server.registerTool('list_brl_entries', {
         description: 'Lee el registro (BRL) de un día: entradas `-` (nota) y `=` (pensamiento), con id y hora. ' +
             'Única forma de obtener el id que piden update_brl_entry/delete_brl_entry. No son tareas.',
         inputSchema: {
@@ -1288,7 +1379,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('add_brl_entry', {
+    const addBrlEntryTool = server.registerTool('add_brl_entry', {
         description: 'Apunta en el registro (BRL) de un día lo ocurrido (nota) o una reflexión (kind:thought). ' +
             `NO es una tarea: no se completa ni se agenda; si hay algo que hacer, add_task. ${ASYNC_NOTE}`,
         inputSchema: {
@@ -1331,7 +1422,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('update_brl_entry', {
+    const updateBrlEntryTool = server.registerTool('update_brl_entry', {
         description: 'Reescribe una entrada del registro (BRL): REEMPLAZA su texto entero, y `kind` cambia ' +
             `además su tipo. \`date\` y \`entryId\` salen de list_brl_entries. ${ASYNC_NOTE}`,
         inputSchema: {
@@ -1362,7 +1453,7 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
-    server.registerTool('delete_brl_entry', {
+    const deleteBrlEntryTool = server.registerTool('delete_brl_entry', {
         description: 'Borra una entrada del registro (BRL). ACCIÓN DELICADA: sin confirmación inmediata ni ' +
             `deshacer — confírmalo con el usuario antes de llamarla. ${ASYNC_NOTE}`,
         inputSchema: {
@@ -1385,7 +1476,7 @@ export function createServer(config, opts = {}) {
         }
     });
     // ── Feature batch (`plan-batch.md`): N operaciones en UNA sola tool call ───
-    server.registerTool('mutate_tasks', {
+    const mutateTasksTool = server.registerTool('mutate_tasks', {
         description: `Vía PREFERENTE para VARIAS operaciones de golpe (crear y/o mutar): resuelve existencias y ` +
             `encola en UNA sola llamada, en vez de una tool call por operación. Cada elemento de \`ops\` ` +
             `equivale a su tool individual (mapeo op↔tool en el README); contrato por-op en la description ` +
@@ -1497,6 +1588,42 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
+    // Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
+    // retira las 24 tools que NO son `add_attachment`/`read_attachment` —
+    // TODAS se registraron arriba igual (para no bifurcar cada una de las 24
+    // llamadas a `registerTool` con un `if`), así que aquí solo se deshace lo
+    // que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
+    // cliente llega a ver el `tools/list` de 26 en el intermedio.
+    if (toolset === 'attachments') {
+        for (const tool of [
+            addTaskTool,
+            refreshSyncTool,
+            listTasksTool,
+            listListsTool,
+            getTaskTool,
+            completeTaskTool,
+            cancelTaskTool,
+            updateTaskTool,
+            rescheduleTaskTool,
+            deleteTaskTool,
+            setSectionTool,
+            removeSectionTool,
+            createListTool,
+            nestListTool,
+            renameListTool,
+            removeListTool,
+            moveToListTool,
+            addSubtaskTool,
+            completeSubtaskTool,
+            listBrlEntriesTool,
+            addBrlEntryTool,
+            updateBrlEntryTool,
+            deleteBrlEntryTool,
+            mutateTasksTool
+        ]) {
+            tool.remove();
+        }
+    }
     return server;
 }
 // Extraído a `schema-strip.ts` (tarea M2, transporte HTTP remoto) para que
@@ -1506,11 +1633,27 @@ export function createServer(config, opts = {}) {
 // de `index.js`.
 export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js';
 /**
- * Arranque real por stdio (el único transporte de hoy): resuelve `config`
- * desde el entorno (`loadConfig`, que SÍ puede `process.exit(1)` si falta
- * `LUMBRE_TOKEN` — ver su JSDoc), crea el servidor con `createServer` (sin
- * más opciones: caen las implementaciones por defecto, fichero para la huella
- * de notas) y lo conecta a `StdioServerTransport`.
+ * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
+ * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
+ * `read_attachment`, pensado para un SEGUNDO conector stdio local dedicado
+ * (David enchufa a la vez el remoto de las 26 tools y este, sin duplicar
+ * superficie — ver README). Cualquier otro valor (incluido no ponerla) cae
+ * al default `'all'` de `createServer` — nunca falla por un valor raro, un
+ * typo en la env simplemente no acota nada.
+ */
+function toolsetFromEnv() {
+    return process.env.LUMBRE_MCP_TOOLSET?.trim() === 'attachments' ? 'attachments' : 'all';
+}
+/**
+ * Arranque real por stdio (el único transporte que corre en la máquina del
+ * usuario): resuelve `config` desde el entorno (`loadConfig`, que SÍ puede
+ * `process.exit(1)` si falta `LUMBRE_TOKEN` — ver su JSDoc), crea el servidor
+ * con `createServer` y lo conecta a `StdioServerTransport`. Pasa
+ * `localFilesystem: true` EXPLÍCITO (aunque hoy coincide con el default, ver
+ * `CreateServerOptions`): este proceso corre en la máquina del usuario, así
+ * que `add_attachment({ file_path })` sí puede leer su disco — a diferencia
+ * de `http.ts`, que pasa `false`. `toolset` sale de `LUMBRE_MCP_TOOLSET`
+ * (`toolsetFromEnv`).
  *
  * Separado de la carga del módulo (antes `loadConfig()`/`new McpServer()`
  * corrían como efecto secundario del propio `import`, lo que obligaba a
@@ -1521,7 +1664,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  */
 export async function main() {
     const config = loadConfig();
-    const server = createServer(config);
+    const server = createServer(config, { localFilesystem: true, toolset: toolsetFromEnv() });
     const transport = stripToolsListSchema(new StdioServerTransport());
     await server.connect(transport);
 }

@@ -256,6 +256,17 @@ export async function getAttachment(config, id) {
     };
 }
 /**
+ * Cabecera con el mime REAL del adjunto (`x-lumbre-content-type`) — MISMA
+ * constante, mismo nombre, que `ATTACHMENT_CONTENT_TYPE_HEADER` en el repo
+ * principal (`src/lib/attachment-upload-parse.ts:43`, leída en
+ * `src/routes/api/attachments/+server.ts:177`; desplegado, comprobado contra
+ * prod el 2026-08-27: `content-type: application/octet-stream` +
+ * `x-lumbre-content-type: image/png` → 200 con `"mime":"image/png"`). Ver el
+ * JSDoc de `uploadAttachment` para el porqué de mandar el mime aquí y no en
+ * `Content-Type`.
+ */
+export const ATTACHMENT_CONTENT_TYPE_HEADER = 'x-lumbre-content-type';
+/**
  * `POST /api/attachments?taskId=<uuid>`: sube los bytes de un fichero y lo
  * deja adjunto y ENLAZADO a esa tarea — a diferencia de `addTask`/`mutateTask`
  * (encolan, se aplican al sincronizar), este endpoint escribe la metadata al
@@ -264,11 +275,21 @@ export async function getAttachment(config, id) {
  *
  * No pasa por `request()`: el cuerpo no es JSON (son los bytes crudos del
  * fichero) y la cabecera del nombre necesita ir URL-encodeada, nunca en la
- * query (acabaría en los access-logs). `mime` debe venir YA degradado si hace
- * falta (ver `mimeForFilename` en `attachments.ts`): un `Content-Type` como
- * `text/plain` hace que SvelteKit devuelva 403 ANTES de llegar al handler
- * (`is_form_content_type`, ver el JSDoc de `SVELTEKIT_FORM_CONTENT_TYPES`) —
- * este cliente no lo sabe ni le corresponde saberlo, solo manda lo que le dan.
+ * query (acabaría en los access-logs). `Content-Type` viaja SIEMPRE fijo a
+ * `application/octet-stream`, y el mime real de `input.mime` va aparte, en
+ * `ATTACHMENT_CONTENT_TYPE_HEADER` — hasta 2026-08-26 `Content-Type` llevaba
+ * el mime real (degradado a mano en `mimeForFilename` para los cuatro que
+ * SvelteKit intercepta, ver abajo); desde que el servidor sabe leer
+ * `x-lumbre-content-type` (comprobado contra prod, ver el JSDoc de la
+ * constante) ya no hace falta esa degradación NI arriesgarse a que un mime
+ * futuro que no esté en la lista cuele un 403 mudo: `application/octet-stream`
+ * nunca es, por construcción, ninguno de los cuatro Content-Type que
+ * `is_form_content_type` (`@sveltejs/kit` 2.66.0, `src/utils/http.js:93`,
+ * llamada desde `src/runtime/server/respond.js:83`; el cuarto sale de
+ * `src/runtime/form-utils.js:69`) intercepta ANTES de nuestro handler cuando
+ * la petición no trae `Origin` (el caso de este MCP, que corre fuera del
+ * navegador) — ese sigue siendo el guardarraíl real (ver el test que lo
+ * comprueba en `lumbre-client.test.ts`), solo cambia DÓNDE viaja el mime.
  */
 export async function uploadAttachment(config, input) {
     const params = new URLSearchParams({ taskId: input.taskId });
@@ -279,7 +300,8 @@ export async function uploadAttachment(config, input) {
             method: 'POST',
             headers: {
                 authorization: `Bearer ${config.token}`,
-                'content-type': input.mime,
+                'content-type': 'application/octet-stream',
+                [ATTACHMENT_CONTENT_TYPE_HEADER]: input.mime,
                 'x-lumbre-filename': encodeURIComponent(input.filename)
             },
             // `Buffer<ArrayBufferLike>` vs el `BodyInit` de los tipos DOM de fetch:

@@ -41,35 +41,18 @@ const EXTENSION_MIME: Record<string, string> = {
 	m4a: 'audio/mp4'
 };
 
-/**
- * Mimes que SvelteKit reconoce como "form content type" (`is_form_content_type`,
- * `@sveltejs/kit` 2.66.0, `src/utils/http.js:93`, llamada desde
- * `src/runtime/server/respond.js:83`; el cuarto sale de
- * `src/runtime/form-utils.js:69`) e intenta parsear como formulario ANTES de
- * llegar a nuestro handler: una petición SIN cabecera `Origin` (como la de
- * este MCP, que corre fuera del navegador) con uno de estos cuatro
- * Content-Type se rechaza con 403 sin ejecutar ni una línea de
- * `handleCredentialUpload`, y el mensaje no dice nada útil. `mimeForFilename`
- * DEGRADA los cuatro a `application/octet-stream` antes de mandar — en la
- * práctica el único que se cruza aquí es `text/plain` (un `.txt`/`.log`):
- * `text/markdown`/`text/csv` no están en la lista y viajan con su mime real.
- */
-const SVELTEKIT_FORM_CONTENT_TYPES = new Set([
-	'application/x-www-form-urlencoded',
-	'multipart/form-data',
-	'text/plain',
-	'application/x-sveltekit-formdata'
-]);
-
 /** Mime a partir del NOMBRE de fichero (extensión, case-insensitive):
- *  `application/octet-stream` si la extensión no está en el mapa, o si el
- *  mime que le tocaría es uno de los cuatro que SvelteKit intercepta como
- *  formulario (ver `SVELTEKIT_FORM_CONTENT_TYPES`) — degradarlo es la única
- *  forma de que la subida llegue al handler en vez de un 403 mudo. */
+ *  `application/octet-stream` si la extensión no está en el mapa. YA NO
+ *  degrada nada (hasta 2026-08-26 sí lo hacía, ver el JSDoc de
+ *  `uploadAttachment` en `lumbre-client.ts` para el motivo del cambio y la
+ *  landmine de SvelteKit que esto sorteaba): el `Content-Type` que sale por
+ *  el cable es SIEMPRE `application/octet-stream` (fijo, decidido en
+ *  `uploadAttachment`), y este mime real viaja aparte, en la cabecera
+ *  `x-lumbre-content-type` — así que un `.txt` vuelve a devolver
+ *  `text/plain` tal cual, sin ninguna excepción. */
 export function mimeForFilename(filename: string): string {
 	const ext = path.extname(filename).slice(1).toLowerCase();
-	const mime = EXTENSION_MIME[ext] ?? 'application/octet-stream';
-	return SVELTEKIT_FORM_CONTENT_TYPES.has(mime) ? 'application/octet-stream' : mime;
+	return EXTENSION_MIME[ext] ?? 'application/octet-stream';
 }
 
 /**
@@ -135,5 +118,65 @@ export async function readLocalAttachment(filePath: string, filename?: string): 
 	}
 	const bytes = await fs.readFile(resolved);
 	const name = filename?.trim() || path.basename(resolved);
+	return { bytes, filename: name, mime: mimeForFilename(name) };
+}
+
+/**
+ * Tope de `add_attachment({ content_base64 })` — MUCHO más bajo que
+ * `MAX_ATTACHMENT_BYTES` (25 MiB) a propósito: ese argumento lo emite el
+ * MODELO dentro de la tool call, no un `fetch` del servidor MCP, y base64
+ * infla ~33% (medido con la captura real que motivó esta feature: 482.979
+ * bytes de PNG → ~644 KB en base64, ~160k tokens — inviable). 1 MiB
+ * decodificado (~1,33 MiB en base64) sigue siendo caro pero cabe en una
+ * respuesta de herramienta razonable; por encima de eso, la vía es el
+ * conector STDIO local (ver `README.md`, "Transporte HTTP remoto" y
+ * `add_attachment` en `index.ts`), que sube por `file_path` sin pasar por el
+ * contexto del modelo.
+ */
+export const MAX_BASE64_ATTACHMENT_BYTES = 1 * 1024 * 1024;
+
+/** Base64 "de verdad": alfabeto estándar + padding opcional, longitud múltiplo
+ *  de 4 tras quitar espacios/saltos de línea (el modelo puede envolver el
+ *  argumento con saltos de línea; `Buffer.from(str, 'base64')` los ignora al
+ *  decodificar, así que también se ignoran aquí para no rechazar un base64
+ *  válido solo por su formato). */
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function isValidBase64(compact: string): boolean {
+	return compact.length > 0 && compact.length % 4 === 0 && BASE64_PATTERN.test(compact);
+}
+
+/**
+ * Decodifica y valida `content_base64` para `add_attachment` (la vía SIN
+ * disco, ver `readLocalAttachment` para la vía CON disco): rechaza un base64
+ * mal formado o que decodifique a 0 bytes, y aplica
+ * `MAX_BASE64_ATTACHMENT_BYTES` con el tamaño REAL decodificado en el
+ * mensaje — mismo criterio de mensajes que `readLocalAttachment`. `filename`
+ * es SIEMPRE obligatorio aquí (a diferencia de `readLocalAttachment`): no hay
+ * ninguna ruta de la que sacar un basename, así que lo exige el llamante
+ * (`index.ts`) antes de llegar aquí; esta función solo valida que no venga en
+ * blanco. El mime se decide igual que en la vía con disco (`mimeForFilename`
+ * sobre el nombre final).
+ */
+export function decodeBase64Attachment(base64: string, filename: string): LocalAttachmentFile {
+	const name = filename.trim();
+	if (!name) {
+		throw new Error('filename no puede estar vacío.');
+	}
+	const compact = base64.replace(/\s+/g, '');
+	if (!isValidBase64(compact)) {
+		throw new Error('content_base64 no es base64 válido (revisa que no falte relleno ni haya caracteres ajenos al alfabeto).');
+	}
+	const bytes = Buffer.from(compact, 'base64');
+	if (bytes.length === 0) {
+		throw new Error('content_base64 decodifica a 0 bytes — ¿el fichero de origen estaba vacío?');
+	}
+	if (bytes.length > MAX_BASE64_ATTACHMENT_BYTES) {
+		throw new Error(
+			`El fichero pesa ${readableMB(bytes.length)} MB decodificado y el tope de content_base64 es ` +
+				`${readableMB(MAX_BASE64_ATTACHMENT_BYTES)} MB (ese argumento lo emites TÚ como modelo; algo más ` +
+				'grande necesita el conector local por file_path, ver README "Transporte HTTP remoto").'
+		);
+	}
 	return { bytes, filename: name, mime: mimeForFilename(name) };
 }

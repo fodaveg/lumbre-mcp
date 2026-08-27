@@ -30,7 +30,7 @@ import {
 } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
-import { readLocalAttachment } from './attachments.js';
+import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
 import {
 	computeAutoNotesRender,
 	computeNotesSinceRender,
@@ -130,6 +130,49 @@ function textResult(text: string) {
 function errorResult(err: unknown) {
 	const message = err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err);
 	return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
+}
+
+/**
+ * Comando `claude mcp add` LISTO PARA COPIAR del conector stdio local acotado
+ * a adjuntos (`LUMBRE_MCP_TOOLSET=attachments`, ver `CreateServerOptions` y
+ * `toolsetFromEnv`): solo registra `add_attachment`/`read_attachment`
+ * (2 tools, no 26) para poder tenerlo enchufado A LA VEZ que el conector
+ * remoto sin duplicar la superficie de `tools/list` en el contexto de cada
+ * sesión. Usado tanto en `remoteFileAccessError` (el error que ve el modelo
+ * en el momento en que lo necesita) como en el README.
+ */
+const LOCAL_ATTACHMENTS_CONNECTOR_COMMAND =
+	'claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments ' +
+	'-- node /ruta/absoluta/a/lumbre-mcp/dist/index.js';
+
+/**
+ * Error de `add_attachment({ file_path })` cuando este servidor NO ve el
+ * disco del usuario (`localFilesystem: false`, ver `CreateServerOptions` —
+ * hoy, el transporte HTTP remoto de `http.ts`/`mcp.lumbre.pro`). A propósito
+ * NO reintenta ni delega en `readLocalAttachment`/`fs.stat`: contra ESTE
+ * proceso, cualquier ruta —exista o no en la máquina del usuario— resolvería
+ * contra el disco del VPS, así que un "No existe el fichero" ahí sería un
+ * error LITERALMENTE CIERTO pero sobre la máquina equivocada — el bug real
+ * que motiva esta pieza (medido el 2026-08-27: la captura sí existía en el
+ * Mac de David en ese mismo instante). Explica la topología y las dos
+ * salidas: `content_base64` para algo pequeño, o el conector local de arriba
+ * para algo grande.
+ */
+function remoteFileAccessError(): string {
+	return (
+		'Este conector corre en mcp.lumbre.pro (transporte HTTP remoto) y no tiene forma de ver ' +
+			'el disco de tu ordenador — "file_path" no funciona aquí, y un "no existe el fichero" ' +
+			'sería sobre el disco del SERVIDOR, no el tuyo, así que ni se ha intentado leer. Dos ' +
+			'alternativas:\n' +
+			'  1. Fichero pequeño (unos KB — un .txt, un .log): pásalo con `content_base64` en vez ' +
+			'de `file_path` (y `filename`, obligatorio en ese modo).\n' +
+			'  2. Fichero grande (una captura, un PDF): añade el conector LOCAL de Lumbre, que sí ' +
+			'corre en tu máquina y ve tu disco:\n\n' +
+			`     ${LOCAL_ATTACHMENTS_CONNECTOR_COMMAND}\n\n` +
+			'     (sustituye "tu-token" por tu token de email-to-task y la ruta por la de tu clon; ' +
+			'ver README, "Transporte HTTP remoto"). Con ese conector enchufado, add_attachment ahí ' +
+			'sí puede usar file_path.'
+	);
 }
 
 const recurrenceSchema = z
@@ -463,9 +506,9 @@ function formatOpShapeError(op: string, error: z.ZodError): string {
 
 /**
  * Opciones de `createServer` — la costura de portabilidad (M1): el arranque
- * stdio (`main`, más abajo) no pasa ninguna, así que ambas caen a su
- * implementación real; un futuro transporte no-stdio podría inyectar otra
- * (p. ej. un `NotesSeenStore` en memoria por-request, en vez de fichero).
+ * stdio (`main`, más abajo) pasa `localFilesystem: true` explícito; un futuro
+ * transporte no-stdio podría inyectar otra (p. ej. un `NotesSeenStore` en
+ * memoria por-request, en vez de fichero).
  */
 export interface CreateServerOptions {
 	/** Huella de notas vistas (ver `notes.ts`) — default `fileNotesSeenStore`
@@ -475,14 +518,56 @@ export interface CreateServerOptions {
 	 *  `existence-cache.ts`) — default `Date.now`; inyectable solo para poder
 	 *  testear la expiración del TTL sin `setTimeout`/temporizadores falsos. */
 	now?: () => number;
+	/**
+	 * Si este proceso VE el disco del usuario — decide cómo se comporta
+	 * `add_attachment({ file_path })` (ver su JSDoc, más abajo): con acceso,
+	 * lee la ruta local tal cual (comportamiento de siempre); sin acceso,
+	 * devuelve un error explicativo SIN tocar disco ni red, porque
+	 * `resolveLocalPath`/`fs.stat` se resolverían contra el disco del
+	 * SERVIDOR, no el del usuario que pregunta — bug real, medido el 2026-08-27
+	 * contra `mcp.lumbre.pro`: "No existe el fichero" con el fichero existiendo
+	 * en el Mac del usuario en ese mismo instante, porque el `fs.stat` corría
+	 * en el VPS.
+	 *
+	 * Default `true` (el MENOS sorprendente para quien construye un servidor
+	 * sin pensar en el transporte: es el comportamiento que ya tenía esta
+	 * función antes de que existiera esta opción, y el que espera
+	 * `index.test.ts`, que construye servidores sin pasar `opts`). Los DOS
+	 * transportes reales lo pasan EXPLÍCITO en vez de confiar en el default:
+	 * `main()` (stdio, más abajo) con `true` — corre en la máquina del
+	 * usuario —, `http.ts` con `false` — corre en el VPS compartido, cada
+	 * petición es de un usuario distinto y NINGUNO ve su disco desde ahí.
+	 */
+	localFilesystem?: boolean;
+	/**
+	 * Acota qué tools registra `createServer` — pensado para un SEGUNDO
+	 * conector stdio LOCAL dedicado a adjuntos (ver README, "Transporte HTTP
+	 * remoto"): con `'attachments'`, solo `add_attachment`/`read_attachment`;
+	 * con cualquier otro valor (incluido `undefined`, el default), las 26 de
+	 * siempre. Existe para que David pueda tener el conector remoto (26
+	 * tools) Y un conector local de adjuntos a la vez sin duplicar las 26 en
+	 * el contexto de cada sesión (`tools/list` ya pesa ~25 KB de JSON; dos
+	 * copias son dos veces ese coste, y el modelo encima tendría que acertar
+	 * cuál de los dos `add_task`/`list_tasks` usar). `main()` la lee de
+	 * `LUMBRE_MCP_TOOLSET` (env); `http.ts` NUNCA la pasa — el conector
+	 * remoto sigue exponiendo las 26 siempre, pase lo que pase con la env del
+	 * proceso que lo arrancó.
+	 */
+	toolset?: 'all' | 'attachments';
 }
 
 /**
- * Factory del servidor MCP de Lumbre: registra las 26 tools con `config`
+ * Factory del servidor MCP de Lumbre: registra las tools con `config`
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
- * eso es cosa del llamante (`main`, más abajo, para stdio; un futuro
- * transporte HTTP crearía una instancia por conexión/petición).
+ * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
+ * transporte remoto). Registra las 26 de siempre salvo que
+ * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
+ * quedan `add_attachment`/`read_attachment` — las demás se registran igual
+ * (para no bifurcar cada una de las 24 llamadas a `registerTool` con un
+ * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
+ * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
+ * estado intermedio de "26 registradas".
  *
  * Cada llamada crea sus PROPIAS `taskCache`/`brlCache` (cachés cortas de
  * existencia, ver `existence-cache.ts`) — viven en esta instancia, no en
@@ -494,10 +579,12 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	const notesSeenStore = opts.notesSeenStore ?? fileNotesSeenStore;
 	const taskCache = new TaskExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
 	const brlCache = new BrlExistenceCache(EXISTENCE_CACHE_TTL_MS, opts.now ?? Date.now);
+	const localFilesystem = opts.localFilesystem ?? true;
+	const toolset = opts.toolset ?? 'all';
 
 	const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
 
-	server.registerTool(
+	const addTaskTool = server.registerTool(
 		'add_task',
 		{
 			description:
@@ -553,7 +640,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const refreshSyncTool = server.registerTool(
 		'refresh_sync',
 		{
 			description:
@@ -573,7 +660,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const listTasksTool = server.registerTool(
 		'list_tasks',
 		{
 			description:
@@ -820,7 +907,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		return { list, autoRender };
 	}
 
-	server.registerTool(
+	const listListsTool = server.registerTool(
 		'list_lists',
 		{
 			description:
@@ -840,7 +927,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const getTaskTool = server.registerTool(
 		'get_task',
 		{
 			description:
@@ -921,26 +1008,83 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'add_attachment',
 		{
 			description:
-				'Sube un fichero LOCAL (ruta absoluta o "~/…", tope 25 MB) y lo deja adjunto a una tarea. ' +
-				'A diferencia de add_task/mutate_tasks, es SÍNCRONA: ya está enlazado al responder. Ver ' +
-				'README para el detalle de mimes/límites.',
+				'Sube un fichero y lo deja adjunto a una tarea (SÍNCRONA, a diferencia de add_task/' +
+				'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
+				'`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
+				'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
+				'devuelve un error explicativo, nunca intenta leer tu disco. `content_base64` funciona ' +
+				'siempre, pero es SOLO para ficheros de unos KB (un .txt, un .log): el argumento lo emites ' +
+				'TÚ como modelo, y una imagen de unos cientos de KB son ~100-200k tokens en base64 — tope ' +
+				'1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
+				'sacar un nombre). Ver README para el detalle de mimes/límites y el conector local dedicado.',
 			inputSchema: {
 				taskId: z.string().uuid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
 				file_path: z
 					.string()
 					.min(1)
-					.describe('Ruta LOCAL del fichero, absoluta o "~/…" — una relativa se rechaza'),
+					.optional()
+					.describe(
+						'Ruta LOCAL del fichero, absoluta o "~/…" (una relativa se rechaza). Exactamente uno ' +
+							'de file_path/content_base64. Solo funciona si ESTE conector corre en tu máquina ' +
+							'(stdio local) — contra el conector remoto da un error explicativo con la alternativa.'
+					),
+				content_base64: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(
+						'Bytes del fichero en base64, para cuando no hay file_path posible (conector remoto) ' +
+							'o el fichero es pequeño. SOLO para unos KB (un .txt/.log corto) — tope 1 MB ' +
+							'decodificado; para algo más grande usa file_path con el conector local. Exactamente ' +
+							'uno de file_path/content_base64. Requiere `filename`.'
+					),
 				filename: z
 					.string()
 					.min(1)
 					.optional()
-					.describe('Nombre con el que se guarda; por defecto el basename de file_path')
+					.describe(
+						'Nombre con el que se guarda. Con file_path, opcional (por defecto su basename); con ' +
+							'content_base64, OBLIGATORIO (no hay ruta de la que sacarlo).'
+					)
 			}
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: false });
-				const file = await readLocalAttachment(input.file_path, input.filename);
+				const hasFilePath = input.file_path !== undefined;
+				const hasBase64 = input.content_base64 !== undefined;
+				if (hasFilePath === hasBase64) {
+					return errorResult(
+						new Error(
+							hasFilePath
+								? 'Indica UNA sola vía: file_path o content_base64, no las dos a la vez.'
+								: 'Indica una vía para el fichero: file_path (conector local) o content_base64 ' +
+									'(cualquier conector, ficheros pequeños).'
+						)
+					);
+				}
+
+				let file: { bytes: Buffer; filename: string; mime: string };
+				if (hasBase64) {
+					if (!input.filename?.trim()) {
+						return errorResult(
+							new Error('filename es obligatorio con content_base64 (no hay ruta de la que sacarlo).')
+						);
+					}
+					// Decodifica/valida ANTES de tocar red (`requireTaskExists` incluida)
+					// — un base64 inválido o por encima del tope no debe gastar la
+					// llamada de existencia.
+					file = decodeBase64Attachment(input.content_base64!, input.filename);
+					await requireTaskExists(input.taskId, { allowSubtask: false });
+				} else if (!localFilesystem) {
+					// Ni requireTaskExists ni uploadAttachment: contra este disco NO
+					// existe una ruta correcta que probar (ver `remoteFileAccessError`),
+					// así que ni se toca la red.
+					return errorResult(new Error(remoteFileAccessError()));
+				} else {
+					await requireTaskExists(input.taskId, { allowSubtask: false });
+					file = await readLocalAttachment(input.file_path!, input.filename);
+				}
+
 				const attachment = await uploadAttachment(config, {
 					taskId: input.taskId,
 					filename: file.filename,
@@ -1015,7 +1159,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		taskCache.invalidate(input.taskId);
 	}
 
-	server.registerTool(
+	const completeTaskTool = server.registerTool(
 		'complete_task',
 		{
 			description:
@@ -1044,7 +1188,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const cancelTaskTool = server.registerTool(
 		'cancel_task',
 		{
 			description:
@@ -1075,7 +1219,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const updateTaskTool = server.registerTool(
 		'update_task',
 		{
 			description:
@@ -1132,7 +1276,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const rescheduleTaskTool = server.registerTool(
 		'reschedule_task',
 		{
 			description:
@@ -1163,7 +1307,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const deleteTaskTool = server.registerTool(
 		'delete_task',
 		{
 			description:
@@ -1188,7 +1332,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const setSectionTool = server.registerTool(
 		'set_section',
 		{
 			description:
@@ -1226,7 +1370,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const removeSectionTool = server.registerTool(
 		'remove_section',
 		{
 			description:
@@ -1269,7 +1413,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	// Bandeja de entrada canónica (§5 "Prohibidos" del contrato). Detalle
 	// completo del contrato de lista en `docs/20-contrato-lista.md`.
 
-	server.registerTool(
+	const createListTool = server.registerTool(
 		'create_list',
 		{
 			description:
@@ -1314,7 +1458,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const nestListTool = server.registerTool(
 		'nest_list',
 		{
 			description:
@@ -1346,7 +1490,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const renameListTool = server.registerTool(
 		'rename_list',
 		{
 			description:
@@ -1373,7 +1517,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const removeListTool = server.registerTool(
 		'remove_list',
 		{
 			description:
@@ -1397,7 +1541,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const moveToListTool = server.registerTool(
 		'move_to_list',
 		{
 			description:
@@ -1447,7 +1591,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const addSubtaskTool = server.registerTool(
 		'add_subtask',
 		{
 			description:
@@ -1487,7 +1631,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const completeSubtaskTool = server.registerTool(
 		'complete_subtask',
 		{
 			description:
@@ -1550,7 +1694,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		);
 	}
 
-	server.registerTool(
+	const listBrlEntriesTool = server.registerTool(
 		'list_brl_entries',
 		{
 			description:
@@ -1580,7 +1724,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const addBrlEntryTool = server.registerTool(
 		'add_brl_entry',
 		{
 			description:
@@ -1632,7 +1776,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const updateBrlEntryTool = server.registerTool(
 		'update_brl_entry',
 		{
 			description:
@@ -1670,7 +1814,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
+	const deleteBrlEntryTool = server.registerTool(
 		'delete_brl_entry',
 		{
 			description:
@@ -1701,7 +1845,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 
 	// ── Feature batch (`plan-batch.md`): N operaciones en UNA sola tool call ───
 
-	server.registerTool(
+	const mutateTasksTool = server.registerTool(
 		'mutate_tasks',
 		{
 			description:
@@ -1821,6 +1965,43 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
+	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
+	// retira las 24 tools que NO son `add_attachment`/`read_attachment` —
+	// TODAS se registraron arriba igual (para no bifurcar cada una de las 24
+	// llamadas a `registerTool` con un `if`), así que aquí solo se deshace lo
+	// que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
+	// cliente llega a ver el `tools/list` de 26 en el intermedio.
+	if (toolset === 'attachments') {
+		for (const tool of [
+			addTaskTool,
+			refreshSyncTool,
+			listTasksTool,
+			listListsTool,
+			getTaskTool,
+			completeTaskTool,
+			cancelTaskTool,
+			updateTaskTool,
+			rescheduleTaskTool,
+			deleteTaskTool,
+			setSectionTool,
+			removeSectionTool,
+			createListTool,
+			nestListTool,
+			renameListTool,
+			removeListTool,
+			moveToListTool,
+			addSubtaskTool,
+			completeSubtaskTool,
+			listBrlEntriesTool,
+			addBrlEntryTool,
+			updateBrlEntryTool,
+			deleteBrlEntryTool,
+			mutateTasksTool
+		]) {
+			tool.remove();
+		}
+	}
+
 	return server;
 }
 
@@ -1832,11 +2013,28 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js';
 
 /**
- * Arranque real por stdio (el único transporte de hoy): resuelve `config`
- * desde el entorno (`loadConfig`, que SÍ puede `process.exit(1)` si falta
- * `LUMBRE_TOKEN` — ver su JSDoc), crea el servidor con `createServer` (sin
- * más opciones: caen las implementaciones por defecto, fichero para la huella
- * de notas) y lo conecta a `StdioServerTransport`.
+ * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
+ * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
+ * `read_attachment`, pensado para un SEGUNDO conector stdio local dedicado
+ * (David enchufa a la vez el remoto de las 26 tools y este, sin duplicar
+ * superficie — ver README). Cualquier otro valor (incluido no ponerla) cae
+ * al default `'all'` de `createServer` — nunca falla por un valor raro, un
+ * typo en la env simplemente no acota nada.
+ */
+function toolsetFromEnv(): CreateServerOptions['toolset'] {
+	return process.env.LUMBRE_MCP_TOOLSET?.trim() === 'attachments' ? 'attachments' : 'all';
+}
+
+/**
+ * Arranque real por stdio (el único transporte que corre en la máquina del
+ * usuario): resuelve `config` desde el entorno (`loadConfig`, que SÍ puede
+ * `process.exit(1)` si falta `LUMBRE_TOKEN` — ver su JSDoc), crea el servidor
+ * con `createServer` y lo conecta a `StdioServerTransport`. Pasa
+ * `localFilesystem: true` EXPLÍCITO (aunque hoy coincide con el default, ver
+ * `CreateServerOptions`): este proceso corre en la máquina del usuario, así
+ * que `add_attachment({ file_path })` sí puede leer su disco — a diferencia
+ * de `http.ts`, que pasa `false`. `toolset` sale de `LUMBRE_MCP_TOOLSET`
+ * (`toolsetFromEnv`).
  *
  * Separado de la carga del módulo (antes `loadConfig()`/`new McpServer()`
  * corrían como efecto secundario del propio `import`, lo que obligaba a
@@ -1847,7 +2045,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  */
 export async function main(): Promise<void> {
 	const config = loadConfig();
-	const server = createServer(config);
+	const server = createServer(config, { localFilesystem: true, toolset: toolsetFromEnv() });
 	const transport = stripToolsListSchema(new StdioServerTransport());
 	await server.connect(transport);
 }

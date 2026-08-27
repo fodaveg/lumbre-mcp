@@ -30,10 +30,11 @@ const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
 
 // Techo de bytes de `tools/list` para las 26 tools reales — MISMA fuente que
 // `src/index.test.ts` ("techo de bytes de las 26 tools", `CHAR_CEILING`):
-// medido 25.399 tras añadir `add_attachment` (2026-08-26) + ~5% de
-// holgura. Si ese test cambia su techo, este número se actualiza a la vez —
-// no hay forma de importarlo desde un script standalone sin dependencias, así
-// que va documentado y buscable por el mismo comentario en ambos ficheros.
+// medido 26.578 tras ampliar `add_attachment` a DOS vías (`file_path`/
+// `content_base64`, 2026-08-27) + ~5% de holgura. Si ese test cambia su
+// techo, este número se actualiza a la vez — no hay forma de importarlo desde
+// un script standalone sin dependencias, así que va documentado y buscable
+// por el mismo comentario en ambos ficheros.
 //
 // Esta pareja de números YA se quedó atrás una vez: el lote de
 // `add_attachment` (26 ago 2026) subió el techo en `index.test.ts` y
@@ -41,7 +42,7 @@ const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
 // smoke en rojo por un recuento congelado, no por un fallo real. Si tocas el
 // número de tools, `grep -rn "CHAR_CEILING\|EXPECTED_TOOL_COUNT" src scripts`
 // enseña los TRES sitios de golpe.
-const CHAR_CEILING = 26700;
+const CHAR_CEILING = 27900;
 const EXPECTED_TOOL_COUNT = 26;
 
 if (!url) {
