@@ -595,10 +595,38 @@ export function createServer(config, opts = {}) {
             return errorResult(err);
         }
     });
+    /**
+     * MEDIDO el 2026-08-27, y cambia lo que hay que contarle al modelo: una
+     * lectura hecha justo DESPUÉS de una mutación de este mismo MCP ya sale
+     * fresca SIN ningún flush por medio. Cinco corridas contra el servidor
+     * real con el binario ANTERIOR a esta descripción (o sea, sin nada que
+     * refrescara solo), por los DOS caminos de escritura que existen
+     * (`add_task`, que va a `/api/tasks`, y `mutate_tasks`, que va a
+     * `/api/batch`): en las cinco, la tarea recién creada aparecía en el
+     * `list_tasks` inmediatamente siguiente. La mutación tarda ~4,4 s en
+     * responder, y para cuando responde el servidor ya la tiene aplicada.
+     *
+     * O sea que los `refresh_sync` que el modelo encadenaba detrás de sus
+     * propias mutaciones no compraban nada: cada uno cuesta en el servidor un
+     * upsert del blob CRDT ENTERO de la cuenta, y el coste crece con el
+     * tamaño de la cuenta. Se midieron 506 llamadas en 2.056 transcripts.
+     *
+     * Lo que esta tool SÍ sigue arreglando es el otro caso, que no se puede
+     * medir desde aquí y por eso no se toca: un cambio que el usuario hizo
+     * FUERA de este MCP (su app, su móvil) llega al servidor por WebSocket y
+     * se queda sin persistir; las lecturas del MCP van por la API REST, que
+     * lee lo persistido, así que ese cambio no se ve hasta que alguien fuerza
+     * el flush. Por eso NO se convierte en no-op cuando «no hay nada que este
+     * MCP haya mutado»: este MCP no se entera de esos cambios.
+     */
     const refreshSyncTool = server.registerTool('refresh_sync', {
-        description: 'Fuerza el flush de sync de Lumbre antes de leer (evita que list_tasks devuelva estado ' +
-            'rancio). Solo garantiza lo que YA llegó al servidor por WebSocket — si el dispositivo ' +
-            'del usuario está offline, sus cambios sin enviar no se pueden recuperar. Sin parámetros.',
+        description: 'Fuerza el flush de sync de Lumbre. NO hace falta llamarla por una mutación hecha con ' +
+            'ESTE MCP: cuando la tool de escritura responde, el servidor ya la ha aplicado y la ' +
+            'siguiente lectura la ve (medido). SÍ hace falta cuando el cambio viene de FUERA de ' +
+            'este MCP (la app o el móvil del usuario) y quieres que se vea ya, porque de esos ' +
+            'cambios este MCP no se entera solo. Solo garantiza lo que YA llegó al servidor por ' +
+            'WebSocket — si el dispositivo del usuario está offline, sus cambios sin enviar no se ' +
+            'pueden recuperar. Sin parámetros.',
         inputSchema: {}
     }, async () => {
         try {
