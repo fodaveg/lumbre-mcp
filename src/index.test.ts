@@ -74,9 +74,17 @@ beforeAll(async () => {
 // el bundle entero, con su `now` congelado) se colaría de un test al
 // siguiente en vez de partir de una caché limpia, como pasaba antes de M2
 // (una `taskCache` nueva por cada `createServer`).
+// El registro de la marca "mutación pendiente de flush" (`sync-flush.ts`) es
+// TAMBIÉN de módulo, indexado por token, y por el MISMO motivo: sin este
+// reset, un test de mutación que corra ANTES dejaría la marca puesta para el
+// siguiente test de lectura que comparta `TEST_CONFIG.token`, y esa lectura
+// dispararía un `refresh_sync` automático — una petición de más que el
+// `fetchSpy` de ese test no espera.
 beforeEach(async () => {
 	const { resetExistenceCacheRegistryForTests } = await import('./existence-cache.js');
 	resetExistenceCacheRegistryForTests();
+	const { resetSyncFlushRegistryForTests } = await import('./sync-flush.js');
+	resetSyncFlushRegistryForTests();
 });
 
 describe('tools/list — superficie completa', () => {
@@ -193,6 +201,12 @@ describe('tools/list — superficie completa', () => {
 		// los campos de todas las variantes y no compre nada; 1.684 sigue
 		// bajo el resto de tools de escritura). Techo bajado junto con el
 		// número medido, para que la ganancia quede bloqueada.
+		// Re-medido el 2026-08-27 tras el flush automático de sync (marca por
+		// token en `sync-flush.ts`, ver `withAutoFlush`/`markMutationPending`
+		// en index.ts): 22.606, sobre una base de 22.274 antes de este lote
+		// (+332, solo la `description` reescrita de `refresh_sync` — ninguna
+		// tool nueva, sigue habiendo 19; ninguna tool de LECTURA ni de MUTACIÓN
+		// gana un parámetro). Sigue bajo el techo, así que no se mueve.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
 		const CHAR_CEILING = 23300;
