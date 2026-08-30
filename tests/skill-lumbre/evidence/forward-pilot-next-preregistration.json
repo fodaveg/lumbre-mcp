@@ -1,16 +1,19 @@
 {
   "protocolVersion": 1,
   "status": "frozen-before-egress",
-  "baseSha": "49fdc8ed9ae63d83dcf3e4886443e112acced128",
+  "baseSha": "2a83efce28c125cb5671436a613b21b29decb27e",
   "criteriaFiles": {
-    "references/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
-    "references/forward-expectations.md": "6cad9ea4d41abe1df16e27c15ccdc601bd5d3175273500b088e428f9f257b248",
-    "references/forward-pilot-schema.json": "4e50d5b23453d5b0c583a2cf0e6438f88c3b44cbdccc1f1ade79721dd323b4e7",
-    "scripts/forward-pilot-lib.mjs": "a964df9a045f876d7a2b9477aeb0abbff31a0b16d30161234d994db2642b3235",
-    "scripts/quick-validate-skill.mjs": "77b6de04517796ceb18a3ca9b26323d40e8fba4672b3bda887804ffec37f5b7d",
-    "scripts/run-forward-pilot.mjs": "dc4866206d9fabfd6e4d09e1e6793e4d7f888eb8c6209618cd26a9a4fad9d522",
-    "scripts/test-forward-pilot-verifier.mjs": "c5baec4679a353560e0baf4ca08d38f4e32a97fcd5b3bb53027bfa18e4d21e70",
-    "scripts/validate.sh": "7799eb9165e738a6bfaa696af32cac166fcbef7681b89e16ef702e7861914c19",
-    "scripts/verify-forward-pilot.mjs": "ab41509e5e51587eb5849f206ea3e101fa5b26f6eac3bb246037a0df683ab7c1"
+    "tests/skill-lumbre/evidence/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
+    "tests/skill-lumbre/evidence/forward-expectations.md": "5dfc936f1fd8364d118f849796050cec6070d532e214db3532532546fccbffd8",
+    "tests/skill-lumbre/evidence/forward-pilot-schema.json": "3b394778ffff146f8921e3dbf7dbd7a142c8e267d764a6e7154f437683cf4d53",
+    "tests/skill-lumbre/forward-pilot-lib.mjs": "b2fc96434270bb82c3878d87a35cd16235ca497157e55abc7370bc805d94e34e",
+    "skills/lumbre/scripts/quick-validate-skill.mjs": "77b6de04517796ceb18a3ca9b26323d40e8fba4672b3bda887804ffec37f5b7d",
+    "skills/lumbre/scripts/validate-contracts.mjs": "76664dcf6687119a1bc3656b1e38c6f8948eadd3d8f32fcb81978b935e29f54f",
+    "skills/lumbre/scripts/validate.sh": "d0eda463a9119afde70affaefe26e8b8a6d8c9da58c664ef0cdb6f0458fb6e60",
+    "tests/skill-lumbre/run-forward-pilot.mjs": "4b1cfd8fcd2cda805c89e414f425f25cd0ee25f7680da29d10c86aa264b9d64a",
+    "tests/skill-lumbre/test-forward-pilot-verifier.mjs": "c41c8d29df58d684fd6fdc474561f161767b1198604dcc8d296bd3b15fd9fe88",
+    "tests/skill-lumbre/validate-evidence.mjs": "7431674542bd1e148f03ae242a956ec22a6b89f9bf4c248ccbe18d0c5cb0fefa",
+    "tests/skill-lumbre/validate.sh": "cc56a0121c0f5c1d22f84a4315e5c40216cc16fbe36d900ca912ca5810ccee3a",
+    "tests/skill-lumbre/verify-forward-pilot.mjs": "ad4d9935807627ffd748133bfa18d1bc452daee8f441364e14bda4c84f94affa"
   }
 }
