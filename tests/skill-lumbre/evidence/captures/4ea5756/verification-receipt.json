@@ -1,0 +1,62 @@
+{
+  "protocolVersion": 1,
+  "candidateParentSha": "4ea5756377bf7a1c42f402bb0beeaf0f8bbe398e",
+  "rawCaptureStatusNote": "The raw captureStatus=accepted value is emitted by the runner before behavioral verification; this receipt records the final rejected verdict.",
+  "rawArtifacts": {
+    "evidence": {
+      "path": "raw/lumbre-forward-pilot-20260830.json",
+      "sha256": "018ee980e1cc7083c314c39638ead75835d5243c01d2c9d18c769b086b126956"
+    },
+    "events": {
+      "path": "raw/lumbre-forward-pilot-20260830.events.jsonl",
+      "sha256": "e64de42b03a677b88c96c1a31072f80d567c9b22f62e0130d00ac94e1337979e"
+    },
+    "envelope": {
+      "path": "raw/lumbre-forward-pilot-20260830.envelope.txt",
+      "sha256": "f2db550e050261ae778093416149bd6c615da7510f0e9cff7c87b7aa895bc028"
+    }
+  },
+  "verifier": {
+    "path": "tests/skill-lumbre/verify-forward-pilot.mjs",
+    "sha256": "c8a5944902dcb69d18bf98ceb280c2aa723e41e5ffa6373ad316e7b24604e2e2",
+    "command": "node tests/skill-lumbre/verify-forward-pilot.mjs tests/skill-lumbre/evidence/captures/4ea5756/raw/lumbre-forward-pilot-20260830.json",
+    "exitStatus": 1,
+    "accepted": false,
+    "exactCasesPassed": 10,
+    "exactCasesTotal": 12,
+    "failedCases": [
+      "P02",
+      "P11"
+    ],
+    "failures": [
+      "P02: unexpected development state",
+      "P11: required operation missing (update_task_tags)",
+      "P11: required operation missing (verify_task)",
+      "P11: exact operation count mismatch (update_task_tags)",
+      "P11: exact operation count mismatch (verify_task)",
+      "P11: precedence violation (review_candidate#1<update_task_tags#2)",
+      "P11: precedence violation (update_task_tags#2<verify_task#2)",
+      "P11: precedence violation (verify_task#2<handoff_release#1)",
+      "P11: unexpected development state",
+      "P11: checkpoint next action mismatch"
+    ]
+  },
+  "effects": {
+    "eventCount": 4,
+    "toolCalls": 0,
+    "shellCalls": 0,
+    "mcpCalls": 0,
+    "filesystemMutations": 0,
+    "externalActions": 0,
+    "runtimeErrors": 0
+  },
+  "metrics": {
+    "elapsedMs": 80877,
+    "meanElapsedMsPerCase": 6740,
+    "inputTokens": 24654,
+    "cachedInputTokens": 1792,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 4246,
+    "reasoningOutputTokens": 2721
+  }
+}

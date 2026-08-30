@@ -8,7 +8,38 @@ reproducible y sus métricas viven en `forward-pilot.md` y
 `forward-pilot-evidence.json`; no se presentan como uso longitudinal real. Toda esta
 carpeta es evidencia repo-only y no forma parte de la skill instalada.
 
-## Captura preregistrada rechazada
+## Captura vigente preregistrada rechazada
+
+La captura única P01–P12 del candidato
+`4ea5756377bf7a1c42f402bb0beeaf0f8bbe398e` usó Codex CLI 0.151.0 y el modelo
+solicitado `gpt-5.4`. El verificador aceptó 10/12 casos: P02 conservó `@wip` como
+`devState` en una lectura pura y P11 no cerró `@wip`→`@done` ni verificó esa segunda
+transición antes del handoff. No se adaptaron los criterios ni se repitió la captura.
+
+| Artefacto | SHA-256 |
+|---|---|
+| Evidencia cruda | `018ee980e1cc7083c314c39638ead75835d5243c01d2c9d18c769b086b126956` |
+| Receipt del verificador | `1e9acf782f08c76c46637fa10a846d117143f251f389c5b155ce40cac6c2b692` |
+| Bundle operativo | `15235984833b3e697c31b425c0799caad564b070130721918f1d7a178dc3f20f` |
+| Prompts ciegos | `95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8` |
+| Esquema de salida | `3b394778ffff146f8921e3dbf7dbd7a142c8e267d764a6e7154f437683cf4d53` |
+| Preregistración | `2e88f0e844201251868cc73124b6f7eb4239fd79cf9e2e057c9a6cdca6dbacac` |
+| Entorno aislado | `2daff5aa98ad692285f705523729a6f7b8ba2ee5f553b1e2e34d0c1de5592303` |
+| Envelope exacto | `f2db550e050261ae778093416149bd6c615da7510f0e9cff7c87b7aa895bc028` |
+| JSONL crudo y público | `e64de42b03a677b88c96c1a31072f80d567c9b22f62e0130d00ac94e1337979e` |
+
+Los cuatro eventos contienen cero tool calls, shell, MCP, mutaciones de fichero o
+acciones externas. La respuesta consumió 24 654 tokens de entrada, 1 792 cacheados,
+4 246 de salida y 2 721 de razonamiento. La latencia del batch fue 80 877 ms; la
+media de 6 740 ms/caso es derivada.
+
+Los tres artefactos exactos están en `captures/4ea5756/raw/`; su
+`verification-receipt.json` adyacente separa el veredicto final de los bytes crudos.
+El `captureStatus: accepted` del JSON crudo es la salida pre-verificación del runner:
+el verificador terminó con exit 1 y rechazó la captura 10/12. Esto no se presenta como
+una captura aceptada.
+
+## Captura histórica preregistrada rechazada
 
 La captura P01–P12 publicada usó Codex CLI 0.151.0, modelo solicitado `gpt-5.4` y
 candidato padre `0957116153550efcbf1f42c57d2f4b98a402229e`. Fue una única llamada
@@ -33,11 +64,11 @@ acciones externas. La respuesta consumió 23 948 tokens de entrada, 1 792 cachea
 media de 6 487 ms/caso es derivada. Nueve contratos pasaron y tres fallaron.
 
 Los hashes completos, fixtures, configuración de aislamiento, contadores y resultado
-por caso viven en `forward-pilot-evidence.json`. La conducta del modelo es evidencia
-informativa no bloqueante; integridad, privacidad, cobertura 32/32, negativos y
-revisión independiente siguen siendo gates. El envelope y el JSONL exactos se
-publican al lado; no hubo saneado ni normalización y la captura no se presenta como
-determinista ni aceptada.
+por caso de esta captura permanecen en los tres artefactos
+`forward-pilot-evidence.*`. La conducta del modelo es evidencia informativa no
+bloqueante; integridad, privacidad, cobertura 32/32, negativos y revisión
+independiente siguen siendo gates. No hubo saneado ni normalización y la captura no
+se presenta como determinista ni aceptada.
 
 ## Fuentes incorporadas antes de optimizar
 

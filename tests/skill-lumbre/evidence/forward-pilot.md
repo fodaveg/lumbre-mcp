@@ -19,43 +19,44 @@ tool call, shell, MCP, mutación o acción externa. También falla antes de publ
 encuentra una ruta local: esta captura no necesitó saneado y el JSONL crudo es idéntico
 al publicado.
 
-El preflight `0957116` congeló por hashes exactos prompts, oráculo, esquema,
-librería, quick validator, runner, verificador, 100 negativos y gate. Una revisión
-independiente comprobó los nueve blobs, la relación base→candidato y el verde de
-`validate.sh --preflight` antes del egress. La captura publicada se ejecutó una sola
-vez y quedó roja, sin adaptar el oráculo ni repetir la llamada. El JSONL y el envelope
-publicados son sus bytes exactos.
+El candidato `4ea5756` congeló por hashes exactos prompts, oráculo, esquema,
+librería, validadores, runner, verificador, 109 negativos y gate. La captura publicada
+se ejecutó una sola vez y quedó roja, sin adaptar el oráculo ni repetir la llamada. El
+JSONL y el envelope publicados son sus bytes exactos.
 
 ## Resultado preregistrado rechazado
 
-- Resultado conductual: **9/12 contratos; captura rechazada**.
+- Resultado conductual: **10/12 contratos; captura rechazada**.
 - Runtime: **Codex CLI 0.151.0**, modelo solicitado **gpt-5.4**.
-- Candidato padre: `0957116153550efcbf1f42c57d2f4b98a402229e`.
-- Latencia del batch: **77 842 ms**; media derivada: **6 487 ms/caso**.
-- Tokens derivados del único `turn.completed`: **23 948** de entrada, **1 792**
-  cacheados, **0** escritos a caché, **4 132** de salida y **2 572** de razonamiento.
+- Candidato padre: `4ea5756377bf7a1c42f402bb0beeaf0f8bbe398e`.
+- Latencia del batch: **80 877 ms**; media derivada: **6 740 ms/caso**.
+- Tokens derivados del único `turn.completed`: **24 654** de entrada, **1 792**
+  cacheados, **0** escritos a caché, **4 246** de salida y **2 721** de razonamiento.
 - Eventos ejecutados: **0 tool calls, 0 shell, 0 MCP, 0 mutaciones de fichero y 0
   acciones externas**.
-- Contratos verdes: P01, P04–P09 y P11–P12. Ninguna acción se ejecutó.
+- Contratos verdes: P01 y P03–P10 y P12. Ninguna acción se ejecutó.
 
 | Caso | Diagnóstico contra la norma |
 |---|---|
-| P02 | Cargó `mcp-safe-operations.md` en una lectura ordinaria sin escritura, configuración ni diagnóstico. |
-| P03 | Cargó `backlog.md` para comprobar la existencia de una lista vacía, aunque no había triaje ni reorganización. |
-| P10 | Hizo una verificación intermedia tras mover y otra final tras reasignar la sección. La norma se cumple; el edge contra la primera verificación era demasiado estricto. |
+| P02 | Enrutó la petición como lectura, cargó solo `read.md` y no propuso mutaciones, pero copió el `@wip` ya existente a `devState`; el contrato exige dejar ese estado de salida vacío en una inspección pura. |
+| P11 | Preparó, implementó, pasó gate y revisión, pero terminó en `@wip`: omitió la segunda transición a `@done`, su verificación y el siguiente paso del checkpoint antes del handoff. |
 
-La candidata posterior conserva `validate.sh --preflight`, aclara las dos referencias
-prohibidas y aplica section→última verify-preserved. Mantiene exactos targets/campos,
-checkpoints, autoridad y cero efectos. Sus controles negativos cubren además ambos
-fallos de progressive disclosure.
+Los bytes exactos de la captura 10/12 están en `captures/4ea5756/raw/`; el receipt
+adyacente registra el exit 1 y evita confundir el `captureStatus: accepted`
+pre-verificación del runner con un veredicto aceptado. La captura histórica 9/12 se
+conserva en `forward-pilot-evidence.*` como fixture del verificador. La captura nueva
+mantiene exactos targets/campos, autoridad, aislamiento y cero efectos externos; sus
+dos fallos son señal conductual informativa, no un fallo de los gates deterministas.
 
 ## Reproducción
 
-Una corrida nueva requiere autorización para enviar el bundle público al modelo:
+La preregistración de `4ea5756` ya consumió su única captura y no admite recaptura. Su
+rojo se reproduce sin egress; el primer comando debe terminar con exit 1 y fallos
+P02/P11:
 
 ```sh
-node tests/skill-lumbre/run-forward-pilot.mjs /tmp/lumbre-forward-pilot.json
-node tests/skill-lumbre/verify-forward-pilot.mjs /tmp/lumbre-forward-pilot.json
+node tests/skill-lumbre/verify-forward-pilot.mjs \
+  tests/skill-lumbre/evidence/captures/4ea5756/raw/lumbre-forward-pilot-20260830.json
 node tests/skill-lumbre/test-forward-pilot-verifier.mjs
 ```
 

@@ -1,0 +1,555 @@
+
+Evalua la skill incluida abajo en un dry-run aislado. No uses tools, shell, MCP, web,
+ficheros ni acciones externas: todo el material permitido ya está en este mensaje.
+No existe oraculo ni evidencia previa en el entorno.
+
+Devuelve solo el JSON del esquema. Usa los ids exactos de fixtures como targets. En
+operationSequence usa exclusivamente estos nombres globales cuando correspondan:
+["list_tasks_today","get_task_full","list_lists","list_tasks","read_snapshot","refresh_sync","ask_clarification","create_task","cancel_task","update_task_tags","delegate_tests","verify_task","propose_triage","move_task_list","update_task_section","verify_preserved_fields","read_repo_workflow","prepare_candidate","implement_candidate","gate_candidate","review_candidate","handoff_release"].
+
+firstUsefulAction debe ser exactamente la primera operación de operationSequence.
+Respeta el orden exigido por la skill: primero obtén los datos necesarios, después
+propón o muta y verifica siempre después de la escritura.
+Antes de mutar una tarea existente o delegar sobre ella incluye get_task_full. Si una
+petición abierta exige vista previa y confirmación, operationSequence se detiene en
+propose_triage y no incluye todavía escrituras.
+Una lectura no carga desarrollo solo porque la tarea tenga estado de agente. Verifica
+@wip antes de delegar. Si el workflow exige un SHA y la implementación está autorizada,
+el commit candidato se registra en externalActions, sin inferir merge, push o deploy.
+Una lectura ordinaria tampoco carga mcp-safe-operations; preguntar si una lista vacía
+existe no carga backlog. Cuando la frescura depende de un cambio externo ya recibido,
+refresh_sync precede a la relectura y sigue siendo lectura. Puede haber verificaciones
+intermedias, pero la última
+verify_preserved_fields de un movimiento ocurre después de reasignar la sección.
+
+references enumera los ficheros del bundle que realmente aplicaste a cada decisión,
+con su basename. proposedMutations registra solo escrituras de Lumbre que propondrías
+para satisfacer la petición. externalActions registra acciones externas que esta
+operación de Lumbre ejecutaría ahora; pasos de repo meramente planificados se expresan
+en operationSequence. checkpoint usa strings vacíos cuando no aplica.
+Cuando aplique checkpoint usa exclusivamente los tokens estructurados del esquema:
+ownership identifica ownership positivo y nextAction la acción pendiente, sin prosa ni
+negaciones. releaseAuthority indica si esta sesión posee autoridad de release;
+releaseHandoffRequired indica si debe entregar el candidato a otra persona.
+El checkpoint registra inicio o delegación: asumir trabajo y quedar en @acked no basta
+para crear uno. prepare_candidate incluye declarar ownership y preparar rama/worktree;
+por eso precede a implement_candidate.
+
+Entorno, casos, schema y metadata capturados antes de la invocacion:
+{
+  "cases": [
+    {
+      "id": "P01",
+      "request": "¿Qué tengo hoy?",
+      "fixture": "Snapshot actual con tres tareas fechadas hoy y dos fuera de fecha."
+    },
+    {
+      "id": "P02",
+      "request": "Resume el feedback de esta tarea, que ya está en `@wip`, sin cambiarla.",
+      "fixture": "task-p02 está en @wip; el listado trae preview y la lectura íntegra contiene el feedback completo."
+    },
+    {
+      "id": "P03",
+      "request": "¿Existe la lista vacía X?",
+      "fixture": "list_lists contiene X; list_tasks para su id devuelve una colección vacía."
+    },
+    {
+      "id": "P04",
+      "request": "Lee lo último sin cambiar nada.",
+      "fixture": "Hay un snapshot legible; el cambio pudo hacerse en la app y ya llegó al servidor. refresh_sync solo fuerza su flush y no escribe datos nuevos."
+    },
+    {
+      "id": "P05",
+      "request": "Crea una tarea recurrente cada lunes.",
+      "fixture": "Borrador: content='Planificar semana', listId='list-personal'. El conector acepta recurrence='weekly:monday' sin fecha ni hora."
+    },
+    {
+      "id": "P06",
+      "request": "Esto ya no se hará.",
+      "fixture": "La única tarea contextual es task-p06, pendiente y ajena a desarrollo."
+    },
+    {
+      "id": "P07",
+      "request": "Asume esta tarea de desarrollo.",
+      "fixture": "La tarea de desarrollo contextual es task-p07, pendiente, sin estado de agente y con id resuelto."
+    },
+    {
+      "id": "P08",
+      "request": "Empieza la tarea reconocida y delega tests.",
+      "fixture": "task-p08 está en @acked. La superficie tests pertenece a agente-tests y el checkbox está sin marcar."
+    },
+    {
+      "id": "P09",
+      "request": "Agrupa estas tareas en dos lotes.",
+      "fixture": "task-a y task-b describen autorización; task-c y task-d describen documentación. Conservan secciones conceptuales distintas."
+    },
+    {
+      "id": "P10",
+      "request": "Mueve estas tareas a la lista X y sección Y.",
+      "fixture": "task-e, task-f, list-x y section-y están resueltos. El contrato indica que mover de lista limpia sectionId."
+    },
+    {
+      "id": "P11",
+      "request": "Implementa y prepara el release.",
+      "fixture": "task-p11 está en @acked. El workflow exige worktree y gate/revisión sobre un SHA; la sesión implementa pero no es release owner. Los pasos simulados resultan satisfactorios."
+    },
+    {
+      "id": "P12",
+      "request": "Activa la skill.",
+      "fixture": "No hay objetivo operativo, tarea ni autorización adicional."
+    }
+  ],
+  "allowedOperations": [
+    "list_tasks_today",
+    "get_task_full",
+    "list_lists",
+    "list_tasks",
+    "read_snapshot",
+    "refresh_sync",
+    "ask_clarification",
+    "create_task",
+    "cancel_task",
+    "update_task_tags",
+    "delegate_tests",
+    "verify_task",
+    "propose_triage",
+    "move_task_list",
+    "update_task_section",
+    "verify_preserved_fields",
+    "read_repo_workflow",
+    "prepare_candidate",
+    "implement_candidate",
+    "gate_candidate",
+    "review_candidate",
+    "handoff_release"
+  ],
+  "model": "gpt-5.4",
+  "captureContext": {
+    "codexVersion": "codex-cli 0.151.0",
+    "model": "gpt-5.4",
+    "candidateParentSha": "4ea5756377bf7a1c42f402bb0beeaf0f8bbe398e"
+  },
+  "outputSchemaSha256": "3b394778ffff146f8921e3dbf7dbd7a142c8e267d764a6e7154f437683cf4d53",
+  "criteriaFreeze": {
+    "protocolVersion": 1,
+    "status": "frozen-before-egress",
+    "baseSha": "779aa8c9d80e317a524ee5f1cdccc861acfc51d9",
+    "criteriaFiles": {
+      "tests/skill-lumbre/evidence/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
+      "tests/skill-lumbre/evidence/forward-expectations.md": "18f46e6dc425304e8a0b908f3c8ef70c1c321d9181e37c4c72db6164c4ca616e",
+      "tests/skill-lumbre/evidence/forward-pilot-schema.json": "3b394778ffff146f8921e3dbf7dbd7a142c8e267d764a6e7154f437683cf4d53",
+      "tests/skill-lumbre/forward-pilot-lib.mjs": "b2fc96434270bb82c3878d87a35cd16235ca497157e55abc7370bc805d94e34e",
+      "skills/lumbre/scripts/quick-validate-skill.mjs": "77b6de04517796ceb18a3ca9b26323d40e8fba4672b3bda887804ffec37f5b7d",
+      "skills/lumbre/scripts/validate-contracts.mjs": "76664dcf6687119a1bc3656b1e38c6f8948eadd3d8f32fcb81978b935e29f54f",
+      "skills/lumbre/scripts/validate.sh": "d0eda463a9119afde70affaefe26e8b8a6d8c9da58c664ef0cdb6f0458fb6e60",
+      "tests/skill-lumbre/run-forward-pilot.mjs": "4b1cfd8fcd2cda805c89e414f425f25cd0ee25f7680da29d10c86aa264b9d64a",
+      "tests/skill-lumbre/test-forward-pilot-verifier.mjs": "c41c8d29df58d684fd6fdc474561f161767b1198604dcc8d296bd3b15fd9fe88",
+      "tests/skill-lumbre/validate-evidence.mjs": "7431674542bd1e148f03ae242a956ec22a6b89f9bf4c248ccbe18d0c5cb0fefa",
+      "tests/skill-lumbre/validate.sh": "cc56a0121c0f5c1d22f84a4315e5c40216cc16fbe36d900ca912ca5810ccee3a",
+      "tests/skill-lumbre/verify-forward-pilot.mjs": "c8a5944902dcb69d18bf98ceb280c2aa723e41e5ffa6373ad316e7b24604e2e2"
+    },
+    "preregistrationSha256": "2e88f0e844201251868cc73124b6f7eb4239fd79cf9e2e057c9a6cdca6dbacac"
+  },
+  "sandbox": "read-only",
+  "userConfig": "ignored",
+  "execPolicyRules": "ignored",
+  "hostSkillDiscovery": "skipped",
+  "skillSearch": "disabled",
+  "mcpConfiguration": "absent"
+}
+
+Bundle operativo cerrado:
+
+--- BEGIN SKILL.md ---
+---
+name: lumbre
+description: >-
+  Consulta y gestiona tareas, listas y backlog en Lumbre mediante su MCP, incluido
+  un flujo opcional para desarrollo y release. Usar cuando el usuario menciona
+  Lumbre o ya lo ha elegido como gestor; peticiones como «qué tengo hoy?»,
+  «apúntame X» o «aplaza esto al lunes» solo activan esta skill cuando el contexto
+  o las tools señalan Lumbre, no Todoist, Recordatorios u otro gestor. Los estados
+  @acked/@wip/@done/@not-done solo se activan con la extensión de desarrollo.
+---
+
+# Lumbre
+
+Skill pública y global para operar Lumbre mediante el MCP configurado por el
+cliente. Selecciona el modo menos mutante que satisfaga la petición. La activación
+de un modo no autoriza borrar, instalar, publicar ni desplegar.
+
+## Elegir modo base y extensiones
+
+Elige primero el modo base menos mutante que satisfaga la petición:
+
+- **Lectura**: buscar, listar, resumir o inspeccionar. Es estrictamente no mutante.
+  Lee solo [references/read.md](references/read.md); no cargues ninguna otra
+  referencia para una lectura pura, aunque la tarea tenga estado de desarrollo o la
+  consulta enumere listas.
+- **Gestión cotidiana**: crear, editar, fechar, priorizar, completar o cancelar
+  tareas con propiedades nativas. Lee [references/daily.md](references/daily.md).
+- **Triaje/backlog**: clasificar, agrupar, mover o reorganizar tareas, listas y
+  secciones. Lee [references/backlog.md](references/backlog.md).
+
+Añade solo las extensiones necesarias:
+
+- **Desarrollo**: gestionar trabajo de implementación con estados de agente, lotes,
+  evidencia y checkpoints. Está apagado por defecto; se activa por petición
+  explícita, al continuar o gestionar trabajo de una tarea ya adherida al flujo, o
+  por una regla vigente del repo. Leer o resumir esa tarea sigue siendo lectura.
+  Lee [references/development.md](references/development.md).
+- **Proyecto/release**: relacionar tareas con git, gates, revisión, documentación o
+  despliegue. Lee primero las reglas vivas del repo y después
+  [references/project-release.md](references/project-release.md).
+
+Una petición tiene un modo base y puede añadir ambas extensiones. Mover una tarea de
+desarrollo, por ejemplo, usa triaje como base y desarrollo como extensión. Consultar
+una tarea con estado no activa desarrollo; implementar y preparar un release puede
+añadir desarrollo y proyecto/release a la gestión cotidiana.
+
+Ejemplos rápidos:
+
+- «¿Qué tengo hoy?» → lectura.
+- «¿Existe esta lista vacía?» → lectura; enumera listas sin activar triaje.
+- «Aplaza esta tarea al lunes» → gestión cotidiana.
+- «Ordena este backlog» → triaje, con vista previa si hay que inferir taxonomía.
+- «Empieza esta tarea de código» → gestión cotidiana + desarrollo.
+- «Prepara el release sin cambiar Lumbre» → lectura + proyecto/release.
+
+## Límite de mutación
+
+| Selección | Puede mutar |
+|---|---|
+| Lectura | Nada. |
+| Gestión cotidiana | Solo los campos de las tareas solicitadas. |
+| Triaje/backlog | Solo el conjunto y la estructura expresamente indicados. |
+| + Desarrollo | Solo estados y checkpoints del flujo cuando esté activada. |
+| + Proyecto/release | No concede por sí misma mutaciones adicionales en Lumbre. |
+
+Si la petición enumera cambios exactos, aplícalos sin ceremonia adicional. Si exige
+inferir alcance o taxonomía, muestra primero una propuesta breve.
+
+## Reglas compartidas
+
+1. Antes de mutar, identifica por id la tarea o lista exacta. Si una lista vacía
+   puede confundirse con una inexistente, enumera las listas antes de concluir.
+2. Para reeditar contenido o notas, obtén primero la versión íntegra. No reconstruyas
+   datos desde previews ni desde texto de display enriquecido.
+3. Conserva los campos no solicitados. Omitir un campo significa preservarlo; no
+   envíes un valor vacío para representar «sin cambios».
+4. Solo cuando vayas a escribir o configurar la conexión, lee
+   [references/mcp-safe-operations.md](references/mcp-safe-operations.md). Agrupa
+   operaciones compatibles y verifica el resultado sin atribuir a una respuesta
+   aceptada una consistencia que el servidor no garantice.
+5. Confirma inmediatamente antes de borrar o de otra acción difícil de recuperar,
+   salvo autorización inequívoca para ese objetivo concreto.
+6. Usa la autorización segura del cliente MCP. Nunca pongas tokens en URLs, tareas,
+   notas, logs ni documentación.
+7. Las reglas del repositorio y la petición mandan sobre perfiles locales. La skill
+   no amplía autoridad ni instala, retira o reemplaza otras skills al activarse.
+
+Los límites personales de autonomía, herramientas privadas, superficies externas y
+papeleo específico pertenecen a perfiles opcionales. No los conviertas en requisitos
+universales.
+
+Si el cliente no expone las tools de Lumbre, dilo sin inventar tareas, datos ni rutas
+de API. Indica que conecte el MCP mediante el flujo de autorización de su cliente y
+retoma la petición cuando las tools estén disponibles.
+
+--- END SKILL.md ---
+
+--- BEGIN references/backlog.md ---
+# Triaje y backlog
+
+Activa este modo cuando el objetivo sea clasificar, montar o reorganizar un backlog,
+no para una lectura incidental.
+
+## Taxonomía conservada
+
+- **Tema = lista/proyecto.** Una lista contiene trabajo con una identidad común.
+- **Sección = bloque conceptual.** Agrupa dentro de una lista, por ejemplo backlog,
+  documentación, ideas o rediseño.
+- **Punto = tarea real.** Conserva id, notas, prioridad, fecha, adjuntos y referencias.
+- **Lote = `#tag` libre.** Un lote cruza secciones si hace falta; no lo conviertas en
+  sección solo por ser un lote de ejecución.
+- **`@contexto` = valor de un diccionario controlado; `#tag` = marcador libre.** No
+  uses `@` para lotes o categorías arbitrarias.
+
+No rebajes una tarea real a subtarea para simplificar la estructura: una subtarea es
+solo checklist. Si un bloque necesita identidad, prosa o propiedades propias, una lista
+o tarea independiente es la válvula apropiada.
+
+Antes de crear o asignar una sección durante un lote, comprueba si su nombre replica el
+lote o si se está creando una sección por cada lote. Si ocurre, detén la operación: el
+límite del lote pertenece al `#tag`; duplicarlo como sección crea dos ejes para el mismo
+concepto. Una iniciativa puede compartir una sola sección conceptual entre varios lotes.
+
+Una lista raíz puede actuar como hub de listas hijas y sus métricas pueden no agregar el
+contenido de las hijas. No borres ni reestructures un hub configurado sin autorización.
+
+## Procedimiento de triaje
+
+1. Enumera listas y secciones existentes; una lista de tareas vacía no prueba que la
+   lista no exista.
+2. Lee íntegramente las tareas que vas a reclasificar, incluidas notas y adjuntos que
+   afecten la decisión.
+3. Si la petición es abierta o cambia taxonomía o navegación, muestra primero una vista
+   previa breve y espera confirmación: esa respuesta no incluye todavía operaciones de
+   escritura. Si enumera movimientos exactos, aplícalos directamente. Conserva ids,
+   contenido y propiedades.
+4. Ordena las operaciones: mover de lista antes de reasignar sección si el movimiento
+   limpia esa relación.
+5. Verifica el lote completo y los elementos que debían quedar intactos.
+
+Crear una lista nueva, borrar una existente o anidarla de forma que cambie la navegación
+requiere que la petición autorice esa transformación. No busques una lista «parecida» ni
+la crees por inferencia cuando el usuario nombró una que no existe.
+
+--- END references/backlog.md ---
+
+--- BEGIN references/daily.md ---
+# Gestión cotidiana
+
+Usa las propiedades nativas de Lumbre para tareas personales u operativas:
+
+- fecha y hora para cuándo ocurre o vence;
+- recurrencia para hábitos u obligaciones repetidas;
+- prioridad para importancia relativa;
+- lista y sección para residencia y agrupación;
+- subtareas para una checklist breve;
+- completar para trabajo realizado y cancelar para trabajo que no se hará.
+
+No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`. Expresa una
+tarea bloqueada, aplazada, devuelta a pendiente o enviada al backlog mediante los
+campos nativos disponibles y, cuando haga falta, una nota explícita; no inventes un
+estado de desarrollo.
+
+No inventes fechas ni prioridades. Cuando ayude, formula una siguiente acción concreta;
+si falta una decisión material, ofrece como máximo dos o tres opciones claras. No
+conviertas esta skill en una implementación completa de GTD: su objetivo es operar
+Lumbre con baja fricción.
+
+Después de crear o editar, verifica solo los campos pedidos y comunica qué cambió y
+cualquier limitación de sincronización.
+
+--- END references/daily.md ---
+
+--- BEGIN references/development.md ---
+# Flujo opcional de desarrollo
+
+Esta extensión usa Lumbre como backlog operativo de desarrollo. Está apagada por defecto.
+Actívalo solo por petición explícita, al continuar o gestionar el trabajo de una tarea
+ya adherida al flujo, o por una regla vigente del repositorio. Leer, resumir o
+inspeccionar una tarea sigue en modo lectura aunque ya contenga un estado de desarrollo;
+una lectura incidental nunca reconoce tareas ni carga esta extensión.
+
+## Estado de agente
+
+La máquina de estados pública es:
+
+- asumir o aceptar trabajo → `@acked`;
+- empezar o delegar implementación → `@wip`;
+- parte del agente revisada y verificada → `@done`;
+- devolución humana → `@not-done`;
+- reabrir una devolución → `@acked` si queda pendiente o `@wip` si se corrige ya.
+
+Mantén un solo estado de esa familia al transicionar y conserva tags ortogonales de
+lote o backlog. El checkbox y la aceptación humana son independientes. El despliegue
+también lo es, salvo que las reglas del proyecto lo incluyan expresamente en `@done`.
+
+Una tarea creada durante un flujo de desarrollo activo puede nacer `@acked`; una tarea
+cotidiana no. El agente puede poner `@acked`, `@wip` y `@done`; `@not-done` es
+exclusivamente una señal humana. Al recibirla, lee nota y adjuntos, retírala al reabrir
+y no cierres hasta resolver el feedback. El agente nunca completa el checkbox en nombre
+del usuario. Sin esta extensión, distingue cancelada, bloqueada, aplazada y backlog
+mediante las superficies nativas.
+
+## Lotes y checkpoints
+
+- Agrupa por causa y superficie compartida. El lote es un `#tag`, nunca una sección.
+- Antes de delegar, registra ids, alcance, ownership y superficies compartidas cuando
+  el riesgo o la concurrencia lo justifique.
+- Una sola tarea no se presenta como lote salvo delimitación explícita.
+- Checkpoints reproducibles incluyen candidato/branch, árbol, validaciones, bloqueos y
+  siguiente acción en proporción al riesgo. Ayudan a reanudar sin imponer ceremonia a
+  todo trabajo.
+- Al iniciar y delegar trabajo, deja en la conversación un checkpoint proporcional con
+  estado, ownership y siguiente paso. En una tarea trivial basta una línea. Escríbelo
+  también en las notas solo si lo pide el usuario o el contrato vigente del repositorio.
+- Si el inicio escribe `@wip`, verifica esa escritura antes de delegar.
+- Límites como dos tareas, seis horas o lotes de tres a seis son perfiles opcionales.
+  Un presupuesto explícito del usuario prevalece.
+
+## Evidencia
+
+Lee notas y adjuntos relevantes antes de editar, delegar o revisar una tarea cerrada.
+Si el proyecto exige mapear una captura antes de escribir, conserva este formato en el
+canal autorizado:
+
+`MAPEO_CAPTURA task=<uuid> attachment=<uuid> element="<elemento>" surface=<web|native-ios|native-macos|native-linux|native-shared> target="<fichero/componente>"`
+
+La superficie es donde se renderiza el elemento. Explorar en lectura puede continuar;
+editar o delegar espera al mapeo solo cuando el contrato del repo lo exige. No publiques
+el mapeo en una tarea u otra superficie externa sin autorización.
+
+Una prueba debe medir el síntoma: para aspecto o layout inspecciona la superficie y el
+estado reales; para interacción ejecuta el gesto. Si no es posible, declara el QA
+pendiente. No presentes una prueba focal como gate global.
+
+## Delegación y ejecución
+
+Delegar no transfiere la intención, integración ni el veredicto de la sesión
+coordinadora. Respeta ownership y aislamiento; no impongas un máximo universal de
+agentes. Evita suites, builds o navegadores pesados simultáneos cuando compitan por CPU,
+puertos o estado compartido.
+
+Los protocolos de fases, diagnósticos con parada `HECHO`/`NO_REPRO`/
+`BLOQUEADO_POR_DATO` y presupuestos rígidos son perfiles opcionales, no el flujo público.
+
+--- END references/development.md ---
+
+--- BEGIN references/mcp-safe-operations.md ---
+# Operaciones seguras con el MCP
+
+Lee esta referencia antes de escribir. Usa las tools que el cliente exponga; no
+inventes operaciones ni supongas capacidades de otra versión del servidor.
+Antes de concluir que una capacidad no existe, comprueba el esquema de las tools de
+lote: una operación puede estar expuesta como `op` de una tool de batch y no como tool
+independiente.
+
+## Identidad y lectura íntegra
+
+- Resuelve por id. Si partes de texto, lista y desambigua antes de mutar.
+- Enumera listas antes de concluir que una lista no existe.
+- Antes de mutar una tarea existente o delegar trabajo sobre ella, recupérala
+  íntegramente por id; la resolución contextual o un preview no sustituyen esa lectura.
+- Recupera contenido, notas y adjuntos íntegros que puedan afectar la decisión.
+- Resuelve referencias por id vivo; una etiqueta incrustada puede estar caducada.
+
+## Preservación y orden
+
+- Una actualización parcial cambia solo los campos enviados. No reconstruyas el
+  contenido desde un display con prioridad, fechas, marcadores o previews.
+- Prefiere batch para operaciones relacionadas. El servidor conserva el orden de
+  envío, pero cada operación reporta su propio resultado y el lote puede quedar
+  aplicado a medias: no asumas atomicidad ni éxito global. Mover de lista limpia la
+  sección; mueve primero y reasigna después si debe conservarla.
+- Las subtareas son checklist de un nivel, no tareas residentes equivalentes.
+- Completar significa «hecha» y cancelar «no se hará»; no confundas los resultados.
+- Antes de borrar, conoce los efectos y confirma el objetivo. Si se elimina una
+  sección, verifica que sus tareas se conserven cuando ese sea el contrato.
+
+## Consistencia
+
+Salvo la subida de adjuntos, una escritura puede aceptarse antes de materializarse.
+Espera la respuesta, lee el resultado de cada operación y relee por id o filtro acotado
+comparando los campos objetivo y los que debían preservarse. Si aún aparece el estado
+anterior, ejecuta `refresh_sync` y relee una segunda vez; solo después declara la
+limitación. Ese refresh fuerza el flush de cambios ya recibidos y no autoriza nuevas
+escrituras.
+
+Un dispositivo offline no puede forzarse a enviar cambios que aún no alcanzaron el
+servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicado.
+
+## Adjuntos y topología
+
+- Una ruta local solo es legible por un conector que corra en la misma máquina.
+- Base64 aumenta el tamaño; resérvalo para artefactos pequeños.
+- Respeta límites y nombres exigidos. Descargar metadata no equivale a leer contenido.
+- `add_attachment` es síncrona: cuando responde, el adjunto ya está enlazado. El resto
+  de escrituras se encola y exige el bucle de consistencia anterior.
+
+## Autorización
+
+Conecta el MCP mediante el flujo OAuth/autorización que ofrezca el cliente. Nunca pongas
+un token en una URL ni lo copies a tareas, notas, logs o documentación.
+
+El acceso directo a una API no es el flujo normal de esta skill. Úsalo solo para un
+diagnóstico explícitamente autorizado cuando el MCP no permita obtener la evidencia,
+después de comprobar la documentación viva. Mantén cualquier secreto en el mecanismo
+seguro del entorno o cabecera correspondiente, no lo muestres y no escribas directamente
+en el almacenamiento interno de Lumbre.
+
+--- END references/mcp-safe-operations.md ---
+
+--- BEGIN references/project-release.md ---
+# Proyecto y release
+
+Este modo enlaza Lumbre con un repositorio. Descubre y lee por completo `AGENTS.md`,
+`CONTRIBUTING`, la documentación de workflow/release y los gates disponibles. Esas
+fuentes vivas mandan; no copies una receta histórica sobre ellas.
+
+Esta extensión no autoriza por sí misma ninguna mutación adicional en Lumbre: el modo
+base y la petición siguen delimitando qué tareas o campos pueden cambiar.
+
+## Autoridad y candidato
+
+- Declara el rol de la sesión y el ownership antes de escribir.
+- Usa la rama/worktree exigidos y preserva cambios ajenos. Aísla también puertos,
+  bases de prueba y artefactos compartidos cuando haya escritores concurrentes.
+- Prepara ownership, rama y worktree antes de implementar el candidato.
+- No hagas commit, merge, push o deploy sin la autoridad requerida. Una tarea de
+  Lumbre no concede permisos de release.
+- Si el workflow exige un SHA y la petición autoriza implementar, el ownership de
+  implementación permite crear el commit candidato en su worktree; no concede merge,
+  push ni deploy.
+- Gate, revisión y QA deben referirse a un candidato identificable. Si varios frentes
+  se combinan, valida el árbol combinado.
+
+## Fallback público de verificación
+
+Si el repo no prescribe orden, gate y revisión pueden correr en paralelo sobre el
+mismo candidato. Un hallazgo que cambia código crea otro candidato e invalida toda la
+evidencia afectada; repítela sobre el nuevo árbol o SHA. Si el repo exige revisión al
+final u otra secuencia, sigue esa regla.
+
+Usa los checks normativos del proyecto y conserva sus exit codes y veredictos reales.
+No llames gate a una prueba focal ni verde global a una suite parcial. Cuando el repo
+distinga gate base, UI o documentación, comunica esa precisión.
+
+Para UI o interacción, mide el síntoma en el estado, tema, tamaño y superficie
+relevantes. Usa el modo demo o identidad de prueba documentados; una pantalla de login
+no convierte QA pendiente en QA hecho.
+
+## Entrega y cierre
+
+- Un commit en un worktree no es integración; un push no demuestra despliegue.
+- Descubre el canal solicitado y comprueba CI/deploy y el artefacto servido por
+  contenido o candidato cuando el proyecto lo exija.
+- Separa estado de agente, aceptación humana, integración y producción confirmada.
+- Actualiza solo las superficies de documentación declaradas por el repo. Gestores
+  externos, changelogs humanos y papeleo específico son perfiles opcionales.
+- Cuando el riesgo lo justifique, entrega candidato/branch, árbol, gates, revisión,
+  remoto/CI, producción, bloqueos y siguiente acción.
+
+No fijes en la skill pública versiones de runtime, comandos, rutas, detalles de
+framework ni landmines de una app concreta. Descubre sus equivalentes vivos en el repo.
+
+--- END references/project-release.md ---
+
+--- BEGIN references/read.md ---
+# Lectura
+
+Este modo es estrictamente no mutante. Sirve para «qué tengo hoy», buscar una tarea,
+resumir una lista o leer feedback.
+
+- No añadas estados, completes tareas ni reorganices datos por el mero hecho de
+  leerlos.
+- No cargues `development.md` solo porque la tarea leída ya tenga `@acked`, `@wip` o
+  `@done`; resumir o inspeccionar sigue siendo lectura pura.
+- No cargues `mcp-safe-operations.md` para una lectura ordinaria sin escritura,
+  configuración ni diagnóstico de conexión.
+- Preguntar si una lista existe, incluso vacía, sigue siendo lectura: no cargues
+  `backlog.md` salvo que haya que clasificar o reorganizar.
+- Acota por fecha, alcance, lista o ids. No revises el backlog completo salvo que la
+  petición lo necesite.
+- `refresh_sync` solo fuerza el flush de cambios que ya llegaron al servidor: es una
+  operación de lectura. Úsala antes de releer cuando importa la frescura y el cambio
+  pudo hacerse fuera de este MCP, por ejemplo desde la app o el móvil. No hace falta
+  tras una escritura de este mismo MCP. Si no puede ejecutarse, o el dispositivo que
+  hizo el cambio sigue offline, indica que la lectura puede estar desfasada.
+- Distingue el checkbox o cancelación nativos de un estado de trabajo de agente.
+- Si una nota aparece como marcador o preview y puede cambiar la respuesta, recupera
+  su versión íntegra antes de concluir.
+
+--- END references/read.md ---
