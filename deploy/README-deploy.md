@@ -23,10 +23,10 @@ nunca se reenvía a Lumbre y ningún token pasa por el navegador.
 
 El despliegue falla cerrado si falta o mide menos de 32 caracteres
 `LUMBRE_MCP_BACKCHANNEL_SECRET`. Debe configurarse con el mismo valor en los
-contenedores de Lumbre y lumbre-mcp. A 30 ago 2026 el lado Lumbre desplegado aún
-responde 503 porque su contenedor no tiene el secreto: no marcar M3 como hecha
-hasta desplegarlo y completar QA real en claude.ai web/móvil. Discovery verde
-solo certifica metadata, no el flujo OAuth.
+contenedores de Lumbre y lumbre-mcp. Desde el 30 ago 2026 ambos lados de
+producción lo tienen configurado y el flujo OAuth pasó QA real desde Codex. En
+un despliegue nuevo hay que conservar esa igualdad y repetir el QA: discovery
+verde solo certifica metadata, no el flujo OAuth.
 
 `oauth.key` y `oauth-store.json` forman una unidad de backup: hay que copiar y
 restaurar ambos juntos, con permisos `0600`, o descartar ambos y volver a
@@ -215,9 +215,8 @@ https://mcp.lumbre.pro/mcp
 
 Claude descubre OAuth 2.1 y el callback exacto es
 `https://claude.ai/api/mcp/auth_callback`; el consentimiento sucede en
-`app.lumbre.pro`. Hasta configurar el secreto en ambos contenedores y pasar QA
-real, las formas heredadas stdio, Bearer directo o `/mcp/<token>` siguen siendo
-la única ruta operativa.
+`app.lumbre.pro`. Las formas stdio, Bearer directo y `/mcp/<token>` se conservan
+solo por compatibilidad; las configuraciones nuevas deben usar OAuth.
 
 La compatibilidad con `/mcp/<token>` sigue tocando las DOS piezas del deploy:
 además de `./deploy/publicar.sh` (recompila y sube `dist/`), hay que volver a

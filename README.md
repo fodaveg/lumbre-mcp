@@ -32,16 +32,49 @@ añadas un bearer ni un token en el path.
 
 La skill pública multimodo vive en `skills/lumbre/`. No es necesaria para usar
 el MCP, pero añade reglas seguras de lectura, gestión cotidiana, backlog y el
-flujo opcional de desarrollo/release.
+flujo opcional de desarrollo/release. Se instala desde este repositorio con
+[`skills`](https://skills.sh), que mantiene una única instalación global y la
+hace visible para los clientes seleccionados:
+
+`npx` viene incluido con `npm`, que se instala junto con Node.js. Si todavía no
+lo tienes, instala Node.js con el gestor de paquetes de tu sistema:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
-  --repo fodaveg/lumbre-mcp --path skills/lumbre
+# macOS
+brew install node
+
+# Fedora
+sudo dnf install nodejs
 ```
 
-También puedes pedir a Codex que use `$skill-installer` con el repo
-`fodaveg/lumbre-mcp` y la ruta `skills/lumbre`. La skill estará disponible en
-el turno siguiente.
+Comprueba el requisito antes de instalar la skill:
+
+```bash
+node --version
+npm --version
+npx --version
+```
+
+```bash
+npx --yes skills add fodaveg/lumbre-mcp -g -y \
+  --skill lumbre \
+  --agent codex claude-code
+```
+
+Reinicia o abre una conversación nueva para que el cliente descubra la skill.
+Para traer versiones posteriores:
+
+```bash
+npx --yes skills update lumbre -g -y
+```
+
+La distribución soportada sigue la rama `main` de este repositorio; no se
+publican tags de versión de la skill. `skills` registra el origen y el hash
+instalado en su lockfile para poder actualizar esa única copia gestionada.
+
+La skill y el MCP se instalan por separado: este paso aporta las instrucciones
+de trabajo al agente, pero no conecta Lumbre. Para autorizar el MCP remoto,
+completa antes los pasos de [Conectar el MCP remoto](#conectar-el-mcp-remoto).
 
 ## Qué hace (Fase 1 — crear/leer)
 
