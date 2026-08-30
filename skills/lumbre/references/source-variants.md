@@ -1,7 +1,30 @@
-# Variantes de las copias de origen
+# Evidencia histórica de las copias de origen
 
-Esta referencia conserva información divergente para que la fase de optimización no pierda
-reglas por accidente. No es una segunda skill ni una preferencia separada.
+Esta referencia conserva procedencia y divergencias para auditar la consolidación. **No es
+normativa y no debe cargarse durante una operación normal.** Las decisiones vigentes están
+en `SKILL.md` y en las referencias de modo; este fichero no es una segunda skill, un perfil
+ni una fuente alternativa de instrucciones.
+
+## Resoluciones de la optimización
+
+- Lectura y día a día no mutan estados de desarrollo; `@acked` se aplica solo al asumir o
+  triar dentro del perfil de desarrollo activado.
+- El fallback público permite gate y revisión en paralelo sobre un candidato único; las
+  reglas vivas del repo pueden exigir revisión final u otra secuencia.
+- Límites de dos tareas/seis horas, lotes de tres a seis, herramientas privadas y papeleo
+  externo quedan como perfiles opcionales.
+- `@not-done` solo opera si el repo o perfil lo define; fuera de él se distinguen
+  cancelación, bloqueo, aplazamiento y backlog mediante superficies nativas.
+- El gate se descubre en el repo. Esta skill conserva invariantes de evidencia, no una
+  lista fija de comandos de una aplicación.
+- OAuth/autorización del cliente es el camino normal. La API directa queda limitada a
+  diagnóstico explícitamente autorizado, sin secretos en URLs ni salida.
+- La retirada de copias antiguas es responsabilidad de un instalador autorizado después
+  de demostrar que la fuente canónica es alcanzable; activar la skill nunca la ejecuta.
+
+Las secciones V1–V11 siguientes describen únicamente lo que contenían las fuentes y por
+qué una cláusula existe. Ante cualquier diferencia, prevalecen las resoluciones anteriores
+y las referencias operativas.
 
 ## Identificadores de origen
 
@@ -29,7 +52,7 @@ dependa de instalar también la documentación del repositorio.
 - CL-backup conservaba la versión más extensa, incidencias y reglas operativas eliminadas
   después; se incluyó para no perder información única.
 - Las seis fuentes asumían un planificador y repositorio personales concretos.
-- La baseline pública conserva la suma como cinco modos y evita que una consulta cotidiana
+- La skill pública conserva la suma como cinco modos y evita que una consulta cotidiana
   active por defecto el flujo de desarrollo.
 
 ## V2 — reconocimiento de estado
@@ -39,8 +62,8 @@ dependa de instalar también la documentación del repositorio.
 - CL-live y CL-backup añaden que las tareas creadas por el agente nacen reconocidas y que
   `@not-done` es una devolución humana con procedimiento de reapertura.
 - El diseño público solicitado exige lectura sin mutación y desarrollo opcional.
-- Se conservan ambas reglas en `development.md`: estricta heredada y acotada pública. Esta
-  contradicción debe resolverse en la optimización con pruebas de comportamiento.
+- La baseline conservó ambas reglas; la optimización eligió la variante acotada pública y
+  mantuvo la estricta únicamente como procedencia histórica.
 
 ## V3 — gate y revisión
 
@@ -51,7 +74,8 @@ dependa de instalar también la documentación del repositorio.
 - CX-live y las fuentes CL además remiten a la secuencia normativa del repositorio; las
   fuentes AG y CX-repo presentan
   la receta embebida como orden fijo.
-- Ambas variantes permanecen en `project-release.md`; el contrato del repo prevalece.
+- La optimización usa como fallback el paralelismo sobre el mismo candidato; el contrato
+  del repo prevalece y puede ordenar una revisión final.
 
 ## V4 — captura y delegación
 
@@ -68,7 +92,7 @@ dependa de instalar también la documentación del repositorio.
 - CX-repo conserva parte de la agrupación pero no el checkpoint detallado.
 - AG-repo carece de ambos párrafos y salta directamente al gate.
 - CL-live añade fases, límites de diagnóstico y una única suite pesada simultánea.
-- La unión conserva todas las variantes en `development.md`.
+- La skill final conserva esas cifras solo como perfiles opcionales.
 
 ## V6 — diferencias de plataforma
 
@@ -93,7 +117,8 @@ dependa de instalar también la documentación del repositorio.
 - Las fuentes CX/AG antiguas nombran el dominio web como base de API.
 - CL-live y CL-backup corrigen la base a `https://app.lumbre.pro`, añaden límite de lectura,
   estado dentro de `content` y ausencia de endpoint individual por id.
-- La referencia segura conserva la variante CL y obliga a comprobar el contrato vivo.
+- La baseline conservó la variante CL; la skill final prefiere OAuth y restringe cualquier
+  acceso API directo a diagnóstico autorizado con contrato vivo.
 
 Las fuentes también difieren en el refresh previo: CL-live lo exige antes de toda lectura;
 las demás lo presentan como verificación de mutaciones y frescura eventual. La baseline usa
@@ -104,8 +129,8 @@ refresh previo cuando importa la frescura y conserva aquí la variante estricta.
 - CX/AG antiguas afirman despliegue por push y observación posterior de CI.
 - CL-backup afirma que el push no despliega y que el despliegue web es manual; distingue
   además canales nativos.
-- CL-live evita fijar la mecánica y remite al workflow. `project-release.md` conserva las
-  tres formulaciones y hace prevalecer la norma viva.
+- CL-live evita fijar la mecánica y remite al workflow. La optimización no infiere
+  despliegue de push y hace prevalecer la norma viva.
 
 ## V10 — reglas únicas de CL-backup y CL-live
 

@@ -2,17 +2,20 @@
 
 ## Lectura/consulta
 
-Este modo es estrictamente no mutante. Sirve para «qué tengo hoy», «busca esta tarea»,
-«resume esta lista» o «lee el feedback».
+Este modo es estrictamente no mutante. Sirve para «qué tengo hoy», buscar una tarea,
+resumir una lista o leer feedback.
 
-- No añadas `@acked`, no completes tareas y no reorganices listas por el mero hecho de
-  leerlas.
-- Acota la consulta por fecha, alcance, lista o ids para evitar volcar un backlog entero
-  sin necesidad.
-- Si la frescura importa y hubo cambios fuera del MCP, refresca antes de leer.
-- Distingue una tarea completada por el usuario de un estado de trabajo de un agente.
-- Si una nota aparece como marcador o preview y puede cambiar la respuesta, recupera la
-  nota íntegra antes de concluir.
+- No añadas estados, completes tareas, refresques con efectos ni reorganices datos por
+  el mero hecho de leerlos.
+- Acota por fecha, alcance, lista o ids. No revises el backlog completo salvo que la
+  petición lo necesite.
+- Si la frescura exige una operación de sync o refresh que pueda persistir cambios,
+  trátala como mutación y obtén la autorización correspondiente. Si no se ejecuta,
+  indica explícitamente en la respuesta que la lectura puede estar desfasada respecto
+  de cambios aún no sincronizados.
+- Distingue el checkbox o cancelación nativos de un estado de trabajo de agente.
+- Si una nota aparece como marcador o preview y puede cambiar la respuesta, recupera
+  su versión íntegra antes de concluir.
 
 ## Día a día
 
@@ -22,12 +25,13 @@ Usa las propiedades nativas de Lumbre para tareas personales u operativas:
 - recurrencia para hábitos u obligaciones repetidas;
 - prioridad para importancia relativa;
 - lista y sección para residencia y agrupación;
-- subtareas para una checklist corta dentro de una tarea;
-- completar para trabajo realizado y cancelar para trabajo descartado.
+- subtareas para una checklist breve;
+- completar para trabajo realizado y cancelar para trabajo que no se hará.
 
-No actives automáticamente `@acked/@wip/@done`: esos contextos pertenecen al modo de
-desarrollo opcional. Tampoco inventes un `@not-done`; expresa bloqueo, aplazamiento,
-backlog, cancelación o devolución a pendiente con el mecanismo que corresponda.
+No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`. Expresa una
+tarea bloqueada, aplazada, devuelta a pendiente o enviada al backlog mediante los
+campos nativos disponibles y, cuando haga falta, una nota explícita; no inventes un
+estado de desarrollo.
 
-Tras crear o editar, verifica los campos pedidos y comunica solo la información útil:
-qué cambió, en qué tarea y cualquier limitación de sincronización.
+Después de crear o editar, verifica solo los campos pedidos y comunica qué cambió y
+cualquier limitación de sincronización.

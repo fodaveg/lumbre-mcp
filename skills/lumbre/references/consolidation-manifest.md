@@ -1,9 +1,11 @@
-# Manifiesto autocontenido de la unión
+# Manifiesto autocontenido de consolidación
 
-Este manifiesto permite validar una instalación aislada de la skill. La matriz narrativa
-completa vive en `docs/lumbre-skill-consolidation.md` del repositorio canónico.
+Evidencia de que la optimización parte de la unión completa y no de una copia elegida.
+Este fichero no se carga en el uso normal. La matriz narrativa y las decisiones están
+en la documentación del repositorio canónico; `forward-prompts.md` y
+`forward-expectations.md` separan la batería ciega de su oráculo.
 
-## Fuentes incorporadas
+## Fuentes incorporadas antes de optimizar
 
 | ID | Líneas | Bytes | SHA-256 |
 |---|---:|---:|---|
@@ -17,41 +19,46 @@ completa vive en `docs/lumbre-skill-consolidation.md` del repositorio canónico.
 Los dos `agents/openai.yaml` encontrados eran idénticos:
 `82441cb68af4298cd0f0d00f0d452f0f446a6df853192a06402449dff048c5dd`.
 
-## Cláusulas cubiertas
+## Cobertura final
 
-Cobertura de cláusulas: 100%.
+Cobertura de cláusulas: 100% (32/32). Las decisiones normativas viven en el router y
+las referencias de modo; `source-variants.md` conserva procedencia no normativa.
 
-| ID | Destino principal |
+| ID | Destino final |
 |---|---|
 | S01 | `SKILL.md` |
-| S02 | `project-release.md` |
-| S03 | `mcp-safe-operations.md`, `backlog.md` |
-| S04 | `project-release.md`, `source-variants.md` |
+| S02 | `SKILL.md`, `project-release.md` |
+| S03 | `SKILL.md`, `mcp-safe-operations.md`, `backlog.md` |
+| S04 | `project-release.md`, `source-variants.md` (histórico) |
 | S05 | `backlog.md` |
 | S06 | `backlog.md` |
 | S07 | `backlog.md` |
 | S08 | `backlog.md`, `mcp-safe-operations.md` |
 | S09 | `backlog.md` |
-| S10 | `mcp-safe-operations.md` |
+| S10 | `SKILL.md`, `mcp-safe-operations.md` |
 | S11 | `mcp-safe-operations.md` |
-| S12 | `SKILL.md`, `mcp-safe-operations.md` |
-| S13 | `mcp-safe-operations.md`, `source-variants.md` |
+| S12 | `SKILL.md`, `mcp-safe-operations.md`, `read-and-daily.md` |
+| S13 | `mcp-safe-operations.md`, `source-variants.md` (histórico) |
 | S14 | `development.md` |
 | S15 | `development.md` |
 | S16 | `development.md` |
-| S17 | `development.md` |
-| S18 | `mcp-safe-operations.md`, `development.md` |
+| S17 | `development.md`, `project-release.md` |
+| S18 | `development.md`, `mcp-safe-operations.md` |
 | S19 | `development.md` |
-| S20 | `development.md` |
+| S20 | `development.md`, `project-release.md` |
 | S21 | `development.md` |
 | S22 | `development.md` |
 | S23 | `development.md` |
 | S24 | `development.md`, `project-release.md` |
 | S25 | `project-release.md` |
-| S26 | `project-release.md`, `source-variants.md` |
-| S27 | `project-release.md`, `development.md` |
+| S26 | `project-release.md`, `source-variants.md` (histórico) |
+| S27 | `development.md`, `project-release.md` |
 | S28 | `project-release.md` |
-| S29 | `project-release.md`, `source-variants.md` |
+| S29 | `project-release.md`, `source-variants.md` (histórico) |
 | S30 | `project-release.md` |
-| S31 | `project-release.md` |
-| S32 | `agents/openai.yaml`, `source-variants.md` |
+| S31 | `project-release.md`, `source-variants.md` (histórico) |
+| S32 | `agents/openai.yaml`, `source-variants.md` (histórico) |
+
+Las copias antiguas se retiran solo cuando la fuente canónica es duradera y alcanzable,
+el instalador autorizado demuestra que los runtimes resuelven esta misma skill y la
+validación pasa. Activar la skill no ejecuta esa retirada.
