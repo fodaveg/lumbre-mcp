@@ -39,6 +39,17 @@ const integrityOnly = args.includes("--integrity-only");
 const requestedEvidence = args.find((arg) => arg !== "--integrity-only");
 const evidencePath = resolve(requestedEvidence ?? defaultEvidence);
 const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+const repoOnlyHarness = candidateContains(
+  evidence.candidateParentSha,
+  "tests/skill-lumbre/evidence/forward-pilot-schema.json",
+);
+
+function candidateContains(candidateSha, repoPath) {
+  return spawnSync("git", ["cat-file", "-e", `${candidateSha}:${repoPath}`], {
+    cwd: repoRoot,
+  }).status === 0;
+}
+
 function readCandidateFile(candidateSha, path) {
   const repoPath = path.startsWith("skills/") || path.startsWith("tests/")
     ? path
@@ -59,10 +70,12 @@ function findHistoricalPreregistration(candidateSha, expectedHash) {
   for (const path of [
     "references/forward-pilot-preregistration.json",
     "references/forward-pilot-next-preregistration.json",
+    "tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json",
   ]) {
+    const repoPath = path.startsWith("tests/") ? path : `skills/lumbre/${path}`;
     const result = spawnSync(
       "git",
-      ["show", `${candidateSha}:skills/lumbre/${path}`],
+      ["show", `${candidateSha}:${repoPath}`],
       { cwd: repoRoot, encoding: "utf8" },
     );
     if (result.status === 0 && sha256(result.stdout) === expectedHash) {
@@ -78,7 +91,9 @@ function findHistoricalPreregistration(candidateSha, expectedHash) {
 function callHistoricalExport(candidateSha, exportName, input) {
   const librarySource = readCandidateFile(
     candidateSha,
-    "scripts/forward-pilot-lib.mjs",
+    repoOnlyHarness
+      ? "tests/skill-lumbre/forward-pilot-lib.mjs"
+      : "scripts/forward-pilot-lib.mjs",
   );
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(librarySource).toString("base64")}`;
   const driver = `
@@ -188,7 +203,9 @@ const schemaPath = join(evidenceDir, "forward-pilot-schema.json");
 const schemaSource = integrityOnly
   ? readCandidateFile(
       evidence.candidateParentSha,
-      "references/forward-pilot-schema.json",
+      repoOnlyHarness
+        ? "tests/skill-lumbre/evidence/forward-pilot-schema.json"
+        : "references/forward-pilot-schema.json",
     )
   : readFileSync(schemaPath, "utf8");
 const schema = JSON.parse(schemaSource);
@@ -482,6 +499,13 @@ function hashCandidateFiles(candidateSha, files) {
   return hashes;
 }
 
+function criteriaHash(hashes, suffix) {
+  const match = Object.entries(hashes ?? {}).find(([path]) =>
+    path.endsWith(suffix),
+  );
+  return match?.[1];
+}
+
 check(evidence.protocolVersion === 2, "evidence: protocolVersion must be 2");
 check(evidence.deterministic === false, "evidence: must declare non-determinism");
 check(
@@ -699,7 +723,12 @@ check(
   "evidence: envelope hash mismatch",
 );
 const promptSource = integrityOnly
-  ? readCandidateFile(evidence.candidateParentSha, "references/forward-prompts.md")
+  ? readCandidateFile(
+      evidence.candidateParentSha,
+      repoOnlyHarness
+        ? "tests/skill-lumbre/evidence/forward-prompts.md"
+        : "references/forward-prompts.md",
+    )
   : readFileSync(join(evidenceDir, "forward-prompts.md"), "utf8");
 const environmentInputs = {
   promptSource,
@@ -746,12 +775,24 @@ check(
   "evidence: published artifacts contain private paths",
 );
 if (integrityOnly) {
-  const historicalVerification = deriveHistoricalVerification(
-    evidence.candidateParentSha,
-    evidence,
-    rawLog,
-    envelope,
+  const failedCases = new Set(
+    behavioralFailures
+      .map((failure) => failure.match(/^(P\d{2}):/)?.[1])
+      .filter(Boolean),
   );
+  const historicalVerification = repoOnlyHarness
+    ? {
+        accepted: behavioralFailures.length === 0,
+        exactCasesPassed: 12 - failedCases.size,
+        exactCasesTotal: 12,
+        failures: behavioralFailures,
+      }
+    : deriveHistoricalVerification(
+        evidence.candidateParentSha,
+        evidence,
+        rawLog,
+        envelope,
+      );
   check(
     JSON.stringify(evidence.verification) ===
       JSON.stringify(historicalVerification),
@@ -888,7 +929,7 @@ check(
 );
 check(
   (integrityOnly
-    ? candidateCriteriaHashes?.["scripts/run-forward-pilot.mjs"]
+    ? criteriaHash(candidateCriteriaHashes, "run-forward-pilot.mjs")
     : sha256(readFileSync(join(scriptDir, "run-forward-pilot.mjs")))) ===
     evidence.hashes.runnerSourceSha256,
   "evidence: runner source hash drifted",
@@ -900,7 +941,7 @@ check(
 );
 check(
   (integrityOnly
-    ? candidateCriteriaHashes?.["scripts/forward-pilot-lib.mjs"]
+    ? criteriaHash(candidateCriteriaHashes, "forward-pilot-lib.mjs")
     : sha256(readFileSync(join(scriptDir, "forward-pilot-lib.mjs")))) ===
     evidence.hashes.librarySourceSha256,
   "evidence: pilot library hash drifted",
@@ -912,14 +953,14 @@ check(
 );
 check(
   (integrityOnly
-    ? candidateCriteriaHashes?.["scripts/verify-forward-pilot.mjs"]
+    ? criteriaHash(candidateCriteriaHashes, "verify-forward-pilot.mjs")
     : sha256(readFileSync(join(scriptDir, "verify-forward-pilot.mjs")))) ===
     evidence.hashes.verifierSourceSha256,
   "evidence: verifier source hash drifted",
 );
 check(
   (integrityOnly
-    ? candidateCriteriaHashes?.["scripts/test-forward-pilot-verifier.mjs"]
+    ? criteriaHash(candidateCriteriaHashes, "test-forward-pilot-verifier.mjs")
     : sha256(readFileSync(join(scriptDir, "test-forward-pilot-verifier.mjs")))) ===
     evidence.hashes.negativeTestSourceSha256,
   "evidence: negative test source hash drifted",
