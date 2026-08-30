@@ -17,7 +17,7 @@ fail() {
 [ -f "$skill_dir/agents/openai.yaml" ] || fail "missing agents/openai.yaml"
 [ -f "$manifest" ] || fail "missing consolidation manifest"
 
-for ref in read-and-daily.md backlog.md development.md project-release.md mcp-safe-operations.md
+for ref in read.md daily.md backlog.md development.md project-release.md mcp-safe-operations.md
 do
   [ -f "$refs/$ref" ] || fail "missing references/$ref"
   grep -Fq "references/$ref" "$entry" || fail "SKILL.md does not route to $ref"
@@ -35,15 +35,15 @@ entry_lines=$(wc -l < "$entry" | tr -d ' ')
 [ "$entry_lines" -le 120 ] || fail "router exceeds 120 lines ($entry_lines)"
 
 grep -Fq 'Está apagado por defecto' "$entry" || fail "development opt-in missing"
-grep -Fq 'estrictamente no mutante' "$refs/read-and-daily.md" ||
+grep -Fq 'estrictamente no mutante' "$refs/read.md" ||
   fail "read-only mode missing"
 grep -Fq 'no autoriza borrar, instalar, publicar ni desplegar' "$entry" ||
   fail "mode activation authority boundary missing"
-grep -Fq 'refresques con efectos' "$refs/read-and-daily.md" ||
+grep -Fq 'refresques con efectos' "$refs/read.md" ||
   fail "mutating refresh boundary missing"
-grep -Fq 'No revises el backlog completo' "$refs/read-and-daily.md" ||
+grep -Fq 'No revises el backlog completo' "$refs/read.md" ||
   fail "bounded-read rule missing"
-grep -Fq 'la lectura puede estar desfasada' "$refs/read-and-daily.md" ||
+grep -Fq 'la lectura puede estar desfasada' "$refs/read.md" ||
   fail "omitted refresh freshness disclosure missing"
 grep -Fq 'una lectura incidental nunca reconoce tareas' "$refs/development.md" ||
   fail "incidental ack guard missing"
@@ -53,10 +53,22 @@ grep -Fq 'aunque ya contenga un estado de desarrollo' "$refs/development.md" ||
   fail "development adhesion read-only boundary missing"
 grep -Fq 'El lote es un `#tag`, nunca una sección' "$refs/development.md" ||
   fail "lot taxonomy missing"
-grep -Fq 'checkpoint proporcional con estado' "$refs/development.md" ||
+grep -Fq 'checkpoint proporcional con' "$refs/development.md" ||
   fail "delegated work checkpoint missing"
 grep -Fq 'En una tarea trivial basta una línea' "$refs/development.md" ||
   fail "delegated checkpoint proportionality missing"
+grep -Fq 'exclusivamente una señal humana' "$refs/development.md" ||
+  fail "human-only not-done boundary missing"
+grep -Fq 'en la conversación un checkpoint' "$refs/development.md" ||
+  fail "checkpoint surface missing"
+grep -Fq 'muestra primero una vista' "$refs/backlog.md" ||
+  fail "open-triage preview boundary missing"
+grep -Fq 'no autoriza por sí misma ninguna mutación adicional' "$refs/project-release.md" ||
+  fail "release mutation boundary missing"
+grep -Fq 'Elige primero el modo base' "$entry" ||
+  fail "base mode routing missing"
+grep -Fq 'Añade solo las extensiones necesarias' "$entry" ||
+  fail "extension routing missing"
 grep -Fq 'mismo candidato' "$refs/project-release.md" ||
   fail "single-candidate review rule missing"
 grep -Fq 'un push no demuestra despliegue' "$refs/project-release.md" ||
@@ -71,20 +83,17 @@ grep -Fq 'Activar la skill no ejecuta esa retirada' "$manifest" ||
   fail "duplicate-removal authorization boundary missing"
 
 prompt_count=$(grep -c '^| P[0-9][0-9] |' "$refs/forward-prompts.md")
-[ "$prompt_count" -eq 12 ] ||
-  fail "expected 12 blind prompts, found $prompt_count"
+[ "$prompt_count" -eq 16 ] ||
+  fail "expected 16 blind prompts, found $prompt_count"
 expectation_count=$(grep -c '^| P[0-9][0-9] |' "$refs/forward-expectations.md")
-[ "$expectation_count" -eq 12 ] ||
-  fail "expected 12 oracle rows, found $expectation_count"
-for group in lectura día/dev backlog/release
-do
-  group_count=$(grep -c "| $group |" "$refs/forward-expectations.md")
-  case "$group" in
-    lectura|día/dev|backlog/release)
-      [ "$group_count" -eq 4 ] || fail "expected 4 $group scenarios"
-      ;;
-  esac
-done
+[ "$expectation_count" -eq 16 ] ||
+  fail "expected 16 oracle rows, found $expectation_count"
+[ "$(grep -c '| lectura |' "$refs/forward-expectations.md")" -eq 4 ] ||
+  fail "expected 4 lectura scenarios"
+[ "$(grep -c '| día/dev |' "$refs/forward-expectations.md")" -eq 6 ] ||
+  fail "expected 6 día/dev scenarios"
+[ "$(grep -c '| backlog/release |' "$refs/forward-expectations.md")" -eq 6 ] ||
+  fail "expected 6 backlog/release scenarios"
 prompt_ids=$(grep '^| P[0-9][0-9] |' "$refs/forward-prompts.md" | cut -d '|' -f 2 | tr -d ' ')
 expectation_ids=$(grep '^| P[0-9][0-9] |' "$refs/forward-expectations.md" | cut -d '|' -f 2 | tr -d ' ')
 [ "$prompt_ids" = "$expectation_ids" ] || fail "blind prompts and oracle IDs differ"
@@ -100,6 +109,8 @@ grep -Fq 'declara explícitamente que la lectura puede estar desfasada' \
   "$refs/forward-expectations.md" || fail "P04 strict oracle missing"
 grep -Fq 'estado, ownership y siguiente paso' "$refs/forward-expectations.md" ||
   fail "P08 strict oracle missing"
+grep -Fq 'He puesto `@not-done`' "$refs/forward-prompts.md" ||
+  fail "ambiguous not-done scenario missing"
 
 for source_id in CX-live AG-live CX-repo AG-repo CL-live CL-backup
 do

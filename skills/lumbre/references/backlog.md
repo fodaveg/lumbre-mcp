@@ -32,7 +32,9 @@ contenido de las hijas. No borres ni reestructures un hub configurado sin autori
    lista no exista.
 2. Lee íntegramente las tareas que vas a reclasificar, incluidas notas y adjuntos que
    afecten la decisión.
-3. Propón o aplica una taxonomía explícita y conserva ids, contenido y propiedades.
+3. Si la petición es abierta o cambia taxonomía o navegación, muestra primero una vista
+   previa breve. Si enumera movimientos exactos, aplícalos directamente. Conserva ids,
+   contenido y propiedades.
 4. Ordena las operaciones: mover de lista antes de reasignar sección si el movimiento
    limpia esa relación.
 5. Verifica el lote completo y los elementos que debían quedar intactos.

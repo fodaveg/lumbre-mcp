@@ -4,6 +4,9 @@ Este modo enlaza Lumbre con un repositorio. Descubre y lee por completo `AGENTS.
 `CONTRIBUTING`, la documentación de workflow/release y los gates disponibles. Esas
 fuentes vivas mandan; no copies una receta histórica sobre ellas.
 
+Esta extensión no autoriza por sí misma ninguna mutación adicional en Lumbre: el modo
+base y la petición siguen delimitando qué tareas o campos pueden cambiar.
+
 ## Autoridad y candidato
 
 - Declara el rol de la sesión y el ownership antes de escribir.

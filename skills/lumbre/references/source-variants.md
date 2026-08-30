@@ -52,8 +52,8 @@ dependa de instalar también la documentación del repositorio.
 - CL-backup conservaba la versión más extensa, incidencias y reglas operativas eliminadas
   después; se incluyó para no perder información única.
 - Las seis fuentes asumían un planificador y repositorio personales concretos.
-- La skill pública conserva la suma como cinco modos y evita que una consulta cotidiana
-  active por defecto el flujo de desarrollo.
+- La skill pública conserva la suma como tres modos base y dos extensiones, y evita que
+  una consulta cotidiana active por defecto el flujo de desarrollo.
 
 ## V2 — reconocimiento de estado
 

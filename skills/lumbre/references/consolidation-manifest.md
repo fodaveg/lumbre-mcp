@@ -37,7 +37,7 @@ las referencias de modo; `source-variants.md` conserva procedencia no normativa.
 | S09 | `backlog.md` |
 | S10 | `SKILL.md`, `mcp-safe-operations.md` |
 | S11 | `mcp-safe-operations.md` |
-| S12 | `SKILL.md`, `mcp-safe-operations.md`, `read-and-daily.md` |
+| S12 | `SKILL.md`, `mcp-safe-operations.md`, `read.md` |
 | S13 | `mcp-safe-operations.md`, `source-variants.md` (histórico) |
 | S14 | `development.md` |
 | S15 | `development.md` |

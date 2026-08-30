@@ -17,6 +17,10 @@ No le entregues el oráculo, la documentación de optimización ni conclusiones 
 | P10 | «Mueve estas tareas a la lista X y sección Y.» |
 | P11 | «Implementa y prepara el release.» |
 | P12 | «Activa la skill.» |
+| P13 | «Continúa con esto.» |
+| P14 | «Organiza estas tareas.» |
+| P15 | «Prepara el release sin cambiar Lumbre.» |
+| P16 | «He puesto `@not-done`; corrígelo.» |
 
 Para cada ID, registra la respuesta, las referencias cargadas, tools llamadas,
 mutaciones propuestas o ejecutadas y tiempo hasta la primera acción útil. No abras

@@ -9,7 +9,7 @@ este documento no declara terminada la optimización de producto.
 1. Se tomó como única entrada la unión de seis cuerpos divergentes ya inventariada.
 2. Se resolvieron contradicciones mediante las decisiones de producto, sin partir de una
    copia preferida.
-3. Se separó el router corto de cuatro referencias operativas por modo y una referencia
+3. Se separó el router corto de seis referencias operativas por modo y una referencia
    de seguridad para escrituras.
 4. `consolidation-manifest.md` y `source-variants.md` permanecen como evidencia no cargada
    normalmente. Ninguna cláusula se eliminó solo por parecer redundante.
@@ -21,7 +21,7 @@ recetas locales y contradicciones ya resueltas, no la cobertura.
 
 | ID | Disposición final |
 |---|---|
-| S01 | Cinco modos discriminados en `SKILL.md`; desarrollo queda apagado por defecto. |
+| S01 | Tres modos base y dos extensiones en `SKILL.md`; desarrollo queda apagado por defecto. |
 | S02 | Las reglas vivas del repo prevalecen y se descubren antes de operar. |
 | S03 | Lista vacía frente a inexistente se conserva en router, seguridad y backlog. |
 | S04 | Separación de tareas/documentación vive en release; variantes externas son perfil. |
@@ -36,7 +36,7 @@ recetas locales y contradicciones ya resueltas, no la cobertura.
 | S13 | OAuth es normal; API directa queda solo para diagnóstico autorizado y seguro. |
 | S14 | `@acked`→`@wip`→`@done`, un solo estado y tags ortogonales, solo en desarrollo. |
 | S15 | Una creación nace `@acked` únicamente dentro del flujo dev ya activado. |
-| S16 | `@not-done` queda como perfil explícito; fallback usa estados nativos. |
+| S16 | `@not-done` queda como señal exclusivamente humana; fallback usa estados nativos. |
 | S17 | Estado de agente, checkbox, aceptación y deploy se separan. |
 | S18 | Notas y adjuntos se leen antes de editar, delegar o revisar cierre. |
 | S19 | `MAPEO_CAPTURA` exacto se conserva cuando el repo exige el guardarraíl. |
@@ -68,13 +68,13 @@ matriz para poder comprobar una instalación aislada.
 | Checkpoints útiles para TDAH/TEA sin ceremonia universal | Aceptada | Se exigen en proporción a riesgo, concurrencia o reanudación. |
 | Perfil dev apagado por defecto | Aceptada | Solo petición, continuidad de tarea o regla viva del repo lo activan. |
 | Límites personales como perfil | Aceptada | Dos tareas/seis horas y tamaños de lote no son universales. |
-| Medir doce escenarios | Aceptada parcialmente | La batería y criterios quedan definidos y revisados estáticamente; falta piloto real. |
+| Medir dieciséis escenarios | Aceptada parcialmente | La batería y criterios quedan definidos y revisados estáticamente; falta piloto real. |
 | Piloto real durante dos semanas | Diferida | Requiere uso longitudinal; no puede simularse con validación local. |
 
 No se rechazó ninguna recomendación. La parte diferida no bloquea probar la candidata,
 pero sí impide declarar terminada la optimización de producto.
 
-## Batería de doce escenarios
+## Batería de dieciséis escenarios
 
 El arnés separa físicamente entradas y resultados:
 
@@ -83,10 +83,11 @@ El arnés separa físicamente entradas y resultados:
 - `skills/lumbre/references/forward-expectations.md` contiene modos, contratos y
   negativos. El coordinador lo abre únicamente después de recoger los resultados.
 
-La batería mantiene doce casos: cuatro de lectura, cuatro combinados de día a día y
-desarrollo, y cuatro combinados de backlog y release. P02 prueba de forma explícita que
+La batería mantiene dieciséis casos: cuatro de lectura, seis combinados de día a día y
+desarrollo, y seis combinados de backlog y release. P02 prueba de forma explícita que
 resumir una tarea ya marcada `@wip` sigue siendo lectura, no carga desarrollo y no muta.
-El validador comprueba que prompts y oráculo tienen los mismos 12 IDs y que ningún
+P13–P16 añaden ambigüedad, reorganización abierta, release sin mutación y reapertura de
+`@not-done`. El validador comprueba que prompts y oráculo tienen los mismos 16 IDs y que ningún
 contrato observable aparece en el fichero ciego.
 
 Métricas del piloto: tiempo hasta la primera acción útil, referencias/líneas cargadas,

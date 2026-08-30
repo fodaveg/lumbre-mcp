@@ -3,7 +3,8 @@ name: lumbre
 description: >-
   Consulta y gestiona tareas, listas y backlog en Lumbre mediante su MCP, incluido
   un flujo opcional para desarrollo y release. Usar para leer o cambiar datos de
-  Lumbre; los estados @acked/@wip/@done solo se activan en el perfil de desarrollo.
+  Lumbre; los estados @acked/@wip/@done/@not-done solo se activan con la extensión
+  de desarrollo.
 ---
 
 # Lumbre
@@ -12,15 +13,19 @@ Skill pública y global para operar Lumbre mediante el MCP configurado por el
 cliente. Selecciona el modo menos mutante que satisfaga la petición. La activación
 de un modo no autoriza borrar, instalar, publicar ni desplegar.
 
-## Elegir el modo
+## Elegir modo base y extensiones
 
-- **Lectura/consulta**: buscar, listar, resumir o inspeccionar. Es estrictamente no
-  mutante. Lee [references/read-and-daily.md](references/read-and-daily.md).
-- **Día a día**: crear, editar, fechar, priorizar, completar o cancelar tareas con
-  propiedades nativas. Lee
-  [references/read-and-daily.md](references/read-and-daily.md).
+Elige primero el modo base menos mutante que satisfaga la petición:
+
+- **Lectura**: buscar, listar, resumir o inspeccionar. Es estrictamente no mutante.
+  Lee [references/read.md](references/read.md).
+- **Gestión cotidiana**: crear, editar, fechar, priorizar, completar o cancelar
+  tareas con propiedades nativas. Lee [references/daily.md](references/daily.md).
 - **Triaje/backlog**: clasificar, agrupar, mover o reorganizar tareas, listas y
   secciones. Lee [references/backlog.md](references/backlog.md).
+
+Añade solo las extensiones necesarias:
+
 - **Desarrollo**: gestionar trabajo de implementación con estados de agente, lotes,
   evidencia y checkpoints. Está apagado por defecto; se activa por petición
   explícita, al continuar o gestionar trabajo de una tarea ya adherida al flujo, o
@@ -30,9 +35,31 @@ de un modo no autoriza borrar, instalar, publicar ni desplegar.
   despliegue. Lee primero las reglas vivas del repo y después
   [references/project-release.md](references/project-release.md).
 
-Una petición puede activar varios modos. Consultar el plan de hoy o inspeccionar una
-tarea con `@acked`, `@wip` o `@done` no activa desarrollo; implementar y preparar un
-release sí puede activar desarrollo y proyecto/release.
+Una petición tiene un modo base y puede añadir ambas extensiones. Mover una tarea de
+desarrollo, por ejemplo, usa triaje como base y desarrollo como extensión. Consultar
+una tarea con estado no activa desarrollo; implementar y preparar un release puede
+añadir desarrollo y proyecto/release a la gestión cotidiana.
+
+Ejemplos rápidos:
+
+- «¿Qué tengo hoy?» → lectura.
+- «Aplaza esta tarea al lunes» → gestión cotidiana.
+- «Ordena este backlog» → triaje, con vista previa si hay que inferir taxonomía.
+- «Empieza esta tarea de código» → gestión cotidiana + desarrollo.
+- «Prepara el release sin cambiar Lumbre» → lectura + proyecto/release.
+
+## Límite de mutación
+
+| Selección | Puede mutar |
+|---|---|
+| Lectura | Nada. |
+| Gestión cotidiana | Solo los campos de las tareas solicitadas. |
+| Triaje/backlog | Solo el conjunto y la estructura expresamente indicados. |
+| + Desarrollo | Solo estados y checkpoints del flujo cuando esté activada. |
+| + Proyecto/release | No concede por sí misma mutaciones adicionales en Lumbre. |
+
+Si la petición enumera cambios exactos, aplícalos sin ceremonia adicional. Si exige
+inferir alcance o taxonomía, muestra primero una propuesta breve.
 
 ## Reglas compartidas
 

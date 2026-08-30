@@ -1,29 +1,30 @@
 # Flujo opcional de desarrollo
 
-Este perfil usa Lumbre como backlog operativo de desarrollo. Está apagado por defecto.
+Esta extensión usa Lumbre como backlog operativo de desarrollo. Está apagada por defecto.
 Actívalo solo por petición explícita, al continuar o gestionar el trabajo de una tarea
 ya adherida al flujo, o por una regla vigente del repositorio. Leer, resumir o
 inspeccionar una tarea sigue en modo lectura aunque ya contenga un estado de desarrollo;
-una lectura incidental nunca reconoce tareas ni carga este perfil.
+una lectura incidental nunca reconoce tareas ni carga esta extensión.
 
 ## Estado de agente
 
-El flujo público es `@acked` → `@wip` → `@done`:
+La máquina de estados pública es:
 
-- `@acked`: la tarea fue asumida o triada conscientemente dentro del perfil activo;
-- `@wip`: empezó el trabajo o se delegó una parte de la implementación;
-- `@done`: la parte del agente está implementada, revisada y verificada según el
-  contrato del proyecto.
+- asumir o aceptar trabajo → `@acked`;
+- empezar o delegar implementación → `@wip`;
+- parte del agente revisada y verificada → `@done`;
+- devolución humana → `@not-done`;
+- reabrir una devolución → `@acked` si queda pendiente o `@wip` si se corrige ya.
 
 Mantén un solo estado de esa familia al transicionar y conserva tags ortogonales de
 lote o backlog. El checkbox y la aceptación humana son independientes. El despliegue
 también lo es, salvo que las reglas del proyecto lo incluyan expresamente en `@done`.
 
 Una tarea creada durante un flujo de desarrollo activo puede nacer `@acked`; una tarea
-cotidiana no. `@not-done` solo existe cuando el repositorio o perfil lo define como señal
-humana de devolución. En ese caso, lee nota y adjuntos, retíralo al reabrir, pasa a
-`@wip` si la corrección empieza o a `@acked` si queda pendiente, y no cierres hasta
-resolver el feedback. Sin ese perfil, distingue cancelada, bloqueada, aplazada y backlog
+cotidiana no. El agente puede poner `@acked`, `@wip` y `@done`; `@not-done` es
+exclusivamente una señal humana. Al recibirla, lee nota y adjuntos, retírala al reabrir
+y no cierres hasta resolver el feedback. El agente nunca completa el checkbox en nombre
+del usuario. Sin esta extensión, distingue cancelada, bloqueada, aplazada y backlog
 mediante las superficies nativas.
 
 ## Lotes y checkpoints
@@ -35,8 +36,9 @@ mediante las superficies nativas.
 - Checkpoints reproducibles incluyen candidato/branch, árbol, validaciones, bloqueos y
   siguiente acción en proporción al riesgo. Ayudan a reanudar sin imponer ceremonia a
   todo trabajo.
-- Al iniciar y delegar trabajo, deja visible un checkpoint proporcional con estado,
-  ownership y siguiente paso. En una tarea trivial basta una línea; no exige un dossier.
+- Al iniciar y delegar trabajo, deja en la conversación un checkpoint proporcional con
+  estado, ownership y siguiente paso. En una tarea trivial basta una línea. Escríbelo
+  también en las notas solo si lo pide el usuario o el contrato vigente del repositorio.
 - Límites como dos tareas, seis horas o lotes de tres a seis son perfiles opcionales.
   Un presupuesto explícito del usuario prevalece.
 
