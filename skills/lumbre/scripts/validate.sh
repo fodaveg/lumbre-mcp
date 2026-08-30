@@ -41,8 +41,6 @@ done
   fail "missing historical pilot preregistration"
 [ -f "$refs/forward-pilot-next-preregistration.json" ] ||
   fail "missing next pilot preregistration"
-[ -f "$refs/forward-pilot-history.bundle" ] ||
-  fail "missing self-contained pilot git bundle"
 if grep -Fq 'source-variants.md' "$entry"; then
   fail "historical variants must not be loaded by the operational router"
 fi
@@ -154,6 +152,8 @@ history_tmp=
 next_base=$(sed -n 's/.*"baseSha": "\([0-9a-f]*\)".*/\1/p' \
   "$refs/forward-pilot-next-preregistration.json")
 if ! git -C "$repo_root" cat-file -e "$next_base^{commit}" >/dev/null 2>&1; then
+  [ -f "$refs/forward-pilot-history.bundle" ] ||
+    fail "missing self-contained pilot git bundle"
   history_tmp=$(mktemp -d)
   trap 'rm -rf "$history_tmp"' EXIT HUP INT TERM
   git clone -q --bare "$refs/forward-pilot-history.bundle" "$history_tmp/repo.git" ||
@@ -171,6 +171,7 @@ if [ "$mode" = full ]; then
   node "$skill_dir/scripts/verify-forward-pilot.mjs" --integrity-only
 fi
 node "$skill_dir/scripts/test-forward-pilot-verifier.mjs"
+node "$skill_dir/scripts/run-forward-pilot.mjs" --check-candidate
 
 for source_id in CX-live AG-live CX-repo AG-repo CL-live CL-backup
 do

@@ -47,11 +47,12 @@ const criteriaFreeze = {
   ...preregistration,
   preregistrationSha256: sha256(preregistrationSource),
 };
-const outputPath = process.argv[2];
+const checkCandidateOnly = process.argv[2] === "--check-candidate";
+const outputPath = checkCandidateOnly ? undefined : process.argv[2];
 const model = process.env.LUMBRE_PILOT_MODEL ?? "gpt-5.4";
 
-if (!outputPath) {
-  console.error("usage: run-forward-pilot.mjs <output.json>");
+if (!outputPath && !checkCandidateOnly) {
+  console.error("usage: run-forward-pilot.mjs <output.json>|--check-candidate");
   process.exit(2);
 }
 
@@ -98,24 +99,54 @@ function hashCandidateFiles(candidateSha, files) {
   );
 }
 
+function resolvePreregisteredCandidate() {
+  const head = runText("git", ["rev-parse", "HEAD"]);
+  const preregistrationHash = sha256(preregistrationSource);
+  const history = runText("git", ["rev-list", "--all", "--parents"]);
+  const candidates = history
+    .split("\n")
+    .map((line) => line.split(" "))
+    .filter((parts) => parts[1] === preregistration.baseSha)
+    .map(([candidate]) => candidate)
+    .filter((candidate) => {
+      const source = spawnSync(
+        "git",
+        [
+          "show",
+          `${candidate}:skills/lumbre/references/forward-pilot-next-preregistration.json`,
+        ],
+        { cwd: repoRoot, encoding: "utf8" },
+      );
+      return source.status === 0 && sha256(source.stdout) === preregistrationHash;
+    });
+  if (candidates.length !== 1) {
+    throw new Error("cannot resolve a unique preregistered candidate");
+  }
+  return { candidateSha: candidates[0], headSha: head };
+}
+
+const { candidateSha, headSha } = resolvePreregisteredCandidate();
+
 const captureContext = {
   codexVersion: runText("codex", ["--version"]),
   model,
-  candidateParentSha: runText("git", ["rev-parse", "HEAD"]),
+  candidateParentSha: candidateSha,
 };
 assertCriteriaFreeze(
   skillDir,
   preregistration,
   captureContext.candidateParentSha,
 );
-const preflight = spawnSync(join(scriptDir, "validate.sh"), ["--preflight"], {
-  cwd: repoRoot,
-  encoding: "utf8",
-});
-if (preflight.status !== 0) {
-  throw new Error(
-    `pilot preflight failed: ${preflight.stderr || preflight.stdout}`,
-  );
+if (!checkCandidateOnly) {
+  const preflight = spawnSync(join(scriptDir, "validate.sh"), ["--preflight"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (preflight.status !== 0) {
+    throw new Error(
+      `pilot preflight failed: ${preflight.stderr || preflight.stdout}`,
+    );
+  }
 }
 const candidateCriteriaHashes = hashCandidateFiles(
   captureContext.candidateParentSha,
@@ -133,6 +164,10 @@ const candidatePreregistrationHash = hashCandidateFiles(
 )["references/forward-pilot-next-preregistration.json"];
 if (candidatePreregistrationHash !== criteriaFreeze.preregistrationSha256) {
   throw new Error("preregistration differs from snapshotted candidate");
+}
+if (checkCandidateOnly) {
+  console.log(`forward pilot candidate: ok (${candidateSha})`);
+  process.exit(0);
 }
 
 const promptSource = readFileSync(promptsPath, "utf8");
@@ -277,7 +312,9 @@ const startedAt = process.hrtime.bigint();
   }
   if (
     runText("codex", ["--version"]) !== captureContext.codexVersion ||
-    runText("git", ["rev-parse", "HEAD"]) !== captureContext.candidateParentSha
+    runText("git", ["rev-parse", "HEAD"]) !== headSha ||
+    resolvePreregisteredCandidate().candidateSha !==
+      captureContext.candidateParentSha
   ) {
     throw new Error("Codex version or candidate HEAD changed during evaluation");
   }
