@@ -93,7 +93,9 @@ export function collectRefIds(texts) {
  *
  * - Sin referencias → cero llamadas (`emptyRefResolution`).
  * - Con referencias a tareas → UNA `findTasksByIds` con todos los ids uuid de
- *   golpe (hasta `MAX_REF_IDS`).
+ *   golpe (hasta `MAX_REF_IDS`). Si la lectura principal activó
+ *   `includeArchived`, `opts` lo propaga para que una referencia archivada no
+ *   se declare falsamente rota.
  * - Con referencias a listas → UNA `listLists` (trae TODAS las listas vivas del
  *   usuario, así que resuelve cualquier número de referencias a lista).
  *
@@ -102,7 +104,7 @@ export function collectRefIds(texts) {
  * una nota tuviera un enlace. Los ids de esa parte quedan sin comprobar y se
  * pintan «sin resolver», que es la única lectura honesta (nunca «rota»).
  */
-export async function resolveRefs(config, texts) {
+export async function resolveRefs(config, texts, opts = {}) {
     const { taskIds, listIds } = collectRefIds(texts);
     const resolution = emptyRefResolution();
     resolution.refTaskIds = taskIds;
@@ -115,7 +117,9 @@ export async function resolveRefs(config, texts) {
         const askable = taskIds.filter((id) => UUID_RE.test(id)).slice(0, MAX_REF_IDS);
         if (askable.length > 0) {
             try {
-                resolution.tasks = await findTasksByIds(config, askable);
+                resolution.tasks = await findTasksByIds(config, askable, {
+                    includeArchived: opts.includeArchived
+                });
                 for (const id of askable)
                     resolution.checkedTasks.add(id);
             }

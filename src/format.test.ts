@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LumbreTask } from './lumbre-client.js';
-import { formatTaskList } from './format.js';
+import { formatTaskFull, formatTaskList } from './format.js';
 
 /**
  * `creada:<timestamp>` en `formatTask` (tarea de perf, 2026-08-25): antes iba
@@ -87,5 +87,31 @@ describe('formatTaskList — `creada:` solo cuando hay títulos duplicados en el
 		const tasks = [task({ id: 'a', content: 'Tarea suelta' })];
 		const output = formatTaskList(tasks, 'today', { notesMode: 'none' });
 		expect(output).not.toContain('()');
+	});
+});
+
+describe('formato de tareas archivadas', () => {
+	it('el listado distingue una archivada de una viva con la fecha de archivo', () => {
+		const output = formatTaskList(
+			[
+				task({ id: 'viva', content: 'Viva', archivedAt: null }),
+				task({
+					id: 'archivada',
+					content: 'Archivada',
+					archivedAt: '2026-08-27T10:15:00.000Z'
+				})
+			],
+			'all',
+			{ notesMode: 'none' }
+		);
+		expect(output).toContain('Archivada (archivada:2026-08-27)');
+		expect(output).not.toContain('Viva (archivada:');
+	});
+
+	it('get_task informa explícitamente si la tarea está archivada', () => {
+		expect(formatTaskFull(task({ archivedAt: '2026-08-27T10:15:00.000Z' }))).toContain(
+			'- archivada: 2026-08-27T10:15:00.000Z'
+		);
+		expect(formatTaskFull(task({ archivedAt: null }))).toContain('- archivada: no');
 	});
 });

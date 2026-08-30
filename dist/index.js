@@ -661,7 +661,8 @@ export function createServer(config, opts = {}) {
         description: 'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
             'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
             'vacío igual que una lista vacía existente — usa list_lists para distinguir. `section` ' +
-            'agrupa por sección dentro de `list`. `notes` controla las notas de cada tarea (default ' +
+            'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
+            '`notes` controla las notas de cada tarea (default ' +
             '"auto": íntegra si @done/#done, si cambió desde la última vez que la viste, o si se tocó ' +
             'hace poco (`notesRecentHours`), si no un marcador ✎N con su tamaño y fecha — NUNCA un ' +
             'texto recortado a medias; la cabecera del listado detalla el criterio y te avisa de ' +
@@ -690,6 +691,11 @@ export function createServer(config, opts = {}) {
                 .describe('Nombre (case-insensitive) de una sección dentro de `list` a filtrar (Fase B, ' +
                 'listas=proyectos); combinado con `list`, solo casa una sección de ESA lista'),
             includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
+            includeArchived: z
+                .boolean()
+                .optional()
+                .describe('Incluir tareas archivadas; default false. En listados sigue combinándose con ' +
+                'includeDone y el resto de filtros'),
             notes: z
                 .enum(['auto', 'none', 'preview', 'full'])
                 .optional()
@@ -737,7 +743,9 @@ export function createServer(config, opts = {}) {
                 const tasks = await listTasks(config, input);
                 taskCache.setAll(tasks);
                 const autoRender = computeNotesSinceRender(tasks, since);
-                const refs = await resolveRefs(config, refTexts(tasks, 'auto', autoRender));
+                const refs = await resolveRefs(config, refTexts(tasks, 'auto', autoRender), {
+                    includeArchived: input.includeArchived
+                });
                 return textResult(formatTaskList(tasks, input.scope ?? 'today', {
                     notesMode: 'auto',
                     autoRender,
@@ -752,12 +760,16 @@ export function createServer(config, opts = {}) {
                 // igual, solo que sin ahorrar.
                 const tasks = await listTasks(config, { ...input, notesQuery: 'none' });
                 taskCache.setAll(tasks);
-                const refs = await resolveRefs(config, refTexts(tasks, notesMode));
+                const refs = await resolveRefs(config, refTexts(tasks, notesMode), {
+                    includeArchived: input.includeArchived
+                });
                 return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
             }
             if (notesMode === 'auto') {
                 const { list, autoRender } = await listTasksAutoTwoPhase(input);
-                const refs = await resolveRefs(config, refTexts(list, notesMode, autoRender));
+                const refs = await resolveRefs(config, refTexts(list, notesMode, autoRender), {
+                    includeArchived: input.includeArchived
+                });
                 return textResult(formatTaskList(list, input.scope ?? 'today', {
                     notesMode,
                     autoRender,
@@ -779,7 +791,9 @@ export function createServer(config, opts = {}) {
                     .filter(hasNotes)
                     .map((t) => ({ taskId: t.id, notes: t.notes, notesUpdatedAt: t.notesUpdatedAt })), notesSeenStore);
             }
-            const refs = await resolveRefs(config, refTexts(tasks, notesMode));
+            const refs = await resolveRefs(config, refTexts(tasks, notesMode), {
+                includeArchived: input.includeArchived
+            });
             return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
         }
         catch (err) {
@@ -830,7 +844,10 @@ export function createServer(config, opts = {}) {
         let fullTasksById = new Map();
         if (fullIds.length > 0) {
             try {
-                fullTasksById = await findTasksByIds(config, fullIds, { notesQuery: 'full' });
+                fullTasksById = await findTasksByIds(config, fullIds, {
+                    notesQuery: 'full',
+                    includeArchived: input.includeArchived
+                });
             }
             catch {
                 // La fase 2 falló DEL TODO (red, 5xx…): `fullTasksById` se queda
@@ -876,13 +893,20 @@ export function createServer(config, opts = {}) {
     const getTaskTool = server.registerTool('get_task', {
         description: 'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
             'lista/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
-            'obtener el id de una subtarea. Error si el taskId no existe.',
+            'obtener el id de una subtarea. `includeArchived` permite recuperarla si está archivada. ' +
+            'Error si el taskId no existe.',
         inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)')
+            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+            includeArchived: z
+                .boolean()
+                .optional()
+                .describe('Permitir recuperar la tarea por id aunque esté archivada; default false')
         }
     }, async (input) => {
         try {
-            const task = await findTaskById(config, input.taskId);
+            const task = await findTaskById(config, input.taskId, {
+                includeArchived: input.includeArchived
+            });
             if (!task)
                 return errorResult(taskNotFoundError(input.taskId));
             taskCache.set(task);
@@ -896,11 +920,7 @@ export function createServer(config, opts = {}) {
             // Referencias EN VIVO del texto, la nota (que aquí sale siempre íntegra)
             // y las subtareas — ver `refs.ts`. Cero peticiones extra si no hay
             // ninguna referencia, que es el caso normal.
-            const refs = await resolveRefs(config, [
-                task.content,
-                task.notes,
-                ...(task.subtasks ?? []).map((s) => s.content)
-            ]);
+            const refs = await resolveRefs(config, [task.content, task.notes, ...(task.subtasks ?? []).map((s) => s.content)], { includeArchived: input.includeArchived });
             return textResult(formatTaskFull(task, refs));
         }
         catch (err) {

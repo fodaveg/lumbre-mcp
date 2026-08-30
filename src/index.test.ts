@@ -129,6 +129,17 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
+	it('list_tasks/get_task exponen `includeArchived` como boolean opcional', () => {
+		for (const name of ['list_tasks', 'get_task']) {
+			const schema = tools.find((t) => t.name === name)!.inputSchema as {
+				properties?: Record<string, { type?: string }>;
+				required?: string[];
+			};
+			expect(schema.properties?.includeArchived).toMatchObject({ type: 'boolean' });
+			expect(schema.required ?? []).not.toContain('includeArchived');
+		}
+	});
+
 	it('techo de bytes de las 19 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
@@ -245,6 +256,170 @@ describe('tools/list — superficie completa', () => {
 			| { items?: { properties?: { op?: { enum?: string[] } } } }
 			| undefined;
 		expect(opsSchema?.items?.properties?.op?.enum?.sort()).toEqual(['add', 'delete', 'update']);
+	});
+});
+
+describe('includeArchived — wiring de las tools al contrato HTTP', () => {
+	const TASK_ID = '11111111-1111-1111-1111-111111111111';
+	const REFERENCED_ID = '22222222-2222-2222-2222-222222222222';
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'include-archived-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('list_tasks reenvía includeArchived=true en un listado normal', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse([]));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'list_tasks',
+			arguments: { scope: 'all', includeDone: true, includeArchived: true, notes: 'none' }
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls[0][0]).toBe(
+			'https://lumbre.test/api/tasks?scope=all&includeDone=true&includeArchived=true&notes=none'
+		);
+	});
+
+	it('get_task reenvía includeArchived=true junto al id', async () => {
+		const task = {
+			id: TASK_ID,
+			content: 'tarea archivada',
+			notes: null,
+			done: true,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: '2026-08-27T00:00:00.000Z',
+			archivedAt: '2026-08-27T10:15:00.000Z',
+			parentId: null
+		};
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse([task]));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'get_task',
+			arguments: { taskId: TASK_ID, includeArchived: true }
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls[0][0]).toBe(
+			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`
+		);
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		expect(first.type === 'text' ? first.text : '').toContain(
+			'- archivada: 2026-08-27T10:15:00.000Z'
+		);
+	});
+
+	it('leer una archivada no la cuela en la caché que autoriza mutaciones', async () => {
+		const archivedTask = {
+			id: TASK_ID,
+			content: 'tarea archivada',
+			notes: null,
+			done: true,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: '2026-08-27T00:00:00.000Z',
+			archivedAt: '2026-08-27T10:15:00.000Z',
+			parentId: null
+		};
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const value = String(url);
+			if (value.includes('includeArchived=true')) return jsonResponse([archivedTask]);
+			if (value.includes('/api/tasks?id=')) return jsonResponse([]);
+			if (value.includes('/api/mutations')) throw new Error('no debe mutar una archivada por caché');
+			throw new Error(`fetch no mockeado: ${value}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		await client.callTool({
+			name: 'get_task',
+			arguments: { taskId: TASK_ID, includeArchived: true }
+		});
+		const mutation = await client.callTool({
+			name: 'complete_task',
+			arguments: { taskId: TASK_ID }
+		});
+
+		expect(mutation.isError).toBe(true);
+		expect(fetchSpy.mock.calls.map((call) => String(call[0]))).toEqual([
+			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`,
+			`https://lumbre.test/api/tasks?id=${TASK_ID}`
+		]);
+	});
+
+	it('una archivada que referencia otra archivada resuelve la referencia viva, no como ROTA', async () => {
+		const source = {
+			id: TASK_ID,
+			content: `Depende de [[task:${REFERENCED_ID}|Etiqueta vieja]]`,
+			notes: null,
+			done: true,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: '2026-08-27T00:00:00.000Z',
+			archivedAt: '2026-08-27T10:15:00.000Z',
+			parentId: null
+		};
+		const referenced = {
+			...source,
+			id: REFERENCED_ID,
+			content: 'Dependencia archivada ACTUAL'
+		};
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const value = String(url);
+			if (value.includes(`/api/tasks?id=${TASK_ID}`)) return jsonResponse([source]);
+			if (value.includes(`/api/tasks?ids=${REFERENCED_ID}`)) return jsonResponse([referenced]);
+			throw new Error(`fetch no mockeado: ${value}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'get_task',
+			arguments: { taskId: TASK_ID, includeArchived: true }
+		});
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		const text = first.type === 'text' ? first.text ?? '' : '';
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy.mock.calls.map((call) => String(call[0]))).toEqual([
+			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`,
+			`https://lumbre.test/api/tasks?ids=${REFERENCED_ID}&includeArchived=true`
+		]);
+		expect(text).toContain(`→tarea[hecha] "Dependencia archivada ACTUAL" id:${REFERENCED_ID}`);
+		expect(text).not.toContain('→tarea[ROTA]');
 	});
 });
 
@@ -1248,7 +1423,10 @@ describe('list_tasks({notes:"auto"}) — notas en dos fases (perf, 2026-08-25)',
 		});
 		const client = await buildClient(fetchSpy);
 
-		const result = await client.callTool({ name: 'list_tasks', arguments: {} });
+		const result = await client.callTool({
+			name: 'list_tasks',
+			arguments: { includeArchived: true }
+		});
 		const text = textOf(result as { content: { type: string; text?: string }[] });
 
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -1256,9 +1434,11 @@ describe('list_tasks({notes:"auto"}) — notas en dos fases (perf, 2026-08-25)',
 		const phase1Url = urls.find((u) => !u.includes('ids='))!;
 		const phase2Url = urls.find((u) => u.includes('ids='))!;
 		expect(phase1Url).toContain('notes=length');
+		expect(phase1Url).toContain('includeArchived=true');
 		expect(phase2Url).toContain(`ids=${DONE_ID}`);
 		expect(phase2Url).not.toContain(MARKER_ID); // solo el id íntegro, NO el del marcador
 		expect(phase2Url).toContain('notes=full');
+		expect(phase2Url).toContain('includeArchived=true');
 
 		expect(text).toContain(FULL_TEXT.trim());
 		expect(text).toContain(`✎${MARKER_NOTE_LEN}`);

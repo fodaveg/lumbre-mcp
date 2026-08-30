@@ -4,6 +4,7 @@ import {
 	ATTACHMENT_CONTENT_TYPE_HEADER,
 	buildBatchFromOps,
 	collectExistenceCheckIds,
+	findTaskById,
 	findTasksByIds,
 	listLists,
 	listTasks,
@@ -177,6 +178,17 @@ describe('findTasksByIds', () => {
 		expect(url).toBe('https://lumbre.test/api/tasks?ids=a&notes=full');
 	});
 
+	it('reenvía includeArchived=true (no 1) junto a `notes=` en la fase 2', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await findTasksByIds(config, ['a'], { notesQuery: 'full', includeArchived: true });
+		const [url] = fetchSpy.mock.calls[0] as [string];
+		expect(url).toBe('https://lumbre.test/api/tasks?ids=a&notes=full&includeArchived=true');
+		expect(url).not.toContain('includeArchived=1');
+	});
+
 	it('trocea por encima de MAX_IDS_PER_REQUEST (200): dos peticiones, resultado fusionado', async () => {
 		const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`);
 		const fetchSpy = vi.fn(async (url: string | URL) => {
@@ -265,6 +277,39 @@ describe('listTasks — scope upcoming', () => {
 
 		await listTasks(config, { scope: 'upcoming' });
 		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?scope=upcoming');
+	});
+});
+
+describe('includeArchived — contrato GET /api/tasks', () => {
+	it('listTasks reenvía el literal includeArchived=true (no 1) y conserva los demás filtros', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		await listTasks(config, { scope: 'all', includeDone: true, includeArchived: true });
+		const [url] = fetchSpy.mock.calls[0] as [string];
+		expect(url).toBe(
+			'https://lumbre.test/api/tasks?scope=all&includeDone=true&includeArchived=true'
+		);
+		expect(url).not.toContain('includeArchived=1');
+	});
+
+	it('findTaskById permite recuperar una archivada solo cuando se solicita y usa `true`', async () => {
+		const fetchSpy = vi.fn().mockImplementation(() =>
+			Promise.resolve(
+				new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+			)
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		await findTaskById(config, 'task-1');
+		await findTaskById(config, 'task-1', { includeArchived: true });
+
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?id=task-1');
+		expect(fetchSpy.mock.calls[1][0]).toBe(
+			'https://lumbre.test/api/tasks?id=task-1&includeArchived=true'
+		);
 	});
 });
 

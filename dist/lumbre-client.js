@@ -73,6 +73,8 @@ export async function listTasks(config, input) {
         params.set('section', input.section);
     if (input.includeDone)
         params.set('includeDone', 'true');
+    if (input.includeArchived)
+        params.set('includeArchived', 'true');
     if (input.limit)
         params.set('limit', String(input.limit));
     if (input.notesQuery)
@@ -114,8 +116,9 @@ export async function listLists(config) {
  *   exponen — precondición para poder comprobar la existencia de una
  *   subtarea antes de completarla (ver `complete_subtask` en `index.ts`).
  *
- * Tareas ARCHIVADAS siguen sin aparecer (mismo criterio que antes, heredado
- * del endpoint).
+ * `opts.includeArchived` reenvía `includeArchived=true`, la única excepción
+ * a los filtros que normalmente ignora el lookup por id. Sin indicarlo, las
+ * archivadas siguen sin aparecer (comportamiento histórico).
  *
  * La usan tanto `get_task` (para devolver la tarea completa, con sus
  * subtareas si las tiene) como el chequeo de existencia de las tools de
@@ -123,8 +126,10 @@ export async function listLists(config) {
  * transcrito (bug real, ver la tarea que motiva este fichero) hoy se
  * encolaba igual y se perdía en silencio al drenar.
  */
-export async function findTaskById(config, taskId) {
+export async function findTaskById(config, taskId, opts = {}) {
     const params = new URLSearchParams({ id: taskId });
+    if (opts.includeArchived)
+        params.set('includeArchived', 'true');
     const body = await request(config, `/api/tasks?${params.toString()}`);
     if (!Array.isArray(body)) {
         throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?id=.');
@@ -153,7 +158,9 @@ const MAX_IDS_PER_REQUEST = 200;
  * `notesQuery` (mismo significado que `ListTasksInput.notesQuery`): sin
  * indicar, el servidor sirve notas completas (comportamiento de siempre) —
  * la fase 2 de `list_tasks` lo manda explícito (`'full'`) por claridad, pese
- * a que ya sea el default del servidor.
+ * a que ya sea el default del servidor. `includeArchived` se usa en esa misma
+ * fase cuando el listado inicial incluyó archivadas: sin propagarlo, una nota
+ * de una tarea archivada desaparecería entre `notes=length` y `notes=full`.
  */
 export async function findTasksByIds(config, ids, opts = {}) {
     if (ids.length === 0)
@@ -164,6 +171,8 @@ export async function findTasksByIds(config, ids, opts = {}) {
         const params = new URLSearchParams({ ids: chunk.join(',') });
         if (opts.notesQuery)
             params.set('notes', opts.notesQuery);
+        if (opts.includeArchived)
+            params.set('includeArchived', 'true');
         const body = await request(config, `/api/tasks?${params.toString()}`);
         if (!Array.isArray(body)) {
             throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?ids=.');
@@ -184,16 +193,15 @@ export async function findTasksByIds(config, ids, opts = {}) {
  * cae exactamente por esta misma rama, y "no existe" sería falso en ese
  * caso. Antes decía justo eso y empujaba a la hipótesis equivocada
  * ("¿se transcribió mal?"): dos sesiones dieron por hecho que unas tareas
- * NUNCA habían existido, cuando estaban archivadas. `includeArchived` existe
- * en el servidor de Lumbre pero no está desplegado todavía — no se expone
- * aquí (lote posterior); este mensaje solo deja de mentir sobre lo que ya
- * sabe.
+ * NUNCA habían existido, cuando estaban archivadas. `includeArchived` ya se
+ * puede pedir en `list_tasks`/`get_task`; el mensaje propone ese siguiente
+ * paso sin afirmar que el id sea inexistente.
  */
 export function taskNotFoundError(taskId) {
     return new Error(`El id ${taskId} no está entre las tareas (ni subtareas) que devuelve el servidor para este ` +
-        'usuario. Puede que se transcribiera mal (resuélvelo de nuevo con list_tasks, o con get_task ' +
-        'de la tarea padre si es una subtarea), pero también puede estar ARCHIVADA: el listado no ' +
-        'incluye archivadas aunque se pida includeDone. No se ha encolado ninguna mutación.');
+        'usuario. Puede que se transcribiera mal (resuélvelo de nuevo con list_tasks), que sea una ' +
+        'subtarea (usa get_task sobre la tarea padre) o que esté ARCHIVADA: reintenta list_tasks/' +
+        'get_task con includeArchived:true. No se ha encolado ninguna mutación.');
 }
 /** Error uniforme cuando `taskId` SÍ existe pero es una subtarea y la tool no
  *  aplica ahí — ver `assertTaskUsable`. */

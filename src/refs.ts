@@ -76,7 +76,7 @@ export interface RefIds {
  * superficies.
  */
 export interface RefResolution {
-	/** Tareas vivas resueltas, por id. */
+	/** Tareas resueltas por id; puede incluir archivadas si se solicitaron. */
 	tasks: Map<string, LumbreTask>;
 	/** Nombre ACTUAL de cada lista viva, por id. */
 	lists: Map<string, string>;
@@ -127,7 +127,9 @@ export function collectRefIds(texts: (string | null | undefined)[]): RefIds {
  *
  * - Sin referencias → cero llamadas (`emptyRefResolution`).
  * - Con referencias a tareas → UNA `findTasksByIds` con todos los ids uuid de
- *   golpe (hasta `MAX_REF_IDS`).
+ *   golpe (hasta `MAX_REF_IDS`). Si la lectura principal activó
+ *   `includeArchived`, `opts` lo propaga para que una referencia archivada no
+ *   se declare falsamente rota.
  * - Con referencias a listas → UNA `listLists` (trae TODAS las listas vivas del
  *   usuario, así que resuelve cualquier número de referencias a lista).
  *
@@ -138,7 +140,8 @@ export function collectRefIds(texts: (string | null | undefined)[]): RefIds {
  */
 export async function resolveRefs(
 	config: LumbreConfig,
-	texts: (string | null | undefined)[]
+	texts: (string | null | undefined)[],
+	opts: { includeArchived?: boolean } = {}
 ): Promise<RefResolution> {
 	const { taskIds, listIds } = collectRefIds(texts);
 	const resolution = emptyRefResolution();
@@ -152,7 +155,9 @@ export async function resolveRefs(
 		const askable = taskIds.filter((id) => UUID_RE.test(id)).slice(0, MAX_REF_IDS);
 		if (askable.length > 0) {
 			try {
-				resolution.tasks = await findTasksByIds(config, askable);
+				resolution.tasks = await findTasksByIds(config, askable, {
+					includeArchived: opts.includeArchived
+				});
 				for (const id of askable) resolution.checkedTasks.add(id);
 			} catch {
 				// Best-effort: sin comprobar → «sin resolver», nunca «rota».

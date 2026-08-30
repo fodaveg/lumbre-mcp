@@ -120,6 +120,25 @@ describe('resolveRefs — coste en peticiones', () => {
 		expect(spy.mock.calls[0][0]).toBe(`https://lumbre.test/api/tasks?ids=${ID_A}%2C${ID_B}`);
 	});
 
+	it('includeArchived se propaga a `?ids=` para no declarar rota una referencia archivada', async () => {
+		const archived = task({
+			id: ID_B,
+			content: 'Dependencia archivada ACTUAL',
+			archivedAt: '2026-08-27T10:00:00.000Z'
+		});
+		const spy = mockFetchSequence([[archived]]);
+		const resolution = await resolveRefs(config, [`[[task:${ID_B}|Etiqueta vieja]]`], {
+			includeArchived: true
+		});
+
+		expect(spy.mock.calls[0][0]).toBe(
+			`https://lumbre.test/api/tasks?ids=${ID_B}&includeArchived=true`
+		);
+		expect(renderRefs(`[[task:${ID_B}|Etiqueta vieja]]`, resolution)).toBe(
+			`→tarea[pendiente] "Dependencia archivada ACTUAL" id:${ID_B}`
+		);
+	});
+
 	it('referencias a LISTAS: una `?includeLists=1` (peor caso del lote = 2 llamadas)', async () => {
 		const spy = mockFetchSequence([
 			[task({ id: ID_A })],

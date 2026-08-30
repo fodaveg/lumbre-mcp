@@ -62,6 +62,16 @@ describe('TaskExistenceCache', () => {
 		expect(cache.get('b')?.id).toBe('b');
 	});
 
+	it('una lectura con includeArchived no mete archivadas en la caché de precondiciones de escritura', () => {
+		const cache = new TaskExistenceCache();
+		cache.setAll([
+			task({ id: 'viva', archivedAt: null }),
+			task({ id: 'archivada', archivedAt: '2026-08-27T10:00:00.000Z' })
+		]);
+		expect(cache.get('viva')?.id).toBe('viva');
+		expect(cache.get('archivada')).toBeUndefined();
+	});
+
 	it('invalidate borra la entrada — una mutación local sobre ese id no debe servir el valor viejo', () => {
 		const cache = new TaskExistenceCache();
 		cache.set(task({ id: 'a' }));

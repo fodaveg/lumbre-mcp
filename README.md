@@ -87,6 +87,10 @@ completa antes los pasos de [Conectar el MCP remoto](#conectar-el-mcp-remoto).
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
   por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
   fecha), `overdue` o `all`; puede incluir completadas con `includeDone`.
+  `includeArchived: true` amplía el mismo filtro a tareas archivadas — se
+  combina con `includeDone` y el resto de parámetros, y cada archivada se
+  identifica con su fecha de archivo. El servidor exige el literal booleano
+  `true`; el MCP lo serializa como `includeArchived=true`.
   `upcoming` es la ventana RODANTE de `days` días **contando hoy** (default 7,
   máximo 14) y existe porque `week` es la semana de CALENDARIO: un domingo
   —o un viernes— `week` apenas tiene nada por delante, así que responde a
@@ -156,12 +160,14 @@ completa antes los pasos de [Conectar el MCP remoto](#conectar-el-mcp-remoto).
   distingue ambos casos: úsala para comprobar si una lista existe (p. ej. el
   usuario dice que la acaba de crear) o para resolver su `listId` sin
   depender de que ya tenga tareas. Sin parámetros.
-- `get_task({ taskId })` — devuelve UNA tarea completa y sin recortar (notas
-  íntegras y verbatim, `createdAt` sin recortar, lista/sección con sus ids). Si
+- `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
+  recortar (notas íntegras y verbatim, `createdAt` sin recortar, lista/sección
+  con sus ids). `includeArchived: true` permite recuperarla aunque esté
+  archivada. Si
   tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/
   pendiente — es la ÚNICA forma de obtener el id de una subtarea (`list_tasks`
   nunca las lista), necesario para `complete_subtask`. Da error si el `taskId`
-  no existe entre las tareas visibles del usuario.
+  no existe entre las tareas visibles del usuario para ese alcance.
 - `read_attachment({ attachment_id })` — descarga los BYTES de un adjunto de
   una tarea (vía `GET /api/attachments/:id`, sácalo del campo `attachments`
   de `list_tasks`/`get_task`). Si es una imagen, se devuelve para verla

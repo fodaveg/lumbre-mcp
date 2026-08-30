@@ -48,8 +48,16 @@ export class TaskExistenceCache {
     }
     /** Registra/refresca `task` con un TTL nuevo desde ahora — usado tanto al
      *  resolver un `taskId` suelto (`requireTaskExists`, `get_task`) como al
-     *  volcar un listado entero (`list_tasks`, `mutate_tasks`), ver `setAll`. */
+     *  volcar un listado entero (`list_tasks`, `mutate_tasks`), ver `setAll`.
+     *  Una archivada recuperada mediante `includeArchived` NO entra: esta caché
+     *  evita el lookup de precondición de las tools de mutación, y una lectura
+     *  ampliada no debe autorizar indirectamente una escritura que el lookup
+     *  normal (`includeArchived=false`) rechazaría. */
     set(task) {
+        if (task.archivedAt) {
+            this.entries.delete(task.id);
+            return;
+        }
         this.entries.set(task.id, { value: task, expiresAt: this.now() + this.ttlMs });
     }
     /** Atajo de `set` para un lote (`listTasks`/`findTasksByIds`). */

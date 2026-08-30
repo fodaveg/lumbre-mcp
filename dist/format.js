@@ -128,6 +128,8 @@ function formatTask(t, opts, isDuplicateTitle) {
         tags.push(t.date);
     if (t.deadline)
         tags.push(`⚑${t.deadline}`);
+    if (t.archivedAt)
+        tags.push(`archivada:${t.archivedAt.slice(0, 10)}`);
     // `createdAt` recortado a minuto (sin segundos/ms): SOLO si hay otra tarea
     // con el mismo título en este mismo lote — sirve para desempatar
     // duplicados ("deja el más nuevo") sin alargar la línea de más en el caso
@@ -179,6 +181,7 @@ export function formatTaskFull(t, refs) {
         `Tarea ${t.id}`,
         `- contenido: ${renderRefs(t.content, refs)}`,
         `- estado: ${t.done ? 'hecha' : 'pendiente'}`,
+        `- archivada: ${t.archivedAt ?? 'no'}`,
         `- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
         `- fecha: ${t.date ?? '(sin fecha)'}`,
         `- deadline: ${t.deadline ? `⚑${t.deadline}` : '(sin deadline)'}`,
