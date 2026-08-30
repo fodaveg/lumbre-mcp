@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "status": "frozen-before-egress",
+  "baseSha": "91d2100b2dc81ba2074abb45dd24896d25446d4c",
+  "criteriaFiles": {
+    "references/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
+    "references/forward-expectations.md": "6d212e9f066f18a6a3f27d2a567d957fca40c6c142edc4b80d16c70297345c0b",
+    "references/forward-pilot-schema.json": "4e50d5b23453d5b0c583a2cf0e6438f88c3b44cbdccc1f1ade79721dd323b4e7",
+    "scripts/forward-pilot-lib.mjs": "953c1954d9a155043506a22ce0e1bca5882c21b51b3f55a398b30e604d925db7",
+    "scripts/quick-validate-skill.mjs": "77b6de04517796ceb18a3ca9b26323d40e8fba4672b3bda887804ffec37f5b7d",
+    "scripts/run-forward-pilot.mjs": "0813c85a91960132978dc821e660a10d525fa7e3eda07dfb63cd60a43980d6ab",
+    "scripts/test-forward-pilot-verifier.mjs": "b16c8d2bb323246e19b26203c1b8d02075166e3ae11f3383e6a4ac910dea68b5",
+    "scripts/validate.sh": "de84ffb25f66e26d5ca1142996ae0012f5d0f5444bb9176f0e55996a7e8f752d",
+    "scripts/verify-forward-pilot.mjs": "e0264ccb82240066ad0748eabe058df0c4eb82715744bbe3ff83688d5a6f67a5"
+  }
+}

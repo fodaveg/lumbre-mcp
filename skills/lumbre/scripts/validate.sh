@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+mode=${1:-full}
+case "$mode" in
+  full|--preflight) ;;
+  *) printf '%s\n' "usage: validate.sh [--preflight]" >&2; exit 2 ;;
+esac
+
 skill_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 entry="$skill_dir/SKILL.md"
 refs="$skill_dir/references"
@@ -26,6 +32,15 @@ done
 [ -f "$refs/source-variants.md" ] || fail "missing historical source evidence"
 [ -f "$refs/forward-prompts.md" ] || fail "missing blind forward prompts"
 [ -f "$refs/forward-expectations.md" ] || fail "missing forward-test oracle"
+[ -f "$refs/forward-pilot.md" ] || fail "missing reproducible pilot protocol"
+[ -f "$refs/forward-pilot-evidence.json" ] || fail "missing pilot evidence"
+[ -f "$refs/forward-pilot-evidence.events.jsonl" ] || fail "missing raw pilot event log"
+[ -f "$refs/forward-pilot-evidence.envelope.txt" ] || fail "missing exact pilot envelope"
+[ -f "$refs/forward-pilot-schema.json" ] || fail "missing pilot output schema"
+[ -f "$refs/forward-pilot-preregistration.json" ] ||
+  fail "missing historical pilot preregistration"
+[ -f "$refs/forward-pilot-next-preregistration.json" ] ||
+  fail "missing next pilot preregistration"
 if grep -Fq 'source-variants.md' "$entry"; then
   fail "historical variants must not be loaded by the operational router"
 fi
@@ -51,12 +66,16 @@ grep -Fq 'Leer o resumir esa tarea sigue siendo lectura' "$entry" ||
   fail "read-only task with dev state routing guard missing"
 grep -Fq 'aunque ya contenga un estado de desarrollo' "$refs/development.md" ||
   fail "development adhesion read-only boundary missing"
+grep -Fq 'No cargues `development.md` solo porque la tarea leída' "$refs/read.md" ||
+  fail "read-only progressive disclosure boundary missing"
 grep -Fq 'El lote es un `#tag`, nunca una sección' "$refs/development.md" ||
   fail "lot taxonomy missing"
 grep -Fq 'checkpoint proporcional con' "$refs/development.md" ||
   fail "delegated work checkpoint missing"
 grep -Fq 'En una tarea trivial basta una línea' "$refs/development.md" ||
   fail "delegated checkpoint proportionality missing"
+grep -Fq 'verifica esa escritura antes de delegar' "$refs/development.md" ||
+  fail "verify-before-delegate boundary missing"
 grep -Fq 'exclusivamente una señal humana' "$refs/development.md" ||
   fail "human-only not-done boundary missing"
 grep -Fq 'en la conversación un checkpoint' "$refs/development.md" ||
@@ -73,8 +92,16 @@ grep -Fq 'mismo candidato' "$refs/project-release.md" ||
   fail "single-candidate review rule missing"
 grep -Fq 'un push no demuestra despliegue' "$refs/project-release.md" ||
   fail "push/deploy distinction missing"
+grep -Fq 'permite crear el commit candidato' "$refs/project-release.md" ||
+  fail "implementation commit authority boundary missing"
 grep -Fq 'flujo OAuth/autorización' "$refs/mcp-safe-operations.md" ||
   fail "OAuth-first authorization missing"
+grep -Fq 'Antes de mutar una tarea existente o delegar trabajo' \
+  "$refs/mcp-safe-operations.md" || fail "full-read-before-write boundary missing"
+grep -Fq 'esa respuesta no incluye todavía operaciones de' "$refs/backlog.md" ||
+  fail "open triage confirmation stop missing"
+grep -Fq 'Prepara ownership, rama y worktree antes de implementar' \
+  "$refs/project-release.md" || fail "prepare-before-implement boundary missing"
 grep -Fq 'Nunca pongas' "$refs/mcp-safe-operations.md" ||
   fail "URL token prohibition missing"
 grep -Fq 'no debe cargarse durante una operación normal' "$refs/source-variants.md" ||
@@ -103,14 +130,34 @@ if grep -E 'Modo esperado|Contrato observable|cero mutaciones|No borra' \
 fi
 grep -Fq 'No borra, instala, publica ni despliega' "$refs/forward-expectations.md" ||
   fail "activation negative scenario missing"
-grep -Fq 'no carga desarrollo, no cambia `@wip`' "$refs/forward-expectations.md" ||
+grep -Fq 'no carga desarrollo ni la referencia MCP' "$refs/forward-expectations.md" ||
   fail "read-only dev-state negative scenario missing"
+grep -Fq 'Enumera listas sin cargar backlog' "$refs/forward-expectations.md" ||
+  fail "read-only empty-list routing scenario missing"
 grep -Fq 'declara explícitamente que la lectura puede estar desfasada' \
   "$refs/forward-expectations.md" || fail "P04 strict oracle missing"
-grep -Fq 'estado, ownership y siguiente paso' "$refs/forward-expectations.md" ||
-  fail "P08 strict oracle missing"
+grep -Fq 'aplica y verifica `@wip` antes de delegar' \
+  "$refs/forward-expectations.md" || fail "P08 verify-before-delegate oracle missing"
+grep -Fq 'checkpoint proporcional' "$refs/forward-expectations.md" ||
+  fail "P08 checkpoint oracle missing"
+grep -Fq 'última verificación de campos preservados' \
+  "$refs/forward-expectations.md" || fail "P10 final preservation check missing"
 grep -Fq 'He puesto `@not-done`' "$refs/forward-prompts.md" ||
   fail "ambiguous not-done scenario missing"
+grep -Fq 'observación post-publicación no bloqueante' \
+  "$refs/forward-expectations.md" || fail "honest longitudinal criterion missing"
+
+command -v node >/dev/null 2>&1 || fail "node is required for behavioral pilot checks"
+node --check "$skill_dir/scripts/forward-pilot-lib.mjs" >/dev/null
+node --check "$skill_dir/scripts/quick-validate-skill.mjs" >/dev/null
+node --check "$skill_dir/scripts/run-forward-pilot.mjs" >/dev/null
+node --check "$skill_dir/scripts/verify-forward-pilot.mjs" >/dev/null
+node --check "$skill_dir/scripts/test-forward-pilot-verifier.mjs" >/dev/null
+node "$skill_dir/scripts/quick-validate-skill.mjs" "$skill_dir"
+if [ "$mode" = full ]; then
+  node "$skill_dir/scripts/verify-forward-pilot.mjs" --integrity-only
+fi
+node "$skill_dir/scripts/test-forward-pilot-verifier.mjs"
 
 for source_id in CX-live AG-live CX-repo AG-repo CL-live CL-backup
 do

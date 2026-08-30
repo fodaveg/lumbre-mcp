@@ -12,8 +12,12 @@ base y la petición siguen delimitando qué tareas o campos pueden cambiar.
 - Declara el rol de la sesión y el ownership antes de escribir.
 - Usa la rama/worktree exigidos y preserva cambios ajenos. Aísla también puertos,
   bases de prueba y artefactos compartidos cuando haya escritores concurrentes.
+- Prepara ownership, rama y worktree antes de implementar el candidato.
 - No hagas commit, merge, push o deploy sin la autoridad requerida. Una tarea de
   Lumbre no concede permisos de release.
+- Si el workflow exige un SHA y la petición autoriza implementar, el ownership de
+  implementación permite crear el commit candidato en su worktree; no concede merge,
+  push ni deploy.
 - Gate, revisión y QA deben referirse a un candidato identificable. Si varios frentes
   se combinan, valida el árbol combinado.
 

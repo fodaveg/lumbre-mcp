@@ -1,0 +1,671 @@
+{
+  "protocolVersion": 2,
+  "deterministic": false,
+  "captureStatus": "rejected-preregistered-contract",
+  "verification": {
+    "accepted": false,
+    "exactCasesPassed": 9,
+    "exactCasesTotal": 12,
+    "failures": [
+      "P02: forbidden reference present",
+      "P03: forbidden reference present",
+      "P10: precedence violation (update_task_section#1<verify_preserved_fields#1)"
+    ]
+  },
+  "reproducibilityClaim": "The protocol and checks are reproducible; model wording, latency and token counts are not deterministic.",
+  "runner": "codex exec --ephemeral --ignore-user-config --ignore-rules --enable skip_host_skill_discovery --config suppress_unstable_features_warning=true --disable skill_search --sandbox read-only",
+  "codexVersion": "codex-cli 0.151.0",
+  "model": "gpt-5.4",
+  "candidateParentSha": "0957116153550efcbf1f42c57d2f4b98a402229e",
+  "selection": [
+    "P01",
+    "P02",
+    "P03",
+    "P04",
+    "P05",
+    "P06",
+    "P07",
+    "P08",
+    "P09",
+    "P10",
+    "P11",
+    "P12"
+  ],
+  "captureHarness": {
+    "runnerSourceSha256": "0813c85a91960132978dc821e660a10d525fa7e3eda07dfb63cd60a43980d6ab",
+    "librarySourceSha256": "953c1954d9a155043506a22ce0e1bca5882c21b51b3f55a398b30e604d925db7"
+  },
+  "hashes": {
+    "operationalBundleSha256": "095b51e637942c0ac5a7f759eb140a8c8ba0f208ee954d1c315c44f0f10cd0f1",
+    "operationalFiles": {
+      "SKILL.md": "29798877145f2f14b972e3160baab3543c786507247e8ead304a8bd4efcb0779",
+      "references/backlog.md": "2491d8500cfe855c24707cb17f3b8e4653fffec401cf612dee7dbd09268cac9e",
+      "references/daily.md": "b3f448cf57a782482da5add70b4f3a60d753da48cb316a6963ee2ac4c219727d",
+      "references/development.md": "8df8377219fb27959ab30173347d0cc0963367af178f34f0a1288e7f35271154",
+      "references/mcp-safe-operations.md": "fe5da6893ccef35285d370384fcc93e7e47e118b4776139478565f11520276da",
+      "references/project-release.md": "f992aee79313789afc1b86decfc9deb5a719d1505e486c7511816ca5d722c374",
+      "references/read.md": "541071c2f297a8a2e64f5c536885edfc44d2fd0ae3eea68fee9d0b05e2c90ba3"
+    },
+    "blindPromptsSha256": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
+    "outputSchemaSha256": "4e50d5b23453d5b0c583a2cf0e6438f88c3b44cbdccc1f1ade79721dd323b4e7",
+    "preregistrationSha256": "d32e162850129de638403136d5a6bc45810fb79ae4fcc7627056f5a10df79679",
+    "runnerSourceSha256": "0813c85a91960132978dc821e660a10d525fa7e3eda07dfb63cd60a43980d6ab",
+    "librarySourceSha256": "953c1954d9a155043506a22ce0e1bca5882c21b51b3f55a398b30e604d925db7",
+    "verifierSourceSha256": "e0264ccb82240066ad0748eabe058df0c4eb82715744bbe3ff83688d5a6f67a5",
+    "negativeTestSourceSha256": "b16c8d2bb323246e19b26203c1b8d02075166e3ae11f3383e6a4ac910dea68b5",
+    "evaluationEnvironmentSha256": "72c9736bb0229f874d4fd3ed282b77477fcd449bd596769cdc73d89df658ab0e",
+    "evaluationEnvelopeSha256": "a949b11c2303cfdb923e7fc5b7b364a36ab5d4d414f2a6058e105300ae64fd08",
+    "captureRawEventLogSha256": "a12dd84270d5ab50cdb2c01c5d839e1ec74a20d4412d43199cf1bdfd3e8b7b94",
+    "publishedEventLogSha256": "a12dd84270d5ab50cdb2c01c5d839e1ec74a20d4412d43199cf1bdfd3e8b7b94"
+  },
+  "environment": {
+    "cases": [
+      {
+        "id": "P01",
+        "request": "¿Qué tengo hoy?",
+        "fixture": "Snapshot actual con tres tareas fechadas hoy y dos fuera de fecha."
+      },
+      {
+        "id": "P02",
+        "request": "Resume el feedback de esta tarea, que ya está en `@wip`, sin cambiarla.",
+        "fixture": "task-p02 está en @wip; el listado trae preview y la lectura íntegra contiene el feedback completo."
+      },
+      {
+        "id": "P03",
+        "request": "¿Existe la lista vacía X?",
+        "fixture": "list_lists contiene X; list_tasks para su id devuelve una colección vacía."
+      },
+      {
+        "id": "P04",
+        "request": "Lee lo último sin cambiar nada.",
+        "fixture": "Hay un snapshot legible; el contrato del conector indica que refresh_sync puede incorporar o persistir cambios."
+      },
+      {
+        "id": "P05",
+        "request": "Crea una tarea recurrente cada lunes.",
+        "fixture": "Borrador: content='Planificar semana', listId='list-personal'. El conector acepta recurrence='weekly:monday' sin fecha ni hora."
+      },
+      {
+        "id": "P06",
+        "request": "Esto ya no se hará.",
+        "fixture": "La única tarea contextual es task-p06, pendiente y ajena a desarrollo."
+      },
+      {
+        "id": "P07",
+        "request": "Asume esta tarea de desarrollo.",
+        "fixture": "La tarea de desarrollo contextual es task-p07, pendiente, sin estado de agente y con id resuelto."
+      },
+      {
+        "id": "P08",
+        "request": "Empieza la tarea reconocida y delega tests.",
+        "fixture": "task-p08 está en @acked. La superficie tests pertenece a agente-tests y el checkbox está sin marcar."
+      },
+      {
+        "id": "P09",
+        "request": "Agrupa estas tareas en dos lotes.",
+        "fixture": "task-a y task-b describen autorización; task-c y task-d describen documentación. Conservan secciones conceptuales distintas."
+      },
+      {
+        "id": "P10",
+        "request": "Mueve estas tareas a la lista X y sección Y.",
+        "fixture": "task-e, task-f, list-x y section-y están resueltos. El contrato indica que mover de lista limpia sectionId."
+      },
+      {
+        "id": "P11",
+        "request": "Implementa y prepara el release.",
+        "fixture": "task-p11 está en @acked. El workflow exige worktree y gate/revisión sobre un SHA; la sesión implementa pero no es release owner. Los pasos simulados resultan satisfactorios."
+      },
+      {
+        "id": "P12",
+        "request": "Activa la skill.",
+        "fixture": "No hay objetivo operativo, tarea ni autorización adicional."
+      }
+    ],
+    "allowedOperations": [
+      "list_tasks_today",
+      "get_task_full",
+      "list_lists",
+      "list_tasks",
+      "read_snapshot",
+      "ask_clarification",
+      "create_task",
+      "cancel_task",
+      "update_task_tags",
+      "delegate_tests",
+      "verify_task",
+      "propose_triage",
+      "move_task_list",
+      "update_task_section",
+      "verify_preserved_fields",
+      "read_repo_workflow",
+      "prepare_candidate",
+      "implement_candidate",
+      "gate_candidate",
+      "review_candidate",
+      "handoff_release"
+    ],
+    "model": "gpt-5.4",
+    "captureContext": {
+      "codexVersion": "codex-cli 0.151.0",
+      "model": "gpt-5.4",
+      "candidateParentSha": "0957116153550efcbf1f42c57d2f4b98a402229e"
+    },
+    "outputSchemaSha256": "4e50d5b23453d5b0c583a2cf0e6438f88c3b44cbdccc1f1ade79721dd323b4e7",
+    "criteriaFreeze": {
+      "protocolVersion": 1,
+      "status": "frozen-before-egress",
+      "baseSha": "91d2100b2dc81ba2074abb45dd24896d25446d4c",
+      "criteriaFiles": {
+        "references/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
+        "references/forward-expectations.md": "6d212e9f066f18a6a3f27d2a567d957fca40c6c142edc4b80d16c70297345c0b",
+        "references/forward-pilot-schema.json": "4e50d5b23453d5b0c583a2cf0e6438f88c3b44cbdccc1f1ade79721dd323b4e7",
+        "scripts/forward-pilot-lib.mjs": "953c1954d9a155043506a22ce0e1bca5882c21b51b3f55a398b30e604d925db7",
+        "scripts/quick-validate-skill.mjs": "77b6de04517796ceb18a3ca9b26323d40e8fba4672b3bda887804ffec37f5b7d",
+        "scripts/run-forward-pilot.mjs": "0813c85a91960132978dc821e660a10d525fa7e3eda07dfb63cd60a43980d6ab",
+        "scripts/test-forward-pilot-verifier.mjs": "b16c8d2bb323246e19b26203c1b8d02075166e3ae11f3383e6a4ac910dea68b5",
+        "scripts/validate.sh": "de84ffb25f66e26d5ca1142996ae0012f5d0f5444bb9176f0e55996a7e8f752d",
+        "scripts/verify-forward-pilot.mjs": "e0264ccb82240066ad0748eabe058df0c4eb82715744bbe3ff83688d5a6f67a5"
+      },
+      "preregistrationSha256": "d32e162850129de638403136d5a6bc45810fb79ae4fcc7627056f5a10df79679"
+    },
+    "sandbox": "read-only",
+    "userConfig": "ignored",
+    "execPolicyRules": "ignored",
+    "hostSkillDiscovery": "skipped",
+    "skillSearch": "disabled",
+    "mcpConfiguration": "absent"
+  },
+  "isolationAudit": {
+    "bundleFiles": [
+      "SKILL.md",
+      "references/backlog.md",
+      "references/daily.md",
+      "references/development.md",
+      "references/mcp-safe-operations.md",
+      "references/project-release.md",
+      "references/read.md"
+    ],
+    "unexpectedBundleFiles": [],
+    "bundleUnchangedAfterRun": true,
+    "oracleExposed": false,
+    "eventLogFile": "forward-pilot-evidence.events.jsonl",
+    "envelopeFile": "forward-pilot-evidence.envelope.txt"
+  },
+  "privacyAudit": {
+    "privatePathsFound": [],
+    "normalizationApplied": false,
+    "rawEqualsPublished": true
+  },
+  "eventAudit": {
+    "eventCount": 4,
+    "itemTypes": {
+      "agent_message": 1
+    },
+    "toolCalls": 0,
+    "shellCalls": 0,
+    "mcpCalls": 0,
+    "filesystemMutations": 0,
+    "externalActions": 0,
+    "runtimeErrors": [],
+    "deniedItems": []
+  },
+  "metrics": {
+    "elapsedMs": 77842,
+    "meanElapsedMsPerCase": 6487,
+    "latencyNote": "Batch wall time observed by the capture harness; per-case mean is derived.",
+    "inputTokens": 23948,
+    "cachedInputTokens": 1792,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 4132,
+    "reasoningOutputTokens": 2572
+  },
+  "cases": [
+    {
+      "id": "P01",
+      "mode": "read",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "read.md"
+      ],
+      "firstUsefulAction": "list_tasks_today",
+      "operationSequence": [
+        "list_tasks_today"
+      ],
+      "proposedMutations": [],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P02",
+      "mode": "read",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "read.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "get_task_full",
+      "operationSequence": [
+        "get_task_full"
+      ],
+      "proposedMutations": [],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P03",
+      "mode": "read",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "read.md",
+        "backlog.md"
+      ],
+      "firstUsefulAction": "list_lists",
+      "operationSequence": [
+        "list_lists",
+        "list_tasks"
+      ],
+      "proposedMutations": [],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P04",
+      "mode": "read",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "read.md"
+      ],
+      "firstUsefulAction": "read_snapshot",
+      "operationSequence": [
+        "read_snapshot"
+      ],
+      "proposedMutations": [],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": true,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P05",
+      "mode": "daily",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "daily.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "create_task",
+      "operationSequence": [
+        "create_task",
+        "verify_task"
+      ],
+      "proposedMutations": [
+        {
+          "target": "new-task",
+          "fields": [
+            "content",
+            "listId",
+            "recurrence"
+          ]
+        }
+      ],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P06",
+      "mode": "daily",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "daily.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "get_task_full",
+      "operationSequence": [
+        "get_task_full",
+        "cancel_task",
+        "verify_task"
+      ],
+      "proposedMutations": [
+        {
+          "target": "task-p06",
+          "fields": [
+            "cancellation"
+          ]
+        }
+      ],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P07",
+      "mode": "daily+development",
+      "extensions": [
+        "development"
+      ],
+      "references": [
+        "SKILL.md",
+        "daily.md",
+        "development.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "get_task_full",
+      "operationSequence": [
+        "get_task_full",
+        "update_task_tags",
+        "verify_task"
+      ],
+      "proposedMutations": [
+        {
+          "target": "task-p07",
+          "fields": [
+            "tags"
+          ]
+        }
+      ],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "@acked",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P08",
+      "mode": "daily+development",
+      "extensions": [
+        "development"
+      ],
+      "references": [
+        "SKILL.md",
+        "daily.md",
+        "development.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "get_task_full",
+      "operationSequence": [
+        "get_task_full",
+        "update_task_tags",
+        "verify_task",
+        "delegate_tests",
+        "verify_task"
+      ],
+      "proposedMutations": [
+        {
+          "target": "task-p08",
+          "fields": [
+            "tags"
+          ]
+        }
+      ],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "@wip",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "wip",
+        "ownership": "session-implements; tests-agent-owns-tests",
+        "nextAction": "integrate-delegated-test-evidence"
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P09",
+      "mode": "backlog",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "backlog.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "get_task_full",
+      "operationSequence": [
+        "get_task_full",
+        "propose_triage"
+      ],
+      "proposedMutations": [
+        {
+          "target": "task-a",
+          "fields": [
+            "tags"
+          ]
+        },
+        {
+          "target": "task-b",
+          "fields": [
+            "tags"
+          ]
+        },
+        {
+          "target": "task-c",
+          "fields": [
+            "tags"
+          ]
+        },
+        {
+          "target": "task-d",
+          "fields": [
+            "tags"
+          ]
+        }
+      ],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P10",
+      "mode": "backlog",
+      "extensions": [],
+      "references": [
+        "SKILL.md",
+        "backlog.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "get_task_full",
+      "operationSequence": [
+        "get_task_full",
+        "move_task_list",
+        "verify_preserved_fields",
+        "update_task_section",
+        "verify_preserved_fields"
+      ],
+      "proposedMutations": [
+        {
+          "target": "task-e",
+          "fields": [
+            "listId",
+            "sectionId"
+          ]
+        },
+        {
+          "target": "task-f",
+          "fields": [
+            "listId",
+            "sectionId"
+          ]
+        }
+      ],
+      "externalActions": [],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    },
+    {
+      "id": "P11",
+      "mode": "daily+development+project-release",
+      "extensions": [
+        "development",
+        "project-release"
+      ],
+      "references": [
+        "SKILL.md",
+        "daily.md",
+        "development.md",
+        "project-release.md",
+        "mcp-safe-operations.md"
+      ],
+      "firstUsefulAction": "read_repo_workflow",
+      "operationSequence": [
+        "read_repo_workflow",
+        "get_task_full",
+        "prepare_candidate",
+        "update_task_tags",
+        "verify_task",
+        "implement_candidate",
+        "gate_candidate",
+        "review_candidate",
+        "update_task_tags",
+        "verify_task",
+        "handoff_release"
+      ],
+      "proposedMutations": [
+        {
+          "target": "task-p11",
+          "fields": [
+            "tags"
+          ]
+        }
+      ],
+      "externalActions": [
+        "commit"
+      ],
+      "asksClarification": false,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "@done",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "done",
+        "ownership": "implementation-session; release-owner-pending",
+        "nextAction": "handoff-verified-candidate-to-release-owner"
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": true
+    },
+    {
+      "id": "P12",
+      "mode": "none",
+      "extensions": [],
+      "references": [
+        "SKILL.md"
+      ],
+      "firstUsefulAction": "ask_clarification",
+      "operationSequence": [
+        "ask_clarification"
+      ],
+      "proposedMutations": [],
+      "externalActions": [],
+      "asksClarification": true,
+      "fullBacklogScan": false,
+      "freshnessWarning": false,
+      "devState": "",
+      "checkboxAction": "none",
+      "checkpoint": {
+        "status": "",
+        "ownership": "",
+        "nextAction": ""
+      },
+      "releaseAuthority": false,
+      "releaseHandoffRequired": false
+    }
+  ]
+}

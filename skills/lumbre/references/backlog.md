@@ -33,7 +33,8 @@ contenido de las hijas. No borres ni reestructures un hub configurado sin autori
 2. Lee íntegramente las tareas que vas a reclasificar, incluidas notas y adjuntos que
    afecten la decisión.
 3. Si la petición es abierta o cambia taxonomía o navegación, muestra primero una vista
-   previa breve. Si enumera movimientos exactos, aplícalos directamente. Conserva ids,
+   previa breve y espera confirmación: esa respuesta no incluye todavía operaciones de
+   escritura. Si enumera movimientos exactos, aplícalos directamente. Conserva ids,
    contenido y propiedades.
 4. Ordena las operaciones: mover de lista antes de reasignar sección si el movimiento
    limpia esa relación.

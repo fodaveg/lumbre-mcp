@@ -7,6 +7,8 @@ inventes operaciones ni supongas capacidades de otra versión del servidor.
 
 - Resuelve por id. Si partes de texto, lista y desambigua antes de mutar.
 - Enumera listas antes de concluir que una lista no existe.
+- Antes de mutar una tarea existente o delegar trabajo sobre ella, recupérala
+  íntegramente por id; la resolución contextual o un preview no sustituyen esa lectura.
 - Recupera contenido, notas y adjuntos íntegros que puedan afectar la decisión.
 - Resuelve referencias por id vivo; una etiqueta incrustada puede estar caducada.
 

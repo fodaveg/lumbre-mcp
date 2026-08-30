@@ -23,5 +23,7 @@ No le entregues el oráculo, la documentación de optimización ni conclusiones 
 | P16 | «He puesto `@not-done`; corrígelo.» |
 
 Para cada ID, registra la respuesta, las referencias cargadas, tools llamadas,
-mutaciones propuestas o ejecutadas y tiempo hasta la primera acción útil. No abras
-otros ficheros de evaluación hasta entregar esos datos.
+mutaciones propuestas o ejecutadas y la primera acción útil. En una ejecución
+individual mide también el tiempo hasta esa acción; en batch registra latencia total y
+etiqueta cualquier media por caso como derivada, no observada. No abras otros ficheros
+de evaluación hasta entregar esos datos.

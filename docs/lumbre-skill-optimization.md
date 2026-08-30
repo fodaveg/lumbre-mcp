@@ -1,8 +1,9 @@
 # Optimización de la skill global de Lumbre
 
 Estado: candidata optimizada sobre la baseline congelada `e6dff13`. La integridad
-semántica está validada 32/32; el piloto real de dos semanas queda pendiente y por eso
-este documento no declara terminada la optimización de producto.
+semántica está validada 32/32, el gate comprueba integridad y privacidad de la evidencia
+y 104 controles negativos. El piloto conductual y la observación longitudinal son
+evidencia informativa post-publicación, no gates de release.
 
 ## Método
 
@@ -61,18 +62,18 @@ matriz para poder comprobar una instalación aislada.
 
 | Recomendación | Decisión | Motivo |
 |---|---|---|
-| Router pequeño y progressive disclosure | Aceptada | El router pasa de 76 a 58 líneas y solo enruta referencias pertinentes. |
+| Router pequeño y progressive disclosure | Aceptada | El router queda en 85 líneas y solo enruta referencias pertinentes. |
 | Referencias por modo | Aceptada | Lectura/día, backlog, desarrollo y release están separados; seguridad se carga al escribir. |
 | Cero mutaciones en lectura | Aceptada | Incluye estados y refresh con efectos. |
 | No revisar toda la lista por sesión | Aceptada | La lectura se acota por fecha, lista o ids salvo necesidad explícita. |
 | Checkpoints útiles para TDAH/TEA sin ceremonia universal | Aceptada | Se exigen en proporción a riesgo, concurrencia o reanudación. |
 | Perfil dev apagado por defecto | Aceptada | Solo petición, continuidad de tarea o regla viva del repo lo activan. |
 | Límites personales como perfil | Aceptada | Dos tareas/seis horas y tamaños de lote no son universales. |
-| Medir dieciséis escenarios | Aceptada parcialmente | La batería y criterios quedan definidos y revisados estáticamente; falta piloto real. |
-| Piloto real durante dos semanas | Diferida | Requiere uso longitudinal; no puede simularse con validación local. |
+| Medir dieciséis escenarios | Aceptada | La batería conserva 16 escenarios; el arnés selecciona P01–P12 y registra el resultado sin convertirlo en gate. |
+| Piloto real durante dos semanas | Diferida, no bloqueante | Requiere uso longitudinal; no puede simularse con validación local. |
 
-No se rechazó ninguna recomendación. La parte diferida no bloquea probar la candidata,
-pero sí impide declarar terminada la optimización de producto.
+No se rechazó ninguna recomendación. La parte longitudinal diferida no bloquea la
+publicación ni impide declarar terminada la consolidación y optimización estructural.
 
 ## Batería de dieciséis escenarios
 
@@ -90,6 +91,9 @@ P13–P16 añaden ambigüedad, reorganización abierta, release sin mutación y 
 `@not-done`. El validador comprueba que prompts y oráculo tienen los mismos 16 IDs y que ningún
 contrato observable aparece en el fichero ciego.
 
+Cada preregistración permite una sola captura. Una salida roja se conserva como
+evidencia y detiene ese piloto; no se encadenan ajustes y recapturas en el mismo lote.
+
 Métricas del piloto: tiempo hasta la primera acción útil, referencias/líneas cargadas,
 mutaciones no solicitadas y sobrecarga percibida. Umbrales propuestos: cero mutaciones
 incidentales en P01–P06, cero acciones externas por activación en P12 y ausencia de
@@ -100,12 +104,12 @@ se anotarán durante el piloto.
 
 | Ruta de modo | Baseline | Candidata | Cambio |
 |---|---:|---:|---:|
-| Router | 76 líneas | 58 líneas | −23,7% |
-| Lectura/día (router + referencia) | 109 | 95 | −12,8% |
-| Backlog con seguridad de escritura | 193 | 149 | −22,8% |
-| Desarrollo con seguridad de escritura | 251 | 174 | −30,7% |
-| Release con seguridad de escritura | 247 | 151 | −38,9% |
-| Núcleo operativo completo | 422 | 297 | −29,6% |
+| Router | 76 líneas | 85 líneas | +11,8% |
+| Lectura (router + referencia) | 109 | 107 | −1,8% |
+| Backlog con seguridad de escritura | 193 | 181 | −6,2% |
+| Desarrollo con gestión cotidiana y seguridad | 251 | 229 | −8,8% |
+| Release con seguridad de escritura | 247 | 187 | −24,3% |
+| Núcleo operativo completo | 422 | 347 | −17,8% |
 
 La baseline pedía además cargar `source-variants.md` en desarrollo/release; la candidata
 lo retira del camino operativo, pero conserva el fichero y el manifiesto como evidencia.

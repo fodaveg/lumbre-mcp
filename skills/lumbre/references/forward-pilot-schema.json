@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "cases": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "enum": ["P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10", "P11", "P12"] },
+          "mode": { "type": "string", "enum": ["read", "daily", "backlog", "daily+development", "daily+development+project-release", "none"] },
+          "extensions": { "type": "array", "items": { "type": "string", "enum": ["development", "project-release"] } },
+          "references": { "type": "array", "items": { "type": "string", "enum": ["SKILL.md", "read.md", "daily.md", "backlog.md", "development.md", "project-release.md", "mcp-safe-operations.md"] } },
+          "firstUsefulAction": { "type": "string", "enum": ["list_tasks_today", "get_task_full", "list_lists", "list_tasks", "read_snapshot", "ask_clarification", "create_task", "cancel_task", "update_task_tags", "delegate_tests", "verify_task", "propose_triage", "move_task_list", "update_task_section", "verify_preserved_fields", "read_repo_workflow", "prepare_candidate", "implement_candidate", "gate_candidate", "review_candidate", "handoff_release"] },
+          "operationSequence": { "type": "array", "items": { "type": "string", "enum": ["list_tasks_today", "get_task_full", "list_lists", "list_tasks", "read_snapshot", "ask_clarification", "create_task", "cancel_task", "update_task_tags", "delegate_tests", "verify_task", "propose_triage", "move_task_list", "update_task_section", "verify_preserved_fields", "read_repo_workflow", "prepare_candidate", "implement_candidate", "gate_candidate", "review_candidate", "handoff_release"] } },
+          "proposedMutations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string", "enum": ["new-task", "task-p06", "task-p07", "task-p08", "task-a", "task-b", "task-c", "task-d", "task-e", "task-f", "task-p11"] },
+                "fields": { "type": "array", "items": { "type": "string", "enum": ["content", "listId", "recurrence", "cancellation", "tags", "sectionId"] } }
+              },
+              "required": ["target", "fields"],
+              "additionalProperties": false
+            }
+          },
+          "externalActions": { "type": "array", "items": { "type": "string", "enum": ["commit", "push", "deploy", "install", "publish", "delete"] } },
+          "asksClarification": { "type": "boolean" },
+          "fullBacklogScan": { "type": "boolean" },
+          "freshnessWarning": { "type": "boolean" },
+          "devState": { "type": "string", "enum": ["", "@acked", "@wip", "@done", "@not-done"] },
+          "checkboxAction": { "type": "string", "enum": ["none", "complete", "uncomplete"] },
+          "checkpoint": {
+            "type": "object",
+            "properties": {
+              "status": { "type": "string", "enum": ["", "wip", "done"] },
+              "ownership": { "type": "string", "enum": ["", "session-implements; tests-agent-owns-tests", "implementation-session; release-owner-pending"] },
+              "nextAction": { "type": "string", "enum": ["", "integrate-delegated-test-evidence", "handoff-verified-candidate-to-release-owner"] }
+            },
+            "required": ["status", "ownership", "nextAction"],
+            "additionalProperties": false
+          },
+          "releaseAuthority": { "type": "boolean" },
+          "releaseHandoffRequired": { "type": "boolean" }
+        },
+        "required": ["id", "mode", "extensions", "references", "firstUsefulAction", "operationSequence", "proposedMutations", "externalActions", "asksClarification", "fullBacklogScan", "freshnessWarning", "devState", "checkboxAction", "checkpoint", "releaseAuthority", "releaseHandoffRequired"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["cases"],
+  "additionalProperties": false
+}

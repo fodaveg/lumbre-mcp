@@ -3,7 +3,40 @@
 Evidencia de que la optimización parte de la unión completa y no de una copia elegida.
 Este fichero no se carga en el uso normal. La matriz narrativa y las decisiones están
 en la documentación del repositorio canónico; `forward-prompts.md` y
-`forward-expectations.md` separan la batería ciega de su oráculo.
+`forward-expectations.md` separan la batería ciega de su oráculo. El piloto sintético
+reproducible y sus métricas viven en `forward-pilot.md` y
+`forward-pilot-evidence.json`; no se presentan como uso longitudinal real.
+
+## Captura preregistrada rechazada
+
+La captura P01–P12 publicada usó Codex CLI 0.151.0, modelo solicitado `gpt-5.4` y
+candidato padre `0957116153550efcbf1f42c57d2f4b98a402229e`. Fue una única llamada
+tras un preflight completo congelado y revisado. El resultado fue 9/12, sin adaptar el
+oráculo ni repetir la captura.
+
+| Artefacto | SHA-256 |
+|---|---|
+| Bundle operativo | `095b51e637942c0ac5a7f759eb140a8c8ba0f208ee954d1c315c44f0f10cd0f1` |
+| Prompts ciegos | `95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8` |
+| Esquema de salida | `4e50d5b23453d5b0c583a2cf0e6438f88c3b44cbdccc1f1ade79721dd323b4e7` |
+| Preregistración | `d32e162850129de638403136d5a6bc45810fb79ae4fcc7627056f5a10df79679` |
+| Entorno aislado | `72c9736bb0229f874d4fd3ed282b77477fcd449bd596769cdc73d89df658ab0e` |
+| Envelope exacto | `a949b11c2303cfdb923e7fc5b7b364a36ab5d4d414f2a6058e105300ae64fd08` |
+| Runner exacto de captura | `0813c85a91960132978dc821e660a10d525fa7e3eda07dfb63cd60a43980d6ab` |
+| Librería exacta de captura | `953c1954d9a155043506a22ce0e1bca5882c21b51b3f55a398b30e604d925db7` |
+| JSONL crudo y público | `a12dd84270d5ab50cdb2c01c5d839e1ec74a20d4412d43199cf1bdfd3e8b7b94` |
+
+Los cuatro eventos contienen cero tool calls, shell, MCP, mutaciones de fichero o
+acciones externas. La respuesta consumió 23 948 tokens de entrada, 1 792 cacheados,
+4 132 de salida y 2 572 de razonamiento. La latencia del batch fue 77 842 ms; la
+media de 6 487 ms/caso es derivada. Nueve contratos pasaron y tres fallaron.
+
+Los hashes completos, fixtures, configuración de aislamiento, contadores y resultado
+por caso viven en `forward-pilot-evidence.json`. La conducta del modelo es evidencia
+informativa no bloqueante; integridad, privacidad, cobertura 32/32, negativos y
+revisión independiente siguen siendo gates. El envelope y el JSONL exactos se
+publican al lado; no hubo saneado ni normalización y la captura no se presenta como
+determinista ni aceptada.
 
 ## Fuentes incorporadas antes de optimizar
 

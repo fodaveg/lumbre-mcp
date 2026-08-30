@@ -39,6 +39,7 @@ mediante las superficies nativas.
 - Al iniciar y delegar trabajo, deja en la conversación un checkpoint proporcional con
   estado, ownership y siguiente paso. En una tarea trivial basta una línea. Escríbelo
   también en las notas solo si lo pide el usuario o el contrato vigente del repositorio.
+- Si el inicio escribe `@wip`, verifica esa escritura antes de delegar.
 - Límites como dos tareas, seis horas o lotes de tres a seis son perfiles opcionales.
   Un presupuesto explícito del usuario prevalece.
 
