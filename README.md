@@ -579,3 +579,7 @@ ruta por la de tu clon compilado (ver "Compilar" más arriba). Con este
 conector enchufado, `add_attachment` en `lumbre-adjuntos` acepta `file_path`
 con normalidad — el error explicativo de arriba solo sale al llamarla desde
 el conector `mcp.lumbre.pro` sin este segundo conector a mano.
+
+## Licencia
+
+[MIT](LICENSE) © 2026 David Velasco.

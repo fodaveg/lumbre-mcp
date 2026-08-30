@@ -3,6 +3,11 @@
 	"version": "0.1.0",
 	"private": true,
 	"description": "Conector MCP remoto para Lumbre con OAuth 2.1 y skill multimodo opcional.",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/fodaveg/lumbre-mcp.git"
+	},
 	"type": "module",
 	"bin": {
 		"lumbre-mcp": "dist/index.js"
@@ -18,12 +23,12 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.29.0",
-		"zod": "^3.25.0"
+		"@modelcontextprotocol/sdk": "^1.30.0",
+		"zod": "^3.25.76"
 	},
 	"devDependencies": {
-		"@types/node": "^22.10.0",
-		"typescript": "^5.7.0",
-		"vitest": "^3.2.6"
+		"@types/node": "^22.20.1",
+		"typescript": "^5.9.3",
+		"vitest": "^3.2.7"
 	}
 }
