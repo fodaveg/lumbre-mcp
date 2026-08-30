@@ -13,6 +13,9 @@ const CODEX_CALLBACK_ID = 'codexCallback123';
 const CODEX_CLIENT_ID = `https://chatgpt.com/oauth/codex/${CODEX_CALLBACK_ID}/client.json`;
 const CODEX_REGISTERED_REDIRECT = `http://127.0.0.1/callback/${CODEX_CALLBACK_ID}`;
 const CODEX_REDIRECT = `http://127.0.0.1:49152/callback/${CODEX_CALLBACK_ID}`;
+const CODEX_STABLE_CLIENT_ID = 'https://chatgpt.com/oauth/codex/client.json';
+const CODEX_STABLE_REGISTERED_REDIRECT = 'http://127.0.0.1/callback';
+const CODEX_STABLE_REDIRECT = 'http://127.0.0.1:49153/callback';
 const VERIFIER = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~';
 const CHALLENGE = createHash('sha256').update(VERIFIER, 'ascii').digest('base64url');
 const UPSTREAM_TOKEN = 'a'.repeat(64);
@@ -1294,6 +1297,61 @@ describe('OAuth 2.1 para claude.ai', () => {
 			client_id: CODEX_CLIENT_ID,
 			redirect_uri: 'https://evil.example/callback'
 		})).status).toBe(400);
+	});
+
+	it('acepta el CIMD estable issuer-bound que usa Codex 0.151', async () => {
+		const fallback = oauthFetch({
+			introspectBody: {
+				active: true,
+				credentialId: CREDENTIAL_ID,
+				clientId: CODEX_STABLE_CLIENT_ID,
+				resource: OAUTH_RESOURCE,
+				scope: OAUTH_SCOPE
+			}
+		});
+		const codexFetch: typeof fetch = async (input, init) => {
+			if (String(input) === CODEX_STABLE_CLIENT_ID) {
+				return new Response(JSON.stringify({
+					client_id: CODEX_STABLE_CLIENT_ID,
+					client_name: 'Codex',
+					redirect_uris: [CODEX_STABLE_REGISTERED_REDIRECT],
+					token_endpoint_auth_method: 'none',
+					grant_types: ['authorization_code', 'refresh_token'],
+					response_types: ['code']
+				}), { status: 200, headers: { 'content-type': 'application/json' } });
+			}
+			return await fallback(input, init);
+		};
+		const stateDir = await newStateDir();
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: codexFetch }));
+		const accepted = await beginAuthorization(baseUrl, {
+			client_id: CODEX_STABLE_CLIENT_ID,
+			redirect_uri: CODEX_STABLE_REDIRECT
+		});
+		expect(accepted.status).toBe(302);
+		expect(accepted.headers.get('location')).toMatch(/^https:\/\/app\.lumbre\.pro\/integrations\/lumbre-mcp\?request=/);
+		const requestId = new URL(accepted.headers.get('location')!).searchParams.get('request');
+		const approved = await fetch(`${baseUrl}/oauth/lumbre/callback?request=${requestId}&decision=approved`, {
+			redirect: 'manual'
+		});
+		expect(approved.status).toBe(302);
+		const callback = new URL(approved.headers.get('location')!);
+		expect(`${callback.origin}${callback.pathname}`).toBe(CODEX_STABLE_REDIRECT);
+		expect(callback.searchParams.get('iss')).toBe(OAUTH_ISSUER);
+		const token = await fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code',
+				code: callback.searchParams.get('code')!,
+				client_id: CODEX_STABLE_CLIENT_ID,
+				redirect_uri: CODEX_STABLE_REDIRECT,
+				resource: OAUTH_RESOURCE,
+				code_verifier: VERIFIER
+			})
+		});
+		expect(token.status).toBe(200);
+		await expect(new OAuthService({ stateDir, fetch: codexFetch }).ensureReady()).resolves.toBeUndefined();
 	});
 
 	it('authorize no acepta formulario ni entrada de tokens en el navegador', async () => {

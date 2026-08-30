@@ -285,7 +285,7 @@ function validateClientIdUrl(clientId: string): URL {
 	) {
 		throw new OAuthError('invalid_client', 'Este conector solo admite documentos de cliente de Claude o Codex.');
 	}
-	if (url.hostname === 'chatgpt.com' && !/^\/oauth\/codex\/[A-Za-z0-9_-]+\/client\.json$/.test(url.pathname)) {
+	if (url.hostname === 'chatgpt.com' && !/^\/oauth\/codex\/(?:[A-Za-z0-9_-]+\/)?client\.json$/.test(url.pathname)) {
 		throw new OAuthError('invalid_client', 'Documento de cliente de Codex no reconocido.');
 	}
 	return url;
@@ -323,8 +323,10 @@ function validStoredRedirect(clientId: string, redirectUri: string): boolean {
 	const client = validateClientIdUrl(clientId);
 	if (client.hostname === 'claude.ai') return redirectUri === OAUTH_CALLBACK;
 	const callbackId = client.pathname.match(/^\/oauth\/codex\/([A-Za-z0-9_-]+)\/client\.json$/)?.[1];
-	if (!callbackId) return false;
-	return registeredRedirectMatches(clientId, redirectUri, `http://127.0.0.1/callback/${callbackId}`);
+	const registered = callbackId
+		? `http://127.0.0.1/callback/${callbackId}`
+		: 'http://127.0.0.1/callback';
+	return registeredRedirectMatches(clientId, redirectUri, registered);
 }
 
 function grantContext(clientId: string, resource: string, scope: string): Buffer {
