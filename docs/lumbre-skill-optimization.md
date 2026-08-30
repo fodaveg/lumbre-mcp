@@ -2,7 +2,7 @@
 
 Estado: candidata optimizada sobre la baseline congelada `e6dff13`. La integridad
 semántica está validada 32/32, el gate comprueba integridad y privacidad de la evidencia
-y 104 controles negativos. El piloto conductual y la observación longitudinal son
+y 109 controles negativos. El piloto conductual y la observación longitudinal son
 evidencia informativa post-publicación, no gates de release.
 
 ## Método
@@ -105,12 +105,12 @@ se anotarán durante el piloto.
 
 | Ruta de modo | Baseline | Candidata | Cambio |
 |---|---:|---:|---:|
-| Router | 76 líneas | 85 líneas | +11,8% |
-| Lectura (router + referencia) | 109 | 107 | −1,8% |
-| Backlog con seguridad de escritura | 193 | 181 | −6,2% |
-| Desarrollo con gestión cotidiana y seguridad | 251 | 229 | −8,8% |
-| Release con seguridad de escritura | 247 | 187 | −24,3% |
-| Núcleo operativo completo | 422 | 347 | −17,8% |
+| Router | 76 líneas | 95 líneas | +25,0% |
+| Lectura (router + referencia) | 109 | 118 | +8,3% |
+| Backlog con seguridad de escritura | 193 | 200 | +3,6% |
+| Desarrollo con gestión cotidiana y seguridad | 251 | 248 | −1,2% |
+| Release con seguridad de escritura | 247 | 206 | −16,6% |
+| Núcleo operativo completo | 422 | 367 | −13,0% |
 
 La baseline pedía además cargar `source-variants.md` en desarrollo/release; la candidata
 lo retira del camino operativo, pero conserva el fichero y el manifiesto como evidencia.

@@ -46,7 +46,7 @@ normal de la skill.
   contrato la exige; las referencias tienen mínimos y prohibiciones de progressive
   disclosure, no igualdad ciega. Targets/campos, estados, checkpoints, autoridad y cero
   efectos siguen siendo exactos.
-- Sus 104 controles negativos incluyen cada edge de precedencia, operaciones y
+- Sus 109 controles negativos incluyen cada edge de precedencia, operaciones y
   referencias prohibidas, pasos críticos duplicados, lecturas requeridas, P02,
   P05–P12, metadata, métricas, JSONL, harness, envelope, privacidad y shell.
 - Antes de cualquier egress se congelan por SHA-256 prompts, oráculo, esquema,
