@@ -154,10 +154,16 @@ next_base=$(sed -n 's/.*"baseSha": "\([0-9a-f]*\)".*/\1/p' \
 if ! git -C "$repo_root" cat-file -e "$next_base^{commit}" >/dev/null 2>&1; then
   [ -f "$refs/forward-pilot-history.bundle" ] ||
     fail "missing self-contained pilot git bundle"
+  [ -f "$refs/forward-pilot-history-update.bundle" ] ||
+    fail "missing incremental pilot git bundle"
   history_tmp=$(mktemp -d)
   trap 'rm -rf "$history_tmp"' EXIT HUP INT TERM
   git clone -q --bare "$refs/forward-pilot-history.bundle" "$history_tmp/repo.git" ||
     fail "cannot open self-contained pilot git bundle"
+  git -C "$history_tmp/repo.git" fetch -q \
+    "$refs/forward-pilot-history-update.bundle" \
+    'refs/heads/main:refs/heads/portable-update' ||
+    fail "cannot apply incremental pilot git bundle"
   export GIT_DIR="$history_tmp/repo.git"
   export GIT_WORK_TREE="$repo_root"
 fi
