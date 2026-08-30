@@ -41,6 +41,8 @@ done
   fail "missing historical pilot preregistration"
 [ -f "$refs/forward-pilot-next-preregistration.json" ] ||
   fail "missing next pilot preregistration"
+[ -f "$refs/forward-pilot-history.bundle" ] ||
+  fail "missing self-contained pilot git bundle"
 if grep -Fq 'source-variants.md' "$entry"; then
   fail "historical variants must not be loaded by the operational router"
 fi
@@ -148,6 +150,17 @@ grep -Fq 'observación post-publicación no bloqueante' \
   "$refs/forward-expectations.md" || fail "honest longitudinal criterion missing"
 
 command -v node >/dev/null 2>&1 || fail "node is required for behavioral pilot checks"
+history_tmp=
+next_base=$(sed -n 's/.*"baseSha": "\([0-9a-f]*\)".*/\1/p' \
+  "$refs/forward-pilot-next-preregistration.json")
+if ! git -C "$repo_root" cat-file -e "$next_base^{commit}" >/dev/null 2>&1; then
+  history_tmp=$(mktemp -d)
+  trap 'rm -rf "$history_tmp"' EXIT HUP INT TERM
+  git clone -q --bare "$refs/forward-pilot-history.bundle" "$history_tmp/repo.git" ||
+    fail "cannot open self-contained pilot git bundle"
+  export GIT_DIR="$history_tmp/repo.git"
+  export GIT_WORK_TREE="$repo_root"
+fi
 node --check "$skill_dir/scripts/forward-pilot-lib.mjs" >/dev/null
 node --check "$skill_dir/scripts/quick-validate-skill.mjs" >/dev/null
 node --check "$skill_dir/scripts/run-forward-pilot.mjs" >/dev/null

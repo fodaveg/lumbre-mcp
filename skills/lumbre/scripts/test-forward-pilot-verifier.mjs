@@ -106,7 +106,33 @@ function preregisteredCandidateSha() {
   ) {
     return captured;
   }
-  throw new Error("cannot resolve a candidate that directly follows preregistration base");
+  const history = spawnSync("git", ["rev-list", "--all", "--parents"], {
+    cwd: resolve(skillDir, "..", ".."),
+    encoding: "utf8",
+  });
+  if (history.status !== 0) {
+    throw new Error("cannot inspect preregistered candidates");
+  }
+  const preregistrationHash = sha256(preregistrationSource);
+  const candidates = history.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.split(" "))
+    .filter((parts) => parts[1] === preregistration.baseSha)
+    .map(([candidate]) => candidate)
+    .filter((candidate) => {
+      const source = spawnSync(
+        "git",
+        [
+          "show",
+          `${candidate}:skills/lumbre/references/forward-pilot-next-preregistration.json`,
+        ],
+        { cwd: resolve(skillDir, "..", ".."), encoding: "utf8" },
+      );
+      return source.status === 0 && sha256(source.stdout) === preregistrationHash;
+    });
+  if (candidates.length === 1) return candidates[0];
+  throw new Error("cannot resolve a unique preregistered candidate");
 }
 
 function makeLocalBaseline() {
