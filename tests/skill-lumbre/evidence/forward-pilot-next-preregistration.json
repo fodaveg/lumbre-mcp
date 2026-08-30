@@ -1,10 +1,10 @@
 {
   "protocolVersion": 1,
   "status": "frozen-before-egress",
-  "baseSha": "d8acdf045ce050db3a7b8d7d840e3766c34fe93f",
+  "baseSha": "779aa8c9d80e317a524ee5f1cdccc861acfc51d9",
   "criteriaFiles": {
     "tests/skill-lumbre/evidence/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
-    "tests/skill-lumbre/evidence/forward-expectations.md": "5dfc936f1fd8364d118f849796050cec6070d532e214db3532532546fccbffd8",
+    "tests/skill-lumbre/evidence/forward-expectations.md": "18f46e6dc425304e8a0b908f3c8ef70c1c321d9181e37c4c72db6164c4ca616e",
     "tests/skill-lumbre/evidence/forward-pilot-schema.json": "3b394778ffff146f8921e3dbf7dbd7a142c8e267d764a6e7154f437683cf4d53",
     "tests/skill-lumbre/forward-pilot-lib.mjs": "b2fc96434270bb82c3878d87a35cd16235ca497157e55abc7370bc805d94e34e",
     "skills/lumbre/scripts/quick-validate-skill.mjs": "77b6de04517796ceb18a3ca9b26323d40e8fba4672b3bda887804ffec37f5b7d",
