@@ -112,7 +112,7 @@ function deriveHistoricalVerification(candidateSha, evidence, rawLog, envelope) 
     const archive = spawnSync(
       "git",
       ["archive", candidateSha, "skills/lumbre"],
-      { cwd: repoRoot, encoding: null },
+      { cwd: repoRoot, encoding: null, maxBuffer: 10 * 1024 * 1024 },
     );
     if (archive.status !== 0) {
       throw new Error("cannot archive historical pilot candidate");
