@@ -157,7 +157,7 @@ function validateClientIdUrl(clientId) {
         throw new OAuthError('invalid_client', 'client_id debe ser un documento HTTPS válido.');
     }
     if (url.protocol !== 'https:' ||
-        url.hostname !== 'claude.ai' ||
+        (url.hostname !== 'claude.ai' && url.hostname !== 'chatgpt.com') ||
         (url.port !== '' && url.port !== '443') ||
         url.pathname === '/' ||
         url.search !== '' ||
@@ -165,9 +165,49 @@ function validateClientIdUrl(clientId) {
         url.username !== '' ||
         url.password !== '' ||
         url.hash !== '') {
-        throw new OAuthError('invalid_client', 'Este conector solo admite documentos de cliente de claude.ai.');
+        throw new OAuthError('invalid_client', 'Este conector solo admite documentos de cliente de Claude o Codex.');
+    }
+    if (url.hostname === 'chatgpt.com' && !/^\/oauth\/codex\/[A-Za-z0-9_-]+\/client\.json$/.test(url.pathname)) {
+        throw new OAuthError('invalid_client', 'Documento de cliente de Codex no reconocido.');
     }
     return url;
+}
+function registeredRedirectMatches(clientId, requested, registered) {
+    if (requested === registered)
+        return true;
+    const client = validateClientIdUrl(clientId);
+    if (client.hostname !== 'chatgpt.com')
+        return false;
+    try {
+        const actual = new URL(requested);
+        const expected = new URL(registered);
+        return (actual.protocol === 'http:' &&
+            actual.hostname === '127.0.0.1' &&
+            actual.port !== '' &&
+            expected.protocol === 'http:' &&
+            expected.hostname === actual.hostname &&
+            expected.port === '' &&
+            expected.pathname === actual.pathname &&
+            expected.search === actual.search &&
+            expected.hash === '' &&
+            actual.hash === '' &&
+            expected.username === '' &&
+            expected.password === '' &&
+            actual.username === '' &&
+            actual.password === '');
+    }
+    catch {
+        return false;
+    }
+}
+function validStoredRedirect(clientId, redirectUri) {
+    const client = validateClientIdUrl(clientId);
+    if (client.hostname === 'claude.ai')
+        return redirectUri === OAUTH_CALLBACK;
+    const callbackId = client.pathname.match(/^\/oauth\/codex\/([A-Za-z0-9_-]+)\/client\.json$/)?.[1];
+    if (!callbackId)
+        return false;
+    return registeredRedirectMatches(clientId, redirectUri, `http://127.0.0.1/callback/${callbackId}`);
 }
 function grantContext(clientId, resource, scope) {
     return Buffer.from(JSON.stringify([clientId, resource, scope]), 'utf8');
@@ -272,7 +312,8 @@ function normalizeStore(value) {
             item.clientName.length === 0 ||
             item.clientName.length > 120 ||
             typeof item.clientId !== 'string' ||
-            item.redirectUri !== OAUTH_CALLBACK ||
+            typeof item.redirectUri !== 'string' ||
+            !validStoredRedirect(item.clientId, item.redirectUri) ||
             item.scope !== OAUTH_SCOPE ||
             item.resource !== OAUTH_RESOURCE ||
             typeof item.challenge !== 'string' ||
@@ -295,7 +336,8 @@ function normalizeStore(value) {
             typeof item.credentialId !== 'string' ||
             !isValidRequestId(item.credentialId) ||
             typeof item.clientId !== 'string' ||
-            item.redirectUri !== OAUTH_CALLBACK ||
+            typeof item.redirectUri !== 'string' ||
+            !validStoredRedirect(item.clientId, item.redirectUri) ||
             item.scope !== OAUTH_SCOPE ||
             item.resource !== OAUTH_RESOURCE ||
             typeof item.challenge !== 'string' ||
@@ -481,8 +523,8 @@ export class OAuthService {
             typeof candidate.client_name !== 'string' ||
             candidate.client_name.trim() === '' ||
             !Array.isArray(candidate.redirect_uris) ||
+            candidate.redirect_uris.length === 0 ||
             !candidate.redirect_uris.every((redirect) => typeof redirect === 'string') ||
-            !candidate.redirect_uris.includes(OAUTH_CALLBACK) ||
             (candidate.token_endpoint_auth_method !== undefined && candidate.token_endpoint_auth_method !== 'none') ||
             (candidate.grant_types !== undefined &&
                 (!Array.isArray(candidate.grant_types) || !candidate.grant_types.includes('authorization_code'))) ||
@@ -512,8 +554,6 @@ export class OAuthService {
         const state = one(params, 'state', false);
         if (responseType !== 'code')
             throw new OAuthError('unsupported_response_type', 'Solo se admite response_type=code.');
-        if (redirectUri !== OAUTH_CALLBACK)
-            throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
         if (scope !== OAUTH_SCOPE)
             throw new OAuthError('invalid_scope', `El scope debe ser ${OAUTH_SCOPE}.`);
         if (resource !== OAUTH_RESOURCE)
@@ -523,7 +563,7 @@ export class OAuthService {
         }
         if (state !== undefined && state.length > 1024)
             throw new OAuthError('invalid_request', 'state demasiado largo.');
-        return { clientId: clientId, redirectUri, scope, resource, challenge, state };
+        return { clientId: clientId, redirectUri: redirectUri, scope, resource, challenge, state };
     }
     enterPublicEndpoint(req, endpoint) {
         const forwarded = req.headers['x-forwarded-for'];
@@ -566,6 +606,9 @@ export class OAuthService {
                 throw new OAuthError('invalid_request', 'Método no permitido.', 405);
             const request = this.authorizationRequest(url.searchParams);
             const metadata = await this.clientMetadata(request.clientId);
+            if (!metadata.redirect_uris.some((registered) => registeredRedirectMatches(request.clientId, request.redirectUri, registered))) {
+                throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
+            }
             const clientName = metadata.client_name.trim().slice(0, 120);
             const transactionId = randomBytes(32).toString('base64url');
             let created;

@@ -9,6 +9,10 @@ import { createHttpApp } from './http.js';
 import { OAuthService, OAUTH_CALLBACK, OAUTH_ISSUER, OAUTH_RESOURCE, OAUTH_RESOURCE_METADATA, OAUTH_SCOPE } from './oauth.js';
 
 const CLIENT_ID = 'https://claude.ai/.well-known/oauth-client/lumbre';
+const CODEX_CALLBACK_ID = 'codexCallback123';
+const CODEX_CLIENT_ID = `https://chatgpt.com/oauth/codex/${CODEX_CALLBACK_ID}/client.json`;
+const CODEX_REGISTERED_REDIRECT = `http://127.0.0.1/callback/${CODEX_CALLBACK_ID}`;
+const CODEX_REDIRECT = `http://127.0.0.1:49152/callback/${CODEX_CALLBACK_ID}`;
 const VERIFIER = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~';
 const CHALLENGE = createHash('sha256').update(VERIFIER, 'ascii').digest('base64url');
 const UPSTREAM_TOKEN = 'a'.repeat(64);
@@ -1260,6 +1264,36 @@ describe('OAuth 2.1 para claude.ai', () => {
 			fetch: oauthFetch({ metadataBody: 'x'.repeat(64 * 1024 + 1) })
 		}));
 		expect((await beginAuthorization(oversizedBase)).status).toBe(400);
+	});
+
+	it('acepta el CIMD de Codex con el puerto loopback efímero registrado por path', async () => {
+		const fallback = oauthFetch();
+		const codexFetch: typeof fetch = async (input, init) => {
+			if (String(input) === CODEX_CLIENT_ID) {
+				return new Response(JSON.stringify({
+					client_id: CODEX_CLIENT_ID,
+					client_name: 'Codex',
+					redirect_uris: [CODEX_REGISTERED_REDIRECT],
+					token_endpoint_auth_method: 'none',
+					grant_types: ['authorization_code', 'refresh_token'],
+					response_types: ['code']
+				}), { status: 200, headers: { 'content-type': 'application/json' } });
+			}
+			return await fallback(input, init);
+		};
+		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: codexFetch }));
+		const accepted = await beginAuthorization(baseUrl, { client_id: CODEX_CLIENT_ID, redirect_uri: CODEX_REDIRECT });
+		expect(accepted.status).toBe(302);
+		expect(accepted.headers.get('location')).toMatch(/^https:\/\/app\.lumbre\.pro\/integrations\/lumbre-mcp\?request=/);
+
+		expect((await beginAuthorization(baseUrl, {
+			client_id: CODEX_CLIENT_ID,
+			redirect_uri: `http://localhost:49152/callback/${CODEX_CALLBACK_ID}`
+		})).status).toBe(400);
+		expect((await beginAuthorization(baseUrl, {
+			client_id: CODEX_CLIENT_ID,
+			redirect_uri: 'https://evil.example/callback'
+		})).status).toBe(400);
 	});
 
 	it('authorize no acepta formulario ni entrada de tokens en el navegador', async () => {
