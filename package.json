@@ -2,7 +2,7 @@
 	"name": "lumbre-mcp",
 	"version": "0.1.0",
 	"private": true,
-	"description": "Conector MCP para Lumbre (Fase 1): añadir y listar tareas desde Claude Code/Desktop vía el token de email-to-task.",
+	"description": "Conector MCP remoto para Lumbre con OAuth 2.1 y skill multimodo opcional.",
 	"type": "module",
 	"bin": {
 		"lumbre-mcp": "dist/index.js"

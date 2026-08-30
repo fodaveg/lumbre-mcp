@@ -1,17 +1,47 @@
 # lumbre-mcp
 
 Conector [MCP](https://modelcontextprotocol.io) de **Lumbre** — deja que
-Claude Code (u otro cliente MCP) añada, consulte y mute tareas de tu
-planificador semanal desde una conversación.
+Codex, Claude y otros clientes MCP añadan, consulten y muten tareas desde una
+conversación.
 
 Paquete Node/TS **autónomo**: no comparte dependencias ni build con la app
-SvelteKit de Lumbre; habla con ella solo por HTTP (`app.lumbre.pro`) usando el
-token de email-to-task.
+SvelteKit de Lumbre. El servicio remoto usa OAuth 2.1 y consentimiento en la
+sesión web de `app.lumbre.pro`; no hay que pegar un token en la URL.
 
 Vivía como `mcp/` dentro del repo de la app y se extrajo a este repo propio el
 2026-07-25 con `git subtree split --prefix=mcp`, así que **conserva su
 historia** (los primeros 23 commits llevan mensajes del monorepo, con `feat(mcp):`
 y también de otros ámbitos que tocaron esta carpeta de paso).
+
+## Conectar el MCP remoto
+
+La URL pública es `https://mcp.lumbre.pro/mcp`. El cliente abre el navegador y
+redirige a Lumbre para iniciar sesión y autorizar la conexión.
+
+En Codex:
+
+```bash
+codex mcp add lumbre --url https://mcp.lumbre.pro/mcp
+codex mcp login lumbre
+```
+
+En claude.ai web o móvil, añade un conector personalizado con esa misma URL. No
+añadas un bearer ni un token en el path.
+
+## Instalar la skill opcional
+
+La skill pública multimodo vive en `skills/lumbre/`. No es necesaria para usar
+el MCP, pero añade reglas seguras de lectura, gestión cotidiana, backlog y el
+flujo opcional de desarrollo/release.
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
+  --repo fodaveg/lumbre-mcp --path skills/lumbre
+```
+
+También puedes pedir a Codex que use `$skill-installer` con el repo
+`fodaveg/lumbre-mcp` y la ruta `skills/lumbre`. La skill estará disponible en
+el turno siguiente.
 
 ## Qué hace (Fase 1 — crear/leer)
 
@@ -403,9 +433,11 @@ después del `git pull` para que se recoja el `dist/` nuevo. Aviso: quien
 toque `src/` tiene que recompilar (`npm run build`) y commitear `dist/` en
 el MISMO commit, porque de momento nada lo vigila automáticamente.
 
-## Configurar en Claude Code
+## Conector stdio local (compatibilidad y adjuntos)
 
-Necesitas tu **token de email-to-task**: en la app de Lumbre, Ajustes →
+Esta vía local es opcional. Úsala para desarrollo, compatibilidad o para adjuntar
+ficheros grandes desde el disco local. Necesitas tu **token de email-to-task**:
+en la app de Lumbre, Ajustes →
 sección de email entrante (el mismo token que usa `task+<token>@…` y
 `/api/ingest`; si aún no lo tienes, la app lo genera la primera vez que
 entras a esa sección).
@@ -468,19 +500,13 @@ solo devuelve `request` y `decision`. La credencial dedicada se canjea de
 servidor a servidor, se cifra antes de persistir y nunca aparece en HTML,
 `Location`, query ni logs.
 
-> La implementación no equivale a producción: el deploy requiere el mismo
-> `LUMBRE_MCP_BACKCHANNEL_SECRET` (mínimo 32 caracteres) en Lumbre y en este
-> servicio. Mientras el contenedor Lumbre no tenga ese secreto, su backchannel
-> responde 503 y la autorización falla cerrada. La aceptación de M3 exige
-> desplegar ambos lados y hacer QA real en claude.ai web y móvil.
-
 | Forma | Cómo | Para qué cliente |
 |---|---|---|
-| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | claude.ai web/móvil tras desplegar el secreto compartido |
-| Bearer directo (compatibilidad temporal) | `Authorization: Bearer <token-de-Lumbre>` contra `POST /mcp` | Clientes existentes como Claude Code |
+| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Codex y claude.ai web/móvil |
+| Bearer directo (compatibilidad temporal) | `Authorization: Bearer <token-de-Lumbre>` contra `POST /mcp` | Clientes heredados |
 | Path (compatibilidad temporal) | `POST /mcp/<token-de-Lumbre>` | Conectores antiguos de claude.ai; no usar en configuraciones nuevas |
 
-En claude.ai se configura solo `https://mcp.lumbre.pro/mcp`. El relé cifra la
+En Codex y claude.ai se configura solo `https://mcp.lumbre.pro/mcp`. El relé cifra la
 credencial upstream con AES-256-GCM y la asocia a access/refresh tokens opacos.
 Antes de emitir o rotar refresh consulta `introspect`; revocación, replay y
 límites de tombstones eliminan la familia local y dejan una revocación cifrada
@@ -491,11 +517,11 @@ familia incluso tras reinicio. Si una familia o el store alcanza el límite de
 tombstones, la rotación revoca fail-safe esa familia en vez de bloquearse.
 
 El recurso y permiso son exactos: `https://mcp.lumbre.pro/mcp` y
-`lumbre:mcp`. El callback admitido es únicamente el oficial de claude.ai,
-`https://claude.ai/api/mcp/auth_callback`. El servidor usa documentos de
-metadata de cliente (CIMD) servidos por `claude.ai`; no inventa un `client_id`
-ni anuncia registro dinámico. La caché CIMD respeta `Cache-Control: no-store`
-y `no-cache` y no reutiliza esas respuestas.
+`lumbre:mcp`. Los callbacks se validan contra la identidad del cliente: el
+callback oficial de claude.ai y el loopback efímero issuer-bound de Codex. El
+servidor usa documentos de metadata de cliente (CIMD); no inventa un
+`client_id` ni anuncia registro dinámico. La caché CIMD respeta
+`Cache-Control: no-store` y `no-cache` y no reutiliza esas respuestas.
 
 El callback Lumbre es one-shot: se consume durablemente antes de `/exchange`,
 de modo que dos callbacks concurrentes nunca canjean dos veces. Si la respuesta
