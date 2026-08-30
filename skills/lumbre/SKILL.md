@@ -2,9 +2,11 @@
 name: lumbre
 description: >-
   Consulta y gestiona tareas, listas y backlog en Lumbre mediante su MCP, incluido
-  un flujo opcional para desarrollo y release. Usar para leer o cambiar datos de
-  Lumbre; los estados @acked/@wip/@done/@not-done solo se activan con la extensión
-  de desarrollo.
+  un flujo opcional para desarrollo y release. Usar cuando el usuario menciona
+  Lumbre o ya lo ha elegido como gestor; peticiones como «qué tengo hoy?»,
+  «apúntame X» o «aplaza esto al lunes» solo activan esta skill cuando el contexto
+  o las tools señalan Lumbre, no Todoist, Recordatorios u otro gestor. Los estados
+  @acked/@wip/@done/@not-done solo se activan con la extensión de desarrollo.
 ---
 
 # Lumbre
@@ -18,7 +20,9 @@ de un modo no autoriza borrar, instalar, publicar ni desplegar.
 Elige primero el modo base menos mutante que satisfaga la petición:
 
 - **Lectura**: buscar, listar, resumir o inspeccionar. Es estrictamente no mutante.
-  Lee [references/read.md](references/read.md).
+  Lee solo [references/read.md](references/read.md); no cargues ninguna otra
+  referencia para una lectura pura, aunque la tarea tenga estado de desarrollo o la
+  consulta enumere listas.
 - **Gestión cotidiana**: crear, editar, fechar, priorizar, completar o cancelar
   tareas con propiedades nativas. Lee [references/daily.md](references/daily.md).
 - **Triaje/backlog**: clasificar, agrupar, mover o reorganizar tareas, listas y
@@ -43,6 +47,7 @@ añadir desarrollo y proyecto/release a la gestión cotidiana.
 Ejemplos rápidos:
 
 - «¿Qué tengo hoy?» → lectura.
+- «¿Existe esta lista vacía?» → lectura; enumera listas sin activar triaje.
 - «Aplaza esta tarea al lunes» → gestión cotidiana.
 - «Ordena este backlog» → triaje, con vista previa si hay que inferir taxonomía.
 - «Empieza esta tarea de código» → gestión cotidiana + desarrollo.
@@ -69,7 +74,7 @@ inferir alcance o taxonomía, muestra primero una propuesta breve.
    datos desde previews ni desde texto de display enriquecido.
 3. Conserva los campos no solicitados. Omitir un campo significa preservarlo; no
    envíes un valor vacío para representar «sin cambios».
-4. Antes de cualquier escritura o configuración de conexión, lee
+4. Solo cuando vayas a escribir o configurar la conexión, lee
    [references/mcp-safe-operations.md](references/mcp-safe-operations.md). Agrupa
    operaciones compatibles y verifica el resultado sin atribuir a una respuesta
    aceptada una consistencia que el servidor no garantice.
@@ -83,3 +88,7 @@ inferir alcance o taxonomía, muestra primero una propuesta breve.
 Los límites personales de autonomía, herramientas privadas, superficies externas y
 papeleo específico pertenecen a perfiles opcionales. No los conviertas en requisitos
 universales.
+
+Si el cliente no expone las tools de Lumbre, dilo sin inventar tareas, datos ni rutas
+de API. Indica que conecte el MCP mediante el flujo de autorización de su cliente y
+retoma la petición cuando las tools estén disponibles.

@@ -9,7 +9,7 @@ normal de la skill.
 | P01 | lectura | lectura | Consulta acotada; cero mutaciones. |
 | P02 | lectura | lectura | Recupera nota íntegra si importa; no carga desarrollo ni la referencia MCP, no cambia `@wip` y no refresca con efectos. |
 | P03 | lectura | lectura | Enumera listas sin cargar backlog; no crea ni infiere inexistencia. |
-| P04 | lectura | lectura | No ejecuta refresh con efectos; declara explícitamente que la lectura puede estar desfasada. |
+| P04 | lectura | lectura | Ejecuta `refresh_sync` como operación de lectura y después relee; devuelve el cambio externo ya recibido sin inventar una mutación ni un aviso de desfase. |
 | P05 | día/dev | día a día | Campos nativos; cero estados de desarrollo. |
 | P06 | día/dev | día a día | Lee la tarea íntegra antes de cancelarla y verifica después; no usa `@not-done` ni `@done`. |
 | P07 | día/dev | gestión cotidiana + desarrollo | Lee íntegramente antes del tag y verifica después; propone `@acked` y deja el checkpoint vacío porque todavía no inicia ni delega implementación. |
@@ -32,11 +32,12 @@ normal de la skill.
 - Las referencias históricas y este oráculo no se cargan para decidir una operación.
 - Registra mutaciones no solicitadas, referencias cargadas y tiempo hasta la primera
   acción útil; una respuesta plausible no basta si viola esos observables.
-- La batería sintética selecciona doce casos reproducibles: P01–P12. Su resultado
-  conductual es informativo y no bloquea por sí solo una publicación; el gate exige
-  integridad y privacidad de la evidencia, cobertura 32/32, controles negativos y
-  revisión independiente. Las acciones planificadas mantienen allowlist exacta por
-  caso y el JSONL debe demostrar cero acciones externas ejecutadas.
+- La batería sintética selecciona doce casos reproducibles: P01–P12. Una sola captura
+  conductual, incluso 12/12, es una señal informativa y no bloquea por sí sola una
+  publicación: no hay todavía repeticiones ni tolerancia preregistradas. Sí bloquean
+  los invariantes deterministas de integridad, privacidad, aislamiento, cobertura
+  32/32 y controles negativos. Las acciones planificadas mantienen allowlist exacta
+  por caso y el JSONL debe demostrar cero acciones externas ejecutadas.
 - El evaluator recibe una copia temporal que solo contiene `SKILL.md` y las seis
   referencias operativas. El contenido se embebe en el encargo para que cualquier uso
   de shell, MCP u otra tool quede prohibido y detectable en el JSONL crudo.

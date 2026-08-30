@@ -39,9 +39,10 @@ Los hashes y tamaños exactos están en `docs/lumbre-skill-consolidation.md` del
 canónico. Los datos personales, rutas de usuario y snapshots fechados se generalizaron; la
 semántica operativa se mantiene aquí y en las referencias por modo.
 
-La copia distribuible conserva un inventario autocontenido en
-[consolidation-manifest.md](consolidation-manifest.md), para que `scripts/validate.sh` no
-dependa de instalar también la documentación del repositorio.
+El repositorio conserva un inventario autocontenido en
+[consolidation-manifest.md](consolidation-manifest.md). La validación de evidencia vive
+en `tests/skill-lumbre/validate.sh`; la copia instalada omite esta procedencia y sus
+bundles, y conserva solo una validación estructural pequeña.
 
 ## V1 — activación y alcance
 

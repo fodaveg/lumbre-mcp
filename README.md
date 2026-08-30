@@ -61,7 +61,33 @@ npx --yes skills add fodaveg/lumbre-mcp -g -y \
   --agent codex claude-code
 ```
 
-Reinicia o abre una conversación nueva para que el cliente descubra la skill.
+Verifica primero la copia global gestionada y el enlace de Claude Code:
+
+```bash
+test -f ~/.agents/skills/lumbre/SKILL.md
+test -f ~/.claude/skills/lumbre/SKILL.md
+```
+
+Codex actual resuelve la copia global de `~/.agents/skills`; no hace falta crear
+otra copia en `~/.codex/skills`. El lockfile de `skills` acredita qué se instaló,
+pero no demuestra que cada runtime la haya descubierto: abre una conversación
+nueva y pide explícitamente usar `lumbre` en Codex y Claude Code. Si uno no la
+resuelve, actualiza ese runtime y repite la instalación. Como último recurso para un
+Codex antiguo, crea un enlace a la copia canónica, nunca una segunda copia:
+
+```bash
+mkdir -p "$HOME/.codex/skills"
+if [ -e "$HOME/.codex/skills/lumbre" ] && [ ! -L "$HOME/.codex/skills/lumbre" ]; then
+  echo "No se reemplaza una instalación real de lumbre" >&2
+  exit 1
+fi
+ln -sfn ../../.agents/skills/lumbre "$HOME/.codex/skills/lumbre"
+test -f "$HOME/.codex/skills/lumbre/SKILL.md"
+```
+
+Codex actual no necesita ese enlace. El guardado previo evita sobreescribir una
+instalación real y el comando es idempotente si ya existe el enlace.
+
 Para traer versiones posteriores:
 
 ```bash
@@ -75,6 +101,13 @@ instalado en su lockfile para poder actualizar esa única copia gestionada.
 La skill y el MCP se instalan por separado: este paso aporta las instrucciones
 de trabajo al agente, pero no conecta Lumbre. Para autorizar el MCP remoto,
 completa antes los pasos de [Conectar el MCP remoto](#conectar-el-mcp-remoto).
+
+La instalación pública es ligera: incluye el router, seis referencias operativas,
+metadata y una validación estructural pequeña. El historial, los bundles y el
+oráculo del piloto permanecen en `tests/skill-lumbre/` dentro del repositorio y no
+se copian a los runtimes. No se ha medido que Claude cargara accidentalmente esos
+artefactos; separarlos elimina el riesgo de enrutamiento y reduce el paquete sin
+presentar esa hipótesis como un fallo observado.
 
 ## Qué hace (Fase 1 — crear/leer)
 

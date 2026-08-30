@@ -17,21 +17,22 @@ import {
 } from "./forward-pilot-lib.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const skillDir = resolve(scriptDir, "..");
+const repoRoot = resolve(scriptDir, "..", "..");
+const skillDir = join(repoRoot, "skills", "lumbre");
+const evidenceDir = join(scriptDir, "evidence");
 const verifier = join(scriptDir, "verify-forward-pilot.mjs");
 const publishedEvidencePath = join(
-  skillDir,
-  "references",
+  evidenceDir,
   "forward-pilot-evidence.json",
 );
 const publishedEvidence = JSON.parse(readFileSync(publishedEvidencePath, "utf8"));
 const preregistrationSource = readFileSync(
-  join(skillDir, "references", "forward-pilot-next-preregistration.json"),
+  join(evidenceDir, "forward-pilot-next-preregistration.json"),
   "utf8",
 );
 const preregistration = JSON.parse(preregistrationSource);
 const baselineCandidateSha = preregisteredCandidateSha();
-assertCriteriaFreeze(skillDir, preregistration, baselineCandidateSha);
+assertCriteriaFreeze(repoRoot, preregistration, baselineCandidateSha);
 const criteriaFreeze = {
   ...preregistration,
   preregistrationSha256: sha256(preregistrationSource),
@@ -55,7 +56,7 @@ function currentHash(path) {
 
 function gitRevision(revision) {
   const result = spawnSync("git", ["rev-parse", revision], {
-    cwd: resolve(skillDir, "..", ".."),
+    cwd: repoRoot,
     encoding: "utf8",
   });
   if (result.status !== 0) throw new Error(`cannot resolve ${revision}`);
@@ -66,7 +67,7 @@ function readRevisionFile(revision, path) {
   const result = spawnSync(
     "git",
     ["show", `${revision}:skills/lumbre/${path}`],
-    { cwd: resolve(skillDir, "..", ".."), encoding: "utf8" },
+    { cwd: repoRoot, encoding: "utf8" },
   );
   if (result.status !== 0) throw new Error(`cannot read ${path} at ${revision}`);
   return result.stdout;
@@ -107,7 +108,7 @@ function preregisteredCandidateSha() {
     return captured;
   }
   const history = spawnSync("git", ["rev-list", "--all", "--parents"], {
-    cwd: resolve(skillDir, "..", ".."),
+    cwd: repoRoot,
     encoding: "utf8",
   });
   if (history.status !== 0) {
@@ -125,9 +126,9 @@ function preregisteredCandidateSha() {
         "git",
         [
           "show",
-          `${candidate}:skills/lumbre/references/forward-pilot-next-preregistration.json`,
+          `${candidate}:tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json`,
         ],
-        { cwd: resolve(skillDir, "..", ".."), encoding: "utf8" },
+        { cwd: repoRoot, encoding: "utf8" },
       );
       return source.status === 0 && sha256(source.stdout) === preregistrationHash;
     });
@@ -179,6 +180,12 @@ function makeLocalBaseline() {
   ];
   getCase(evidence, "P02").references = ["SKILL.md", "read.md"];
   getCase(evidence, "P03").references = ["SKILL.md", "read.md"];
+  getCase(evidence, "P04").firstUsefulAction = "refresh_sync";
+  getCase(evidence, "P04").operationSequence = [
+    "refresh_sync",
+    "read_snapshot",
+  ];
+  getCase(evidence, "P04").freshnessWarning = false;
   getCase(evidence, "P09").operationSequence = [
     "get_task_full",
     "propose_triage",
@@ -213,7 +220,7 @@ function makeLocalBaseline() {
   const runnerHash = currentHash(join(scriptDir, "run-forward-pilot.mjs"));
   const libraryHash = currentHash(join(scriptDir, "forward-pilot-lib.mjs"));
   const schemaHash = currentHash(
-    join(skillDir, "references", "forward-pilot-schema.json"),
+    join(evidenceDir, "forward-pilot-schema.json"),
   );
   const captureContext = {
     codexVersion: evidence.codexVersion,
@@ -222,7 +229,7 @@ function makeLocalBaseline() {
   };
   const environment = buildEvaluationEnvironment({
     promptSource: readFileSync(
-      join(skillDir, "references", "forward-prompts.md"),
+      join(evidenceDir, "forward-prompts.md"),
       "utf8",
     ),
     model: evidence.model,
@@ -658,6 +665,7 @@ const controls = [
 
 const precedenceEdges = [
   ["P03", "list_lists", 1, "list_tasks", 1],
+  ["P04", "refresh_sync", 1, "read_snapshot", 1],
   ["P05", "create_task", 1, "verify_task", 1],
   ["P06", "get_task_full", 1, "cancel_task", 1],
   ["P06", "cancel_task", 1, "verify_task", 1],
@@ -701,6 +709,7 @@ for (const [id, before, beforeOccurrence, after, afterOccurrence] of
 
 for (const [id, operation] of [
   ["P01", "create_task"],
+  ["P04", "create_task"],
   ["P05", "update_task_tags"],
   ["P06", "delegate_tests"],
   ["P07", "delegate_tests"],
@@ -721,6 +730,8 @@ for (const [id, operation] of [
 
 for (const [id, operation, occurrence] of [
   ["P03", "list_tasks", 1],
+  ["P04", "refresh_sync", 1],
+  ["P04", "read_snapshot", 1],
   ["P05", "verify_task", 1],
   ["P06", "get_task_full", 1],
   ["P07", "get_task_full", 1],
@@ -744,6 +755,7 @@ for (const [id, operation, occurrence] of [
 }
 
 for (const [id, operation] of [
+  ["P04", "refresh_sync"],
   ["P05", "create_task"],
   ["P06", "cancel_task"],
   ["P07", "update_task_tags"],
@@ -804,7 +816,7 @@ try {
   let nonexistentBaseRejected = false;
   try {
     assertCriteriaFreeze(
-      skillDir,
+      repoRoot,
       { ...preregistration, baseSha: "0".repeat(40) },
       baselineCandidateSha,
     );

@@ -31,13 +31,13 @@ import {
 } from "./forward-pilot-lib.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const skillDir = resolve(scriptDir, "..");
-const repoRoot = resolve(skillDir, "..", "..");
-const promptsPath = join(skillDir, "references", "forward-prompts.md");
-const schemaPath = join(skillDir, "references", "forward-pilot-schema.json");
+const repoRoot = resolve(scriptDir, "..", "..");
+const skillDir = join(repoRoot, "skills", "lumbre");
+const evidenceDir = join(scriptDir, "evidence");
+const promptsPath = join(evidenceDir, "forward-prompts.md");
+const schemaPath = join(evidenceDir, "forward-pilot-schema.json");
 const preregistrationPath = join(
-  skillDir,
-  "references",
+  evidenceDir,
   "forward-pilot-next-preregistration.json",
 );
 const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
@@ -83,12 +83,12 @@ function runText(command, args, cwd = repoRoot) {
   return result.stdout.trim();
 }
 
-function hashCandidateFiles(candidateSha, files) {
+function hashCandidateRepoFiles(candidateSha, files) {
   return Object.fromEntries(
     files.map((path) => {
       const result = spawnSync(
         "git",
-        ["show", `${candidateSha}:skills/lumbre/${path}`],
+        ["show", `${candidateSha}:${path}`],
         { cwd: repoRoot, encoding: null },
       );
       if (result.status !== 0) {
@@ -96,6 +96,16 @@ function hashCandidateFiles(candidateSha, files) {
       }
       return [path, sha256(result.stdout)];
     }),
+  );
+}
+
+function hashCandidateSkillFiles(candidateSha, files) {
+  const hashes = hashCandidateRepoFiles(
+    candidateSha,
+    files.map((path) => `skills/lumbre/${path}`),
+  );
+  return Object.fromEntries(
+    files.map((path) => [path, hashes[`skills/lumbre/${path}`]]),
   );
 }
 
@@ -113,7 +123,7 @@ function resolvePreregisteredCandidate() {
         "git",
         [
           "show",
-          `${candidate}:skills/lumbre/references/forward-pilot-next-preregistration.json`,
+          `${candidate}:tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json`,
         ],
         { cwd: repoRoot, encoding: "utf8" },
       );
@@ -128,11 +138,11 @@ function resolvePreregisteredCandidate() {
 const { candidateSha, headSha } = resolvePreregisteredCandidate();
 
 assertCriteriaFreeze(
-  skillDir,
+  repoRoot,
   preregistration,
   candidateSha,
 );
-const candidateCriteriaHashes = hashCandidateFiles(
+const candidateCriteriaHashes = hashCandidateRepoFiles(
   candidateSha,
   CRITERIA_FILES,
 );
@@ -142,10 +152,10 @@ if (
 ) {
   throw new Error("criteria freeze differs from snapshotted candidate");
 }
-const candidatePreregistrationHash = hashCandidateFiles(
+const candidatePreregistrationHash = hashCandidateRepoFiles(
   candidateSha,
-  ["references/forward-pilot-next-preregistration.json"],
-)["references/forward-pilot-next-preregistration.json"];
+  ["tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json"],
+)["tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json"];
 if (candidatePreregistrationHash !== criteriaFreeze.preregistrationSha256) {
   throw new Error("preregistration differs from snapshotted candidate");
 }
@@ -195,7 +205,7 @@ if (JSON.stringify(bundleFilesBefore) !== JSON.stringify(operationalFiles.slice(
   throw new Error(`isolated bundle contains unexpected files: ${bundleFilesBefore}`);
 }
 const bundleHashesBefore = hashFiles(bundleDir, bundleFilesBefore);
-const candidateOperationalHashes = hashCandidateFiles(
+const candidateOperationalHashes = hashCandidateSkillFiles(
   captureContext.candidateParentSha,
   bundleFilesBefore,
 );
@@ -318,7 +328,7 @@ const startedAt = process.hrtime.bigint();
     throw new Error("Codex version or candidate HEAD changed during evaluation");
   }
   assertCriteriaFreeze(
-    skillDir,
+    repoRoot,
     preregistration,
     captureContext.candidateParentSha,
   );

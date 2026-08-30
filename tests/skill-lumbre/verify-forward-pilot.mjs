@@ -27,10 +27,11 @@ import {
 } from "./forward-pilot-lib.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const skillDir = resolve(scriptDir, "..");
+const repoRoot = resolve(scriptDir, "..", "..");
+const skillDir = join(repoRoot, "skills", "lumbre");
+const evidenceDir = join(scriptDir, "evidence");
 const defaultEvidence = join(
-  skillDir,
-  "references",
+  evidenceDir,
   "forward-pilot-evidence.json",
 );
 const args = process.argv.slice(2);
@@ -38,11 +39,13 @@ const integrityOnly = args.includes("--integrity-only");
 const requestedEvidence = args.find((arg) => arg !== "--integrity-only");
 const evidencePath = resolve(requestedEvidence ?? defaultEvidence);
 const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
-const repoRoot = resolve(skillDir, "..", "..");
 function readCandidateFile(candidateSha, path) {
+  const repoPath = path.startsWith("skills/") || path.startsWith("tests/")
+    ? path
+    : `skills/lumbre/${path}`;
   const result = spawnSync(
     "git",
-    ["show", `${candidateSha}:skills/lumbre/${path}`],
+    ["show", `${candidateSha}:${repoPath}`],
     { cwd: repoRoot, encoding: "utf8" },
   );
   if (result.status !== 0) {
@@ -181,7 +184,7 @@ function deriveHistoricalVerification(candidateSha, evidence, rawLog, envelope) 
   }
 }
 
-const schemaPath = join(skillDir, "references", "forward-pilot-schema.json");
+const schemaPath = join(evidenceDir, "forward-pilot-schema.json");
 const schemaSource = integrityOnly
   ? readCandidateFile(
       evidence.candidateParentSha,
@@ -196,8 +199,7 @@ const historicalPreregistration = integrityOnly
     )
   : null;
 const preregistrationPath = join(
-  skillDir,
-  "references",
+  evidenceDir,
   "forward-pilot-next-preregistration.json",
 );
 const preregistrationSource = integrityOnly
@@ -205,7 +207,7 @@ const preregistrationSource = integrityOnly
   : readFileSync(preregistrationPath, "utf8");
 const preregistration = JSON.parse(preregistrationSource);
 if (!integrityOnly) {
-  assertCriteriaFreeze(skillDir, preregistration, evidence.candidateParentSha);
+  assertCriteriaFreeze(repoRoot, preregistration, evidence.candidateParentSha);
 }
 const criteriaFreeze = {
   ...preregistration,
@@ -283,13 +285,13 @@ const contracts = {
     extensions: [],
     requiredReferences: ["SKILL.md", "read.md"],
     forbiddenReferences: operationalReferences.filter((entry) => entry !== "read.md"),
-    firstAction: "read_snapshot",
-    requiredOperations: { read_snapshot: 1 },
-    exactOperationCounts: { read_snapshot: 1 },
+    firstAction: "refresh_sync",
+    requiredOperations: { refresh_sync: 1, read_snapshot: 1 },
+    exactOperationCounts: { refresh_sync: 1, read_snapshot: 1 },
     forbiddenOperations: [...mutationOperations, ...developmentReleaseOperations],
+    precedence: [["refresh_sync", 1, "read_snapshot", 1]],
     mutations: [],
     devState: "",
-    freshnessWarning: true,
   },
   P05: {
     mode: "daily",
@@ -695,7 +697,7 @@ check(
 );
 const promptSource = integrityOnly
   ? readCandidateFile(evidence.candidateParentSha, "references/forward-prompts.md")
-  : readFileSync(join(skillDir, "references", "forward-prompts.md"), "utf8");
+  : readFileSync(join(evidenceDir, "forward-prompts.md"), "utf8");
 const environmentInputs = {
   promptSource,
   model: evidence.model,
@@ -817,7 +819,7 @@ check(
 );
 const candidateCriteriaHashes = hashCandidateFiles(
   evidence.candidateParentSha,
-  CRITERIA_FILES,
+  integrityOnly ? Object.keys(preregistration.criteriaFiles) : CRITERIA_FILES,
 );
 check(
   candidateCriteriaHashes !== null &&
@@ -830,12 +832,12 @@ const candidatePreregistrationHashes = hashCandidateFiles(
   [
     integrityOnly
       ? historicalPreregistration.path
-      : "references/forward-pilot-next-preregistration.json",
+      : "tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json",
   ],
 );
 const candidatePreregistrationPath = integrityOnly
   ? historicalPreregistration.path
-  : "references/forward-pilot-next-preregistration.json";
+  : "tests/skill-lumbre/evidence/forward-pilot-next-preregistration.json";
 check(
   candidatePreregistrationHashes !== null &&
     candidatePreregistrationHashes[candidatePreregistrationPath] ===

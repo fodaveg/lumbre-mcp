@@ -12,8 +12,9 @@ evidencia informativa post-publicación, no gates de release.
    copia preferida.
 3. Se separó el router corto de seis referencias operativas por modo y una referencia
    de seguridad para escrituras.
-4. `consolidation-manifest.md` y `source-variants.md` permanecen como evidencia no cargada
-   normalmente. Ninguna cláusula se eliminó solo por parecer redundante.
+4. `tests/skill-lumbre/evidence/consolidation-manifest.md` y `source-variants.md`
+   permanecen como evidencia repo-only. Ninguna cláusula se eliminó solo por parecer
+   redundante.
 
 Ante duda se conservó duplicación. La reducción afecta instrucciones repetidas,
 recetas locales y contradicciones ya resueltas, no la cobertura.
@@ -33,7 +34,7 @@ recetas locales y contradicciones ya resueltas, no la cobertura.
 | S09 | `@contexto` controlado y `#tag` libre siguen diferenciados. |
 | S10 | Contenido crudo obligatorio antes de reeditar; no se usa display enriquecido. |
 | S11 | Updates parciales, batch y orden mover→sección permanecen en seguridad. |
-| S12 | Escritura eventual se relee; refresh con efectos se clasifica como mutación. |
+| S12 | Escritura eventual se relee; `refresh_sync` fuerza el flush de cambios ya recibidos y se clasifica como lectura. |
 | S13 | OAuth es normal; API directa queda solo para diagnóstico autorizado y seguro. |
 | S14 | `@acked`→`@wip`→`@done`, un solo estado y tags ortogonales, solo en desarrollo. |
 | S15 | Una creación nace `@acked` únicamente dentro del flujo dev ya activado. |
@@ -62,9 +63,9 @@ matriz para poder comprobar una instalación aislada.
 
 | Recomendación | Decisión | Motivo |
 |---|---|---|
-| Router pequeño y progressive disclosure | Aceptada | El router queda en 85 líneas y solo enruta referencias pertinentes. |
+| Router pequeño y progressive disclosure | Aceptada | El router queda bajo 120 líneas y lectura enlaza solo su referencia pertinente. |
 | Referencias por modo | Aceptada | Lectura/día, backlog, desarrollo y release están separados; seguridad se carga al escribir. |
-| Cero mutaciones en lectura | Aceptada | Incluye estados y refresh con efectos. |
+| Cero mutaciones en lectura | Aceptada | Excluye estados y permite el flush no mutante de cambios ya recibidos. |
 | No revisar toda la lista por sesión | Aceptada | La lectura se acota por fecha, lista o ids salvo necesidad explícita. |
 | Checkpoints útiles para TDAH/TEA sin ceremonia universal | Aceptada | Se exigen en proporción a riesgo, concurrencia o reanudación. |
 | Perfil dev apagado por defecto | Aceptada | Solo petición, continuidad de tarea o regla viva del repo lo activan. |
@@ -79,9 +80,9 @@ publicación ni impide declarar terminada la consolidación y optimización estr
 
 El arnés separa físicamente entradas y resultados:
 
-- `skills/lumbre/references/forward-prompts.md` contiene solo ID y petición. Es el
+- `tests/skill-lumbre/evidence/forward-prompts.md` contiene solo ID y petición. Es el
   único fichero de evaluación que recibe el agente antes de responder.
-- `skills/lumbre/references/forward-expectations.md` contiene modos, contratos y
+- `tests/skill-lumbre/evidence/forward-expectations.md` contiene modos, contratos y
   negativos. El coordinador lo abre únicamente después de recoger los resultados.
 
 La batería mantiene dieciséis casos: cuatro de lectura, seis combinados de día a día y

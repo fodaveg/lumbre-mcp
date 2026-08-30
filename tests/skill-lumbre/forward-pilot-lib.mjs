@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -27,6 +27,7 @@ export const ALLOWED_OPERATIONS = [
   "list_lists",
   "list_tasks",
   "read_snapshot",
+  "refresh_sync",
   "ask_clarification",
   "create_task",
   "cancel_task",
@@ -46,37 +47,39 @@ export const ALLOWED_OPERATIONS = [
 ];
 
 export const CRITERIA_FILES = [
-  "references/forward-prompts.md",
-  "references/forward-expectations.md",
-  "references/forward-pilot-schema.json",
-  "scripts/forward-pilot-lib.mjs",
-  "scripts/quick-validate-skill.mjs",
-  "scripts/run-forward-pilot.mjs",
-  "scripts/test-forward-pilot-verifier.mjs",
-  "scripts/validate.sh",
-  "scripts/verify-forward-pilot.mjs",
+  "tests/skill-lumbre/evidence/forward-prompts.md",
+  "tests/skill-lumbre/evidence/forward-expectations.md",
+  "tests/skill-lumbre/evidence/forward-pilot-schema.json",
+  "tests/skill-lumbre/forward-pilot-lib.mjs",
+  "skills/lumbre/scripts/quick-validate-skill.mjs",
+  "skills/lumbre/scripts/validate-contracts.mjs",
+  "skills/lumbre/scripts/validate.sh",
+  "tests/skill-lumbre/run-forward-pilot.mjs",
+  "tests/skill-lumbre/test-forward-pilot-verifier.mjs",
+  "tests/skill-lumbre/validate-evidence.mjs",
+  "tests/skill-lumbre/validate.sh",
+  "tests/skill-lumbre/verify-forward-pilot.mjs",
 ];
 
-export function currentCriteriaHashes(skillDir) {
+export function currentCriteriaHashes(repoRoot) {
   return Object.fromEntries(
-    CRITERIA_FILES.map((path) => [path, sha256(readFileSync(join(skillDir, path)))]),
+    CRITERIA_FILES.map((path) => [path, sha256(readFileSync(join(repoRoot, path)))]),
   );
 }
 
-export function assertCriteriaFreeze(skillDir, freeze, candidateSha) {
+export function assertCriteriaFreeze(repoRoot, freeze, candidateSha) {
   if (
     freeze?.protocolVersion !== 1 ||
     freeze?.status !== "frozen-before-egress" ||
     !/^[0-9a-f]{40}$/.test(freeze?.baseSha ?? "") ||
     JSON.stringify(freeze.criteriaFiles) !==
-      JSON.stringify(currentCriteriaHashes(skillDir))
+      JSON.stringify(currentCriteriaHashes(repoRoot))
   ) {
     throw new Error("pilot criteria differ from pre-egress preregistration");
   }
   if (!/^[0-9a-f]{40}$/.test(candidateSha ?? "")) {
     throw new Error("pilot candidate SHA is missing");
   }
-  const repoRoot = resolve(skillDir, "..", "..");
   const baseExists = spawnSync(
     "git",
     ["cat-file", "-e", `${freeze.baseSha}^{commit}`],
@@ -106,7 +109,7 @@ const fixtures = {
   P01: "Snapshot actual con tres tareas fechadas hoy y dos fuera de fecha.",
   P02: "task-p02 está en @wip; el listado trae preview y la lectura íntegra contiene el feedback completo.",
   P03: "list_lists contiene X; list_tasks para su id devuelve una colección vacía.",
-  P04: "Hay un snapshot legible; el contrato del conector indica que refresh_sync puede incorporar o persistir cambios.",
+  P04: "Hay un snapshot legible; el cambio pudo hacerse en la app y ya llegó al servidor. refresh_sync solo fuerza su flush y no escribe datos nuevos.",
   P05: "Borrador: content='Planificar semana', listId='list-personal'. El conector acepta recurrence='weekly:monday' sin fecha ni hora.",
   P06: "La única tarea contextual es task-p06, pendiente y ajena a desarrollo.",
   P07: "La tarea de desarrollo contextual es task-p07, pendiente, sin estado de agente y con id resuelto.",
@@ -179,7 +182,9 @@ Una lectura no carga desarrollo solo porque la tarea tenga estado de agente. Ver
 @wip antes de delegar. Si el workflow exige un SHA y la implementación está autorizada,
 el commit candidato se registra en externalActions, sin inferir merge, push o deploy.
 Una lectura ordinaria tampoco carga mcp-safe-operations; preguntar si una lista vacía
-existe no carga backlog. Puede haber verificaciones intermedias, pero la última
+existe no carga backlog. Cuando la frescura depende de un cambio externo ya recibido,
+refresh_sync precede a la relectura y sigue siendo lectura. Puede haber verificaciones
+intermedias, pero la última
 verify_preserved_fields de un movimiento ocurre después de reasignar la sección.
 
 references enumera los ficheros del bundle que realmente aplicaste a cada decisión,

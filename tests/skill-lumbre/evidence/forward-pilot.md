@@ -54,9 +54,9 @@ fallos de progressive disclosure.
 Una corrida nueva requiere autorización para enviar el bundle público al modelo:
 
 ```sh
-node scripts/run-forward-pilot.mjs /tmp/lumbre-forward-pilot.json
-node scripts/verify-forward-pilot.mjs /tmp/lumbre-forward-pilot.json
-node scripts/test-forward-pilot-verifier.mjs
+node tests/skill-lumbre/run-forward-pilot.mjs /tmp/lumbre-forward-pilot.json
+node tests/skill-lumbre/verify-forward-pilot.mjs /tmp/lumbre-forward-pilot.json
+node tests/skill-lumbre/test-forward-pilot-verifier.mjs
 ```
 
 El runner y el verificador son herramientas del repositorio: necesitan un checkout Git
@@ -65,7 +65,9 @@ shallow clone que no contenga ese commit puede fallar al comprobar `git show`; e
 afecta al uso operativo normal de la skill.
 
 Cada preregistración permite una sola captura, sin ajustar criterios ni recapturar en
-el mismo lote. El resultado conductual se conserva como evidencia informativa; la
-publicación exige integridad histórica, privacidad, cobertura 32/32, controles
-negativos y revisión independiente. El seguimiento real de dos semanas queda como
-observación post-publicación no bloqueante.
+el mismo lote. Una única salida estocástica, incluso 12/12, se conserva como señal
+conductual informativa mientras no haya repeticiones y tolerancia preregistradas. La
+publicación exige los gates deterministas de integridad histórica, privacidad,
+aislamiento, cobertura 32/32 y controles negativos, además de revisión independiente.
+El seguimiento real de dos semanas queda como observación post-publicación no
+bloqueante.

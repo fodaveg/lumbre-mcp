@@ -5,7 +5,8 @@ Este fichero no se carga en el uso normal. La matriz narrativa y las decisiones 
 en la documentación del repositorio canónico; `forward-prompts.md` y
 `forward-expectations.md` separan la batería ciega de su oráculo. El piloto sintético
 reproducible y sus métricas viven en `forward-pilot.md` y
-`forward-pilot-evidence.json`; no se presentan como uso longitudinal real.
+`forward-pilot-evidence.json`; no se presentan como uso longitudinal real. Toda esta
+carpeta es evidencia repo-only y no forma parte de la skill instalada.
 
 ## Captura preregistrada rechazada
 

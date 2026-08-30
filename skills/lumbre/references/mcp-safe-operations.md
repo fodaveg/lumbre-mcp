@@ -2,6 +2,9 @@
 
 Lee esta referencia antes de escribir. Usa las tools que el cliente exponga; no
 inventes operaciones ni supongas capacidades de otra versión del servidor.
+Antes de concluir que una capacidad no existe, comprueba el esquema de las tools de
+lote: una operación puede estar expuesta como `op` de una tool de batch y no como tool
+independiente.
 
 ## Identidad y lectura íntegra
 
@@ -16,8 +19,10 @@ inventes operaciones ni supongas capacidades de otra versión del servidor.
 
 - Una actualización parcial cambia solo los campos enviados. No reconstruyas el
   contenido desde un display con prioridad, fechas, marcadores o previews.
-- Prefiere batch para operaciones relacionadas y conserva su orden. Mover de lista
-  puede limpiar la sección: mueve primero y reasigna después si debe conservarla.
+- Prefiere batch para operaciones relacionadas. El servidor conserva el orden de
+  envío, pero cada operación reporta su propio resultado y el lote puede quedar
+  aplicado a medias: no asumas atomicidad ni éxito global. Mover de lista limpia la
+  sección; mueve primero y reasigna después si debe conservarla.
 - Las subtareas son checklist de un nivel, no tareas residentes equivalentes.
 - Completar significa «hecha» y cancelar «no se hará»; no confundas los resultados.
 - Antes de borrar, conoce los efectos y confirma el objetivo. Si se elimina una
@@ -25,10 +30,12 @@ inventes operaciones ni supongas capacidades de otra versión del servidor.
 
 ## Consistencia
 
-Una escritura puede aceptarse antes de materializarse. Espera la respuesta, ejecuta el
-sync/refresh apropiado cuando esté autorizado y sea necesario, relee por id o filtro
-acotado y compara tanto los campos objetivo como los que debían preservarse. Un refresh
-que persiste o incorpora cambios es una mutación, no una consulta.
+Salvo la subida de adjuntos, una escritura puede aceptarse antes de materializarse.
+Espera la respuesta, lee el resultado de cada operación y relee por id o filtro acotado
+comparando los campos objetivo y los que debían preservarse. Si aún aparece el estado
+anterior, ejecuta `refresh_sync` y relee una segunda vez; solo después declara la
+limitación. Ese refresh fuerza el flush de cambios ya recibidos y no autoriza nuevas
+escrituras.
 
 Un dispositivo offline no puede forzarse a enviar cambios que aún no alcanzaron el
 servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicado.
@@ -38,6 +45,8 @@ servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicad
 - Una ruta local solo es legible por un conector que corra en la misma máquina.
 - Base64 aumenta el tamaño; resérvalo para artefactos pequeños.
 - Respeta límites y nombres exigidos. Descargar metadata no equivale a leer contenido.
+- `add_attachment` es síncrona: cuando responde, el adjunto ya está enlazado. El resto
+  de escrituras se encola y exige el bucle de consistencia anterior.
 
 ## Autorización
 

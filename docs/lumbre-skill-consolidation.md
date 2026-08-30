@@ -102,7 +102,8 @@ eliminando texto:
 La optimización parte de esta unión, nunca de una copia individual. Antes de retirar una
 skill antigua deben cumplirse todas estas condiciones:
 
-1. `skills/lumbre/scripts/validate.sh` pasa en la fuente canónica;
+1. `tests/skill-lumbre/validate.sh` pasa en la fuente canónica y la validación
+   instalada `skills/lumbre/scripts/validate.sh` pasa sin historial Git;
 2. la fuente canónica está integrada en una ubicación duradera y alcanzable;
 3. los runtimes objetivo resuelven esa misma fuente y no una copia materializada distinta;
 4. una comprobación de deriva confirma el mismo contenido;
@@ -115,9 +116,11 @@ contrato que debe exigir el instalador.
 ## Evidencia de validación
 
 - El validador oficial de `skill-creator` acepta `skills/lumbre`.
-- `skills/lumbre/scripts/validate.sh` pasa en el checkout canónico.
-- El mismo script y el validador oficial pasan después de copiar únicamente
-  `skills/lumbre` a un directorio temporal aislado; la distribución no depende de `docs/`.
+- `tests/skill-lumbre/validate.sh` pasa en el checkout canónico con la evidencia
+  histórica repo-only.
+- `skills/lumbre/scripts/validate.sh` y el validador oficial pasan después de copiar
+  únicamente `skills/lumbre` a un directorio temporal aislado; la distribución no
+  depende de `docs/`, bundles ni historial Git.
 - `git diff --check` no encuentra errores de whitespace.
 - Un forward-test independiente recorrió lectura explícitamente no mutante, ciclo de una
   tarea de desarrollo y agrupación de ocho tareas en dos lotes conservando secciones. Los
