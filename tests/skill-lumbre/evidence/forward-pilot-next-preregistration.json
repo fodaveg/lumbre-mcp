@@ -1,7 +1,7 @@
 {
   "protocolVersion": 1,
   "status": "frozen-before-egress",
-  "baseSha": "71305f8870bc3eb5b26aab2eb648f7b51c8ccc5e",
+  "baseSha": "d8acdf045ce050db3a7b8d7d840e3766c34fe93f",
   "criteriaFiles": {
     "tests/skill-lumbre/evidence/forward-prompts.md": "95322be63160134d92ee51c65c5804cd18886eedf264147da4509a266729adf8",
     "tests/skill-lumbre/evidence/forward-expectations.md": "5dfc936f1fd8364d118f849796050cec6070d532e214db3532532546fccbffd8",
@@ -14,6 +14,6 @@
     "tests/skill-lumbre/test-forward-pilot-verifier.mjs": "c41c8d29df58d684fd6fdc474561f161767b1198604dcc8d296bd3b15fd9fe88",
     "tests/skill-lumbre/validate-evidence.mjs": "7431674542bd1e148f03ae242a956ec22a6b89f9bf4c248ccbe18d0c5cb0fefa",
     "tests/skill-lumbre/validate.sh": "cc56a0121c0f5c1d22f84a4315e5c40216cc16fbe36d900ca912ca5810ccee3a",
-    "tests/skill-lumbre/verify-forward-pilot.mjs": "8e55397119fee2beaad4976f1ed8c066f35181a1afda74d97a4a0692617c3837"
+    "tests/skill-lumbre/verify-forward-pilot.mjs": "c8a5944902dcb69d18bf98ceb280c2aa723e41e5ffa6373ad316e7b24604e2e2"
   }
 }
