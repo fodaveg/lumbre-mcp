@@ -2,6 +2,7 @@
 import { createServer as createHttpServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createOAuthService, OAUTH_CHALLENGE } from './oauth.js';
 import { stripToolsListSchema } from './schema-strip.js';
 // CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
 // integrado). `createServer(config, opts)` NO cae en los defaults de `opts`
@@ -14,20 +15,20 @@ import { createServer } from './index.js';
  * Transporte HTTP remoto de lumbre-mcp (mcp.lumbre.pro, tarea M2). A
  * diferencia de `index.ts` (stdio, un proceso por cliente, token fijo por
  * `env`), este servidor es un RELÉ compartido: NO tiene token propio — cada
- * petición trae el suyo en `Authorization: Bearer <token>` y ese token se
- * convierte en el `config.token` con el que ESA petición habla con
- * app.lumbre.pro (ver `lumbre-client.ts`). Sin header, 401 fail-closed: nunca
- * se intenta una petición sin auth "a ver qué pasa".
+ * petición trae una credencial. Este lote incorpora el núcleo OAuth 2.1
+ * Authorization Code + PKCE: el bearer opaco se resuelve localmente al token
+ * upstream cifrado y solo ESTE último se convierte en `config.token`; el
+ * bearer OAuth nunca se reenvía a app.lumbre.pro. El consentimiento actual es
+ * un arnés provisional y no se despliega hasta integrar el broker de Lumbre.
+ * Mientras tanto se conservan el Bearer directo y `/mcp/<token>`.
  *
  * SEGUNDA FORMA (tarea M2b, 2026-08-25): `POST /mcp/<token>` — el token va en
  * el PATH en vez de la cabecera. Motivo: claude.ai (web/móvil) no deja
- * configurar cabeceras en un conector personalizado y, si el servidor
- * responde 401, exige un flujo OAuth 2.1 completo que este relé no tiene
- * (M3, sin hacer). Es la vía barata, igual que ya hace Lumbre con el feed ICS
- * y los buzones: el token vive en la URL. `/mcp` sigue funcionando exactamente
+ * configurar cabeceras en un conector personalizado. OAuth sustituirá esta vía
+ * cuando exista el broker; se mantiene durante la migración. `/mcp` sigue funcionando exactamente
  * igual para quien sí puede mandar cabecera (Claude Code, ver
  * `deploy/README-deploy.md`). Si llegan las dos formas a la vez, GANA la
- * cabecera (`extractToken`, más abajo) — es la menos expuesta de las dos (no
+ * cabecera (resuelta en `handleMcpRequest`) — es la menos expuesta de las dos (no
  * queda guardada en ningún sitio salvo la config del cliente), así que ante
  * ambigüedad se prefiere la buena en vez de fallar o mezclar.
  *
@@ -106,14 +107,8 @@ const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/i;
 function isWellFormedPathToken(segment) {
     return TOKEN_PATH_PATTERN.test(segment);
 }
-/** Combina las dos formas de traer el token, cabecera primero. `pathToken` ya
- *  ha pasado (o no) `isWellFormedPathToken` en el llamador — aquí solo se
- *  decide la prioridad. */
-function extractToken(req, pathToken) {
-    return tokenFromHeader(req) ?? pathToken;
-}
-function sendJsonRpcError(res, status, code, message) {
-    res.writeHead(status, { 'content-type': 'application/json' });
+function sendJsonRpcError(res, status, code, message, headers = {}) {
+    res.writeHead(status, { 'content-type': 'application/json', ...headers });
     res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
 }
 function readBody(req) {
@@ -145,7 +140,7 @@ function logRequest(method, status) {
  * un solo carácter sigue siendo un token que no debe acabar en un log). El
  * body ya lo lee `handleMcpRequest` sin volcarlo tampoco (`describeMethod`).
  */
-async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel) {
+async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth) {
     if (req.method !== 'POST') {
         sendJsonRpcError(res, 405, -32000, `Method not allowed. Modo stateless: solo POST ${routeLabel}.`);
         logRequest(`${req.method ?? '?'} ${routeLabel}`, 405);
@@ -159,12 +154,19 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel) {
     // Fail-closed: sin token no se llega ni a leer el body. El servidor NO
     // tiene token propio — es el de ESTA petición el que se usa para hablar
     // con app.lumbre.pro (ver el JSDoc de cabecera). Cabecera gana sobre path
-    // (`extractToken`); un `pathToken` mal formado ya llega aquí como
+    // (resuelta debajo); un `pathToken` mal formado ya llega aquí como
     // `undefined` (ver `createHttpApp`), así que un path con la forma
     // incorrecta cae exactamente por esta misma rama, como "sin credencial".
-    const token = extractToken(req, pathToken);
+    const presentedBearer = tokenFromHeader(req);
+    let token = pathToken;
+    if (presentedBearer) {
+        if (oauth.isOAuthAccessToken(presentedBearer))
+            token = await oauth.resolveAccessToken(presentedBearer);
+        else
+            token = presentedBearer;
+    }
     if (!token) {
-        sendJsonRpcError(res, 401, -32001, 'Falta Authorization: Bearer <token> o un token válido en el path.');
+        sendJsonRpcError(res, 401, -32001, 'Authorization requerida. Conecta este servidor mediante OAuth 2.1.', { 'www-authenticate': OAUTH_CHALLENGE });
         logRequest(`POST ${routeLabel}`, 401);
         return;
     }
@@ -233,16 +235,55 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel) {
  * los tests puedan levantarla en un puerto efímero (`app.listen(0)`) sin
  * pisar el `PORT` real.
  */
-export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL) {
+export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL, oauth = createOAuthService()) {
     return createHttpServer((req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost');
+        if (!isAllowedHost(req) || !isAllowedOrigin(req)) {
+            res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+            res.end('Host/Origin no permitido.');
+            return;
+        }
         if (url.pathname === '/healthz' && req.method === 'GET') {
             res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
             res.end('ok');
             return;
         }
+        if (url.pathname === '/readyz' && req.method === 'GET') {
+            void oauth.checkReady().then(() => {
+                res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+                res.end('ready');
+            }, () => {
+                res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+                res.end('not ready');
+            });
+            return;
+        }
+        if (req.method === 'GET' &&
+            (url.pathname === '/.well-known/oauth-protected-resource/mcp' ||
+                url.pathname === '/.well-known/oauth-protected-resource')) {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' });
+            res.end(JSON.stringify(oauth.protectedResourceMetadata()));
+            return;
+        }
+        if (req.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' });
+            res.end(JSON.stringify(oauth.authorizationServerMetadata()));
+            return;
+        }
+        if (url.pathname === '/authorize') {
+            void oauth.handleAuthorize(req, res, url, baseUrl);
+            return;
+        }
+        if (url.pathname === '/token') {
+            void oauth.handleToken(req, res);
+            return;
+        }
+        if (url.pathname === '/revoke') {
+            void oauth.handleRevoke(req, res);
+            return;
+        }
         if (url.pathname === '/mcp') {
-            void handleMcpRequest(req, res, baseUrl, undefined, '/mcp');
+            void handleMcpRequest(req, res, baseUrl, undefined, '/mcp', oauth);
             return;
         }
         // `/mcp/<token>` (segunda forma, ver el JSDoc de cabecera). Cualquier
@@ -258,7 +299,7 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             const remainder = url.pathname.slice(MCP_PATH_PREFIX.length);
             const isSingleSegment = remainder.length > 0 && !remainder.includes('/');
             const pathToken = isSingleSegment && isWellFormedPathToken(remainder) ? remainder : undefined;
-            void handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>');
+            void handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>', oauth);
             return;
         }
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -272,9 +313,15 @@ const isMainModule = process.argv[1] !== undefined && import.meta.url === pathTo
 if (isMainModule) {
     const port = Number(process.env.PORT) || DEFAULT_PORT;
     const baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL;
-    const app = createHttpApp(baseUrl);
-    app.listen(port, () => {
-        console.error(`[lumbre-mcp-http] escuchando en :${port} (relé hacia ${baseUrl})`);
+    const oauth = createOAuthService();
+    void oauth.ensureReady().then(() => {
+        const app = createHttpApp(baseUrl, oauth);
+        app.listen(port, () => {
+            console.error(`[lumbre-mcp-http] escuchando en :${port} (relé hacia ${baseUrl})`);
+        });
+    }, () => {
+        console.error('[lumbre-mcp-http] estado OAuth no disponible; listener no iniciado');
+        process.exitCode = 1;
     });
 }
 //# sourceMappingURL=http.js.map

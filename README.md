@@ -454,16 +454,40 @@ van a stderr).
 Además del stdio de arriba (un proceso local por cliente, token fijo por
 `env`), este repo también sirve un transporte Streamable HTTP compartido en
 `https://mcp.lumbre.pro/mcp` (`src/http.ts`, desplegado — ver
-`deploy/README-deploy.md`). Es un **relé stateless**: no guarda ningún token,
-cada petición trae el suyo y ese token es el que habla con `app.lumbre.pro`
-para ESA petición.
+`deploy/README-deploy.md`). El transporte MCP es **stateless** (un servidor y
+un transporte nuevos por petición), pero la autorización OAuth sí conserva
+los grants necesarios en el volumen de estado. El bearer OAuth nunca se manda
+a Lumbre: el relé lo resuelve localmente al token upstream cifrado.
 
-### Autenticación — dos formas, una por cliente
+### Autenticación — OAuth 2.1 (núcleo técnico, integración pendiente)
+
+> **PROVISIONAL — NO INTEGRABLE todavía.** La pantalla actual que pide el
+> token de Lumbre y lo valida contra `/api/tasks` es solo el arnés local del
+> núcleo OAuth. El flujo definitivo depende del contrato de broker/consentimiento
+> que debe proporcionar la app Lumbre. No desplegar esta pantalla, no presentar
+> M3 como terminada y no usar esta sección como confirmación de que claude.ai ya
+> puede conectarse con la URL limpia.
 
 | Forma | Cómo | Para qué cliente |
 |---|---|---|
-| Cabecera | `Authorization: Bearer <token>` contra `POST /mcp` | Claude Code (`claude mcp add --transport http … --header "Authorization: Bearer …"`) |
-| Path | `POST /mcp/<token>` (mismo endpoint, token al final de la URL) | claude.ai web/móvil — no deja configurar cabeceras en un conector personalizado, y sin OAuth 2.1 (que este relé no implementa) un 401 ahí bloquea la conexión entera |
+| OAuth 2.1 (tras integrar el broker) | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Objetivo para claude.ai web/móvil |
+| Bearer directo (compatibilidad temporal) | `Authorization: Bearer <token-de-Lumbre>` contra `POST /mcp` | Clientes existentes como Claude Code |
+| Path (compatibilidad temporal) | `POST /mcp/<token-de-Lumbre>` | Conectores antiguos de claude.ai; no usar en configuraciones nuevas |
+
+Cuando el broker de Lumbre quede diseñado e integrado, claude.ai deberá poder
+recibir solo `https://mcp.lumbre.pro/mcp`. El núcleo ya cifra la credencial
+upstream con AES-256-GCM y la asocia a access/refresh tokens opacos. Los access
+tokens duran una hora. Cada familia refresh tiene una vigencia absoluta de 30
+días: rota en cada uso sin prolongar esa fecha; reutilizar uno antiguo revoca la
+familia incluso tras reinicio. Si una familia o el store alcanza el límite de
+tombstones, la rotación revoca fail-safe esa familia en vez de bloquearse.
+
+El recurso y permiso son exactos: `https://mcp.lumbre.pro/mcp` y
+`lumbre:mcp`. El callback admitido es únicamente el oficial de claude.ai,
+`https://claude.ai/api/mcp/auth_callback`. El servidor usa documentos de
+metadata de cliente (CIMD) servidos por `claude.ai`; no inventa un `client_id`
+ni anuncia registro dinámico. La caché CIMD respeta `Cache-Control: no-store`
+y `no-cache` y no reutiliza esas respuestas.
 
 Si una petición trae **las dos** (cabecera Y path), **gana la cabecera**: es
 la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
@@ -474,13 +498,13 @@ segmento que no case — vacío, con más de un tramo, con caracteres fuera de
 `[0-9a-f]` — se trata exactamente como "sin credencial" y responde 401, sin
 recortes ni normalizaciones.
 
-**El coste de la forma del path**: el token queda guardado en la
+**El coste de la forma heredada del path**: el token queda guardado en la
 configuración del conector del lado de Anthropic (claude.ai) y visible en
 cualquier registro intermedio que guarde URLs (proxies, logs de acceso de
 terceros por los que pase la conexión). Rotar el token de email-to-task
-obliga a **volver a pegar la URL entera** en la config del conector, no solo
-a cambiar una cabecera. Úsala solo donde la cabecera no es una opción; con
-Claude Code, usa siempre la cabecera.
+obliga a **volver a pegar la URL entera** en la config del conector. Se
+conserva para migrar conectores existentes; cuando el broker esté integrado,
+las configuraciones nuevas de claude.ai deberán usar OAuth con la URL limpia.
 
 ### Adjuntos GRANDES con el conector remoto: un SEGUNDO conector stdio local
 

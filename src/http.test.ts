@@ -71,6 +71,9 @@ describe('POST /mcp — auth fail-closed', () => {
 			body: JSON.stringify(initializeBody())
 		});
 		expect(res.status).toBe(401);
+		expect(res.headers.get('www-authenticate')).toBe(
+			'Bearer resource_metadata="https://mcp.lumbre.pro/.well-known/oauth-protected-resource/mcp", scope="lumbre:mcp"'
+		);
 		const body = (await res.json()) as { jsonrpc: string; error: { code: number; message: string } };
 		expect(body.jsonrpc).toBe('2.0');
 		expect(body.error.message).toMatch(/Authorization/);

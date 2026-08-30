@@ -24,11 +24,11 @@ services:
     environment:
       PORT: '8787'
       LUMBRE_BASE_URL: 'https://app.lumbre.pro'
-      # La huella de notas vistas (`notes-seen.json`) se escribe bajo
-      # `XDG_STATE_HOME` (ver `stateDir()` en `src/notes.ts`). Se apunta a un
-      # volumen para que sobreviva a los reinicios: sin él, cada `up -d`
-      # borraría la huella y las notas ya vistas volverían a salir íntegras
-      # durante la ventana de bootstrap (24 h).
+      # La huella de notas y el store OAuth se escriben bajo
+      # `XDG_STATE_HOME/lumbre-mcp`. El volumen es obligatorio: conserva la
+      # clave AES-256-GCM estable, los grants y la rotación de refresh tokens
+      # entre reinicios, además de `notes-seen.json`. El proceso crea el
+      # directorio con 0700 y los ficheros OAuth con 0600.
       #
       # ⚠️ La huella NO está segmentada por token: es un solo fichero para todo
       # el contenedor. Hoy da igual (un único usuario, el token de David), pero
@@ -36,16 +36,18 @@ services:
       # hash del token en la clave ANTES, o cada uno marcaría como vistas las
       # notas del otro.
       XDG_STATE_HOME: /state
-      # NO hay `LUMBRE_TOKEN` aquí: el servidor es un relé stateless y cada
-      # petición trae el suyo en `Authorization: Bearer` (ver el JSDoc de
-      # cabecera de `src/http.ts`). Sin token, 401.
+      # NO hay un `LUMBRE_TOKEN` global aquí. Tras integrar el broker, la
+      # credencial upstream se persistirá cifrada por grant; el bearer OAuth
+      # opaco se resolverá localmente y no se reenviará a Lumbre.
     volumes:
       - state:/state
     networks:
       - edge
     healthcheck:
-      # `/healthz` responde 200 sin tocar la API de Lumbre ni pedir token.
-      test: ['CMD', 'wget', '--quiet', '--spider', 'http://127.0.0.1:8787/healthz']
+      # `/readyz` valida que store, clave y grants OAuth se pueden leer y
+      # descifrar. Deduplica concurrencia y cachea 5 s; Caddy no la publica.
+      # `/healthz` queda como liveness barato.
+      test: ['CMD', 'wget', '--quiet', '--spider', 'http://127.0.0.1:8787/readyz']
       interval: 30s
       timeout: 5s
       retries: 3

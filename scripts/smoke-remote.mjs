@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Guardarraíl de deploy del transporte HTTP remoto (`src/http.ts`, M2). Sin
+ * Guardarraíl de deploy del transporte HTTP remoto (`src/http.ts`). Sin
  * dependencias (`fetch` global de Node 22) — habla Streamable HTTP crudo
  * contra una URL ya desplegada: `initialize` + `tools/list` con token, y el
  * caso NEGATIVO (sin token → 401), porque un guardarraíl que solo prueba el
@@ -14,11 +14,11 @@
  *   MCP_URL=https://mcp.lumbre.pro/mcp LUMBRE_TOKEN=xxx node scripts/smoke-remote.mjs
  *
  * `<url>` es la del endpoint MCP completo (con `/mcp`), no la base del host.
- * Además del camino de cabecera, comprueba la SEGUNDA forma de auth
- * (`/mcp/<token>`, tarea M2b, para claude.ai que no deja configurar
- * cabeceras): el camino feliz con un token bien formado y el NEGATIVO con uno
- * mal formado — sin este último, un fail-open en la validación de forma del
- * path pasaría desapercibido (ver `src/http.test.ts`, mismo sabotaje
+ * Antes del transporte comprueba el descubrimiento OAuth 2.1 (PRM + AS) y el
+ * challenge del 401. Además mantiene el smoke de las dos compatibilidades:
+ * Bearer directo y `/mcp/<token>`, con un token bien formado y el NEGATIVO
+ * con uno mal formado — sin este último, un fail-open en la validación de
+ * forma del path pasaría desapercibido (ver `src/http.test.ts`, mismo sabotaje
  * comprobado allí).
  *
  * Exit 0 si TODAS las comprobaciones pasan, 1 en cualquier otro caso, con un
@@ -27,6 +27,9 @@
 
 const url = process.argv[2] ?? process.env.MCP_URL;
 const token = process.argv[3] ?? process.env.LUMBRE_TOKEN;
+const issuer = url ? new URL(url).origin : undefined;
+const resource = issuer ? `${issuer}/mcp` : undefined;
+const scope = 'lumbre:mcp';
 
 // Techo de bytes de `tools/list` para las 19 tools reales — MISMA fuente que
 // `src/index.test.ts` ("techo de bytes de las 19 tools", `CHAR_CEILING`):
@@ -94,6 +97,43 @@ function check(name, ok, detail) {
 }
 
 async function main() {
+	// 0. Descubrimiento OAuth 2.1 que usa claude.ai al recibir el 401.
+	const prmPath = await fetch(`${issuer}/.well-known/oauth-protected-resource/mcp`);
+	const prmPathBody = await prmPath.json().catch(() => undefined);
+	check('PRM path-specific responde HTTP 200', prmPath.status === 200, `status=${prmPath.status}`);
+	check(
+		'PRM declara resource, issuer, bearer header y scope exactos',
+		prmPathBody?.resource === resource &&
+			Array.isArray(prmPathBody?.authorization_servers) && prmPathBody.authorization_servers.length === 1 &&
+			prmPathBody.authorization_servers[0] === issuer &&
+			Array.isArray(prmPathBody?.bearer_methods_supported) && prmPathBody.bearer_methods_supported.join(',') === 'header' &&
+			Array.isArray(prmPathBody?.scopes_supported) && prmPathBody.scopes_supported.join(',') === scope,
+		JSON.stringify(prmPathBody).slice(0, 300)
+	);
+	const prmAlias = await fetch(`${issuer}/.well-known/oauth-protected-resource`);
+	check(
+		'PRM alias base coincide con el path-specific',
+		prmAlias.status === 200 && JSON.stringify(await prmAlias.json().catch(() => undefined)) === JSON.stringify(prmPathBody),
+		`status=${prmAlias.status}`
+	);
+	const as = await fetch(`${issuer}/.well-known/oauth-authorization-server`);
+	const asBody = await as.json().catch(() => undefined);
+	check('AS metadata responde HTTP 200', as.status === 200, `status=${as.status}`);
+	check(
+		'AS metadata anuncia code+refresh, PKCE S256, cliente público y CIMD sin DCR',
+		asBody?.issuer === issuer &&
+			asBody?.authorization_endpoint === `${issuer}/authorize` &&
+			asBody?.token_endpoint === `${issuer}/token` &&
+			asBody?.revocation_endpoint === `${issuer}/revoke` &&
+			Array.isArray(asBody?.grant_types_supported) && asBody.grant_types_supported.includes('authorization_code') && asBody.grant_types_supported.includes('refresh_token') &&
+			Array.isArray(asBody?.code_challenge_methods_supported) && asBody.code_challenge_methods_supported.join(',') === 'S256' &&
+			Array.isArray(asBody?.token_endpoint_auth_methods_supported) && asBody.token_endpoint_auth_methods_supported.join(',') === 'none' &&
+			asBody?.client_id_metadata_document_supported === true &&
+			asBody?.authorization_response_iss_parameter_supported === true &&
+			asBody?.registration_endpoint === undefined,
+		JSON.stringify(asBody).slice(0, 400)
+	);
+
 	// 1. initialize, con token.
 	const init = await rpc('initialize', {
 		protocolVersion: '2025-06-18',
@@ -126,8 +166,20 @@ async function main() {
 	// 3. Caso NEGATIVO: sin token, 401 fail-closed.
 	const noAuth = await rpc('tools/list', undefined, { withAuth: false });
 	check('sin Authorization: 401 (fail-closed)', noAuth.status === 401, `status=${noAuth.status}`);
+	const challengeResponse = await fetch(url, {
+		method: 'POST',
+		headers: JSON_RPC_HEADERS,
+		body: JSON.stringify({ jsonrpc: '2.0', id: ++requestId, method: 'tools/list', params: {} })
+	});
+	check(
+		'401 anuncia el PRM path-specific y scope exactos',
+		challengeResponse.status === 401 &&
+			challengeResponse.headers.get('www-authenticate') ===
+				`Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource/mcp", scope="${scope}"`,
+		`status=${challengeResponse.status} challenge=${challengeResponse.headers.get('www-authenticate')}`
+	);
 
-	// 4. Token en el PATH (segunda forma, para claude.ai — ver JSDoc de
+	// 4. Token en el PATH (compatibilidad temporal — ver JSDoc de
 	// cabecera): mismo `initialize` + `tools/list`, pero contra `<url>/<token>`
 	// y SIN cabecera, para no tapar un bug que solo se dispare cuando la
 	// cabecera falta de verdad.
@@ -154,6 +206,7 @@ async function main() {
 		console.error(`\nsmoke-remote: ${checks.filter((c) => !c.ok).length}/${checks.length} comprobaciones en rojo.`);
 		process.exit(1);
 	}
+	console.log('\nINFO metadata/challenge no certifican el flujo OAuth; ejecuta el canary local y el QA con broker.');
 	console.log(`\nsmoke-remote: ${checks.length}/${checks.length} comprobaciones en verde.`);
 	process.exit(0);
 }

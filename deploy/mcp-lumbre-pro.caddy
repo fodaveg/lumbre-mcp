@@ -17,13 +17,19 @@
 # Sin `encode`: las respuestas son JSON pequeño y el transporte puede abrir
 # SSE, donde comprimir por buffer solo añade latencia.
 mcp.lumbre.pro {
+	# Readiness descifra el store y solo pertenece al healthcheck interno del
+	# contenedor. El borde no la expone como amplificador público.
+	handle /readyz {
+		respond 404
+	}
+
 	# ── El token del path NUNCA debe llegar a un log ──────────────────────
 	#
-	# Desde que la app de Claude se conecta con el token dentro de la URL
-	# (`/mcp/<token>`, porque no deja configurar cabeceras), esa URI es un
-	# secreto. Y Caddy vuelca la URI COMPLETA en sus entradas de
-	# `http.log.error` (502, timeout...), que van al log del contenedor
-	# `edge-caddy`.
+	# Las conexiones nuevas de claude.ai usarán OAuth y la URL limpia `/mcp`
+	# cuando se integre el broker; se conserva temporalmente `/mcp/<token>`.
+	# Esa URI heredada es un secreto. Caddy vuelca la URI COMPLETA en sus
+	# entradas de `http.log.error` (502, timeout...), que van al log del
+	# contenedor `edge-caddy`.
 	#
 	# MEDIDO el 25 ago 2026, y por eso este bloque es así y no de otra
 	# manera: un `log { output discard }` en el sitio NO basta. Solo tapa
@@ -37,14 +43,33 @@ mcp.lumbre.pro {
 	# cualquier handler, y se reinyecta como cabecera `Authorization` hacia
 	# el upstream. Lo que se registre, se registre: la URI ya no lo lleva.
 	#
-	# El servidor MCP sigue aceptando el token en el path por su cuenta (ver
+	# El servidor MCP sigue aceptando temporalmente el token en el path (ver
 	# `src/http.ts`): esto no lo sustituye, lo cubre por delante. Si alguien
 	# apunta al contenedor sin pasar por este borde, sigue autenticando.
-	@token_en_path path_regexp tok ^/mcp/([0-9a-f]{32})$
-	handle @token_en_path {
+	# Si ya hay Authorization, se conserva: la cabecera siempre gana sobre el
+	# path también en el borde. El path se reescribe igualmente para que nunca
+	# llegue al pipeline de logs.
+	@token_en_path_con_auth {
+		path_regexp tok_auth ^/mcp/([0-9a-f]{32})$
+		header Authorization *
+	}
+	handle @token_en_path_con_auth {
 		rewrite * /mcp
 		reverse_proxy lumbre-mcp:8787 {
-			header_up Authorization "Bearer {re.tok.1}"
+			flush_interval -1
+		}
+	}
+
+	# Solo se sintetiza Bearer desde el path cuando la petición no traía ya
+	# ninguna Authorization.
+	@token_en_path_sin_auth {
+		path_regexp tok_noauth ^/mcp/([0-9a-f]{32})$
+		header !Authorization
+	}
+	handle @token_en_path_sin_auth {
+		rewrite * /mcp
+		reverse_proxy lumbre-mcp:8787 {
+			header_up Authorization "Bearer {re.tok_noauth.1}"
 			flush_interval -1
 		}
 	}

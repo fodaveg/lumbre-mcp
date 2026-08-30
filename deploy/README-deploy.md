@@ -10,14 +10,40 @@ no es un plan: es cómo se opera.
 | Servicio | `/srv/lumbre-mcp` del VPS | Copia de este repo + `deploy/compose.yml` |
 | Contenedor | `lumbre-mcp` | `node dist/http.js`, escucha en 8787 |
 | Borde | `/srv/edge/conf.d/mcp-lumbre-pro.caddy` | Caddy termina TLS y hace proxy |
-| Estado | volumen `lumbre-mcp_state` | huella de notas vistas (`notes-seen.json`) |
+| Estado | volumen `lumbre-mcp_state` | huella de notas + grants OAuth cifrados y clave estable |
 
 El contenedor **no publica puertos al host**: Caddy lo alcanza por el DNS de la
 red Docker externa `edge` (`lumbre-mcp:8787`), igual que hace con
 `lumbre-app:3000`. El único camino de entrada es HTTPS por el borde.
 
-No hay `LUMBRE_TOKEN` en el servidor: es un relé stateless y cada petición trae
-el suyo en `Authorization: Bearer`. Sin token, 401.
+No hay un `LUMBRE_TOKEN` global en el servidor. El núcleo OAuth provisional
+puede asociar una credencial upstream cifrada a access/refresh tokens opacos,
+pero todavía no proporciona el consentimiento definitivo. Cuando se integre
+el broker de Lumbre, cada petición MCP traerá un access token opaco que el relé
+resolverá localmente; nunca lo reenviará como si fuera el token de Lumbre. Sin
+credencial, responde 401 con el challenge de descubrimiento OAuth.
+
+> **M3 no es desplegable todavía:** ese consentimiento es provisional. Falta
+> sustituirlo por el contrato de broker/consentimiento de la app Lumbre. El
+> discovery en verde solo certifica metadata; no certifica que claude.ai pueda
+> completar el flujo real.
+
+`oauth.key` y `oauth-store.json` forman una unidad de backup: hay que copiar y
+restaurar ambos juntos, con permisos `0600`, o descartar ambos y volver a
+autorizar todos los clientes. Restaurar el store sin su clave, o con otra,
+impide iniciar el listener; una instancia ya levantada respondería 503 en
+`/readyz`. Nunca regenerar una clave encima de un store existente. El volumen
+completo sigue siendo secreto aunque el token
+upstream esté cifrado. La imagen actual corre con el usuario de la imagen base;
+moverla a non-root exige preparar ownership de `/state` en la imagen/volumen y
+se deja para el cambio de runtime correspondiente, no para este lote OAuth.
+
+Cada reemplazo del store solicita `fsync` del temporal antes del `rename` y del
+directorio de estado después. Los tests sabotean y verifican ese orden; esto no
+equivale a certificar supervivencia a corte eléctrico del volumen o hardware del
+VPS. `/readyz` comparte una sola comprobación concurrente, cacheada cinco
+segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
+`127.0.0.1`.
 
 ## Publicar una versión nueva
 
@@ -108,17 +134,24 @@ habla Streamable HTTP crudo contra la URL ya desplegada.
 node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp "$LUMBRE_TOKEN"
 ```
 
-Comprueba `initialize` + `tools/list` con token en cabecera (200, 25 tools,
-techo de bytes) y el caso NEGATIVO sin token (401 fail-closed); y las dos
-mismas comprobaciones con el token en el PATH (`<url>/<token>`, la forma que
-usa la app de Claude), más su propio NEGATIVO con un segmento mal formado.
+Comprueba el descubrimiento OAuth (PRM path-specific + alias y metadata del
+authorization server), el challenge exacto del 401, `initialize` +
+`tools/list` con token directo en cabecera (200, 19 tools, techo de bytes), y
+las dos mismas comprobaciones con el token en el PATH (`<url>/<token>`,
+compatibilidad temporal), más su propio NEGATIVO con un segmento mal formado.
 Un deploy no se da por bueno solo con el camino feliz en verde: si un caso
 negativo alguna vez sale distinto de 401 (por ejemplo 200, o un 500 que
 delate un fail-open), el script sale con exit 1 igual que si fallara el
 camino feliz.
 
-Exit 0 = todas las comprobaciones en verde (9 a fecha de este párrafo — el
-propio script imprime `N/N` al final, no hace falta contar a mano). Exit 1 =
+Este smoke remoto **no certifica OAuth**: PRM/AS y el challenge pueden estar
+perfectos con code/refresh/revoke rotos o con el broker ausente. El canary local
+independiente del broker es `npx vitest run src/oauth.test.ts`; cubre code+PKCE,
+refresh/replay tras reinicio y revoke con un upstream simulado. La aceptación
+real exige además el broker de Lumbre y QA de claude.ai web/móvil.
+
+Exit 0 = todas las comprobaciones en verde (el propio script imprime `N/N` al
+final, no hace falta contar a mano). Exit 1 =
 al menos una en rojo, con el detalle impreso por comprobación.
 
 **El smoke no prueba el relé.** `initialize` y `tools/list` los contesta el
@@ -135,29 +168,29 @@ curl -s --max-time 30 -X POST https://mcp.lumbre.pro/mcp \
 
 ## Conectar un cliente
 
-Claude Code, transporte HTTP con cabecera estática:
+Claude Code, transporte HTTP con cabecera estática heredada:
 
 ```bash
 claude mcp add --transport http lumbre https://mcp.lumbre.pro/mcp \
   --header "Authorization: Bearer $LUMBRE_TOKEN"
 ```
 
-claude.ai (web y móvil) NO acepta cabecera estática salvo que la cuenta tenga
-la beta de `static_headers`; sin ella exigiría OAuth 2.1 completo, que este
-relé no tiene (M3 se descartó por caro — ver `README.md`, "Autenticación").
-En su lugar, la app de Claude se conecta con el token en la propia URL:
+Cuando se integre el broker/consentimiento de Lumbre, claude.ai (web y móvil)
+deberá conectarse desde «Añadir conector personalizado» pegando **solo**:
 
 ```
-https://mcp.lumbre.pro/mcp/<tu-token-de-email-to-task>
+https://mcp.lumbre.pro/mcp
 ```
 
-En "Añadir conector personalizado" pega esa URL completa (sin cabeceras: la
-app no deja configurarlas). El transporte stdio de siempre sigue funcionando
-y no se retira.
+El núcleo hace que Claude descubra OAuth 2.1 y fija el callback exacto
+`https://claude.ai/api/mcp/auth_callback`, pero el formulario provisional de
+este lote no es el consentimiento desplegable. Hasta que el broker esté
+integrado y el flujo pase QA real, usar las formas existentes: stdio, Bearer
+directo o `/mcp/<token>`.
 
-**Este cambio toca las DOS piezas del deploy, no solo el contenedor**: además
-de `./deploy/publicar.sh` (recompila y sube `dist/`), hay que volver a subir
-`deploy/mcp-lumbre-pro.caddy` con los pasos de "Cambiar el fragmento de
+La compatibilidad con `/mcp/<token>` sigue tocando las DOS piezas del deploy:
+además de `./deploy/publicar.sh` (recompila y sube `dist/`), hay que volver a
+subir `deploy/mcp-lumbre-pro.caddy` con los pasos de "Cambiar el fragmento de
 Caddy" de arriba — trae el bloque `log` que apaga el registro del borde para
 este host (necesario porque Caddy vuelca la URI completa en sus entradas de
 error, y con el token en el path eso lo dejaría en claro en el log del
