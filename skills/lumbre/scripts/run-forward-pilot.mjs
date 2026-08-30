@@ -127,29 +127,13 @@ function resolvePreregisteredCandidate() {
 
 const { candidateSha, headSha } = resolvePreregisteredCandidate();
 
-const captureContext = {
-  codexVersion: runText("codex", ["--version"]),
-  model,
-  candidateParentSha: candidateSha,
-};
 assertCriteriaFreeze(
   skillDir,
   preregistration,
-  captureContext.candidateParentSha,
+  candidateSha,
 );
-if (!checkCandidateOnly) {
-  const preflight = spawnSync(join(scriptDir, "validate.sh"), ["--preflight"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  });
-  if (preflight.status !== 0) {
-    throw new Error(
-      `pilot preflight failed: ${preflight.stderr || preflight.stdout}`,
-    );
-  }
-}
 const candidateCriteriaHashes = hashCandidateFiles(
-  captureContext.candidateParentSha,
+  candidateSha,
   CRITERIA_FILES,
 );
 if (
@@ -159,7 +143,7 @@ if (
   throw new Error("criteria freeze differs from snapshotted candidate");
 }
 const candidatePreregistrationHash = hashCandidateFiles(
-  captureContext.candidateParentSha,
+  candidateSha,
   ["references/forward-pilot-next-preregistration.json"],
 )["references/forward-pilot-next-preregistration.json"];
 if (candidatePreregistrationHash !== criteriaFreeze.preregistrationSha256) {
@@ -168,6 +152,21 @@ if (candidatePreregistrationHash !== criteriaFreeze.preregistrationSha256) {
 if (checkCandidateOnly) {
   console.log(`forward pilot candidate: ok (${candidateSha})`);
   process.exit(0);
+}
+
+const captureContext = {
+  codexVersion: runText("codex", ["--version"]),
+  model,
+  candidateParentSha: candidateSha,
+};
+const preflight = spawnSync(join(scriptDir, "validate.sh"), ["--preflight"], {
+  cwd: repoRoot,
+  encoding: "utf8",
+});
+if (preflight.status !== 0) {
+  throw new Error(
+    `pilot preflight failed: ${preflight.stderr || preflight.stdout}`,
+  );
 }
 
 const promptSource = readFileSync(promptsPath, "utf8");
