@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lumbre"
+  short_description: "Gestiona tareas y flujos opcionales en Lumbre"
+  default_prompt: "Usa $lumbre para gestionar estas tareas con el modo adecuado."
