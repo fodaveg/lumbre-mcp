@@ -468,9 +468,12 @@ function check(condition, message) {
 function hashCandidateFiles(candidateSha, files) {
   const hashes = {};
   for (const path of files) {
+    const repoPath = path.startsWith("skills/") || path.startsWith("tests/")
+      ? path
+      : `skills/lumbre/${path}`;
     const result = spawnSync(
       "git",
-      ["show", `${candidateSha}:skills/lumbre/${path}`],
+      ["show", `${candidateSha}:${repoPath}`],
       { cwd: repoRoot, encoding: null },
     );
     if (result.status !== 0) return null;
