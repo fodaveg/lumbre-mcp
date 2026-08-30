@@ -271,7 +271,11 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             return;
         }
         if (url.pathname === '/authorize') {
-            void oauth.handleAuthorize(req, res, url, baseUrl);
+            void oauth.handleAuthorize(req, res, url);
+            return;
+        }
+        if (url.pathname === '/oauth/lumbre/callback') {
+            void oauth.handleLumbreCallback(req, res, url);
             return;
         }
         if (url.pathname === '/token') {

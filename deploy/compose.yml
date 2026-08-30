@@ -24,6 +24,10 @@ services:
     environment:
       PORT: '8787'
       LUMBRE_BASE_URL: 'https://app.lumbre.pro'
+      LUMBRE_APP_BASE_URL: 'https://app.lumbre.pro'
+      # Secreto dedicado al backchannel Lumbre<->MCP. Compose aborta antes de
+      # crear el contenedor si falta; debe coincidir con el del contenedor Lumbre.
+      LUMBRE_MCP_BACKCHANNEL_SECRET: '${LUMBRE_MCP_BACKCHANNEL_SECRET:?define LUMBRE_MCP_BACKCHANNEL_SECRET (minimo 32 caracteres)}'
       # La huella de notas y el store OAuth se escriben bajo
       # `XDG_STATE_HOME/lumbre-mcp`. El volumen es obligatorio: conserva la
       # clave AES-256-GCM estable, los grants y la rotación de refresh tokens
@@ -36,8 +40,8 @@ services:
       # hash del token en la clave ANTES, o cada uno marcaría como vistas las
       # notas del otro.
       XDG_STATE_HOME: /state
-      # NO hay un `LUMBRE_TOKEN` global aquí. Tras integrar el broker, la
-      # credencial upstream se persistirá cifrada por grant; el bearer OAuth
+      # NO hay un `LUMBRE_TOKEN` global aquí. La credencial dedicada del
+      # backchannel se persiste cifrada por grant; el bearer OAuth
       # opaco se resolverá localmente y no se reenviará a Lumbre.
     volumes:
       - state:/state

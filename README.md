@@ -459,24 +459,32 @@ un transporte nuevos por petición), pero la autorización OAuth sí conserva
 los grants necesarios en el volumen de estado. El bearer OAuth nunca se manda
 a Lumbre: el relé lo resuelve localmente al token upstream cifrado.
 
-### Autenticación — OAuth 2.1 (núcleo técnico, integración pendiente)
+### Autenticación — OAuth 2.1 con consentimiento en Lumbre
 
-> **PROVISIONAL — NO INTEGRABLE todavía.** La pantalla actual que pide el
-> token de Lumbre y lo valida contra `/api/tasks` es solo el arnés local del
-> núcleo OAuth. El flujo definitivo depende del contrato de broker/consentimiento
-> que debe proporcionar la app Lumbre. No desplegar esta pantalla, no presentar
-> M3 como terminada y no usar esta sección como confirmación de que claude.ai ya
-> puede conectarse con la URL limpia.
+El navegador no recibe ni solicita ningún token. Tras validar OAuth/CIMD/PKCE,
+el relé abre por backchannel una autorización en `app.lumbre.pro`; Lumbre usa
+la sesión web de la persona para login y consentimiento. El callback público
+solo devuelve `request` y `decision`. La credencial dedicada se canjea de
+servidor a servidor, se cifra antes de persistir y nunca aparece en HTML,
+`Location`, query ni logs.
+
+> La implementación no equivale a producción: el deploy requiere el mismo
+> `LUMBRE_MCP_BACKCHANNEL_SECRET` (mínimo 32 caracteres) en Lumbre y en este
+> servicio. Mientras el contenedor Lumbre no tenga ese secreto, su backchannel
+> responde 503 y la autorización falla cerrada. La aceptación de M3 exige
+> desplegar ambos lados y hacer QA real en claude.ai web y móvil.
 
 | Forma | Cómo | Para qué cliente |
 |---|---|---|
-| OAuth 2.1 (tras integrar el broker) | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Objetivo para claude.ai web/móvil |
+| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | claude.ai web/móvil tras desplegar el secreto compartido |
 | Bearer directo (compatibilidad temporal) | `Authorization: Bearer <token-de-Lumbre>` contra `POST /mcp` | Clientes existentes como Claude Code |
 | Path (compatibilidad temporal) | `POST /mcp/<token-de-Lumbre>` | Conectores antiguos de claude.ai; no usar en configuraciones nuevas |
 
-Cuando el broker de Lumbre quede diseñado e integrado, claude.ai deberá poder
-recibir solo `https://mcp.lumbre.pro/mcp`. El núcleo ya cifra la credencial
-upstream con AES-256-GCM y la asocia a access/refresh tokens opacos. Los access
+En claude.ai se configura solo `https://mcp.lumbre.pro/mcp`. El relé cifra la
+credencial upstream con AES-256-GCM y la asocia a access/refresh tokens opacos.
+Antes de emitir o rotar refresh consulta `introspect`; revocación, replay y
+límites de tombstones eliminan la familia local y dejan una revocación cifrada
+en un outbox durable hasta que Lumbre confirma el ACK idempotente. Los access
 tokens duran una hora. Cada familia refresh tiene una vigencia absoluta de 30
 días: rota en cada uso sin prolongar esa fecha; reutilizar uno antiguo revoca la
 familia incluso tras reinicio. Si una familia o el store alcanza el límite de
@@ -488,6 +496,14 @@ El recurso y permiso son exactos: `https://mcp.lumbre.pro/mcp` y
 metadata de cliente (CIMD) servidos por `claude.ai`; no inventa un `client_id`
 ni anuncia registro dinámico. La caché CIMD respeta `Cache-Control: no-store`
 y `no-cache` y no reutiliza esas respuestas.
+
+El callback Lumbre es one-shot: se consume durablemente antes de `/exchange`,
+de modo que dos callbacks concurrentes nunca canjean dos veces. Si la respuesta
+del canje se pierde por un timeout ambiguo, no se reintenta a ciegas porque el
+contrato de Lumbre no ofrece una respuesta idempotente recuperable; la persona
+debe iniciar otra autorización y puede revocar desde Lumbre cualquier
+credencial huérfana. Los tests fijan esta única llamada aun tras repetir el
+callback.
 
 Si una petición trae **las dos** (cabecera Y path), **gana la cabecera**: es
 la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
@@ -503,8 +519,14 @@ configuración del conector del lado de Anthropic (claude.ai) y visible en
 cualquier registro intermedio que guarde URLs (proxies, logs de acceso de
 terceros por los que pase la conexión). Rotar el token de email-to-task
 obliga a **volver a pegar la URL entera** en la config del conector. Se
-conserva para migrar conectores existentes; cuando el broker esté integrado,
-las configuraciones nuevas de claude.ai deberán usar OAuth con la URL limpia.
+conserva para migrar conectores existentes; las configuraciones nuevas de
+claude.ai deben usar OAuth con la URL limpia.
+
+Los stores provisionales v1/v2 contenían tokens personales sin identidad de
+credencial del broker. El servicio los rechaza en readiness, no los modifica y
+no hace `introspect`/`revoke` con ellos. Para migrar: detener el servicio,
+archivar juntos `oauth-store.json` y `oauth.key`, retirarlos del volumen y
+volver a autorizar desde la sesión web de Lumbre.
 
 ### Adjuntos GRANDES con el conector remoto: un SEGUNDO conector stdio local
 

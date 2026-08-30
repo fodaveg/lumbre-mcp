@@ -18,6 +18,28 @@ set -euo pipefail
 
 HOST="${LUMBRE_MCP_HOST:-lumbre}"
 DEST="${LUMBRE_MCP_DEST:-/srv/lumbre-mcp}"
+ENV_FILE="${LUMBRE_MCP_ENV_FILE:-/srv/lumbre-mcp.env}"
+
+is_canonical_remote_path() {
+	local path="$1"
+	[[ "$path" =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] &&
+		[[ "$path" != *"/./"* && "$path" != */. && "$path" != *"/../"* && "$path" != */.. ]]
+}
+
+if ! is_canonical_remote_path "$DEST"; then
+	echo "ERROR: LUMBRE_MCP_DEST debe ser una ruta absoluta canónica simple." >&2
+	exit 1
+fi
+if ! is_canonical_remote_path "$ENV_FILE"; then
+	echo "ERROR: LUMBRE_MCP_ENV_FILE debe ser una ruta absoluta canónica simple." >&2
+	exit 1
+fi
+case "$ENV_FILE" in
+"$DEST" | "$DEST"/*)
+	echo "ERROR: LUMBRE_MCP_ENV_FILE debe quedar fuera de LUMBRE_MCP_DEST." >&2
+	exit 1
+	;;
+esac
 
 cd "$(dirname "$0")/.."
 
@@ -31,6 +53,11 @@ if ! git diff --quiet -- dist; then
 fi
 
 echo "==> Copiando a $HOST:$DEST"
+echo "==> Validando secreto remoto fuera del árbol sincronizado: $ENV_FILE"
+ssh "$HOST" "test -r $ENV_FILE && test \$(stat -c %a $ENV_FILE) = 600" || {
+	echo "ERROR: falta $ENV_FILE legible y con permisos 0600 en $HOST." >&2
+	exit 1
+}
 ssh "$HOST" "mkdir -p $DEST"
 rsync -az --delete \
 	--exclude '.git' \
@@ -39,7 +66,7 @@ rsync -az --delete \
 	./ "$HOST:$DEST/"
 
 echo "==> Reconstruyendo y levantando el contenedor"
-ssh "$HOST" "cd $DEST && docker compose -f deploy/compose.yml up -d --build"
+ssh "$HOST" "cd $DEST && docker compose --env-file $ENV_FILE -f deploy/compose.yml up -d --build"
 
 echo "==> Estado"
 ssh "$HOST" "docker ps --filter name=lumbre-mcp --format '{{.Names}}\t{{.Status}}'"

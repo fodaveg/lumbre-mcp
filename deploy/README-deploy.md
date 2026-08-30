@@ -16,25 +16,27 @@ El contenedor **no publica puertos al host**: Caddy lo alcanza por el DNS de la
 red Docker externa `edge` (`lumbre-mcp:8787`), igual que hace con
 `lumbre-app:3000`. El único camino de entrada es HTTPS por el borde.
 
-No hay un `LUMBRE_TOKEN` global en el servidor. El núcleo OAuth provisional
-puede asociar una credencial upstream cifrada a access/refresh tokens opacos,
-pero todavía no proporciona el consentimiento definitivo. Cuando se integre
-el broker de Lumbre, cada petición MCP traerá un access token opaco que el relé
-resolverá localmente; nunca lo reenviará como si fuera el token de Lumbre. Sin
-credencial, responde 401 con el challenge de descubrimiento OAuth.
+No hay un `LUMBRE_TOKEN` global en el servidor. OAuth abre el consentimiento en
+la sesión web de Lumbre y canjea por backchannel una credencial dedicada; el
+relé la cifra y resuelve cada bearer OAuth opaco localmente. El bearer OAuth
+nunca se reenvía a Lumbre y ningún token pasa por el navegador.
 
-> **M3 no es desplegable todavía:** ese consentimiento es provisional. Falta
-> sustituirlo por el contrato de broker/consentimiento de la app Lumbre. El
-> discovery en verde solo certifica metadata; no certifica que claude.ai pueda
-> completar el flujo real.
+El despliegue falla cerrado si falta o mide menos de 32 caracteres
+`LUMBRE_MCP_BACKCHANNEL_SECRET`. Debe configurarse con el mismo valor en los
+contenedores de Lumbre y lumbre-mcp. A 30 ago 2026 el lado Lumbre desplegado aún
+responde 503 porque su contenedor no tiene el secreto: no marcar M3 como hecha
+hasta desplegarlo y completar QA real en claude.ai web/móvil. Discovery verde
+solo certifica metadata, no el flujo OAuth.
 
 `oauth.key` y `oauth-store.json` forman una unidad de backup: hay que copiar y
 restaurar ambos juntos, con permisos `0600`, o descartar ambos y volver a
 autorizar todos los clientes. Restaurar el store sin su clave, o con otra,
 impide iniciar el listener; una instancia ya levantada respondería 503 en
 `/readyz`. Nunca regenerar una clave encima de un store existente. El volumen
-completo sigue siendo secreto aunque el token
-upstream esté cifrado. La imagen actual corre con el usuario de la imagen base;
+completo sigue siendo secreto aunque la credencial upstream esté cifrada. Los
+stores provisionales v1/v2 se rechazan sin modificarlos: archiva store+clave,
+retíralos manualmente y reautoriza por sesión web. La imagen actual corre con
+el usuario de la imagen base;
 moverla a non-root exige preparar ownership de `/state` en la imagen/volumen y
 se deja para el cambio de runtime correspondiente, no para este lote OAuth.
 
@@ -44,6 +46,33 @@ equivale a certificar supervivencia a corte eléctrico del volumen o hardware de
 VPS. `/readyz` comparte una sola comprobación concurrente, cacheada cinco
 segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
 `127.0.0.1`.
+
+### Secreto del backchannel
+
+El secreto vive en `/srv/lumbre-mcp.env`, fuera de `/srv/lumbre-mcp`: el script
+de publicación sincroniza ese árbol con `rsync --delete` y borraría un `.env`
+guardado dentro. Crear el fichero una sola vez con permisos restrictivos:
+
+```bash
+sudo install -m 0600 -o "$USER" /dev/null /srv/lumbre-mcp.env
+sudoedit /srv/lumbre-mcp.env
+```
+
+Contenido (valor aleatorio estable de 32 caracteres o más, igual al configurado
+en el contenedor Lumbre):
+
+```dotenv
+LUMBRE_MCP_BACKCHANNEL_SECRET=<secreto-aleatorio>
+```
+
+`deploy/publicar.sh` comprueba que el fichero existe, es legible y tiene modo
+exacto `0600` antes del `rsync`, y pasa explícitamente
+`--env-file /srv/lumbre-mcp.env` a Compose. `LUMBRE_MCP_ENV_FILE` permite otra
+ruta absoluta canónica si el operador la necesita, siempre fuera de
+`LUMBRE_MCP_DEST`; el script rechaza rutas equivalentes con `.`/`..` o dobles
+barras. Para rotar, preparar el mismo valor
+nuevo en ambos servicios y reiniciarlos en una ventana coordinada; mientras no
+coincidan, `/requests` falla cerrado y no se emiten grants locales.
 
 ## Publicar una versión nueva
 
@@ -145,10 +174,12 @@ delate un fail-open), el script sale con exit 1 igual que si fallara el
 camino feliz.
 
 Este smoke remoto **no certifica OAuth**: PRM/AS y el challenge pueden estar
-perfectos con code/refresh/revoke rotos o con el broker ausente. El canary local
-independiente del broker es `npx vitest run src/oauth.test.ts`; cubre code+PKCE,
-refresh/replay tras reinicio y revoke con un upstream simulado. La aceptación
-real exige además el broker de Lumbre y QA de claude.ai web/móvil.
+perfectos con code/refresh/revoke rotos o con el backchannel ausente. Los canary
+locales son `npx vitest run src/lumbre-oauth-backchannel.test.ts` y
+`npx vitest run src/oauth.test.ts`; cubren el contrato HTTP negativo, code+PKCE,
+persistencia tras reinicio, introspect, refresh/replay y el outbox de revoke con
+Lumbre simulada. La aceptación real exige además el secreto desplegado en
+Lumbre y QA de claude.ai web/móvil.
 
 Exit 0 = todas las comprobaciones en verde (el propio script imprime `N/N` al
 final, no hace falta contar a mano). Exit 1 =
@@ -175,18 +206,18 @@ claude mcp add --transport http lumbre https://mcp.lumbre.pro/mcp \
   --header "Authorization: Bearer $LUMBRE_TOKEN"
 ```
 
-Cuando se integre el broker/consentimiento de Lumbre, claude.ai (web y móvil)
-deberá conectarse desde «Añadir conector personalizado» pegando **solo**:
+claude.ai (web y móvil) se conecta desde «Añadir conector personalizado»
+pegando **solo**:
 
 ```
 https://mcp.lumbre.pro/mcp
 ```
 
-El núcleo hace que Claude descubra OAuth 2.1 y fija el callback exacto
-`https://claude.ai/api/mcp/auth_callback`, pero el formulario provisional de
-este lote no es el consentimiento desplegable. Hasta que el broker esté
-integrado y el flujo pase QA real, usar las formas existentes: stdio, Bearer
-directo o `/mcp/<token>`.
+Claude descubre OAuth 2.1 y el callback exacto es
+`https://claude.ai/api/mcp/auth_callback`; el consentimiento sucede en
+`app.lumbre.pro`. Hasta configurar el secreto en ambos contenedores y pasar QA
+real, las formas heredadas stdio, Bearer directo o `/mcp/<token>` siguen siendo
+la única ruta operativa.
 
 La compatibilidad con `/mcp/<token>` sigue tocando las DOS piezas del deploy:
 además de `./deploy/publicar.sh` (recompila y sube `dist/`), hay que volver a

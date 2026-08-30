@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEq
 import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { BackchannelError, LUMBRE_OAUTH_CALLBACK, LumbreBackchannel, isValidRequestId } from './lumbre-oauth-backchannel.js';
 export const OAUTH_ISSUER = 'https://mcp.lumbre.pro';
 export const OAUTH_RESOURCE = `${OAUTH_ISSUER}/mcp`;
 export const OAUTH_SCOPE = 'lumbre:mcp';
@@ -22,6 +23,7 @@ const DEFAULT_CIMD_CACHE_MS = 5 * 60_000;
 const MAX_CIMD_CACHE_MS = 60 * 60_000;
 const MAX_REFRESH_TOMBSTONES = 10_000;
 const MAX_REFRESH_TOMBSTONES_PER_FAMILY = 64;
+const MAX_OUTBOX_RETRIES_PER_READINESS = 1;
 const READINESS_CACHE_MS = 5_000;
 const DEFAULT_PUBLIC_LIMITS = {
     authorize: { requestsPerMinute: 30, concurrent: 8 },
@@ -60,12 +62,6 @@ async function syncDirectory(path) {
     finally {
         await handle.close();
     }
-}
-function html(value) {
-    return value.replace(/[&<>"']/g, (char) => {
-        const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-        return entities[char] ?? char;
-    });
 }
 function securityHeaders(contentType) {
     return {
@@ -176,6 +172,9 @@ function validateClientIdUrl(clientId) {
 function grantContext(clientId, resource, scope) {
     return Buffer.from(JSON.stringify([clientId, resource, scope]), 'utf8');
 }
+function transactionContext(requestId, clientId, resource, scope) {
+    return Buffer.from(JSON.stringify(['lumbre-transaction', requestId, clientId, resource, scope]), 'utf8');
+}
 function encrypt(value, key, context) {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -201,14 +200,27 @@ function normalizeStore(value) {
     if (!value || typeof value !== 'object')
         throw new Error('store OAuth inválido');
     const raw = value;
-    if ((raw.version !== 1 && raw.version !== 2) || !Array.isArray(raw.grants)) {
+    if (raw.version === 1 || raw.version === 2) {
+        throw new Error('store OAuth provisional v1/v2 no compatible; archívalo y vuelve a autorizar desde la sesión web');
+    }
+    if (raw.version !== 3 ||
+        !Array.isArray(raw.grants) ||
+        !Array.isArray(raw.usedRefreshTokens) ||
+        !Array.isArray(raw.authorizationRequests) ||
+        !Array.isArray(raw.authorizationCodes) ||
+        !Array.isArray(raw.revocationOutbox)) {
         throw new Error('store OAuth inválido');
     }
-    const grants = raw.grants.map((value, index) => {
+    const grants = raw.grants.map((value) => {
         if (!value || typeof value !== 'object')
             throw new Error('grant OAuth inválido');
         const grant = value;
-        if (typeof grant.clientId !== 'string' ||
+        if (grant.provider !== 'lumbre-web' ||
+            typeof grant.credentialId !== 'string' ||
+            !isValidRequestId(grant.credentialId) ||
+            typeof grant.familyId !== 'string' ||
+            !Number.isFinite(grant.familyExpiresAt) ||
+            typeof grant.clientId !== 'string' ||
             typeof grant.resource !== 'string' ||
             typeof grant.scope !== 'string' ||
             typeof grant.accessHash !== 'string' ||
@@ -218,27 +230,19 @@ function normalizeStore(value) {
             !validEncryptedValue(grant.upstream)) {
             throw new Error('grant OAuth inválido');
         }
-        const familyId = raw.version === 2 && typeof grant.familyId === 'string'
-            ? grant.familyId
-            : digest(`familia:${index}:${grant.accessHash}:${grant.refreshHash}`);
-        const familyExpiresAt = typeof grant.familyExpiresAt === 'number' && Number.isFinite(grant.familyExpiresAt)
-            ? grant.familyExpiresAt
-            : grant.refreshExpiresAt;
-        return { ...grant, familyId, familyExpiresAt };
+        return grant;
     });
-    const usedRefreshTokens = raw.version === 2 && Array.isArray(raw.usedRefreshTokens)
-        ? raw.usedRefreshTokens.map((value) => {
-            if (!value || typeof value !== 'object')
-                throw new Error('tombstone OAuth inválido');
-            const item = value;
-            if (typeof item.hash !== 'string' ||
-                typeof item.familyId !== 'string' ||
-                !Number.isFinite(item.expiresAt)) {
-                throw new Error('tombstone OAuth inválido');
-            }
-            return item;
-        })
-        : [];
+    const usedRefreshTokens = raw.usedRefreshTokens.map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('tombstone OAuth inválido');
+        const item = value;
+        if (typeof item.hash !== 'string' ||
+            typeof item.familyId !== 'string' ||
+            !Number.isFinite(item.expiresAt)) {
+            throw new Error('tombstone OAuth inválido');
+        }
+        return item;
+    });
     const usedHashes = new Set(usedRefreshTokens.map((item) => item.hash));
     if (new Set(grants.map((grant) => grant.familyId)).size !== grants.length ||
         new Set(grants.map((grant) => grant.accessHash)).size !== grants.length ||
@@ -254,10 +258,93 @@ function normalizeStore(value) {
         familyCounts.set(item.familyId, (familyCounts.get(item.familyId) ?? 0) + 1);
     }
     const overflowFamilies = new Set([...familyCounts].filter(([, count]) => count > MAX_REFRESH_TOMBSTONES_PER_FAMILY).map(([familyId]) => familyId));
+    if (overflowFamilies.size > 0)
+        throw new Error('store OAuth incoherente: familia sobre el límite de tombstones');
+    const authorizationRequests = raw.authorizationRequests.map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('autorización OAuth inválida');
+        const item = value;
+        if (typeof item.requestId !== 'string' ||
+            !isValidRequestId(item.requestId) ||
+            !validEncryptedValue(item.transaction) ||
+            typeof item.clientName !== 'string' ||
+            item.clientName !== item.clientName.trim() ||
+            item.clientName.length === 0 ||
+            item.clientName.length > 120 ||
+            typeof item.clientId !== 'string' ||
+            item.redirectUri !== OAUTH_CALLBACK ||
+            item.scope !== OAUTH_SCOPE ||
+            item.resource !== OAUTH_RESOURCE ||
+            typeof item.challenge !== 'string' ||
+            !/^[A-Za-z0-9_-]{43}$/.test(item.challenge) ||
+            (item.state !== undefined && (typeof item.state !== 'string' || item.state.length > 1024)) ||
+            !Number.isFinite(item.expiresAt)) {
+            throw new Error('autorización OAuth inválida');
+        }
+        return item;
+    });
+    if (authorizationRequests.length > MAX_PENDING_ITEMS ||
+        new Set(authorizationRequests.map((item) => item.requestId)).size !== authorizationRequests.length) {
+        throw new Error('store OAuth incoherente');
+    }
+    const authorizationCodes = raw.authorizationCodes.map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('código OAuth inválido');
+        const item = value;
+        if (typeof item.codeHash !== 'string' ||
+            typeof item.credentialId !== 'string' ||
+            !isValidRequestId(item.credentialId) ||
+            typeof item.clientId !== 'string' ||
+            item.redirectUri !== OAUTH_CALLBACK ||
+            item.scope !== OAUTH_SCOPE ||
+            item.resource !== OAUTH_RESOURCE ||
+            typeof item.challenge !== 'string' ||
+            !/^[A-Za-z0-9_-]{43}$/.test(item.challenge) ||
+            (item.state !== undefined && (typeof item.state !== 'string' || item.state.length > 1024)) ||
+            !Number.isFinite(item.expiresAt) ||
+            !validEncryptedValue(item.upstream)) {
+            throw new Error('código OAuth inválido');
+        }
+        return item;
+    });
+    const revocationOutbox = raw.revocationOutbox.map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('outbox OAuth inválida');
+        const item = value;
+        if (item.provider !== 'lumbre-web' ||
+            typeof item.credentialId !== 'string' ||
+            !isValidRequestId(item.credentialId) ||
+            typeof item.clientId !== 'string' ||
+            item.resource !== OAUTH_RESOURCE ||
+            item.scope !== OAUTH_SCOPE ||
+            !validEncryptedValue(item.upstream)) {
+            throw new Error('outbox OAuth inválida');
+        }
+        return item;
+    });
+    const credentialIds = [
+        ...grants.map((item) => item.credentialId),
+        ...authorizationCodes.map((item) => item.credentialId),
+        ...revocationOutbox.map((item) => item.credentialId)
+    ];
+    const opaqueHashes = [
+        ...grants.flatMap((item) => [item.accessHash, item.refreshHash]),
+        ...usedRefreshTokens.map((item) => item.hash),
+        ...authorizationCodes.map((item) => item.codeHash)
+    ];
+    if (authorizationCodes.length > MAX_PENDING_ITEMS ||
+        new Set(authorizationCodes.map((item) => item.codeHash)).size !== authorizationCodes.length ||
+        new Set(credentialIds).size !== credentialIds.length ||
+        new Set(opaqueHashes).size !== opaqueHashes.length) {
+        throw new Error('store OAuth incoherente');
+    }
     return {
-        version: 2,
-        grants: grants.filter((grant) => !overflowFamilies.has(grant.familyId)),
-        usedRefreshTokens: usedRefreshTokens.filter((item) => !overflowFamilies.has(item.familyId))
+        version: 3,
+        grants,
+        usedRefreshTokens,
+        authorizationRequests,
+        authorizationCodes,
+        revocationOutbox
     };
 }
 async function pathExists(path) {
@@ -278,10 +365,9 @@ export class OAuthService {
     suppliedEncryptionKey;
     publicLimits;
     persistenceStep;
+    backchannel;
     encryptionKey;
     keyPromise;
-    transactions = new Map();
-    codes = new Map();
     rateWindows = new Map();
     inFlight = { authorize: 0, token: 0, revoke: 0 };
     clientMetadataCache = new Map();
@@ -294,6 +380,11 @@ export class OAuthService {
         this.fetchFn = options.fetch ?? globalThis.fetch;
         this.now = options.now ?? Date.now;
         this.persistenceStep = options.persistenceStep;
+        this.backchannel = options.backchannel ?? new LumbreBackchannel({
+            baseUrl: options.lumbreAppBaseUrl ?? process.env.LUMBRE_APP_BASE_URL,
+            secret: options.backchannelSecret ?? process.env.LUMBRE_MCP_BACKCHANNEL_SECRET,
+            fetch: this.fetchFn
+        });
         if (options.encryptionKey && options.encryptionKey.length !== 32)
             throw new Error('OAuth encryptionKey debe tener 32 bytes');
         this.suppliedEncryptionKey = options.encryptionKey !== undefined;
@@ -467,61 +558,54 @@ export class OAuthService {
             this.inFlight[endpoint] -= 1;
         };
     }
-    async handleAuthorize(req, res, url, upstreamBaseUrl) {
+    async handleAuthorize(req, res, url) {
         let release;
         try {
             release = this.enterPublicEndpoint(req, 'authorize');
-            if (req.method === 'GET') {
-                this.prunePending();
-                const request = this.authorizationRequest(url.searchParams);
-                const metadata = await this.clientMetadata(request.clientId);
-                const transaction = opaque('tx_');
-                this.transactions.set(transaction, {
-                    ...request,
-                    expiresAt: this.now() + TRANSACTION_TTL_MS,
-                    clientName: metadata.client_name?.slice(0, 120) || 'Claude'
-                });
-                res.writeHead(200, securityHeaders('text/html; charset=utf-8'));
-                res.end(`<!doctype html>
-<html lang="es">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width">
-<title>Autorizar Lumbre</title>
-<style>body{font:16px system-ui;max-width:34rem;margin:4rem auto;padding:0 1rem;color:#242424}label,input,button{display:block;width:100%;box-sizing:border-box}input,button{font:inherit;padding:.75rem;margin-top:.5rem}button{margin-top:1rem}small{color:#666}</style>
-<h1>Autorizar Lumbre</h1>
-<p><strong>${html(metadata.client_name?.slice(0, 120) || 'Claude')}</strong> solicita acceso a tus tareas con el permiso <code>${OAUTH_SCOPE}</code>.</p>
-<p><small>Cliente verificado: <strong>claude.ai</strong> · ${html(request.clientId)}</small></p>
-<form method="post" action="/authorize" autocomplete="off">
-<input type="hidden" name="transaction" value="${html(transaction)}">
-<label>Token de Lumbre<input type="password" name="lumbre_token" required autocomplete="off" maxlength="512"></label>
-<small>Se valida una vez por HTTPS. No se incluye en la URL y se guarda cifrado para renovar el acceso.</small>
-<button type="submit">Autorizar</button>
-</form>
-</html>`);
-                return;
-            }
-            if (req.method !== 'POST')
+            if (req.method !== 'GET')
                 throw new OAuthError('invalid_request', 'Método no permitido.', 405);
-            const form = await readForm(req);
-            const transactionId = one(form, 'transaction');
-            const upstreamToken = one(form, 'lumbre_token');
-            const transaction = this.transactions.get(transactionId);
-            this.transactions.delete(transactionId);
-            if (!transaction || transaction.expiresAt <= this.now())
-                throw new OAuthError('invalid_request', 'La autorización ha caducado; vuelve a iniciarla.');
-            if (!upstreamToken || upstreamToken.length > 512)
-                throw new OAuthError('access_denied', 'Token de Lumbre inválido.');
-            await this.validateUpstreamToken(upstreamBaseUrl, upstreamToken);
-            this.prunePending();
-            const code = opaque('lm_code_');
-            this.codes.set(code, { ...transaction, upstreamToken, expiresAt: this.now() + CODE_TTL_MS });
-            const redirect = new URL(transaction.redirectUri);
-            redirect.searchParams.set('code', code);
-            if (transaction.state !== undefined)
-                redirect.searchParams.set('state', transaction.state);
-            redirect.searchParams.set('iss', OAUTH_ISSUER);
-            res.writeHead(302, { ...securityHeaders('text/plain; charset=utf-8'), location: redirect.toString() });
-            res.end('Redirigiendo a Claude.');
+            const request = this.authorizationRequest(url.searchParams);
+            const metadata = await this.clientMetadata(request.clientId);
+            const clientName = metadata.client_name.trim().slice(0, 120);
+            const transactionId = randomBytes(32).toString('base64url');
+            let created;
+            try {
+                created = await this.backchannel.createAuthorizationRequest({
+                    transactionId,
+                    clientId: request.clientId,
+                    clientName,
+                    resource: request.resource,
+                    scope: request.scope,
+                    callbackUri: LUMBRE_OAUTH_CALLBACK
+                });
+            }
+            catch (error) {
+                throw this.backchannelOAuthError(error);
+            }
+            const expiresAt = Math.min(created.expiresAt, this.now() + TRANSACTION_TTL_MS);
+            const authorizationUrl = new URL(created.authorizationUrl);
+            if (created.expiresAt <= this.now() ||
+                created.expiresAt > this.now() + TRANSACTION_TTL_MS + 5 * 60_000 ||
+                authorizationUrl.searchParams.get('request') !== created.requestId) {
+                throw new OAuthError('server_error', 'Lumbre devolvió una autorización fuera de contrato.', 502);
+            }
+            const key = await this.key();
+            await this.mutateStore((store) => {
+                store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > this.now());
+                if (store.authorizationRequests.length >= MAX_PENDING_ITEMS) {
+                    throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+                }
+                store.authorizationRequests.push({
+                    ...request,
+                    requestId: created.requestId,
+                    transaction: encrypt(transactionId, key, transactionContext(created.requestId, request.clientId, request.resource, request.scope)),
+                    clientName,
+                    expiresAt
+                });
+                return true;
+            });
+            res.writeHead(302, { ...securityHeaders('text/plain; charset=utf-8'), location: created.authorizationUrl });
+            res.end('Redirigiendo a Lumbre.');
         }
         catch (error) {
             oauthError(res, error);
@@ -530,24 +614,106 @@ export class OAuthService {
             release?.();
         }
     }
-    async validateUpstreamToken(baseUrl, token) {
-        let response;
+    async handleLumbreCallback(req, res, url) {
+        let release;
         try {
-            response = await this.fetchFn(`${baseUrl.replace(/\/$/, '')}/api/tasks?scope=today&notes=none`, {
-                headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-                redirect: 'error',
-                signal: AbortSignal.timeout(10_000)
+            release = this.enterPublicEndpoint(req, 'authorize');
+            if (req.method !== 'GET')
+                throw new OAuthError('invalid_request', 'Método no permitido.', 405);
+            const requestId = one(url.searchParams, 'request');
+            const decision = one(url.searchParams, 'decision');
+            if (!requestId || !isValidRequestId(requestId) || (decision !== 'approved' && decision !== 'denied')) {
+                throw new OAuthError('invalid_request', 'Callback de Lumbre inválido.');
+            }
+            let pending;
+            await this.mutateStore((store) => {
+                const found = store.authorizationRequests.find((item) => item.requestId === requestId);
+                if (!found)
+                    return false;
+                pending = found;
+                store.authorizationRequests = store.authorizationRequests.filter((item) => item.requestId !== requestId);
+                return true;
             });
+            if (!pending || pending.expiresAt <= this.now()) {
+                throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
+            }
+            const authorized = pending;
+            if (decision === 'denied') {
+                this.redirectToClient(res, authorized, { error: 'access_denied' });
+                return;
+            }
+            let credential;
+            try {
+                const transactionId = decrypt(authorized.transaction, await this.key(), transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope));
+                credential = await this.backchannel.exchange(requestId, transactionId);
+            }
+            catch (error) {
+                throw this.backchannelOAuthError(error, 'invalid_grant');
+            }
+            if (credential.resource !== authorized.resource || credential.scope !== authorized.scope) {
+                await this.persistCredentialRevocation(credential, authorized);
+                throw new OAuthError('server_error', 'Lumbre devolvió una credencial fuera de contrato.', 502);
+            }
+            const code = opaque('lm_code_');
+            const key = await this.key();
+            try {
+                await this.mutateStore((store) => {
+                    store.authorizationCodes = store.authorizationCodes.filter((item) => item.expiresAt > this.now());
+                    if (store.authorizationCodes.length >= MAX_PENDING_ITEMS) {
+                        throw new OAuthError('temporarily_unavailable', 'Hay demasiados códigos pendientes.', 503);
+                    }
+                    store.authorizationCodes.push({
+                        clientId: authorized.clientId,
+                        redirectUri: authorized.redirectUri,
+                        scope: authorized.scope,
+                        resource: authorized.resource,
+                        challenge: authorized.challenge,
+                        state: authorized.state,
+                        codeHash: digest(code),
+                        upstream: encrypt(credential.accessToken, key, grantContext(authorized.clientId, authorized.resource, authorized.scope)),
+                        credentialId: credential.credentialId,
+                        expiresAt: this.now() + CODE_TTL_MS
+                    });
+                    return true;
+                });
+            }
+            catch (error) {
+                try {
+                    await this.persistCredentialRevocation(credential, authorized);
+                }
+                catch {
+                    // Si el propio store no puede persistir la compensación, solo queda
+                    // el revoke directo idempotente. Nunca se incluye el token en el error.
+                    await this.backchannel.revoke(credential.accessToken).catch(() => undefined);
+                }
+                throw error;
+            }
+            this.redirectToClient(res, authorized, { code });
         }
-        catch {
-            throw new OAuthError('temporarily_unavailable', 'No se pudo validar el token con Lumbre.', 503);
+        catch (error) {
+            oauthError(res, error);
         }
-        const status = response.status;
-        await response.body?.cancel().catch(() => undefined);
-        if (status === 401 || status === 403)
-            throw new OAuthError('access_denied', 'El token de Lumbre no es válido.', 401);
-        if (status < 200 || status >= 300)
-            throw new OAuthError('temporarily_unavailable', 'Lumbre no pudo validar el token.', 503);
+        finally {
+            release?.();
+        }
+    }
+    redirectToClient(res, request, result) {
+        const redirect = new URL(request.redirectUri);
+        if ('code' in result)
+            redirect.searchParams.set('code', result.code);
+        else
+            redirect.searchParams.set('error', result.error);
+        if (request.state !== undefined)
+            redirect.searchParams.set('state', request.state);
+        redirect.searchParams.set('iss', OAUTH_ISSUER);
+        res.writeHead(302, { ...securityHeaders('text/plain; charset=utf-8'), location: redirect.toString() });
+        res.end('Redirigiendo a Claude.');
+    }
+    backchannelOAuthError(error, invalidCode = 'server_error') {
+        if (error instanceof BackchannelError && error.kind === 'transient') {
+            return new OAuthError('temporarily_unavailable', 'Lumbre no está disponible temporalmente.', 503);
+        }
+        return new OAuthError(invalidCode, 'Lumbre rechazó o devolvió una respuesta fuera de contrato.', invalidCode === 'temporarily_unavailable' ? 503 : 502);
     }
     async handleToken(req, res) {
         let release;
@@ -577,29 +743,88 @@ export class OAuthService {
         const redirectUri = one(form, 'redirect_uri');
         const verifier = one(form, 'code_verifier');
         const resource = one(form, 'resource');
-        const code = this.codes.get(codeValue);
-        this.codes.delete(codeValue);
-        if (!code || code.expiresAt <= this.now())
+        const codeHash = digest(codeValue);
+        const code = (await this.loadStore()).authorizationCodes.find((item) => item.codeHash === codeHash);
+        if (!code)
             throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
+        if (code.expiresAt <= this.now()) {
+            await this.retireAuthorizationCode(codeHash);
+            throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
+        }
         if (clientId !== code.clientId || redirectUri !== code.redirectUri || resource !== code.resource) {
             throw new OAuthError('invalid_grant', 'El código no pertenece a esta solicitud.');
         }
-        if (!verifier || !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier))
+        if (!verifier || !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) {
             throw new OAuthError('invalid_grant', 'code_verifier inválido.');
+        }
         const actual = createHash('sha256').update(verifier, 'ascii').digest('base64url');
-        if (!equalText(actual, code.challenge))
+        if (!equalText(actual, code.challenge)) {
             throw new OAuthError('invalid_grant', 'PKCE no coincide.');
-        await this.issueGrant(code, res);
+        }
+        const upstreamToken = decrypt(code.upstream, await this.key(), grantContext(code.clientId, code.resource, code.scope));
+        const active = await this.introspectCredential(code, upstreamToken);
+        if (!active) {
+            await this.retireAuthorizationCode(codeHash);
+            throw new OAuthError('invalid_grant', 'La autorización de Lumbre ya no está activa.');
+        }
+        await this.issueGrant(code, codeHash, res);
     }
-    async issueGrant(code, res) {
+    async retireAuthorizationCode(codeHash) {
+        let credentialId;
+        await this.mutateStore((store) => {
+            const code = store.authorizationCodes.find((item) => item.codeHash === codeHash);
+            if (!code)
+                return false;
+            credentialId = code.credentialId;
+            if (!store.revocationOutbox.some((item) => item.credentialId === code.credentialId)) {
+                store.revocationOutbox.push({
+                    provider: 'lumbre-web',
+                    credentialId: code.credentialId,
+                    clientId: code.clientId,
+                    resource: code.resource,
+                    scope: code.scope,
+                    upstream: code.upstream
+                });
+            }
+            store.authorizationCodes = store.authorizationCodes.filter((item) => item.codeHash !== codeHash);
+            return true;
+        });
+        if (credentialId)
+            await this.flushRevocationOutbox(credentialId);
+    }
+    async introspectCredential(credential, upstreamToken) {
+        let result;
+        try {
+            result = await this.backchannel.introspect(upstreamToken);
+        }
+        catch (error) {
+            throw this.backchannelOAuthError(error, 'temporarily_unavailable');
+        }
+        if (!result.active)
+            return false;
+        if (result.credentialId !== credential.credentialId ||
+            result.clientId !== credential.clientId ||
+            result.resource !== credential.resource ||
+            result.scope !== credential.scope) {
+            return false;
+        }
+        return true;
+    }
+    async issueGrant(code, codeHash, res) {
         const accessToken = opaque(ACCESS_PREFIX);
         const refreshToken = opaque(REFRESH_PREFIX);
         const familyId = randomBytes(16).toString('base64url');
         const now = this.now();
         const familyExpiresAt = now + REFRESH_TTL_MS;
-        const key = await this.key();
+        let issued = false;
         await this.mutateStore((store) => {
+            const storedCode = store.authorizationCodes.find((item) => item.codeHash === codeHash && item.credentialId === code.credentialId && item.expiresAt > now);
+            if (!storedCode)
+                return false;
+            store.authorizationCodes = store.authorizationCodes.filter((item) => item.codeHash !== codeHash);
             store.grants.push({
+                provider: 'lumbre-web',
+                credentialId: code.credentialId,
                 familyId,
                 familyExpiresAt,
                 clientId: code.clientId,
@@ -609,10 +834,13 @@ export class OAuthService {
                 accessExpiresAt: now + ACCESS_TTL_MS,
                 refreshHash: digest(refreshToken),
                 refreshExpiresAt: familyExpiresAt,
-                upstream: encrypt(code.upstreamToken, key, grantContext(code.clientId, code.resource, code.scope))
+                upstream: code.upstream
             });
+            issued = true;
             return true;
         });
+        if (!issued)
+            throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
         json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: refreshToken, scope: code.scope });
     }
     async exchangeRefresh(form, res) {
@@ -624,6 +852,29 @@ export class OAuthService {
         const accessToken = opaque(ACCESS_PREFIX);
         const nextRefresh = opaque(REFRESH_PREFIX);
         const now = this.now();
+        const snapshot = await this.loadStore();
+        const usedSnapshot = snapshot.usedRefreshTokens.find((item) => item.hash === oldHash && item.expiresAt > now);
+        const grantSnapshot = usedSnapshot
+            ? snapshot.grants.find((item) => item.familyId === usedSnapshot.familyId)
+            : snapshot.grants.find((item) => item.refreshHash === oldHash);
+        if (!grantSnapshot ||
+            grantSnapshot.provider !== 'lumbre-web' ||
+            !isValidRequestId(grantSnapshot.credentialId) ||
+            grantSnapshot.clientId !== clientId ||
+            grantSnapshot.resource !== resource ||
+            (requestedScope !== undefined && requestedScope !== grantSnapshot.scope)) {
+            throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
+        }
+        const upstreamToken = decrypt(grantSnapshot.upstream, await this.key(), grantContext(grantSnapshot.clientId, grantSnapshot.resource, grantSnapshot.scope));
+        if (usedSnapshot) {
+            await this.revokeFamily(grantSnapshot.familyId, grantSnapshot.credentialId);
+            throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
+        }
+        const active = await this.introspectCredential(grantSnapshot, upstreamToken);
+        if (!active) {
+            await this.revokeFamily(grantSnapshot.familyId, grantSnapshot.credentialId);
+            throw new OAuthError('invalid_grant', 'La credencial de Lumbre ya no está activa.');
+        }
         const result = { outcome: 'invalid' };
         await this.mutateStore((store) => {
             const used = store.usedRefreshTokens.find((item) => item.hash === oldHash && item.expiresAt > now);
@@ -636,11 +887,13 @@ export class OAuthService {
                     return false;
                 }
                 result.outcome = 'replayed';
-                this.removeFamily(store, used.familyId);
+                this.enqueueFamilyRevocation(store, familyGrant);
                 return true;
             }
             const grant = store.grants.find((item) => item.refreshHash === oldHash);
             if (!grant ||
+                grant.familyId !== grantSnapshot.familyId ||
+                grant.credentialId !== grantSnapshot.credentialId ||
                 grant.refreshExpiresAt <= now ||
                 grant.clientId !== clientId ||
                 grant.resource !== resource ||
@@ -653,7 +906,7 @@ export class OAuthService {
                 // es revocar la familia. Nunca se bloquea una eliminación por intentar
                 // conservar otra tombstone.
                 result.outcome = 'replayed';
-                this.removeFamily(store, grant.familyId);
+                this.enqueueFamilyRevocation(store, grant);
                 return true;
             }
             result.outcome = 'rotated';
@@ -663,8 +916,11 @@ export class OAuthService {
             grant.refreshExpiresAt = nextRefreshExpiresAt;
             return true;
         });
-        if (result.outcome !== 'rotated')
+        if (result.outcome !== 'rotated') {
+            if (result.outcome === 'replayed')
+                await this.flushRevocationOutbox(grantSnapshot.credentialId);
             throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
+        }
         json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: nextRefresh, scope: OAUTH_SCOPE });
     }
     addRefreshTombstone(store, hash, familyId, expiresAt) {
@@ -681,6 +937,67 @@ export class OAuthService {
         store.grants = store.grants.filter((grant) => grant.familyId !== familyId);
         store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => item.familyId !== familyId);
     }
+    enqueueFamilyRevocation(store, grant) {
+        if (!store.revocationOutbox.some((item) => item.credentialId === grant.credentialId)) {
+            store.revocationOutbox.push({
+                provider: 'lumbre-web',
+                credentialId: grant.credentialId,
+                clientId: grant.clientId,
+                resource: grant.resource,
+                scope: grant.scope,
+                upstream: grant.upstream
+            });
+        }
+        this.removeFamily(store, grant.familyId);
+    }
+    async persistCredentialRevocation(credential, context) {
+        const key = await this.key();
+        await this.mutateStore((store) => {
+            if (store.revocationOutbox.some((item) => item.credentialId === credential.credentialId))
+                return false;
+            store.revocationOutbox.push({
+                provider: 'lumbre-web',
+                credentialId: credential.credentialId,
+                clientId: context.clientId,
+                resource: context.resource,
+                scope: context.scope,
+                upstream: encrypt(credential.accessToken, key, grantContext(context.clientId, context.resource, context.scope))
+            });
+            return true;
+        });
+        await this.flushRevocationOutbox(credential.credentialId);
+    }
+    async revokeFamily(familyId, credentialId) {
+        await this.mutateStore((store) => {
+            const grant = store.grants.find((item) => item.familyId === familyId && item.credentialId === credentialId);
+            if (!grant)
+                return false;
+            this.enqueueFamilyRevocation(store, grant);
+            return true;
+        });
+        await this.flushRevocationOutbox(credentialId);
+    }
+    async flushRevocationOutbox(onlyCredentialId) {
+        const store = await this.loadStore();
+        const items = onlyCredentialId
+            ? store.revocationOutbox.filter((item) => item.credentialId === onlyCredentialId)
+            : store.revocationOutbox.slice(0, MAX_OUTBOX_RETRIES_PER_READINESS);
+        for (const item of items) {
+            let upstreamToken;
+            try {
+                upstreamToken = decrypt(item.upstream, await this.key(), grantContext(item.clientId, item.resource, item.scope));
+                await this.backchannel.revoke(upstreamToken);
+            }
+            catch {
+                continue;
+            }
+            await this.mutateStore((current) => {
+                const before = current.revocationOutbox.length;
+                current.revocationOutbox = current.revocationOutbox.filter((candidate) => candidate.credentialId !== item.credentialId);
+                return current.revocationOutbox.length !== before;
+            });
+        }
+    }
     async handleRevoke(req, res) {
         let release;
         try {
@@ -691,17 +1008,21 @@ export class OAuthService {
             const token = one(form, 'token');
             const clientId = one(form, 'client_id');
             const hash = digest(token);
+            let credentialId;
             await this.mutateStore((store) => {
-                let familyId = store.grants.find((grant) => grant.clientId === clientId && (grant.accessHash === hash || grant.refreshHash === hash))?.familyId;
+                let familyId = store.grants.find((grant) => grant.provider === 'lumbre-web' && grant.clientId === clientId && (grant.accessHash === hash || grant.refreshHash === hash))?.familyId;
                 familyId ??= store.usedRefreshTokens.find((item) => item.hash === hash)?.familyId;
                 if (!familyId)
                     return false;
-                const familyGrant = store.grants.find((grant) => grant.familyId === familyId && grant.clientId === clientId);
+                const familyGrant = store.grants.find((grant) => grant.provider === 'lumbre-web' && grant.familyId === familyId && grant.clientId === clientId);
                 if (!familyGrant)
                     return false;
-                this.removeFamily(store, familyId);
+                credentialId = familyGrant.credentialId;
+                this.enqueueFamilyRevocation(store, familyGrant);
                 return true;
             });
+            if (credentialId)
+                await this.flushRevocationOutbox(credentialId);
             json(res, 200, {});
         }
         catch (error) {
@@ -719,7 +1040,12 @@ export class OAuthService {
             const now = this.now();
             const store = await this.loadStore();
             const grant = store.grants.find((item) => item.accessHash === hash);
-            if (!grant || grant.accessExpiresAt <= now || grant.resource !== OAUTH_RESOURCE || grant.scope !== OAUTH_SCOPE)
+            if (!grant ||
+                grant.provider !== 'lumbre-web' ||
+                !isValidRequestId(grant.credentialId) ||
+                grant.accessExpiresAt <= now ||
+                grant.resource !== OAUTH_RESOURCE ||
+                grant.scope !== OAUTH_SCOPE)
                 return undefined;
             validateClientIdUrl(grant.clientId);
             return decrypt(grant.upstream, await this.key(), grantContext(grant.clientId, grant.resource, grant.scope));
@@ -732,6 +1058,7 @@ export class OAuthService {
         return token.startsWith(ACCESS_PREFIX);
     }
     async ensureReady() {
+        this.backchannel.ensureConfigured();
         if (!this.suppliedEncryptionKey && !(await pathExists(join(this.stateDir, 'oauth.key')))) {
             if (await pathExists(this.storePath()))
                 throw new Error('store OAuth presente sin su clave');
@@ -740,15 +1067,39 @@ export class OAuthService {
         const store = await this.loadStore();
         for (const grant of store.grants) {
             validateClientIdUrl(grant.clientId);
-            if (grant.resource !== OAUTH_RESOURCE || grant.scope !== OAUTH_SCOPE) {
+            if (grant.provider !== 'lumbre-web' ||
+                !isValidRequestId(grant.credentialId) ||
+                grant.resource !== OAUTH_RESOURCE ||
+                grant.scope !== OAUTH_SCOPE) {
                 throw new Error('grant OAuth fuera de contrato');
             }
             const upstream = decrypt(grant.upstream, key, grantContext(grant.clientId, grant.resource, grant.scope));
-            if (upstream.length === 0 || upstream.length > 512)
+            if (!/^[a-f0-9]{64}$/.test(upstream))
                 throw new Error('credencial upstream inválida');
+        }
+        for (const pending of store.authorizationRequests) {
+            validateClientIdUrl(pending.clientId);
+            const transactionId = decrypt(pending.transaction, key, transactionContext(pending.requestId, pending.clientId, pending.resource, pending.scope));
+            if (!/^[A-Za-z0-9_-]{32,256}$/.test(transactionId))
+                throw new Error('transacción OAuth inválida');
+        }
+        for (const code of store.authorizationCodes) {
+            validateClientIdUrl(code.clientId);
+            const upstream = decrypt(code.upstream, key, grantContext(code.clientId, code.resource, code.scope));
+            if (!/^[a-f0-9]{64}$/.test(upstream))
+                throw new Error('credencial upstream inválida');
+        }
+        for (const item of store.revocationOutbox) {
+            const upstream = decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope));
+            if (!/^[a-f0-9]{64}$/.test(upstream))
+                throw new Error('outbox OAuth inválida');
         }
         if (await pathExists(this.storePath()))
             await chmod(this.storePath(), 0o600);
+        // Ejecuta también al arrancar la poda segura: grants/códigos caducados
+        // pasan al outbox antes de intentar la revocación upstream.
+        await this.mutateStore(() => false);
+        await this.flushRevocationOutbox();
     }
     async checkReady() {
         const cached = this.readinessCache;
@@ -773,21 +1124,6 @@ export class OAuthService {
             if (this.readinessInFlight === pending)
                 this.readinessInFlight = undefined;
         }
-    }
-    prunePending() {
-        const now = this.now();
-        for (const [id, transaction] of this.transactions) {
-            if (transaction.expiresAt <= now)
-                this.transactions.delete(id);
-        }
-        for (const [id, code] of this.codes) {
-            if (code.expiresAt <= now)
-                this.codes.delete(id);
-        }
-        while (this.transactions.size >= MAX_PENDING_ITEMS)
-            this.transactions.delete(this.transactions.keys().next().value);
-        while (this.codes.size >= MAX_PENDING_ITEMS)
-            this.codes.delete(this.codes.keys().next().value);
     }
     async key() {
         if (this.encryptionKey)
@@ -847,7 +1183,14 @@ export class OAuthService {
         }
         catch (error) {
             if (error.code === 'ENOENT') {
-                return { version: 2, grants: [], usedRefreshTokens: [] };
+                return {
+                    version: 3,
+                    grants: [],
+                    usedRefreshTokens: [],
+                    authorizationRequests: [],
+                    authorizationCodes: [],
+                    revocationOutbox: []
+                };
             }
             throw error;
         }
@@ -859,11 +1202,37 @@ export class OAuthService {
             try {
                 const store = await this.loadStore();
                 const now = this.now();
+                let housekeeping = false;
+                const expiredGrants = store.grants.filter((grant) => grant.refreshExpiresAt <= now);
+                for (const grant of expiredGrants) {
+                    this.enqueueFamilyRevocation(store, grant);
+                    housekeeping = true;
+                }
+                const expiredCodes = store.authorizationCodes.filter((code) => code.expiresAt <= now);
+                for (const code of expiredCodes) {
+                    if (!store.revocationOutbox.some((item) => item.credentialId === code.credentialId)) {
+                        store.revocationOutbox.push({
+                            provider: 'lumbre-web', credentialId: code.credentialId, clientId: code.clientId,
+                            resource: code.resource, scope: code.scope, upstream: code.upstream
+                        });
+                    }
+                    housekeeping = true;
+                }
+                if (expiredCodes.length > 0) {
+                    const expiredHashes = new Set(expiredCodes.map((code) => code.codeHash));
+                    store.authorizationCodes = store.authorizationCodes.filter((code) => !expiredHashes.has(code.codeHash));
+                }
+                const usedBefore = store.usedRefreshTokens.length;
                 store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => item.expiresAt > now);
-                changed = mutator(store);
+                const requestsBefore = store.authorizationRequests.length;
+                store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > now);
+                housekeeping ||= usedBefore !== store.usedRefreshTokens.length || requestsBefore !== store.authorizationRequests.length;
+                changed = mutator(store) || housekeeping;
                 if (!changed)
                     return;
-                store.grants = store.grants.filter((grant) => grant.refreshExpiresAt > now);
+                // No serializamos nunca un estado intermedio incoherente aunque el
+                // proveedor reutilice por error un credentialId o haya una colisión.
+                normalizeStore(store);
                 await mkdir(dirname(this.storePath()), { recursive: true, mode: 0o700 });
                 const temp = `${this.storePath()}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
                 let handle;

@@ -319,7 +319,12 @@ export function createHttpApp(
 		}
 
 		if (url.pathname === '/authorize') {
-			void oauth.handleAuthorize(req, res, url, baseUrl);
+			void oauth.handleAuthorize(req, res, url);
+			return;
+		}
+
+		if (url.pathname === '/oauth/lumbre/callback') {
+			void oauth.handleLumbreCallback(req, res, url);
 			return;
 		}
 
