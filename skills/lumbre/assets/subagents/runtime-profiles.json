@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "claude": {
+      "directory": ".claude/agents",
+      "extension": ".md",
+      "model": "haiku",
+      "defaultToolPrefixes": [
+        "mcp__lumbre__"
+      ],
+      "enforcesToolAllowlist": true
+    },
+    "codex": {
+      "directory": ".codex/agents",
+      "extension": ".toml",
+      "dispatchModel": "gpt-5.6-luna",
+      "reasoningEffort": "low",
+      "embedsModel": false,
+      "enforcesToolAllowlist": false
+    }
+  }
+}

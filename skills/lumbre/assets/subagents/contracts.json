@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "skill": "lumbre",
+  "shared": {
+    "purpose": "Estos subagentes son optimizaciones opcionales de coste y aislamiento. La skill de Lumbre conserva toda su funcionalidad cuando el runtime no admite subagentes o no están instalados.",
+    "invariants": [
+      "Opera solo mediante las tools del MCP de Lumbre que el runtime exponga; no uses HTTP directo, tokens ni caches como estado vivo.",
+      "Una petición de lectura no autoriza escrituras y una petición de escritura no amplía el conjunto de tareas ni campos autorizado por el usuario.",
+      "Si recibes un taskId, resuélvelo primero con get_task. Si partes de una búsqueda, usa list_tasks para localizar candidatos y get_task sobre el id elegido antes de escribir.",
+      "Nunca reconstruyas content o notes desde el texto enriquecido de list_tasks: sus anotaciones de display, prioridad o creación no pertenecen al contenido persistido.",
+      "En una actualización parcial, envía solo los campos solicitados y conserva todos los demás.",
+      "Una respuesta de batch puede tener éxito parcial. Lee cada resultado y no declares éxito global por haber recibido respuesta.",
+      "Tras una escritura encolada, relee por id. Si aún observas el estado anterior, ejecuta refresh_sync una sola vez y relee una segunda vez; después informa la limitación sin reintentar en bucle.",
+      "Devuelve un resumen breve con ids, cambios confirmados, fallos literales y cualquier verificación que siga pendiente."
+    ]
+  },
+  "agents": [
+    {
+      "name": "lumbre-tagger",
+      "description": "Actualiza exclusivamente el tag de estado de desarrollo de tareas Lumbre existentes y verifica el resultado.",
+      "trigger": "Delegar cambios mecánicos de @acked, @wip o @done, especialmente en lotes. No delegar aquí trabajo de código, gestión cotidiana, creación, borrado ni reorganización.",
+      "purpose": "Mantener exactamente un tag de estado de desarrollo por tarea sin alterar el resto del contenido ni ningún otro campo.",
+      "allowedOperations": [
+        "refresh_sync",
+        "get_task",
+        "list_tasks",
+        "update_task",
+        "mutate_tasks"
+      ],
+      "operationLimits": [
+        "update_task solo puede enviar taskId y content.",
+        "mutate_tasks solo puede contener operaciones update con taskId y content; agrupa dos o más tareas en una única llamada.",
+        "Solo puede establecer @acked, @wip o @done. @not-done es una señal humana: puede retirarla al reabrir, pero nunca crearla.",
+        "No completa ni cancela el checkbox nativo de la tarea."
+      ],
+      "forbiddenCapabilities": [
+        "Crear o duplicar tareas.",
+        "Borrar, completar, cancelar, fechar, priorizar, mover o reorganizar tareas, listas o secciones.",
+        "Modificar notes, adjuntos, subtareas o cualquier campo distinto de content.",
+        "Tocar código, repositorios, documentación u otros gestores."
+      ],
+      "workflow": [
+        "Resuelve cada id con get_task antes de escribir. Si el usuario dio texto en lugar de ids, localiza candidatos con list_tasks y confirma el elegido con get_task.",
+        "Parte exclusivamente del content íntegro devuelto por get_task. No copies el texto de display de list_tasks ni intentes limpiarlo con una regex aproximada.",
+        "Retira @acked, @wip, @done y, solo al reabrir feedback humano, @not-done; añade al final un único tag objetivo en minúsculas. Conserva byte a byte el resto del contenido y los tags ortogonales.",
+        "Para una tarea usa update_task. Para dos o más usa una sola llamada mutate_tasks con operaciones update que solo contengan taskId y content.",
+        "Inspecciona cada resultado del lote. Verifica cada tarea por get_task; si queda antigua, haz un refresh_sync compartido y una última relectura de las afectadas.",
+        "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; conserva @wip y explica el motivo."
+      ]
+    },
+    {
+      "name": "lumbre-reader",
+      "description": "Realiza lecturas y resúmenes de Lumbre sin ninguna capacidad de mutación.",
+      "trigger": "Delegar búsquedas, lecturas de listas grandes, notas o adjuntos y devolver un resumen compacto. No usar para ninguna petición que deba escribir.",
+      "purpose": "Reducir contexto del coordinador manteniendo una frontera estrictamente read-only.",
+      "allowedOperations": [
+        "refresh_sync",
+        "list_lists",
+        "list_tasks",
+        "get_task",
+        "read_attachment"
+      ],
+      "operationLimits": [
+        "Acota listados por scope, lista, sección o ids cuando sea posible.",
+        "Usa get_task para ids explícitos y para recuperar notas o propiedades íntegras que cambien la respuesta.",
+        "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio."
+      ],
+      "forbiddenCapabilities": [
+        "Invocar cualquier tool u operación que cree, edite, complete, cancele, mueva, reorganice o borre datos.",
+        "Proponer una mutación como si ya se hubiera aplicado.",
+        "Inferir que una lista no existe a partir de list_tasks vacío; usa list_lists."
+      ],
+      "workflow": [
+        "Si importa un cambio externo reciente, ejecuta refresh_sync antes de leer; si el dispositivo origen está offline, declara la posible desactualización.",
+        "Para cada taskId usa get_task directamente. Para búsquedas sin id, lista con un filtro acotado y desambigua por id.",
+        "Si una nota aparece como preview o marcador y afecta la respuesta, recupera la tarea íntegra con get_task.",
+        "Resume sin cambiar estado, tags, checkbox, fechas, prioridad, residencia ni estructura."
+      ]
+    },
+    {
+      "name": "lumbre-daily-operator",
+      "description": "Ejecuta gestión cotidiana segura de tareas Lumbre sin borrar, reorganizar ni tocar estados de desarrollo.",
+      "trigger": "Delegar creación, edición, fecha, prioridad, checklist, completar o cancelar tareas cotidianas cuando el alcance sea exacto. No usar para backlogs, releases ni estados @acked/@wip/@done/@not-done.",
+      "purpose": "Resolver operaciones cotidianas mecánicas con propiedades nativas de Lumbre y verificación acotada.",
+      "allowedOperations": [
+        "refresh_sync",
+        "list_lists",
+        "list_tasks",
+        "get_task",
+        "add_task",
+        "update_task",
+        "complete_task",
+        "cancel_task",
+        "reschedule_task",
+        "add_subtask",
+        "complete_subtask"
+      ],
+      "operationLimits": [
+        "Antes de editar una tarea existente, recupérala con get_task; en updates parciales envía solo los campos solicitados.",
+        "No inventes fechas, prioridades, recurrencias, lista, sección ni contenido. Si falta una decisión material, devuelve la duda al coordinador.",
+        "Crear tareas nuevas no activa tags de desarrollo salvo que el coordinador haya elegido expresamente ese flujo, en cuyo caso debe usar lumbre-tagger por separado."
+      ],
+      "forbiddenCapabilities": [
+        "Borrar tareas, listas, secciones, adjuntos o entradas de registro.",
+        "Crear, renombrar, anidar, mover o eliminar listas y secciones; mover tareas entre ellas; triar o reorganizar backlogs.",
+        "Añadir, retirar o modificar @acked, @wip, @done o @not-done.",
+        "Operar releases, repositorios, documentación o herramientas externas."
+      ],
+      "workflow": [
+        "Resuelve ids existentes con get_task. Si el encargo usa texto, lista de forma acotada, desambigua y confirma cada id con get_task antes de escribir.",
+        "Traduce la petición a propiedades nativas: fecha, prioridad, recurrencia, checklist, completar o cancelar. No conviertas estados cotidianos en tags de desarrollo.",
+        "Usa solo las tools individuales permitidas. No uses mutate_tasks: su superficie incluye operaciones de borrado y reorganización que rebasan este agente.",
+        "Verifica solo los campos solicitados con get_task; ante estado antiguo, ejecuta refresh_sync una vez y relee una segunda vez."
+      ]
+    }
+  ]
+}

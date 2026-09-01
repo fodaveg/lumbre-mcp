@@ -66,6 +66,24 @@ Ejemplos rápidos:
 Si la petición enumera cambios exactos, aplícalos sin ceremonia adicional. Si exige
 inferir alcance o taxonomía, muestra primero una propuesta breve.
 
+## Subagentes opcionales
+
+La skill funciona íntegramente sin subagentes. Si el runtime expone uno compatible,
+puedes delegar trabajo mecánico a `lumbre-tagger` (solo tags de desarrollo),
+`lumbre-reader` (solo lectura) o `lumbre-daily-operator` (gestión cotidiana segura).
+El coordinador conserva intención, autorización y veredicto; si el agente no existe,
+ejecuta aquí el mismo contrato sin bloquear la petición.
+
+Las definiciones nativas se generan desde una única fuente portable con
+`scripts/manage-subagents.mjs`. No las improvises ni mantengas copias manuales. Instala
+o reemplaza esos ficheros solo cuando el usuario lo pida expresamente: usa primero
+`install --runtime all --dry-run`, después `install --runtime all`, y para actualizar
+una copia gestionada exige `--replace-managed`. El script informa las limitaciones y el
+perfil de modelo económico configurado para cada runtime; cuando el despacho admita
+elegir modelo, aplica ese valor. Nunca reemplaces un fichero no gestionado sin
+`--replace-unmanaged` explícito. En Claude, si el conector usa otro alias, repite
+`--claude-tool-prefix mcp__<alias>__` por cada prefijo real que deba admitir.
+
 ## Reglas compartidas
 
 1. Antes de mutar, identifica por id la tarea o lista exacta. Si una lista vacía
