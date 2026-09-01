@@ -13,7 +13,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MANAGER_ID = "lumbre-subagent-manager:v1";
-const MANAGED_PATTERN = /lumbre-subagent-manager:v\d+/;
+const MANAGED_PATTERN =
+  /^(?:#|<!--) lumbre-subagent-manager:v\d+ digest=[a-f0-9]{64}(?: -->)?$/m;
 const DEFAULT_SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIMES = ["claude", "codex"];
 

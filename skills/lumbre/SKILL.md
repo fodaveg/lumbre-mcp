@@ -82,7 +82,8 @@ una copia gestionada exige `--replace-managed`. El script informa las limitacion
 perfil de modelo económico configurado para cada runtime; cuando el despacho admita
 elegir modelo, aplica ese valor. Nunca reemplaces un fichero no gestionado sin
 `--replace-unmanaged` explícito. En Claude, si el conector usa otro alias, repite
-`--claude-tool-prefix mcp__<alias>__` por cada prefijo real que deba admitir.
+`--claude-tool-prefix mcp__<alias>__` por cada prefijo real que deba admitir y usa
+esa misma lista y orden al instalar, comprobar y actualizar.
 
 ## Reglas compartidas
 

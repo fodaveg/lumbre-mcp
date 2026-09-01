@@ -208,6 +208,33 @@ try {
     0,
   );
   assert.equal(capture.lines.filter((line) => line.startsWith("OK ")).length, 6);
+
+  const customPrefixes = ["mcp__lumbre__", "mcp__claude_ai_Lumbre__"];
+  capture = captureIo();
+  assert.equal(
+    runManager(
+      options(temporaryHome, {
+        replaceManaged: true,
+        claudeToolPrefixes: customPrefixes,
+      }),
+      capture.io,
+    ),
+    0,
+  );
+  capture = captureIo();
+  assert.equal(
+    runManager(
+      options(temporaryHome, {
+        command: "check",
+        claudeToolPrefixes: customPrefixes,
+      }),
+      capture.io,
+    ),
+    0,
+  );
+  capture = captureIo();
+  assert.equal(runManager(options(temporaryHome, { command: "check" }), capture.io), 1);
+  assert.match(capture.lines.join("\n"), /FAIL claude\/lumbre-tagger managed-stale/);
 } finally {
   await rm(temporaryHome, { recursive: true, force: true });
 }
