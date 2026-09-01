@@ -165,7 +165,7 @@ node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp "$LUMBRE_TOKEN"
 
 Comprueba el descubrimiento OAuth (PRM path-specific + alias y metadata del
 authorization server), el challenge exacto del 401, `initialize` +
-`tools/list` con token directo en cabecera (200, 19 tools, techo de bytes), y
+`tools/list` con token directo en cabecera (200, 20 tools, techo de bytes), y
 las dos mismas comprobaciones con el token en el PATH (`<url>/<token>`,
 compatibilidad temporal), más su propio NEGATIVO con un segmento mal formado.
 Un deploy no se da por bueno solo con el camino feliz en verde: si un caso

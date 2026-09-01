@@ -55,6 +55,7 @@ export const CRITERIA_FILES = [
   "skills/lumbre/scripts/validate-contracts.mjs",
   "skills/lumbre/scripts/validate.sh",
   "tests/skill-lumbre/run-forward-pilot.mjs",
+  "tests/skill-lumbre/test-subagent-manager.mjs",
   "tests/skill-lumbre/test-forward-pilot-verifier.mjs",
   "tests/skill-lumbre/validate-evidence.mjs",
   "tests/skill-lumbre/validate.sh",

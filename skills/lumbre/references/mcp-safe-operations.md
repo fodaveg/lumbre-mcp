@@ -47,6 +47,10 @@ servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicad
 - Respeta límites y nombres exigidos. Descargar metadata no equivale a leer contenido.
 - `add_attachment` es síncrona: cuando responde, el adjunto ya está enlazado. El resto
   de escrituras se encola y exige el bucle de consistencia anterior.
+- `delete_attachment` es destructiva y no ofrece deshacer desde el MCP. Resuelve el id
+  desde la tarea íntegra, confirma con el usuario el adjunto exacto antes de llamarla y,
+  tras el éxito, relee la tarea para comprobar que ese id ya no aparece. Un 404 no
+  demuestra si el id era inexistente o pertenecía a otra cuenta.
 
 ## Autorización
 

@@ -61,6 +61,31 @@ npx --yes skills add fodaveg/lumbre-mcp -g -y \
   --agent codex claude-code
 ```
 
+La skill no depende de subagentes, pero puede generar tres roles opcionales
+(`lumbre-tagger`, `lumbre-reader` y `lumbre-daily-operator`) desde un único
+contrato portable. En una instalación nueva, revisa primero el plan y después
+instálalos para Codex y Claude Code:
+
+```bash
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" install \
+  --runtime all --dry-run
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" install \
+  --runtime all
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" check \
+  --runtime all
+```
+
+El instalador nunca reemplaza silenciosamente una definición existente. Para
+migrar copias manuales antiguas añade `--replace-unmanaged`; para actualizar
+copias que ya generó este script, `--replace-managed`. Los prefijos de tools de
+Claude se pueden repetir, por ejemplo
+`--claude-tool-prefix mcp__lumbre__ --claude-tool-prefix mcp__claude_ai_Lumbre__`.
+Claude fija `haiku` y limita las tools en su definición. El formato actual de
+agentes de Codex no permite fijar ahí el modelo ni una allowlist: la definición
+indica al coordinador que despache con `gpt-5.6-luna` y conserva la restricción
+operativa en las instrucciones. Claude.ai web no instala agentes locales; en
+esa superficie la skill sigue funcionando por sí sola.
+
 Verifica primero la copia global gestionada y el enlace de Claude Code:
 
 ```bash
@@ -241,6 +266,12 @@ presentar esa hipótesis como un fallo observado.
   **403 mudo** que dispara `is_form_content_type` de SvelteKit cuando una
   petición sin `Origin` (el caso de este MCP, que corre fuera del navegador)
   trae uno de sus cuatro Content-Type de formulario.
+- `delete_attachment({ attachment_id })` — elimina de forma **destructiva y
+  sin deshacer** un adjunto propio mediante `DELETE /api/attachments/:id`.
+  Obtén antes el id desde `get_task`/`list_tasks` y confirma el objetivo con el
+  usuario. Un 404 no distingue entre un id inexistente y uno ajeno, para no
+  filtrar ownership; el éxito solo se devuelve cuando la API confirma
+  `{ ok: true }`.
 - `refresh_sync()` — fuerza el flush del sync (vía `POST /api/sync/flush`),
   para que el servidor persista los cambios que recibió por WebSocket y que
   aún tiene en un pequeño rebote/debounce. Las lecturas del MCP van por la API
@@ -636,11 +667,11 @@ desde ahí (ver la tool en "Qué hace" más arriba). Para un fichero grande
 stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
-registre SOLO `add_attachment`/`read_attachment` en vez de las 19 tools de
-siempre — así no duplicas la superficie de `tools/list` en el contexto de
-cada sesión (pesa ~22 KB de JSON; dos copias son el doble, y el modelo
-encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 19, igual que siempre.
+registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
+de las 20 tools de siempre — así no duplicas la superficie de `tools/list` en
+el contexto de cada sesión (pesa ~24 KB de JSON; dos copias son el doble, y el
+modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
+Cualquier otro valor (o no ponerla) registra las 20, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

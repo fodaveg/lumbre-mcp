@@ -26,6 +26,7 @@ sh "$skill_dir/scripts/validate.sh"
 node --check "$test_dir/forward-pilot-lib.mjs"
 node --check "$test_dir/run-forward-pilot.mjs"
 node --check "$test_dir/test-forward-pilot-verifier.mjs"
+node --check "$test_dir/test-subagent-manager.mjs"
 node --check "$test_dir/validate-evidence.mjs"
 node --check "$test_dir/verify-forward-pilot.mjs"
 node "$test_dir/validate-evidence.mjs"
@@ -35,6 +36,7 @@ if [ "$mode" = full ]; then
     --integrity-only "$evidence_dir/forward-pilot-evidence.json"
 fi
 node "$test_dir/test-forward-pilot-verifier.mjs"
+node "$test_dir/test-subagent-manager.mjs"
 node "$test_dir/run-forward-pilot.mjs" --check-candidate
 
 printf '%s\n' "lumbre skill repository validation: ok"
