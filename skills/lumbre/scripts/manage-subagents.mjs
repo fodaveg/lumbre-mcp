@@ -158,12 +158,15 @@ function renderClaude(contracts, profile, agent, options) {
 
 function renderCodex(contracts, profile, agent) {
   const instructions = renderInstructions(contracts, agent);
+  const description =
+    `${agent.description} En Codex, despachar con model=${profile.dispatchModel}; ` +
+    "las tools se heredan y este contrato limita su uso.";
   invariant(!instructions.includes("'''"), `${agent.name}: unsupported TOML literal delimiter`);
   const payload = [
     `# dispatch-model: ${profile.dispatchModel}`,
     "# tool-policy: instructions-only; this Codex agent format has no per-agent allowlist",
     `name = ${JSON.stringify(agent.name)}`,
-    `description = ${JSON.stringify(agent.description)}`,
+    `description = ${JSON.stringify(description)}`,
     `model_reasoning_effort = ${JSON.stringify(profile.reasoningEffort)}`,
     "developer_instructions = '''",
     instructions.trimEnd(),

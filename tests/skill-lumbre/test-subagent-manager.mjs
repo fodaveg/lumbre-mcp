@@ -78,6 +78,7 @@ for (const agent of definitions.contracts.agents) {
   assertPromptContract(agent.name, codex);
   assert.match(claude, /^model: haiku$/m);
   assert.match(codex, /^# dispatch-model: gpt-5\.6-luna$/m);
+  assert.match(codex, /^description = .*model=gpt-5\.6-luna.*tools se heredan/m);
   assert.match(codex, /^model_reasoning_effort = "low"$/m);
   assert.doesNotMatch(codex, /^model\s*=/m, "Codex cannot pin the model in this agent format");
   assert.doesNotMatch(codex, /^tools\s*=/m, "Codex cannot enforce a per-agent tool allowlist");
