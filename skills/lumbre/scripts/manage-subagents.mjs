@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -164,9 +165,9 @@ function renderCodex(contracts, profile, agent) {
     "las tools se heredan y este contrato limita su uso.";
   invariant(!instructions.includes("'''"), `${agent.name}: unsupported TOML literal delimiter`);
   const payload = [
-    `# dispatch-model: ${profile.dispatchModel}`,
     "# tool-policy: instructions-only; this Codex agent format has no per-agent allowlist",
     `name = ${JSON.stringify(agent.name)}`,
+    `model = ${JSON.stringify(profile.dispatchModel)}`,
     `description = ${JSON.stringify(description)}`,
     `model_reasoning_effort = ${JSON.stringify(profile.reasoningEffort)}`,
     "developer_instructions = '''",
@@ -359,10 +360,18 @@ export function runManager(options, io = console) {
   if (selectedRuntimes(options.runtime).includes("codex")) {
     io.log(
       `NOTE Codex: dispatch these roles with model=${codexProfile.dispatchModel}; ` +
-        "the installed TOML cannot pin a model or enforce a per-agent tool allowlist.",
+        "the installed TOML cannot enforce a per-agent tool allowlist.",
     );
   }
   return failed ? 1 : 0;
+}
+
+function realpathOrResolve(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function main() {
@@ -375,6 +384,9 @@ function main() {
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (
+  process.argv[1] &&
+  realpathOrResolve(fileURLToPath(import.meta.url)) === realpathOrResolve(process.argv[1])
+) {
   main();
 }
