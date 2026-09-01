@@ -86,9 +86,9 @@ deliberadamente. A partir de ahí, el gestor la recupera de sus propios ficheros
 gestionados, por lo que los comandos cortos de `install` y `check` la conservan
 en futuras actualizaciones. Si las copias gestionadas discrepan o están dañadas,
 el gestor aborta y exige la lista explícita en vez de elegir una silenciosamente.
-Claude fija `haiku` y limita las tools en su definición. El formato actual de
-agentes de Codex no permite fijar ahí el modelo ni una allowlist: la definición
-indica al coordinador que despache con `gpt-5.6-luna` y conserva la restricción
+Claude fija `haiku` y limita las tools en su definición. El TOML de Codex
+también fija el modelo (`model = "gpt-5.6-luna"`), pero ese formato no tiene
+allowlist de tools a nivel de agente: la definición conserva esa restricción
 operativa en las instrucciones. Claude.ai web no instala agentes locales; en
 esa superficie la skill sigue funcionando por sí sola.
 

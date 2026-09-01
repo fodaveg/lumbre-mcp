@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   readFileSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -77,10 +79,9 @@ for (const agent of definitions.contracts.agents) {
   assertPromptContract(agent.name, claude);
   assertPromptContract(agent.name, codex);
   assert.match(claude, /^model: haiku$/m);
-  assert.match(codex, /^# dispatch-model: gpt-5\.6-luna$/m);
+  assert.match(codex, /^model = "gpt-5\.6-luna"$/m);
   assert.match(codex, /^description = .*model=gpt-5\.6-luna.*tools se heredan/m);
   assert.match(codex, /^model_reasoning_effort = "low"$/m);
-  assert.doesNotMatch(codex, /^model\s*=/m, "Codex cannot pin the model in this agent format");
   assert.doesNotMatch(codex, /^tools\s*=/m, "Codex cannot enforce a per-agent tool allowlist");
   assert.deepEqual(
     claudeTools(claude),
@@ -246,6 +247,39 @@ try {
   );
 } finally {
   await rm(temporaryHome, { recursive: true, force: true });
+}
+
+// El script debe correr cuando se invoca a través de un enlace simbólico
+// (p.ej. ~/.agents apuntando a otra ruta). import.meta.url llega con la ruta
+// REAL (enlaces resueltos); si el guard compara contra process.argv[1] sin
+// resolver enlaces, main() nunca corre y el proceso sale con 0 sin escribir
+// nada ni imprimir nada. Un exit code en verde no basta: hace falta salida y
+// ficheros escritos.
+const scriptPath = resolve(repoRoot, "skills", "lumbre", "scripts", "manage-subagents.mjs");
+const symlinkDir = await mkdtemp(join(tmpdir(), "lumbre-subagents-symlink-"));
+const symlinkHome = await mkdtemp(join(tmpdir(), "lumbre-subagents-symlink-home-"));
+try {
+  const symlinkScript = join(symlinkDir, "manage-subagents.mjs");
+  symlinkSync(scriptPath, symlinkScript);
+  const result = spawnSync(
+    process.execPath,
+    [symlinkScript, "install", "--runtime", "all", "--home", symlinkHome, "--skill-dir", skillDir],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, `symlink invocation must exit 0: ${result.stderr}`);
+  assert.match(
+    result.stdout,
+    /WRITE claude\/lumbre-tagger/,
+    "symlink invocation produced no output; main() did not run",
+  );
+  assert.equal(
+    existsSync(targetPath(definitions, "claude", "lumbre-tagger", symlinkHome)),
+    true,
+    "symlink invocation must write files; main() did not run",
+  );
+} finally {
+  await rm(symlinkDir, { recursive: true, force: true });
+  await rm(symlinkHome, { recursive: true, force: true });
 }
 
 console.log("lumbre subagent manager: ok (contracts=3, adapters=6)");
