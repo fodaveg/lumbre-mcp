@@ -223,18 +223,27 @@ try {
   );
   capture = captureIo();
   assert.equal(
-    runManager(
-      options(temporaryHome, {
-        command: "check",
-        claudeToolPrefixes: customPrefixes,
-      }),
-      capture.io,
-    ),
+    runManager(options(temporaryHome, { command: "check" }), capture.io),
     0,
   );
+  assert.match(capture.lines.join("\n"), /NOTE Claude: recovered managed tool prefixes/);
   capture = captureIo();
-  assert.equal(runManager(options(temporaryHome, { command: "check" }), capture.io), 1);
-  assert.match(capture.lines.join("\n"), /FAIL claude\/lumbre-tagger managed-stale/);
+  assert.equal(
+    runManager(options(temporaryHome, { replaceManaged: true }), capture.io),
+    0,
+  );
+  assert.match(
+    readFileSync(managedPath, "utf8"),
+    /mcp__claude_ai_Lumbre__refresh_sync/,
+    "updating without explicit prefixes must preserve managed Claude aliases",
+  );
+
+  const inconsistentPath = targetPath(definitions, "claude", "lumbre-reader", temporaryHome);
+  writeFileSync(inconsistentPath, renderAgent(definitions, "claude", "lumbre-reader"));
+  assert.throws(
+    () => runManager(options(temporaryHome, { command: "check" }), captureIo().io),
+    /managed Claude agents disagree on tool prefixes/,
+  );
 } finally {
   await rm(temporaryHome, { recursive: true, force: true });
 }

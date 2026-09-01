@@ -80,10 +80,12 @@ migrar copias manuales antiguas añade `--replace-unmanaged`; para actualizar
 copias que ya generó este script, `--replace-managed`. Los prefijos de tools de
 Claude se pueden repetir, por ejemplo
 `--claude-tool-prefix mcp__lumbre__ --claude-tool-prefix mcp__claude_ai_Lumbre__`.
-Esa lista forma parte de la definición generada: si usas prefijos no
-predeterminados, repite **la misma lista y el mismo orden** en `dry-run`,
-`install`, `check` y cada actualización con `--replace-managed`; omitirla en
-una actualización retiraría esos aliases.
+Esa lista forma parte de la definición generada. Hay que pasarla al migrar
+ficheros manuales con `--replace-unmanaged` o al cambiar los aliases
+deliberadamente. A partir de ahí, el gestor la recupera de sus propios ficheros
+gestionados, por lo que los comandos cortos de `install` y `check` la conservan
+en futuras actualizaciones. Si las copias gestionadas discrepan o están dañadas,
+el gestor aborta y exige la lista explícita en vez de elegir una silenciosamente.
 Claude fija `haiku` y limita las tools en su definición. El formato actual de
 agentes de Codex no permite fijar ahí el modelo ni una allowlist: la definición
 indica al coordinador que despache con `gpt-5.6-luna` y conserva la restricción

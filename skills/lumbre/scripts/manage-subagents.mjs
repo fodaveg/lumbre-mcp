@@ -238,6 +238,43 @@ function classifyTarget(path, expected) {
   return { status: MANAGED_PATTERN.test(current) ? "managed-stale" : "unmanaged" };
 }
 
+function extractClaudeToolPrefixes(source) {
+  const toolsLine = source.match(/^tools:\s*(.+)$/m)?.[1];
+  if (!toolsLine) return undefined;
+  const prefixes = [];
+  for (const tool of toolsLine.split(",").map((value) => value.trim())) {
+    const match = tool.match(/^(mcp__[A-Za-z0-9_-]+__)[A-Za-z0-9_]+$/);
+    if (!match) return undefined;
+    if (!prefixes.includes(match[1])) prefixes.push(match[1]);
+  }
+  return prefixes.length > 0 ? prefixes : undefined;
+}
+
+function inferManagedClaudePrefixes(definitions, homeDir) {
+  const recovered = [];
+  for (const agent of definitions.contracts.agents) {
+    const path = targetPath(definitions, "claude", agent.name, homeDir);
+    if (!existsSync(path)) continue;
+    const source = readFileSync(path, "utf8");
+    if (!MANAGED_PATTERN.test(source)) continue;
+    const prefixes = extractClaudeToolPrefixes(source);
+    invariant(
+      prefixes,
+      `cannot recover Claude tool prefixes from managed file: ${path}; ` +
+        "pass --claude-tool-prefix explicitly",
+    );
+    recovered.push({ path, prefixes });
+  }
+  if (recovered.length === 0) return undefined;
+  const expected = JSON.stringify(recovered[0].prefixes);
+  invariant(
+    recovered.every(({ prefixes }) => JSON.stringify(prefixes) === expected),
+    "managed Claude agents disagree on tool prefixes; pass the intended " +
+      "--claude-tool-prefix list explicitly",
+  );
+  return recovered[0].prefixes;
+}
+
 function atomicWrite(path, content) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
@@ -257,10 +294,22 @@ function selectedRuntimes(runtime) {
 export function runManager(options, io = console) {
   const definitions = loadDefinitions(options.skillDir);
   const homeDir = resolve(options.home);
+  const effectiveOptions = { ...options };
+  if (
+    selectedRuntimes(options.runtime).includes("claude") &&
+    !effectiveOptions.claudeToolPrefixes
+  ) {
+    effectiveOptions.claudeToolPrefixes = inferManagedClaudePrefixes(definitions, homeDir);
+    if (effectiveOptions.claudeToolPrefixes) {
+      io.log(
+        `NOTE Claude: recovered managed tool prefixes: ${effectiveOptions.claudeToolPrefixes.join(", ")}`,
+      );
+    }
+  }
   const targets = [];
   for (const runtime of selectedRuntimes(options.runtime)) {
     for (const agent of definitions.contracts.agents) {
-      const expected = renderAgent(definitions, runtime, agent.name, options);
+      const expected = renderAgent(definitions, runtime, agent.name, effectiveOptions);
       const path = targetPath(definitions, runtime, agent.name, homeDir);
       targets.push({ runtime, agent: agent.name, path, expected, ...classifyTarget(path, expected) });
     }
