@@ -12,7 +12,8 @@ import { randomUUID } from 'node:crypto';
  * `POST /api/attachments?taskId=` (`uploadAttachment`) sube un fichero y lo
  * enlaza a una tarea — a diferencia de todo lo anterior, es SÍNCRONO: escribe
  * la metadata al CRDT antes de responder, sin esperar a que el cliente
- * sincronice (ver su JSDoc, más abajo).
+ * sincronice (ver su JSDoc, más abajo). `DELETE /api/attachments/:id`
+ * (`deleteAttachment`) retira un adjunto propio por el mismo canal autenticado.
  * Todos se autentican con el MISMO token personal de email-to-task
  * (Ajustes → email entrante en la app), enviado como `Authorization: Bearer`.
  */
@@ -499,6 +500,29 @@ export async function getAttachment(config: LumbreConfig, id: string): Promise<D
 		contentType: res.headers.get('content-type') ?? 'application/octet-stream',
 		bytes: Buffer.from(await res.arrayBuffer())
 	};
+}
+
+/**
+ * `DELETE /api/attachments/:id`: retira un adjunto propio. El endpoint aplica
+ * el borrado de metadata antes de responder y oculta por igual un id ajeno o
+ * inexistente (404 anti-IDOR). Usa `request()` porque la respuesta sí es JSON
+ * (`{ ok: true }`); solo especializa el 404 para que el modelo sepa que debe
+ * volver a resolver el id desde `get_task`, sin afirmar si existía para otra
+ * cuenta.
+ */
+export async function deleteAttachment(config: LumbreConfig, id: string): Promise<void> {
+	let body: unknown;
+	try {
+		body = await request(config, `/api/attachments/${id}`, { method: 'DELETE' });
+	} catch (err) {
+		if (err instanceof LumbreApiError && err.status === 404) {
+			throw new LumbreApiError(`Adjunto ${id} no encontrado (o no pertenece al dueño del token).`, 404);
+		}
+		throw err;
+	}
+	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
+		throw new LumbreApiError('Lumbre no confirmó el borrado del adjunto (respuesta inesperada).');
+	}
 }
 
 /** Metadata que devuelve `POST /api/attachments` al subir un adjunto —

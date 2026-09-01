@@ -89,6 +89,7 @@ describe('tools/list — superficie completa', () => {
 		'get_task',
 		'read_attachment',
 		'add_attachment',
+		'delete_attachment',
 		'complete_task',
 		'cancel_task',
 		'update_task',
@@ -103,9 +104,9 @@ describe('tools/list — superficie completa', () => {
 		'mutate_brl'
 	];
 
-	it('sigue exponiendo las 19 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 20 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27)', () => {
-		expect(tools).toHaveLength(19);
+		expect(tools).toHaveLength(20);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -140,7 +141,19 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
-	it('techo de bytes de las 19 tools: no crece sin que alguien se entere', () => {
+	it('delete_attachment declara destrucción sin deshacer y una salida estructurada', () => {
+		const tool = tools.find((candidate) => candidate.name === 'delete_attachment')!;
+		expect(tool.description).toMatch(/DESTRUCTIVA.*sin deshacer/i);
+		const output = tool.outputSchema as {
+			properties?: Record<string, { type?: string; const?: unknown }>;
+			required?: string[];
+		};
+		expect(output.properties?.deleted).toMatchObject({ const: true });
+		expect(output.properties?.attachment_id).toMatchObject({ type: 'string' });
+		expect(output.required).toEqual(expect.arrayContaining(['deleted', 'attachment_id']));
+	});
+
+	it('techo de bytes de las 20 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -205,9 +218,14 @@ describe('tools/list — superficie completa', () => {
 		// los campos de todas las variantes y no compre nada; 1.684 sigue
 		// bajo el resto de tools de escritura). Techo bajado junto con el
 		// número medido, para que la ganancia quede bloqueada.
+		// Re-medido el 2026-09-01 al añadir `delete_attachment` (DELETE
+		// autenticado, salida legible + `structuredContent`): 20 tools, 23.715
+		// caracteres = +1.517 sobre las 19 anteriores. Es superficie nueva y
+		// destructiva, con schema de salida explícito; el techo sube junto al
+		// valor medido.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 23300;
+		const CHAR_CEILING = 24950;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -1293,6 +1311,71 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 	});
 });
 
+describe('delete_attachment — elimina un adjunto existente (DESTRUCTIVO)', () => {
+	const ATTACHMENT_ID = '44444444-4444-4444-8444-444444444444';
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'delete-attachment-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('camino feliz: llama DELETE con Bearer y devuelve texto más structuredContent', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			expect(String(url)).toBe(`https://lumbre.test/api/attachments/${ATTACHMENT_ID}`);
+			expect(init?.method).toBe('DELETE');
+			expect((init?.headers as Record<string, string>).authorization).toBe(
+				'Bearer test-token-para-index-test'
+			);
+			return jsonResponse({ ok: true });
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'delete_attachment',
+			arguments: { attachment_id: ATTACHMENT_ID }
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(result.structuredContent).toEqual({ deleted: true, attachment_id: ATTACHMENT_ID });
+		const first = (result.content as { type: string; text?: string }[])[0];
+		expect(first?.type === 'text' ? first.text : '').toMatch(/eliminado.*no se puede deshacer/i);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('404 ajeno/inexistente: error legible sin filtrar ownership', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ message: 'No encontrado' }, 404)));
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'delete_attachment',
+			arguments: { attachment_id: ATTACHMENT_ID }
+		});
+
+		expect(result.isError).toBe(true);
+		const first = (result.content as { type: string; text?: string }[])[0];
+		const text = first?.type === 'text' ? first.text : '';
+		expect(text).toContain(ATTACHMENT_ID);
+		expect(text).toMatch(/no encontrado.*no pertenece/i);
+	});
+});
+
 describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TOOLSET=attachments)', () => {
 	async function toolNamesOf(opts: { toolset?: 'all' | 'attachments' } = {}) {
 		const indexModule = await import('./index.js');
@@ -1308,16 +1391,20 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 19 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(19);
+	it('sin `toolset` (default): las 20 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(20);
 	});
 
-	it('`toolset: "attachments"`: SOLO add_attachment/read_attachment', async () => {
-		expect(await toolNamesOf({ toolset: 'attachments' })).toEqual(['add_attachment', 'read_attachment']);
+	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
+		expect(await toolNamesOf({ toolset: 'attachments' })).toEqual([
+			'add_attachment',
+			'delete_attachment',
+			'read_attachment'
+		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 19, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(19);
+	it('`toolset: "all"` (explícito): las 20, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(20);
 	});
 });
 

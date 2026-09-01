@@ -4,6 +4,7 @@ import {
 	ATTACHMENT_CONTENT_TYPE_HEADER,
 	buildBatchFromOps,
 	collectExistenceCheckIds,
+	deleteAttachment,
 	findTaskById,
 	findTasksByIds,
 	listLists,
@@ -607,5 +608,59 @@ describe('uploadAttachment', () => {
 		await expect(
 			uploadAttachment(config, { taskId: TASK_ID, filename: 'a.pdf', mime: 'application/pdf', bytes: Buffer.from('x') })
 		).rejects.toThrow(/no confirmó la subida/);
+	});
+});
+
+// ── deleteAttachment (DELETE /api/attachments/:id) ──────────────────────────
+
+describe('deleteAttachment', () => {
+	const ATTACHMENT_ID = '22222222-2222-4222-8222-222222222222';
+
+	function mockDeleteResponse(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		return fetchSpy;
+	}
+
+	it('camino feliz: DELETE exacto por id con Bearer y confirmación {ok:true}', async () => {
+		const fetchSpy = mockDeleteResponse({ ok: true });
+
+		await deleteAttachment(config, ATTACHMENT_ID);
+
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe(`https://lumbre.test/api/attachments/${ATTACHMENT_ID}`);
+		expect(init.method).toBe('DELETE');
+		expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
+	});
+
+	it('404 no distingue un id inexistente de uno ajeno (anti-IDOR)', async () => {
+		mockDeleteResponse({ message: 'No encontrado' }, 404);
+		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(
+			`Adjunto ${ATTACHMENT_ID} no encontrado (o no pertenece al dueño del token).`
+		);
+	});
+
+	it('401 conserva el error de credencial común del cliente', async () => {
+		mockDeleteResponse({ message: 'Token no válido' }, 401);
+		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/Token inválido/);
+	});
+
+	it('429 conserva el error de rate limit común del cliente', async () => {
+		mockDeleteResponse({ message: 'Demasiadas peticiones' }, 429);
+		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/Demasiadas peticiones/);
+	});
+
+	it('otros errores propagan status y detalle del servidor', async () => {
+		mockDeleteResponse({ message: 'almacenamiento no disponible' }, 503);
+		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(
+			/Lumbre respondió 503: almacenamiento no disponible/
+		);
+	});
+
+	it('200 sin {ok:true}: error de contrato, no falso positivo', async () => {
+		mockDeleteResponse({ ok: false });
+		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/no confirmó el borrado/);
 	});
 });

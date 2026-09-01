@@ -10,6 +10,7 @@ import {
 	assertTaskUsable,
 	buildBatchFromOps,
 	collectExistenceCheckIds,
+	deleteAttachment,
 	findTaskById,
 	findTasksByIds,
 	getAttachment,
@@ -55,6 +56,8 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * `attachments.ts`) y lo enlaza a una tarea vía `POST /api/attachments` —a
  * diferencia de TODO lo demás en esta lista, es SÍNCRONA: no se encola, el
  * adjunto ya está enlazado cuando la tool responde (ver su JSDoc, más abajo).
+ * `delete_attachment` retira un adjunto existente por id mediante
+ * `DELETE /api/attachments/:id`; es destructiva y no ofrece deshacer.
  * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
  * `delete_task`/`set_section`/`add_subtask`/`complete_subtask`/
  * `remove_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
@@ -139,8 +142,9 @@ function errorResult(err: unknown) {
 /**
  * Comando `claude mcp add` LISTO PARA COPIAR del conector stdio local acotado
  * a adjuntos (`LUMBRE_MCP_TOOLSET=attachments`, ver `CreateServerOptions` y
- * `toolsetFromEnv`): solo registra `add_attachment`/`read_attachment`
- * (2 tools, no 19) para poder tenerlo enchufado A LA VEZ que el conector
+ * `toolsetFromEnv`): solo registra las tres tools de adjuntos
+ * (`add_attachment`/`read_attachment`/`delete_attachment`) para poder tenerlo
+ * enchufado A LA VEZ que el conector
  * remoto sin duplicar la superficie de `tools/list` en el contexto de cada
  * sesión. Usado tanto en `remoteFileAccessError` (el error que ve el modelo
  * en el momento en que lo necesita) como en el README.
@@ -616,15 +620,16 @@ export interface CreateServerOptions {
 	/**
 	 * Acota qué tools registra `createServer` — pensado para un SEGUNDO
 	 * conector stdio LOCAL dedicado a adjuntos (ver README, "Transporte HTTP
-	 * remoto"): con `'attachments'`, solo `add_attachment`/`read_attachment`;
-	 * con cualquier otro valor (incluido `undefined`, el default), las 19 de
-	 * siempre. Existe para que David pueda tener el conector remoto (19
-	 * tools) Y un conector local de adjuntos a la vez sin duplicar las 19 en
-	 * el contexto de cada sesión (`tools/list` ya pesa ~22 KB de JSON; dos
+	 * remoto"): con `'attachments'`, solo `add_attachment`/`read_attachment`/
+	 * `delete_attachment`; con cualquier otro valor (incluido `undefined`, el
+	 * default), las 20 de siempre. Existe para que David pueda tener el
+	 * conector remoto (20 tools) Y un conector local de adjuntos a la vez sin
+	 * duplicar las 20 en el contexto de cada sesión (`tools/list` ya pesa ~24
+	 * KB de JSON; dos
 	 * copias son dos veces ese coste, y el modelo encima tendría que acertar
 	 * cuál de los dos `add_task`/`list_tasks` usar). `main()` la lee de
 	 * `LUMBRE_MCP_TOOLSET` (env); `http.ts` NUNCA la pasa — el conector
-	 * remoto sigue exponiendo las 19 siempre, pase lo que pase con la env del
+	 * remoto sigue exponiendo las 20 siempre, pase lo que pase con la env del
 	 * proceso que lo arrancó.
 	 */
 	toolset?: 'all' | 'attachments';
@@ -635,13 +640,14 @@ export interface CreateServerOptions {
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
- * transporte remoto). Registra las 19 de siempre salvo que
+ * transporte remoto). Registra las 20 de siempre salvo que
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
- * quedan `add_attachment`/`read_attachment` — las demás se registran igual
+ * quedan `add_attachment`/`read_attachment`/`delete_attachment` — las demás
+ * se registran igual
  * (para no bifurcar cada una de las 17 llamadas a `registerTool` con un
  * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
- * estado intermedio de "19 registradas".
+ * estado intermedio de "20 registradas".
  *
  * `taskCache`/`brlCache` (cachés cortas de existencia, ver
  * `existence-cache.ts`) salen del registro de MÓDULO indexado por
@@ -1247,6 +1253,42 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 						`bytes, id ${attachment.id}) en la tarea ${input.taskId}. Ya está enlazado (esta vía es ` +
 						'SÍNCRONA): léelo con read_attachment cuando quieras, sin esperar a ningún sync.'
 				);
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
+	);
+
+	server.registerTool(
+		'delete_attachment',
+		{
+			description:
+				'Elimina un adjunto de Lumbre por su id (ver `attachments` en get_task/list_tasks). ' +
+				'Es una operación DESTRUCTIVA y sin deshacer desde el MCP: úsala solo con autorización ' +
+				'clara. El éxito confirma que el adjunto ya no está disponible para esa cuenta.',
+			inputSchema: {
+				attachment_id: z
+					.string()
+					.uuid()
+					.describe('Id del adjunto que se va a eliminar (ver get_task/list_tasks)')
+			},
+			outputSchema: {
+				deleted: z.literal(true),
+				attachment_id: z.string().uuid()
+			}
+		},
+		async (input) => {
+			try {
+				await deleteAttachment(config, input.attachment_id);
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: `Adjunto ${input.attachment_id} eliminado de Lumbre. La operación no se puede deshacer desde el MCP.`
+						}
+					],
+					structuredContent: { deleted: true as const, attachment_id: input.attachment_id }
+				};
 			} catch (err) {
 				return errorResult(err);
 			}
@@ -1926,11 +1968,12 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	);
 
 	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
-	// retira las 17 tools que NO son `add_attachment`/`read_attachment` —
-	// TODAS se registraron arriba igual (para no bifurcar cada una de las 17
-	// llamadas a `registerTool` con un `if`), así que aquí solo se deshace lo
+	// retira las 17 tools que NO son `add_attachment`/`read_attachment`/
+	// `delete_attachment` — TODAS se registraron arriba igual (para no bifurcar
+	// cada una de las 17 llamadas a `registerTool` con un `if`), así que aquí
+	// solo se deshace lo
 	// que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
-	// cliente llega a ver el `tools/list` de 19 en el intermedio.
+	// cliente llega a ver el `tools/list` de 20 en el intermedio.
 	if (toolset === 'attachments') {
 		for (const tool of [
 			addTaskTool,
@@ -1968,9 +2011,10 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
 /**
  * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
  * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
- * `read_attachment`, pensado para un SEGUNDO conector stdio local dedicado
- * (David enchufa a la vez el remoto de las 19 tools y este, sin duplicar
- * superficie — ver README). Cualquier otro valor (incluido no ponerla) cae
+ * `read_attachment`/`delete_attachment`, pensado para un SEGUNDO conector
+ * stdio local dedicado (David enchufa a la vez el remoto de las 20 tools y
+ * este, sin duplicar superficie — ver README). Cualquier otro valor (incluido
+ * no ponerla) cae
  * al default `'all'` de `createServer` — nunca falla por un valor raro, un
  * typo en la env simplemente no acota nada.
  */
