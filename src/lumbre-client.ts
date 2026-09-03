@@ -1313,7 +1313,12 @@ export function planBatchPhases(batchOps: BatchOp[], originalIndexes: number[]):
  *
  * El mensaje de cada descarte cita el índice ORIGINAL de la op `create_list`
  * causante (`ver el fallo de la op [N]`), para que el modelo pueda leer su
- * error concreto en el mismo informe sin tener que adivinar cuál era.
+ * error concreto en el mismo informe sin tener que adivinar cuál era. Si DOS
+ * `create_list` del lote comparten el mismo `listId` (raro, pero el schema no
+ * lo impide), la promesa solo se da por cumplida si TODAS salieron `ok`; el
+ * mensaje cita la que falló con el índice ORIGINAL más bajo — antes (code
+ * review 🔴) un `Map` simple se quedaba con la ÚLTIMA, y podía citar una op
+ * equivocada o dar la lista por creada con una hermana rota.
  */
 export function filterPhase2AfterPhase1(
 	plan: BatchPhasePlan,
@@ -1324,14 +1329,14 @@ export function filterPhase2AfterPhase1(
 	}
 	const [phase1, phase2] = plan.phases;
 
-	// `listId` → índice ORIGINAL de la op `create_list` que la crea (para citarlo
-	// en el mensaje), y `listId` → si esa op salió `ok` en la fase 1.
-	const createListOriginalIndex = new Map<string, number>();
-	const listOk = new Map<string, boolean>();
+	// `listId` → TODAS las entradas {índice ORIGINAL, ok} de los `create_list`
+	// de la fase 1 que la prometen (normalmente una sola).
+	const entriesByListId = new Map<string, { originalIndex: number; ok: boolean }[]>();
 	phase1.ops.forEach((op, i) => {
 		if (op.type === 'mutate' && op.kind === 'createList') {
-			createListOriginalIndex.set(op.taskId, phase1.originalIndexes[i]);
-			listOk.set(op.taskId, phase1Results[i]?.ok === true);
+			const entries = entriesByListId.get(op.taskId) ?? [];
+			entries.push({ originalIndex: phase1.originalIndexes[i], ok: phase1Results[i]?.ok === true });
+			entriesByListId.set(op.taskId, entries);
 		}
 	});
 
@@ -1343,20 +1348,93 @@ export function filterPhase2AfterPhase1(
 	phase2.ops.forEach((op, i) => {
 		const origIndex = phase2.originalIndexes[i];
 		const listId = dependentListIdByIndex.get(origIndex);
-		if (listId !== undefined && listOk.get(listId) !== true) {
-			const createIndex = createListOriginalIndex.get(listId);
-			skipped.push({
-				index: origIndex,
-				error:
-					`la lista ${listId} no se pudo crear en este lote` +
-					(createIndex !== undefined ? ` (ver el fallo de la op [${createIndex}])` : '') +
-					'; la tarea no se ha creado'
-			});
-			return;
+		if (listId !== undefined) {
+			const entries = entriesByListId.get(listId) ?? [];
+			const allOk = entries.length > 0 && entries.every((e) => e.ok);
+			if (!allOk) {
+				const firstFailing = entries
+					.filter((e) => !e.ok)
+					.sort((a, b) => a.originalIndex - b.originalIndex)[0];
+				skipped.push({
+					index: origIndex,
+					error:
+						`la lista ${listId} no se pudo crear en este lote` +
+						(firstFailing !== undefined ? ` (ver el fallo de la op [${firstFailing.originalIndex}])` : '') +
+						'; la tarea no se ha creado'
+				});
+				return;
+			}
 		}
 		ops.push(op);
 		originalIndexes.push(origIndex);
 	});
 
 	return { ops, originalIndexes, skipped };
+}
+
+/** El `create_list` que prometía un `listId` (agujero 🔴, code review sobre
+ *  este mismo commit): índice ORIGINAL de la op y su error, cuando esa
+ *  promesa se rompió ANTES de tocar red — forma inválida (`.strict()` la
+ *  rechaza, p. ej. sin `name`) o validación local — así que ese `create_list`
+ *  NUNCA llegó a `batchOps`/`planBatchPhases`, que solo ven lo que SOBREVIVIÓ
+ *  al filtro. Ver `excludeIngestForBrokenListPromises`. */
+export interface BrokenListPromise {
+	index: number;
+	error: string;
+}
+
+/**
+ * Filtra de `batchOps` (recién traducidas por `buildBatchFromOps`, ANTES de
+ * `planBatchPhases`) las ops `ingest` cuyo `task.listId` referencia un
+ * `create_list` del MISMO lote que YA falló sin llegar a mandarse
+ * (`brokenListIds`, ver `BrokenListPromise`) — nunca las manda, en NINGUNA
+ * fase, y las reporta como fallo con su índice ORIGINAL, citando la op
+ * `create_list` causante.
+ *
+ * El agujero que esto cierra (🔴, revisión sobre el commit que introdujo
+ * `planBatchPhases`): ese planificador solo ve `batchOps`, que es la SALIDA
+ * de `buildBatchFromOps` — un `create_list` descartado por forma inválida
+ * (p. ej. `{op:'create_list', listId:'L'}` sin `name`) nunca entra ahí, así
+ * que `planBatchPhases` no encontraba ninguna dependencia y el `add_task`
+ * dependiente viajaba SOLO, en una única petición, con la lista inexistente
+ * — exactamente el síntoma del incidente 071553, solo que disparado por un
+ * `create_list` mal formado en vez de uno bien formado que aún no se ha
+ * mandado. La promesa de un `listId` (que el lote pretende crear ESA lista)
+ * la hace la FORMA de la op (`op:'create_list'`, con ese `listId`), no que
+ * haya sobrevivido a la validación — así que este filtro corre ANTES,
+ * sobre `batchOps`+`brokenListIds` (que el llamante construye a partir de
+ * los descartes por forma y por validación local, ANTES de traducir), y dejar
+ * a `planBatchPhases` la parte que SÍ puede resolver por red (fase 1).
+ *
+ * Pura, sin red: separada de `mutate_tasks` (`index.ts`, que construye
+ * `brokenListIds`) para poder testearla sin mockear `fetch`.
+ */
+export function excludeIngestForBrokenListPromises(
+	batchOps: BatchOp[],
+	originalIndexes: number[],
+	brokenListIds: Map<string, BrokenListPromise>
+): { batchOps: BatchOp[]; originalIndexes: number[]; skipped: { index: number; error: string }[] } {
+	if (brokenListIds.size === 0) {
+		return { batchOps, originalIndexes, skipped: [] };
+	}
+	const filteredOps: BatchOp[] = [];
+	const filteredIndexes: number[] = [];
+	const skipped: { index: number; error: string }[] = [];
+	batchOps.forEach((op, i) => {
+		if (op.type === 'ingest' && op.task.listId) {
+			const broken = brokenListIds.get(op.task.listId);
+			if (broken !== undefined) {
+				skipped.push({
+					index: originalIndexes[i],
+					error:
+						`la lista ${op.task.listId} no se pudo crear en este lote ` +
+						`(ver el fallo de la op [${broken.index}]); la tarea no se ha creado`
+				});
+				return;
+			}
+		}
+		filteredOps.push(op);
+		filteredIndexes.push(originalIndexes[i]);
+	});
+	return { batchOps: filteredOps, originalIndexes: filteredIndexes, skipped };
 }

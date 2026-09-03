@@ -813,6 +813,47 @@ describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lot
 		expect(text).toMatch(/\[1] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
 		expect(text).toMatch(/\[2] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
 	});
+
+	/**
+	 * El agujero 🔴 de la revisión (reproduce el incidente 071553 ENTERO y lo
+	 * reporta como éxito): un `create_list` con FORMA inválida (sin `name`,
+	 * `mutateTasksStrictOpSchema` es `.strict()` y lo rechaza) nunca llega a
+	 * `batchOps` — `planBatchPhases` solo ve lo que sobrevivió al filtro, así
+	 * que sin este fix no encontraba ninguna dependencia y el `add_task` con
+	 * ese `listId` viajaba SOLO, en la única petición, con la lista todavía
+	 * inexistente: exactamente el síntoma del incidente, solo que disparado
+	 * por un `create_list` mal formado en vez de uno bien formado que aún no
+	 * se ha mandado.
+	 */
+	it('create_list SIN `name` (forma inválida): el add_task dependiente NO viaja en NINGUNA petición', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			// Si el alta huérfana llegara a mandarse, este mock la aceptaría
+			// (`ok:true`) igual que el servidor real — el test de abajo (CERO
+			// llamadas a /api/batch) es el que la delataría.
+			const value = String(url);
+			if (!value.endsWith('/api/batch')) throw new Error(`fetch no mockeado: ${value}`);
+			return jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 'huerfana' }] });
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'create_list', listId: LIST_ID }, // sin `name`: forma inválida
+					{ op: 'add_task', text: 'tarea huérfana', listId: LIST_ID }
+				]
+			}
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(batchCalls(fetchSpy)).toHaveLength(0);
+		const text = resultText(result);
+		expect(text).toContain('0/2 operación(es) encoladas.');
+		expect(text).toContain('[0] create_list:');
+		expect(text).toMatch(/\[1] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
+	});
 });
 
 describe('mutate_brl — las 3 `op` siguen aceptándose (esquema estricto interno)', () => {

@@ -5,6 +5,7 @@ import {
 	buildBatchFromOps,
 	collectExistenceCheckIds,
 	deleteAttachment,
+	excludeIngestForBrokenListPromises,
 	filterPhase2AfterPhase1,
 	findTaskById,
 	findTasksByIds,
@@ -630,6 +631,95 @@ describe('filterPhase2AfterPhase1', () => {
 		expect(filtered.ops).toEqual([batchOps[2]]);
 		expect(filtered.originalIndexes).toEqual([2]);
 		expect(filtered.skipped).toEqual([{ index: 1, error: expect.any(String) }]);
+	});
+
+	/**
+	 * Nit de revisión (🔴, sobre el commit que introdujo esta función): con DOS
+	 * `create_list` del mismo lote prometiendo el MISMO `listId`, un `Map`
+	 * simple `listId → {index, ok}` se quedaba con el ÚLTIMO — podía citar la
+	 * op equivocada, o dar la lista por creada con una hermana rota. La regla:
+	 * una promesa de `listId` solo se cumple si TODOS los `create_list` que la
+	 * prometen salieron `ok`; el mensaje cita el que falló con el índice
+	 * ORIGINAL más bajo.
+	 */
+	it('DOS create_list con el MISMO listId: si uno falla, la promesa se rompe y se cita el que falló ANTES (por índice original)', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'A' } },
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'B' } },
+			{ type: 'ingest', task: { text: 'tarea', listId: LIST_ID } }
+		];
+		const plan = planBatchPhases(batchOps, [5, 2, 9]); // índices originales fuera de orden a propósito
+		const phase1Results: BatchResultItem[] = [
+			{ index: 0, type: 'mutate', ok: true, id: LIST_ID },
+			{ index: 1, type: 'mutate', ok: false, error: 'nombre duplicado' }
+		];
+		const filtered = filterPhase2AfterPhase1(plan, phase1Results);
+		expect(filtered.ops).toEqual([]);
+		// El que falló (índice original 2) es el que se cita, no el que salió
+		// bien (índice original 5) ni el orden de llegada al `Map`.
+		expect(filtered.skipped).toEqual([{ index: 9, error: expect.stringContaining('op [2]') }]);
+	});
+
+	it('DOS create_list con el MISMO listId: si AMBOS salen ok, la alta dependiente viaja', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'A' } },
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'B' } },
+			{ type: 'ingest', task: { text: 'tarea', listId: LIST_ID } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1, 2]);
+		const phase1Results: BatchResultItem[] = [
+			{ index: 0, type: 'mutate', ok: true, id: LIST_ID },
+			{ index: 1, type: 'mutate', ok: true, id: LIST_ID }
+		];
+		const filtered = filterPhase2AfterPhase1(plan, phase1Results);
+		expect(filtered.ops).toEqual([batchOps[2]]);
+		expect(filtered.skipped).toEqual([]);
+	});
+});
+
+describe('excludeIngestForBrokenListPromises', () => {
+	const LIST_ID = 'a0b1c2d3-e4f5-4678-9abc-def012345678';
+
+	it('brokenListIds vacío: no toca nada (mismas referencias)', () => {
+		const batchOps: BatchOp[] = [{ type: 'ingest', task: { text: 'x', listId: LIST_ID } }];
+		const result = excludeIngestForBrokenListPromises(batchOps, [0], new Map());
+		expect(result).toEqual({ batchOps, originalIndexes: [0], skipped: [] });
+	});
+
+	/**
+	 * El agujero 🔴 que cierra esta función: un `create_list` descartado por
+	 * FORMA inválida (p. ej. sin `name`) nunca llega a `batchOps`, así que
+	 * `planBatchPhases` (que solo ve `batchOps`) no encuentra ninguna
+	 * dependencia y el `add_task` con ese `listId` viajaría SOLO — huérfano,
+	 * exactamente el síntoma del incidente 071553. Este filtro corre ANTES de
+	 * `planBatchPhases` con el `listId` roto ya conocido (lo construye
+	 * `index.ts` a partir de `shapeFailures`/`built.skipped`, ver
+	 * `BrokenListPromise`).
+	 */
+	it('add_task con listId de un create_list ROTO (nunca llegó a batchOps): se excluye y sale como fallo', () => {
+		const batchOps: BatchOp[] = [{ type: 'ingest', task: { text: 'tarea', listId: LIST_ID } }];
+		const brokenListIds = new Map([[LIST_ID, { index: 0, error: 'create_list: falta `name`' }]]);
+		const result = excludeIngestForBrokenListPromises(batchOps, [1], brokenListIds);
+		expect(result.batchOps).toEqual([]);
+		expect(result.originalIndexes).toEqual([]);
+		expect(result.skipped).toEqual([
+			{ index: 1, error: expect.stringContaining('op [0]') }
+		]);
+		expect(result.skipped[0].error).toMatch(/no se pudo crear en este lote/);
+		expect(result.skipped[0].error).toMatch(/no se ha creado/);
+	});
+
+	it('un add_task independiente (sin listId roto) sobrevive aunque OTRO del lote sí esté excluido', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'ingest', task: { text: 'depende', listId: LIST_ID } },
+			{ type: 'ingest', task: { text: 'suelta' } },
+			{ type: 'mutate', taskId: 't1', kind: 'complete', payload: { done: true } }
+		];
+		const brokenListIds = new Map([[LIST_ID, { index: 0, error: 'create_list: falta `name`' }]]);
+		const result = excludeIngestForBrokenListPromises(batchOps, [1, 2, 3], brokenListIds);
+		expect(result.batchOps).toEqual([batchOps[1], batchOps[2]]);
+		expect(result.originalIndexes).toEqual([2, 3]);
+		expect(result.skipped).toEqual([{ index: 1, error: expect.any(String) }]);
 	});
 });
 

@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { stripToolsListSchema } from './schema-strip.js';
 import { z } from 'zod';
-import { addTask, assertTaskUsable, buildBatchFromOps, collectExistenceCheckIds, deleteAttachment, filterPhase2AfterPhase1, findTaskById, findTasksByIds, getAttachment, listBrlEntries, listLists, listTasks, mutateTask, planBatchPhases, priorityToLevel, refreshSync, runBatch, taskNotFoundError, uploadAttachment, LumbreApiError } from './lumbre-client.js';
+import { addTask, assertTaskUsable, buildBatchFromOps, collectExistenceCheckIds, deleteAttachment, excludeIngestForBrokenListPromises, filterPhase2AfterPhase1, findTaskById, findTasksByIds, getAttachment, listBrlEntries, listLists, listTasks, mutateTask, planBatchPhases, priorityToLevel, refreshSync, runBatch, taskNotFoundError, uploadAttachment, LumbreApiError } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
 import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
@@ -1565,10 +1565,30 @@ export function createServer(config, opts = {}) {
             // aplicado un nivel más arriba.
             const validatedOriginalIndexes = [];
             const shapeFailures = [];
+            // `listId` → primer `create_list` del lote que prometió esa lista y NO
+            // llegó a mandarse (forma inválida o validación local) — agujero 🔴
+            // cerrado en la revisión de este mismo fix: `planBatchPhases` solo ve
+            // `batchOps` (lo que SOBREVIVIÓ), así que un `create_list` roto por
+            // forma (p. ej. sin `name`) se colaba como "sin dependencia" y el
+            // `add_task` con ese `listId` viajaba SOLO, huérfano — ver
+            // `excludeIngestForBrokenListPromises`. Se queda con el índice ORIGINAL
+            // más bajo si varios `create_list` prometen el mismo `listId`.
+            const brokenListIds = new Map();
+            function recordBrokenListId(listId, index, error) {
+                if (typeof listId !== 'string')
+                    return;
+                const existing = brokenListIds.get(listId);
+                if (existing === undefined || index < existing.index) {
+                    brokenListIds.set(listId, { index, error });
+                }
+            }
             rawOps.forEach((raw, index) => {
                 const result = mutateTasksStrictOpSchema.safeParse(raw);
                 if (!result.success) {
-                    shapeFailures.push({ index, error: formatOpShapeError(String(raw.op), result.error) });
+                    const error = formatOpShapeError(String(raw.op), result.error);
+                    shapeFailures.push({ index, error });
+                    if (raw.op === 'create_list')
+                        recordBrokenListId(raw.listId, index, error);
                     return;
                 }
                 validated.push(result.data);
@@ -1578,17 +1598,31 @@ export function createServer(config, opts = {}) {
             const existing = idsToCheck.length > 0 ? await findTasksByIds(config, idsToCheck) : new Map();
             taskCache.setAll(existing.values());
             const built = buildBatchFromOps(validated, existing);
+            // `create_list` no tiene validación local NI de existencia hoy (no
+            // targetea una tarea), así que en la práctica nunca cae aquí — pero si
+            // algún día la tuviera, un descarte de `create_list` en `built.skipped`
+            // rompe su promesa de `listId` exactamente igual que uno por forma.
+            for (const s of built.skipped) {
+                const op = validated[s.index];
+                if (op.op === 'create_list' && op.listId !== undefined) {
+                    recordBrokenListId(op.listId, validatedOriginalIndexes[s.index], s.error);
+                }
+            }
             const batchOps = built.batchOps;
             const originalIndexes = built.originalIndexes.map((i) => validatedOriginalIndexes[i]);
             // Incidente 071553: `POST /api/batch` del repo principal materializa
             // TODAS las ingestas antes que TODAS las mutaciones, sin mirar el
             // orden de `ops` — un `create_list` + N `add_task` con ese `listId`
             // en la MISMA llamada crea las tareas con la lista aún inexistente
-            // (sin lista, fecha de HOY). `planBatchPhases` detecta esa dependencia
-            // y, SOLO si existe, parte la llamada en dos (ver su JSDoc); sin
-            // dependencia, `plan.phases` es un único elemento con `batchOps` tal
-            // cual — mismo coste de red que antes de este fix.
-            const plan = planBatchPhases(batchOps, originalIndexes);
+            // (sin lista, fecha de HOY). Antes de planificar fases se excluyen las
+            // altas cuya lista prometida YA se sabe rota (`brokenListIds`, arriba) —
+            // esas NUNCA viajan, en ninguna fase. `planBatchPhases` reparte lo que
+            // queda: detecta la dependencia PENDIENTE (un `create_list` que sí llegó
+            // a `batchOps`, resultado aún desconocido) y, SOLO si existe, parte la
+            // llamada en dos (ver su JSDoc); sin dependencia, `plan.phases` es un
+            // único elemento tal cual — mismo coste de red que antes de este fix.
+            const preFiltered = excludeIngestForBrokenListPromises(batchOps, originalIndexes, brokenListIds);
+            const plan = planBatchPhases(preFiltered.batchOps, preFiltered.originalIndexes);
             let results;
             let resultOriginalIndexes;
             const phaseFailures = [];
@@ -1621,20 +1655,24 @@ export function createServer(config, opts = {}) {
                 if (op.type === 'mutate')
                     taskCache.invalidate(op.taskId);
             }
-            // Cuatro fuentes de fallo ahora (forma inválida, descartadas ANTES de
+            // Cinco fuentes de fallo ahora (forma inválida, descartadas ANTES de
             // mandar el batch por `buildBatchFromOps`, altas huérfanas descartadas
-            // entre fase 1 y fase 2 por `filterPhase2AfterPhase1`, y las que el
-            // servidor rechazó al validar/encolar) se combinan en un único informe,
-            // ordenado por posición ORIGINAL en `ops` — el modelo ve exactamente
-            // qué operación falló y por qué, sin tener que distinguir entre las
-            // fases. Las EXITOSAS con `id` (code-review 🟠 #3a: antes se
-            // perdían — el modelo no podía enterarse del `listId` de un
-            // `create_list` sin una `list_tasks` de más) también se recogen, para
-            // poder encadenarlas en un turno posterior (o confirmar el id que ya
-            // se auto-generó, si la op no traía uno propio — ver `create_list`).
+            // ANTES de planificar fases por `excludeIngestForBrokenListPromises`
+            // — su `create_list` nunca llegó a mandarse —, altas huérfanas
+            // descartadas entre fase 1 y fase 2 por `filterPhase2AfterPhase1` — su
+            // `create_list` SÍ se mandó pero falló —, y las que el servidor rechazó
+            // al validar/encolar) se combinan en un único informe, ordenado por
+            // posición ORIGINAL en `ops` — el modelo ve exactamente qué operación
+            // falló y por qué, sin tener que distinguir entre las fases. Las
+            // EXITOSAS con `id` (code-review 🟠 #3a: antes se perdían — el modelo
+            // no podía enterarse del `listId` de un `create_list` sin una
+            // `list_tasks` de más) también se recogen, para poder encadenarlas en
+            // un turno posterior (o confirmar el id que ya se auto-generó, si la
+            // op no traía uno propio — ver `create_list`).
             const failures = [
                 ...shapeFailures,
                 ...built.skipped.map((s) => ({ index: validatedOriginalIndexes[s.index], error: s.error })),
+                ...preFiltered.skipped,
                 ...phaseFailures
             ];
             const succeededWithId = [];

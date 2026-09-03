@@ -527,7 +527,11 @@ targetean una tarea comprueban su existencia contra el servidor ANTES de
 mandar el batch, así que una mutación sobre una tarea recién creada en el
 mismo lote ya se descartaba. Si el `create_list` falla, las altas que
 dependían de él no se mandan y aparecen en el informe como un fallo más,
-citando la op que lo causó.
+citando la op que lo causó. El encadenado es SIEMPRE por `listId` (el uuid
+que tú le diste al `create_list`), nunca por `list` (nombre): la detección
+de la dependencia solo mira `listId` a propósito, así que un `add_task` con
+`list: "Trabajo"` apuntando al NOMBRE de una lista que se crea en el mismo
+lote no encadena — usa el `listId`.
 
 ## Compilar
 
