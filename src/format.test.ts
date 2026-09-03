@@ -90,6 +90,54 @@ describe('formatTaskList — `creada:` solo cuando hay títulos duplicados en el
 	});
 });
 
+describe('formato de la hora (`time`) — se pega a la fecha, no ocupa tag ni línea propia', () => {
+	it('fecha + hora → la línea compacta lleva "fecha hora" en el mismo tag', () => {
+		const output = formatTaskList(
+			[task({ id: 'a', content: 'Reunión', date: '2026-09-04', time: '17:45' })],
+			'today',
+			{ notesMode: 'none' }
+		);
+		expect(output).toContain('Reunión (2026-09-04 17:45)  · id: a');
+	});
+
+	it('fecha + hora → el detalle (`get_task`) muestra "- fecha: fecha hora"', () => {
+		const output = formatTaskFull(task({ date: '2026-09-04', time: '17:45' }));
+		expect(output).toContain('- fecha: 2026-09-04 17:45');
+	});
+
+	it('fecha SIN hora → salida idéntica a antes de este cambio (protege el coste: ni un carácter de más)', () => {
+		const compact = formatTaskList([task({ id: 'a', content: 'Comprar leche', date: '2026-09-04' })], 'today', {
+			notesMode: 'none'
+		});
+		expect(compact).toBe('1 tarea (scope=today):\n- [ ] Comprar leche (2026-09-04)  · id: a');
+		const full = formatTaskFull(task({ date: '2026-09-04' }));
+		expect(full).toContain('- fecha: 2026-09-04');
+		expect(full).not.toContain('- fecha: 2026-09-04 ');
+	});
+
+	it('hora SIN fecha → aparece igualmente (tag suelto en la línea compacta, marcada explícita en el detalle)', () => {
+		const compact = formatTaskList([task({ id: 'a', content: 'Llamar', time: '09:00' })], 'today', {
+			notesMode: 'none'
+		});
+		expect(compact).toContain('Llamar (09:00)  · id: a');
+		const full = formatTaskFull(task({ time: '09:00' }));
+		expect(full).toContain('- fecha: (sin fecha) 09:00');
+	});
+
+	it('`time: null` y `time` ausente (servidor viejo) se comportan igual: como "sin hora"', () => {
+		const withNull = formatTaskList([task({ id: 'a', content: 'X', date: '2026-09-04', time: null })], 'today', {
+			notesMode: 'none'
+		});
+		const withUndefined = formatTaskList(
+			[task({ id: 'a', content: 'X', date: '2026-09-04', time: undefined })],
+			'today',
+			{ notesMode: 'none' }
+		);
+		expect(withNull).toBe(withUndefined);
+		expect(withNull).toBe('1 tarea (scope=today):\n- [ ] X (2026-09-04)  · id: a');
+	});
+});
+
 describe('formato de tareas archivadas', () => {
 	it('el listado distingue una archivada de una viva con la fecha de archivo', () => {
 		const output = formatTaskList(

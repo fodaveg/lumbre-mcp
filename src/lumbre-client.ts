@@ -155,6 +155,11 @@ export interface LumbreTask {
 	cancelled?: boolean;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;
+	/** Hora "HH:MM" (24h) de la tarea, o `null` si no tiene — `GET /api/tasks`
+	 *  la serializa como `time` (`src/routes/api/tasks/+server.ts`, junto a
+	 *  `deadline`). La API de hoy siempre incluye la clave; opcional para
+	 *  tolerar un servidor anterior que aún no la mande. */
+	time?: string | null;
 	deadline: string | null;
 	list: string | null;
 	/** Id de la lista de "Algún día" a la que pertenece, o null. */

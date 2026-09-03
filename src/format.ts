@@ -161,7 +161,13 @@ function formatTask(t: LumbreTask, opts: FormatTaskOptions, isDuplicateTitle: bo
 	const tags: string[] = [];
 	const prio = priorityLabel(t.priority);
 	if (prio) tags.push(prio);
-	if (t.date) tags.push(t.date);
+	// La hora se pega a la fecha en el MISMO tag ("2026-09-04 17:45"), nunca un
+	// tag propio: una tarea sin hora no debe costar ni un carácter más en esta
+	// línea, que se manda al modelo en cada `list_tasks`. Sin fecha pero con
+	// hora (raro pero posible), la hora sola hace de tag en vez de perderse.
+	if (t.date && t.time) tags.push(`${t.date} ${t.time}`);
+	else if (t.date) tags.push(t.date);
+	else if (t.time) tags.push(t.time);
 	if (t.deadline) tags.push(`⚑${t.deadline}`);
 	if (t.archivedAt) tags.push(`archivada:${t.archivedAt.slice(0, 10)}`);
 	// `createdAt` recortado a minuto (sin segundos/ms): SOLO si hay otra tarea
@@ -215,7 +221,14 @@ export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 		`- estado: ${t.done ? 'hecha' : 'pendiente'}`,
 		`- archivada: ${t.archivedAt ?? 'no'}`,
 		`- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
-		`- fecha: ${t.date ?? '(sin fecha)'}`,
+		// Mismo criterio que en `formatTask`: la hora se pega a la fecha, no
+		// ocupa línea propia. Con hora y sin fecha (raro), se marca explícito
+		// para no confundirla con "hoy a esa hora".
+		`- fecha: ${
+			t.date && t.time
+				? `${t.date} ${t.time}`
+				: (t.date ?? (t.time ? `(sin fecha) ${t.time}` : '(sin fecha)'))
+		}`,
 		`- deadline: ${t.deadline ? `⚑${t.deadline}` : '(sin deadline)'}`,
 		`- lista: ${t.list ? `"${t.list}"${t.somedayListId ? ` (listId: ${t.somedayListId})` : ''}` : '(sin lista)'}`,
 		`- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
