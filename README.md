@@ -510,7 +510,24 @@ puedas necesitar referenciar EN OTRA op del mismo `mutate_tasks` es
 `create_list` — dale tú mismo un `listId` (uuid v4) al crearla y úsalo en el
 `move_to_list`/`nest_list` que la targetee, en vez de esperar a la respuesta
 (el id de un `add_task` lo asigna el servidor y solo se conoce DESPUÉS, no se
-puede referenciar dentro de la misma llamada).
+puede referenciar dentro de la misma llamada). Un `add_task` con `listId` del
+`create_list` del mismo lote TAMBIÉN funciona (fix del incidente 071553, 3 sep
+2026): el servidor materializa TODAS las altas antes que TODAS las mutaciones,
+sin mirar el orden de `ops` — una garantía DELIBERADA, en la dirección
+contraria, para que crear una tarea y mutarla en el mismo lote funcione. Esa
+misma garantía deja sin cubrir justo la pareja opuesta, `create_list` seguido
+de un alta que depende de él: la lista aún no existe cuando se materializan las
+altas. El cliente MCP lo detecta y manda las mutaciones (incluido el
+`create_list`) en una petición y las altas dependientes en otra — una petición
+de más SOLO en ese caso, transparente para quien escribe `ops`; la pareja
+alta→mutación (crear una tarea y tocarla en el mismo lote) ya era inexpresable
+antes de este fix y sigue siéndolo: un `add_task` no lleva id de cliente (su id
+lo asigna el servidor y solo se conoce en la respuesta) y las 9 ops que
+targetean una tarea comprueban su existencia contra el servidor ANTES de
+mandar el batch, así que una mutación sobre una tarea recién creada en el
+mismo lote ya se descartaba. Si el `create_list` falla, las altas que
+dependían de él no se mandan y aparecen en el informe como un fallo más,
+citando la op que lo causó.
 
 ## Compilar
 

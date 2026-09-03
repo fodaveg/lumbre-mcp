@@ -673,4 +673,103 @@ export function buildBatchFromOps(ops, existing) {
     });
     return { batchOps, originalIndexes, skipped };
 }
+/**
+ * Detecta si `batchOps` (YA traducidas, ver `buildBatchFromOps`) tiene
+ * dependencia intra-lote — una op `ingest` cuyo `task.listId` coincide con el
+ * `taskId` de una op `mutate`/`createList` del MISMO array — y, si la hay,
+ * reparte `batchOps` en DOS fases (`mutate` primero, `ingest` después) en vez
+ * de una. Pura, sin red: separada de la llamada real (`runBatch` × 1 o 2, en
+ * `index.ts`) para poder testearla sin mockear `fetch`.
+ *
+ * Sin dependencia (incluida una op `ingest` con un `listId` de una lista YA
+ * EXISTENTE, que no se crea en este lote): `split: false`, una sola fase con
+ * `batchOps` tal cual — CERO cambio de comportamiento ni coste extra de red
+ * frente a antes de este fix.
+ *
+ * Con dependencia: fase 1 = TODAS las ops `mutate` del lote (no solo los
+ * `createList` de los que depende alguna alta: el resto de mutaciones viaja
+ * igual, no hay motivo para retrasarlas), en su orden original; fase 2 = TODAS
+ * las ops `ingest` del lote, en su orden original. Qué altas de la fase 2
+ * sobreviven de verdad (una vez se sabe si su `createList` salió `ok`) lo
+ * decide `filterPhase2AfterPhase1`, DESPUÉS de mandar la fase 1 — este
+ * planificador no toca red, así que no puede saberlo todavía.
+ */
+export function planBatchPhases(batchOps, originalIndexes) {
+    // `taskId` de cada `create_list` del lote — la lista que "nace" en esta
+    // misma llamada.
+    const createdListIds = new Set();
+    for (const op of batchOps) {
+        if (op.type === 'mutate' && op.kind === 'createList')
+            createdListIds.add(op.taskId);
+    }
+    const dependents = [];
+    if (createdListIds.size > 0) {
+        batchOps.forEach((op, i) => {
+            if (op.type === 'ingest' && op.task.listId && createdListIds.has(op.task.listId)) {
+                dependents.push({ index: originalIndexes[i], listId: op.task.listId });
+            }
+        });
+    }
+    if (dependents.length === 0) {
+        return { split: false, phases: [{ ops: batchOps, originalIndexes }], dependents: [] };
+    }
+    const mutatePhase = { ops: [], originalIndexes: [] };
+    const ingestPhase = { ops: [], originalIndexes: [] };
+    batchOps.forEach((op, i) => {
+        const phase = op.type === 'mutate' ? mutatePhase : ingestPhase;
+        phase.ops.push(op);
+        phase.originalIndexes.push(originalIndexes[i]);
+    });
+    return { split: true, phases: [mutatePhase, ingestPhase], dependents };
+}
+/**
+ * Segundo paso del reparto, YA con el resultado real de la fase 1 (`runBatch`
+ * de `plan.phases[0].ops`): decide qué ops de la fase 2 (`plan.phases[1]`) se
+ * mandan de verdad y cuáles se descartan por depender de un `create_list` que
+ * NO salió `ok` — nunca se manda una alta huérfana con fecha de HOY (el
+ * síntoma del incidente 071553). Pura, sin red: separada de `mutate_tasks`
+ * para poder testearla sin mockear `fetch`. Con `plan.split` en `false`
+ * devuelve todo vacío — no hay fase 2 que filtrar.
+ *
+ * El mensaje de cada descarte cita el índice ORIGINAL de la op `create_list`
+ * causante (`ver el fallo de la op [N]`), para que el modelo pueda leer su
+ * error concreto en el mismo informe sin tener que adivinar cuál era.
+ */
+export function filterPhase2AfterPhase1(plan, phase1Results) {
+    if (!plan.split || plan.phases.length < 2) {
+        return { ops: [], originalIndexes: [], skipped: [] };
+    }
+    const [phase1, phase2] = plan.phases;
+    // `listId` → índice ORIGINAL de la op `create_list` que la crea (para citarlo
+    // en el mensaje), y `listId` → si esa op salió `ok` en la fase 1.
+    const createListOriginalIndex = new Map();
+    const listOk = new Map();
+    phase1.ops.forEach((op, i) => {
+        if (op.type === 'mutate' && op.kind === 'createList') {
+            createListOriginalIndex.set(op.taskId, phase1.originalIndexes[i]);
+            listOk.set(op.taskId, phase1Results[i]?.ok === true);
+        }
+    });
+    const dependentListIdByIndex = new Map(plan.dependents.map((d) => [d.index, d.listId]));
+    const ops = [];
+    const originalIndexes = [];
+    const skipped = [];
+    phase2.ops.forEach((op, i) => {
+        const origIndex = phase2.originalIndexes[i];
+        const listId = dependentListIdByIndex.get(origIndex);
+        if (listId !== undefined && listOk.get(listId) !== true) {
+            const createIndex = createListOriginalIndex.get(listId);
+            skipped.push({
+                index: origIndex,
+                error: `la lista ${listId} no se pudo crear en este lote` +
+                    (createIndex !== undefined ? ` (ver el fallo de la op [${createIndex}])` : '') +
+                    '; la tarea no se ha creado'
+            });
+            return;
+        }
+        ops.push(op);
+        originalIndexes.push(origIndex);
+    });
+    return { ops, originalIndexes, skipped };
+}
 //# sourceMappingURL=lumbre-client.js.map

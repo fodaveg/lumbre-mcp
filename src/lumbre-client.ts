@@ -947,7 +947,16 @@ export type MutateTasksOp =
 			 *  targetear ESA MISMA lista desde otra op del MISMO `mutate_tasks`
 			 *  (p. ej. `move_to_list`/`nest_list` con ese `listId`, sin depender
 			 *  de una llamada previa para conocerlo). Ausente → se genera como
-			 *  hasta ahora (mismo criterio que la tool individual `create_list`). */
+			 *  hasta ahora (mismo criterio que la tool individual `create_list`).
+			 *  Desde el fix del incidente 071553 (lote con `create_list` + N
+			 *  `add_task` con ese `listId`, ver `planBatchPhases` más abajo), esto
+			 *  TAMBIÉN habilita encadenar con un `add_task` del mismo lote: el
+			 *  servidor materializa TODAS las ingestas antes que TODAS las
+			 *  mutaciones (`src/routes/api/batch/+server.ts` en el repo principal),
+			 *  así que un `add_task` con este `listId` en el MISMO array llegaría
+			 *  con la lista aún inexistente si viajaran juntos en una sola petición;
+			 *  el cliente lo detecta y parte la llamada en dos (mutaciones primero,
+			 *  altas después) — transparente para quien escribe `ops`. */
 			listId?: string;
 	  }
 	| { op: 'nest_list'; listId: string; parentId: string | null }
@@ -1187,4 +1196,167 @@ export function buildBatchFromOps(
 	});
 
 	return { batchOps, originalIndexes, skipped };
+}
+
+// ── Reparto en dos fases (incidente 071553, 3 sep 2026) ─────────────────────
+//
+// `POST /api/batch` del repo principal mete las ops `ingest` y `mutate` en
+// DOS colas separadas y drena SIEMPRE todas las `ingest` antes que TODAS las
+// `mutate` (`materializeBatch`, `src/lib/server/sync/drain.ts` en ese repo;
+// documentado en `src/routes/api/batch/+server.ts:69-76`). NO es un descuido:
+// es una garantía DELIBERADA, en la dirección contraria — así una tarea creada
+// y mutada en el MISMO lote funciona (la mutación siempre encuentra la tarea
+// ya materializada). Esa misma garantía deja sin cubrir la pareja opuesta: un
+// `create_list` seguido de un alta que depende de él. Con un solo
+// `mutate_tasks` `[{op:'create_list',...}, ...N×{op:'add_task', listId: <esa
+// lista>}]`, las altas se materializan con la lista TODAVÍA inexistente:
+// `resolveInboundListId` devuelve `''` y la tarea nace SIN lista y con fecha
+// de HOY (le ensucia el Día al usuario). Reordenar el array en el MCP no
+// arregla nada — el servidor no mira ese orden, mira el TIPO de op — así que
+// el arreglo va aquí: partir la llamada en DOS peticiones cuando (y SOLO
+// cuando) hay esa dependencia.
+//
+// La pareja alta→mutación (la que SÍ cubre el servidor) no hace falta
+// partirla porque hoy es INEXPRESABLE en `mutate_tasks`: un `add_task` no
+// lleva id de cliente (`translateOp` manda `{type:'ingest', task}`; el id lo
+// asigna el servidor y solo se conoce en la respuesta), y las 9 ops que
+// targetean una tarea (`TASK_TARGET_ALLOW_SUBTASK`) comprueban su existencia
+// contra el servidor ANTES de mandar el batch (`collectExistenceCheckIds` +
+// `assertTaskUsable`, en `index.ts`) — una mutación sobre una tarea creada en
+// el mismo lote ya se descarta ahí, con o sin este fix.
+
+/** Una fase del reparto: sus `BatchOp` ya traducidas y, paralelo a ellas, el
+ *  índice ORIGINAL (en el `ops` que pasó el modelo) de cada una — mismo
+ *  criterio que `BuildBatchResult.originalIndexes`. */
+export interface BatchPhase {
+	ops: BatchOp[];
+	originalIndexes: number[];
+}
+
+/** Resultado de `planBatchPhases` — ver su JSDoc. */
+export interface BatchPhasePlan {
+	/** `true` si hubo que partir (hay dependencia intra-lote por `listId`:
+	 *  alguna op `ingest` referencia el `taskId` de un `create_list` del MISMO
+	 *  array). `false` → una sola fase, comportamiento de siempre. */
+	split: boolean;
+	/** Fases en el orden en que hay que mandarlas. Sin partir, un único
+	 *  elemento con TODAS las `batchOps` (mismas referencias que se pasaron). */
+	phases: BatchPhase[];
+	/** Por cada op `ingest` dependiente de un `create_list` del lote: su índice
+	 *  ORIGINAL y el `listId` (= `taskId` del `createList`) del que depende.
+	 *  Vacío si `split` es `false`. La usa `filterPhase2AfterPhase1` para
+	 *  decidir, YA con el resultado real de la fase 1, qué altas se descartan. */
+	dependents: { index: number; listId: string }[];
+}
+
+/**
+ * Detecta si `batchOps` (YA traducidas, ver `buildBatchFromOps`) tiene
+ * dependencia intra-lote — una op `ingest` cuyo `task.listId` coincide con el
+ * `taskId` de una op `mutate`/`createList` del MISMO array — y, si la hay,
+ * reparte `batchOps` en DOS fases (`mutate` primero, `ingest` después) en vez
+ * de una. Pura, sin red: separada de la llamada real (`runBatch` × 1 o 2, en
+ * `index.ts`) para poder testearla sin mockear `fetch`.
+ *
+ * Sin dependencia (incluida una op `ingest` con un `listId` de una lista YA
+ * EXISTENTE, que no se crea en este lote): `split: false`, una sola fase con
+ * `batchOps` tal cual — CERO cambio de comportamiento ni coste extra de red
+ * frente a antes de este fix.
+ *
+ * Con dependencia: fase 1 = TODAS las ops `mutate` del lote (no solo los
+ * `createList` de los que depende alguna alta: el resto de mutaciones viaja
+ * igual, no hay motivo para retrasarlas), en su orden original; fase 2 = TODAS
+ * las ops `ingest` del lote, en su orden original. Qué altas de la fase 2
+ * sobreviven de verdad (una vez se sabe si su `createList` salió `ok`) lo
+ * decide `filterPhase2AfterPhase1`, DESPUÉS de mandar la fase 1 — este
+ * planificador no toca red, así que no puede saberlo todavía.
+ */
+export function planBatchPhases(batchOps: BatchOp[], originalIndexes: number[]): BatchPhasePlan {
+	// `taskId` de cada `create_list` del lote — la lista que "nace" en esta
+	// misma llamada.
+	const createdListIds = new Set<string>();
+	for (const op of batchOps) {
+		if (op.type === 'mutate' && op.kind === 'createList') createdListIds.add(op.taskId);
+	}
+
+	const dependents: { index: number; listId: string }[] = [];
+	if (createdListIds.size > 0) {
+		batchOps.forEach((op, i) => {
+			if (op.type === 'ingest' && op.task.listId && createdListIds.has(op.task.listId)) {
+				dependents.push({ index: originalIndexes[i], listId: op.task.listId });
+			}
+		});
+	}
+
+	if (dependents.length === 0) {
+		return { split: false, phases: [{ ops: batchOps, originalIndexes }], dependents: [] };
+	}
+
+	const mutatePhase: BatchPhase = { ops: [], originalIndexes: [] };
+	const ingestPhase: BatchPhase = { ops: [], originalIndexes: [] };
+	batchOps.forEach((op, i) => {
+		const phase = op.type === 'mutate' ? mutatePhase : ingestPhase;
+		phase.ops.push(op);
+		phase.originalIndexes.push(originalIndexes[i]);
+	});
+
+	return { split: true, phases: [mutatePhase, ingestPhase], dependents };
+}
+
+/**
+ * Segundo paso del reparto, YA con el resultado real de la fase 1 (`runBatch`
+ * de `plan.phases[0].ops`): decide qué ops de la fase 2 (`plan.phases[1]`) se
+ * mandan de verdad y cuáles se descartan por depender de un `create_list` que
+ * NO salió `ok` — nunca se manda una alta huérfana con fecha de HOY (el
+ * síntoma del incidente 071553). Pura, sin red: separada de `mutate_tasks`
+ * para poder testearla sin mockear `fetch`. Con `plan.split` en `false`
+ * devuelve todo vacío — no hay fase 2 que filtrar.
+ *
+ * El mensaje de cada descarte cita el índice ORIGINAL de la op `create_list`
+ * causante (`ver el fallo de la op [N]`), para que el modelo pueda leer su
+ * error concreto en el mismo informe sin tener que adivinar cuál era.
+ */
+export function filterPhase2AfterPhase1(
+	plan: BatchPhasePlan,
+	phase1Results: BatchResultItem[]
+): { ops: BatchOp[]; originalIndexes: number[]; skipped: { index: number; error: string }[] } {
+	if (!plan.split || plan.phases.length < 2) {
+		return { ops: [], originalIndexes: [], skipped: [] };
+	}
+	const [phase1, phase2] = plan.phases;
+
+	// `listId` → índice ORIGINAL de la op `create_list` que la crea (para citarlo
+	// en el mensaje), y `listId` → si esa op salió `ok` en la fase 1.
+	const createListOriginalIndex = new Map<string, number>();
+	const listOk = new Map<string, boolean>();
+	phase1.ops.forEach((op, i) => {
+		if (op.type === 'mutate' && op.kind === 'createList') {
+			createListOriginalIndex.set(op.taskId, phase1.originalIndexes[i]);
+			listOk.set(op.taskId, phase1Results[i]?.ok === true);
+		}
+	});
+
+	const dependentListIdByIndex = new Map(plan.dependents.map((d) => [d.index, d.listId]));
+
+	const ops: BatchOp[] = [];
+	const originalIndexes: number[] = [];
+	const skipped: { index: number; error: string }[] = [];
+	phase2.ops.forEach((op, i) => {
+		const origIndex = phase2.originalIndexes[i];
+		const listId = dependentListIdByIndex.get(origIndex);
+		if (listId !== undefined && listOk.get(listId) !== true) {
+			const createIndex = createListOriginalIndex.get(listId);
+			skipped.push({
+				index: origIndex,
+				error:
+					`la lista ${listId} no se pudo crear en este lote` +
+					(createIndex !== undefined ? ` (ver el fallo de la op [${createIndex}])` : '') +
+					'; la tarea no se ha creado'
+			});
+			return;
+		}
+		ops.push(op);
+		originalIndexes.push(origIndex);
+	});
+
+	return { ops, originalIndexes, skipped };
 }

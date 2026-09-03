@@ -650,6 +650,171 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 	});
 });
 
+describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lote (incidente 071553)', () => {
+	const LIST_ID = 'a0b1c2d3-e4f5-4678-9abc-def012345678';
+	const EXISTING_LIST_ID = 'b1c2d3e4-f5a6-4789-9abc-def012345678';
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'batch-phases-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function batchCalls(fetchSpy: ReturnType<typeof vi.fn>) {
+		return fetchSpy.mock.calls.filter((call) => String(call[0]).endsWith('/api/batch'));
+	}
+
+	function resultText(result: unknown): string {
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		return first.type === 'text' ? (first.text ?? '') : '';
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('sin dependencia (add_task sin listId de un create_list del lote): UNA sola petición a /api/batch', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				ok: true,
+				results: [
+					{ index: 0, type: 'ingest', ok: true, id: 't1' },
+					{ index: 1, type: 'ingest', ok: true, id: 't2' }
+				]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'add_task', text: 'a' },
+					{ op: 'add_task', text: 'b' }
+				]
+			}
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+		expect(resultText(result)).toContain('2/2 operación(es) encoladas.');
+	});
+
+	it('add_task con listId de una lista YA EXISTENTE (sin create_list en el lote): NO parte el lote', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'add_task', text: 'a', listId: EXISTING_LIST_ID }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+	});
+
+	it('create_list + N add_task con ese listId: DOS peticiones (mutate primero, ingest después) e informe con índices ORIGINALES', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const value = String(url);
+			if (!value.endsWith('/api/batch')) throw new Error(`fetch no mockeado: ${value}`);
+			const body = JSON.parse(String(init?.body)) as { ops: unknown[] };
+			const isMutatePhase = (body.ops[0] as { type: string }).type === 'mutate';
+			if (isMutatePhase) {
+				expect(body.ops).toHaveLength(1);
+				return jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID }]
+				});
+			}
+			expect(body.ops).toHaveLength(2);
+			expect(body.ops.every((op) => (op as { type: string }).type === 'ingest')).toBe(true);
+			return jsonResponse({
+				ok: true,
+				results: [
+					{ index: 0, type: 'ingest', ok: true, id: 'nueva-1' },
+					{ index: 1, type: 'ingest', ok: true, id: 'nueva-2' }
+				]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'create_list', name: 'Trabajo', listId: LIST_ID },
+					{ op: 'add_task', text: 'tarea 1', listId: LIST_ID },
+					{ op: 'add_task', text: 'tarea 2', listId: LIST_ID }
+				]
+			}
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(batchCalls(fetchSpy)).toHaveLength(2);
+		const text = resultText(result);
+		expect(text).toContain('3/3 operación(es) encoladas.');
+		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
+		expect(text).toContain('[1] add_task: id nueva-1');
+		expect(text).toContain('[2] add_task: id nueva-2');
+	});
+
+	it('create_list FALLA en fase 1: las altas dependientes NO viajan en ninguna petición y salen como fallo', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const value = String(url);
+			if (!value.endsWith('/api/batch')) throw new Error(`fetch no mockeado: ${value}`);
+			const body = JSON.parse(String(init?.body)) as { ops: unknown[] };
+			// Solo debe llegar la fase 1 (mutate): si llegara una segunda petición
+			// con las altas huérfanas, este mock la aceptaría igual (`ok:true`) y
+			// el test de abajo (UNA sola llamada) la delataría.
+			expect((body.ops[0] as { type: string }).type).toBe('mutate');
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: false, error: 'ya existe una lista con ese nombre' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'create_list', name: 'Trabajo', listId: LIST_ID },
+					{ op: 'add_task', text: 'tarea 1', listId: LIST_ID },
+					{ op: 'add_task', text: 'tarea 2', listId: LIST_ID }
+				]
+			}
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+		const text = resultText(result);
+		expect(text).toContain('0/3 operación(es) encoladas.');
+		expect(text).toContain('[0] create_list: ya existe una lista con ese nombre');
+		expect(text).toMatch(/\[1] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
+		expect(text).toMatch(/\[2] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
+	});
+});
+
 describe('mutate_brl — las 3 `op` siguen aceptándose (esquema estricto interno)', () => {
 	/** Mismo criterio que las de `mutate_tasks` arriba: un caso por op, con
 	 *  variantes INVÁLIDAS por campo que falta y por campo que sobra (ajeno a

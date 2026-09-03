@@ -5,14 +5,17 @@ import {
 	buildBatchFromOps,
 	collectExistenceCheckIds,
 	deleteAttachment,
+	filterPhase2AfterPhase1,
 	findTaskById,
 	findTasksByIds,
 	listLists,
 	listTasks,
+	planBatchPhases,
 	runBatch,
 	subtaskNotAllowedError,
 	taskNotFoundError,
 	uploadAttachment,
+	type BatchOp,
 	type BatchResultItem,
 	type LumbreConfig,
 	type LumbreTask,
@@ -500,6 +503,134 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+});
+
+// ── Reparto en dos fases (incidente 071553) — `planBatchPhases` /
+// `filterPhase2AfterPhase1` ─────────────────────────────────────────────────
+
+describe('planBatchPhases', () => {
+	const LIST_ID = 'a0b1c2d3-e4f5-4678-9abc-def012345678';
+
+	it('sin dependencia (ningún add_task con el listId de un create_list del lote): NO parte', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: 't1', kind: 'complete', payload: { done: true } },
+			{ type: 'ingest', task: { text: 'suelta' } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1]);
+		expect(plan.split).toBe(false);
+		expect(plan.phases).toEqual([{ ops: batchOps, originalIndexes: [0, 1] }]);
+		expect(plan.dependents).toEqual([]);
+	});
+
+	it('add_task con listId de una lista YA EXISTENTE (sin create_list en el lote): NO parte', () => {
+		const batchOps: BatchOp[] = [{ type: 'ingest', task: { text: 'a la lista', listId: LIST_ID } }];
+		const plan = planBatchPhases(batchOps, [0]);
+		expect(plan.split).toBe(false);
+		expect(plan.dependents).toEqual([]);
+	});
+
+	it('create_list + N add_task con ese listId: parte en fase mutate y fase ingest', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'X' } },
+			{ type: 'ingest', task: { text: 'tarea 1', listId: LIST_ID } },
+			{ type: 'ingest', task: { text: 'tarea 2', listId: LIST_ID } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1, 2]);
+		expect(plan.split).toBe(true);
+		expect(plan.phases).toHaveLength(2);
+		expect(plan.phases[0]).toEqual({ ops: [batchOps[0]], originalIndexes: [0] });
+		expect(plan.phases[1]).toEqual({ ops: [batchOps[1], batchOps[2]], originalIndexes: [1, 2] });
+		expect(plan.dependents).toEqual([
+			{ index: 1, listId: LIST_ID },
+			{ index: 2, listId: LIST_ID }
+		]);
+	});
+
+	it('con dependencia, un `mutate` AJENO a create_list también va en la fase 1, en su orden original', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: 't1', kind: 'complete', payload: { done: true } },
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'X' } },
+			{ type: 'ingest', task: { text: 'tarea', listId: LIST_ID } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1, 2]);
+		expect(plan.split).toBe(true);
+		expect(plan.phases[0]).toEqual({ ops: [batchOps[0], batchOps[1]], originalIndexes: [0, 1] });
+		expect(plan.phases[1]).toEqual({ ops: [batchOps[2]], originalIndexes: [2] });
+	});
+
+	it('con dependencia, un add_task SIN listId (o con el de otra lista) viaja igual en la fase 2', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'X' } },
+			{ type: 'ingest', task: { text: 'depende', listId: LIST_ID } },
+			{ type: 'ingest', task: { text: 'sin lista' } },
+			{ type: 'ingest', task: { text: 'lista ajena', listId: 'otra-lista-ya-existente' } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1, 2, 3]);
+		expect(plan.split).toBe(true);
+		expect(plan.phases[1].originalIndexes).toEqual([1, 2, 3]);
+		expect(plan.dependents).toEqual([{ index: 1, listId: LIST_ID }]);
+	});
+});
+
+describe('filterPhase2AfterPhase1', () => {
+	const LIST_ID = 'a0b1c2d3-e4f5-4678-9abc-def012345678';
+
+	it('plan sin partir (`split:false`): devuelve todo vacío, no hay fase 2 que filtrar', () => {
+		const batchOps: BatchOp[] = [{ type: 'ingest', task: { text: 'x' } }];
+		const plan = planBatchPhases(batchOps, [0]);
+		const filtered = filterPhase2AfterPhase1(plan, []);
+		expect(filtered).toEqual({ ops: [], originalIndexes: [], skipped: [] });
+	});
+
+	it('create_list OK: las altas dependientes SÍ se mandan', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'X' } },
+			{ type: 'ingest', task: { text: 'tarea', listId: LIST_ID } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1]);
+		const phase1Results: BatchResultItem[] = [{ index: 0, type: 'mutate', ok: true, id: LIST_ID }];
+		const filtered = filterPhase2AfterPhase1(plan, phase1Results);
+		expect(filtered.ops).toEqual([batchOps[1]]);
+		expect(filtered.originalIndexes).toEqual([1]);
+		expect(filtered.skipped).toEqual([]);
+	});
+
+	it('create_list FALLA: las altas dependientes NO se mandan y salen como fallo con su índice original', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'X' } },
+			{ type: 'ingest', task: { text: 'tarea 1', listId: LIST_ID } },
+			{ type: 'ingest', task: { text: 'tarea 2', listId: LIST_ID } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1, 2]);
+		const phase1Results: BatchResultItem[] = [
+			{ index: 0, type: 'mutate', ok: false, error: 'nombre duplicado' }
+		];
+		const filtered = filterPhase2AfterPhase1(plan, phase1Results);
+		expect(filtered.ops).toEqual([]);
+		expect(filtered.originalIndexes).toEqual([]);
+		expect(filtered.skipped).toEqual([
+			{ index: 1, error: expect.stringContaining('op [0]') },
+			{ index: 2, error: expect.stringContaining('op [0]') }
+		]);
+		expect(filtered.skipped[0].error).toMatch(/no se pudo crear en este lote/);
+		expect(filtered.skipped[0].error).toMatch(/no se ha creado/);
+	});
+
+	it('una alta que NO depende de ningún create_list del lote sobrevive al filtro aunque OTRA sí dependa', () => {
+		const batchOps: BatchOp[] = [
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'X' } },
+			{ type: 'ingest', task: { text: 'depende', listId: LIST_ID } },
+			{ type: 'ingest', task: { text: 'sin lista' } }
+		];
+		const plan = planBatchPhases(batchOps, [0, 1, 2]);
+		const phase1Results: BatchResultItem[] = [
+			{ index: 0, type: 'mutate', ok: false, error: 'nombre duplicado' }
+		];
+		const filtered = filterPhase2AfterPhase1(plan, phase1Results);
+		expect(filtered.ops).toEqual([batchOps[2]]);
+		expect(filtered.originalIndexes).toEqual([2]);
+		expect(filtered.skipped).toEqual([{ index: 1, error: expect.any(String) }]);
+	});
 });
 
 // ── uploadAttachment (POST /api/attachments?taskId=) ────────────────────────

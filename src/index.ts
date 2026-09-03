@@ -11,6 +11,7 @@ import {
 	buildBatchFromOps,
 	collectExistenceCheckIds,
 	deleteAttachment,
+	filterPhase2AfterPhase1,
 	findTaskById,
 	findTasksByIds,
 	getAttachment,
@@ -18,6 +19,7 @@ import {
 	listLists,
 	listTasks,
 	mutateTask,
+	planBatchPhases,
 	priorityToLevel,
 	refreshSync,
 	runBatch,
@@ -1911,33 +1913,67 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				const batchOps = built.batchOps;
 				const originalIndexes = built.originalIndexes.map((i) => validatedOriginalIndexes[i]);
 
-				const results: BatchResultItem[] = batchOps.length > 0 ? await runBatch(config, batchOps) : [];
+				// Incidente 071553: `POST /api/batch` del repo principal materializa
+				// TODAS las ingestas antes que TODAS las mutaciones, sin mirar el
+				// orden de `ops` — un `create_list` + N `add_task` con ese `listId`
+				// en la MISMA llamada crea las tareas con la lista aún inexistente
+				// (sin lista, fecha de HOY). `planBatchPhases` detecta esa dependencia
+				// y, SOLO si existe, parte la llamada en dos (ver su JSDoc); sin
+				// dependencia, `plan.phases` es un único elemento con `batchOps` tal
+				// cual — mismo coste de red que antes de este fix.
+				const plan = planBatchPhases(batchOps, originalIndexes);
+				let results: BatchResultItem[];
+				let resultOriginalIndexes: number[];
+				const phaseFailures: { index: number; error: string }[] = [];
+				if (!plan.split) {
+					const phase = plan.phases[0];
+					results = phase.ops.length > 0 ? await runBatch(config, phase.ops) : [];
+					resultOriginalIndexes = phase.originalIndexes;
+				} else {
+					const [mutatePhase, ingestPhase] = plan.phases;
+					const phase1Results =
+						mutatePhase.ops.length > 0 ? await runBatch(config, mutatePhase.ops) : [];
+					// Con el resultado REAL de la fase 1 ya se sabe qué `create_list`
+					// salió `ok`: las altas que dependían de uno que falló NO se mandan
+					// (nunca huérfanas con fecha de hoy) y entran en el informe como un
+					// fallo más, citando la op `create_list` causante.
+					const phase2 = filterPhase2AfterPhase1(plan, phase1Results);
+					phaseFailures.push(...phase2.skipped);
+					const phase2Results =
+						phase2.ops.length > 0 ? await runBatch(config, phase2.ops) : [];
+					results = [...phase1Results, ...phase2Results];
+					resultOriginalIndexes = [...mutatePhase.originalIndexes, ...phase2.originalIndexes];
+				}
 				// Cualquier op 'mutate' del lote pudo tocar una tarea que ya estuviera
 				// en `taskCache` (poblada arriba) — se invalida sin mirar el resultado
 				// individual: barato, y evita servir un "existe" rancio si otra op del
 				// MISMO lote la borró justo antes. No-op para las ops de lista/sección
-				// (su `taskId` nunca estuvo cacheado aquí).
+				// (su `taskId` nunca estuvo cacheado aquí). Cubre las DOS fases: itera
+				// sobre `batchOps` (el conjunto completo, previo al reparto), no sobre
+				// las fases sueltas.
 				for (const op of batchOps) {
 					if (op.type === 'mutate') taskCache.invalidate(op.taskId);
 				}
 
-				// Tres fuentes de fallo ahora (forma inválida, descartadas ANTES de
-				// mandar el batch por `buildBatchFromOps`, y las que el servidor
-				// rechazó al validar/encolar) se combinan en un único informe,
+				// Cuatro fuentes de fallo ahora (forma inválida, descartadas ANTES de
+				// mandar el batch por `buildBatchFromOps`, altas huérfanas descartadas
+				// entre fase 1 y fase 2 por `filterPhase2AfterPhase1`, y las que el
+				// servidor rechazó al validar/encolar) se combinan en un único informe,
 				// ordenado por posición ORIGINAL en `ops` — el modelo ve exactamente
 				// qué operación falló y por qué, sin tener que distinguir entre las
-				// tres fases. Las EXITOSAS con `id` (code-review 🟠 #3a: antes se
+				// fases. Las EXITOSAS con `id` (code-review 🟠 #3a: antes se
 				// perdían — el modelo no podía enterarse del `listId` de un
 				// `create_list` sin una `list_tasks` de más) también se recogen, para
 				// poder encadenarlas en un turno posterior (o confirmar el id que ya
 				// se auto-generó, si la op no traía uno propio — ver `create_list`).
 				const failures: { index: number; error: string }[] = [
 					...shapeFailures,
-					...built.skipped.map((s) => ({ index: validatedOriginalIndexes[s.index], error: s.error }))
+					...built.skipped.map((s) => ({ index: validatedOriginalIndexes[s.index], error: s.error })),
+					...phaseFailures
 				];
 				const succeededWithId: { index: number; id: string }[] = [];
 				results.forEach((r, i) => {
-					const index = originalIndexes[i];
+					const index = resultOriginalIndexes[i];
 					if (r.ok) {
 						if (r.id !== undefined) succeededWithId.push({ index, id: r.id });
 					} else {
