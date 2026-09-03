@@ -1968,7 +1968,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					results = phase.ops.length > 0 ? await runBatch(config, phase.ops) : [];
 					resultOriginalIndexes = phase.originalIndexes;
 				} else {
-					const [mutatePhase, ingestPhase] = plan.phases;
+					const [mutatePhase] = plan.phases;
 					const phase1Results =
 						mutatePhase.ops.length > 0 ? await runBatch(config, mutatePhase.ops) : [];
 					// Con el resultado REAL de la fase 1 ya se sabe qué `create_list`

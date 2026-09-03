@@ -1632,7 +1632,7 @@ export function createServer(config, opts = {}) {
                 resultOriginalIndexes = phase.originalIndexes;
             }
             else {
-                const [mutatePhase, ingestPhase] = plan.phases;
+                const [mutatePhase] = plan.phases;
                 const phase1Results = mutatePhase.ops.length > 0 ? await runBatch(config, mutatePhase.ops) : [];
                 // Con el resultado REAL de la fase 1 ya se sabe qué `create_list`
                 // salió `ok`: las altas que dependían de uno que falló NO se mandan
