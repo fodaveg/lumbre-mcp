@@ -365,11 +365,14 @@ server-side, ver ese endpoint).
   SUBTAREA**: los cuatro campos son accidentales PERMITIDOS en una subtarea
   (`docs/18-que-es-una-tarea.md` §2.5 del repo principal).
 - `reschedule_task({ taskId, date })` — mueve la tarea a otro día
-  (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con `date: null`. **NO
-  acepta el id de una subtarea** (lo rechaza con error): `date: null` la
-  adoptaría en la Bandeja, y una subtarea no tiene lista propia — vive en la
-  checklist de su padre (§2.5). Para reagendar lo que la contiene, opera sobre
-  la tarea PADRE.
+  (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con `date: null`.
+  **Acepta el id de una SUBTAREA, pero solo con una fecha**: `date` es un
+  accidental permitido en subtarea (§2.5). Con `date: null` sobre una subtarea
+  se rechaza con error, porque una subtarea sin fecha se queda en la checklist
+  de su padre y NO cae a la Bandeja; para desagendar lo que la contiene, opera
+  sobre la tarea PADRE. Restricción **temporal** de este conector, no del
+  contrato: el camino de desagendar de la app (`task-ops.unscheduleTask`) aún
+  no tiene el guard de `parentId` que sí tienen sus vecinas.
 - `delete_task({ taskId })` — borra (soft-delete) la tarea. **Acción
   delicada**: sin confirmación inmediata ni deshacer desde la tool; confírmalo
   con el usuario antes de llamarla.
@@ -518,12 +521,19 @@ repo principal, no este conector):
 - **Sí**: `complete`, `cancel`, `delete`, `add_subtask`, `complete_subtask` y
   `update` (sus cuatro campos —`content`, `notes`, `priority`, `time`— son
   accidentales PERMITIDOS en una subtarea).
-- **No** (se descarta esa op con un error que explica por qué, las demás del
-  lote siguen): `set_section` y `move_to_list`, porque escriben `sectionId`/
-  `somedayListId`, PROHIBIDOS en una subtarea (no tiene lista ni sección
-  propias: vive en la checklist de su padre); y `reschedule`, porque su
-  `date: null` la adoptaría en la Bandeja. Para eso, opera sobre el id de la
-  tarea PADRE.
+- **Depende del payload**: `reschedule` **sí con una fecha** (`date` también
+  es un accidental permitido), **no con `date: null`** — desagendar una
+  subtarea la sacaría de la checklist de su padre, donde §2.5 dice que se
+  queda. Restricción temporal de este conector: falta el guard de `parentId`
+  en el `unscheduleTask` de la app.
+- **No** (se descarta esa op, las demás del lote siguen): `set_section` y
+  `move_to_list`, porque escriben `sectionId`/`somedayListId`, PROHIBIDOS en
+  una subtarea (no tiene lista ni sección propias: vive en la checklist de su
+  padre). Para eso, opera sobre el id de la tarea PADRE.
+
+En los tres casos el rechazo es por-op y con el motivo REAL de esa op (no un
+error genérico): entra en el mismo informe de éxito PARCIAL que un `taskId`
+inexistente, conservando el índice original, y el resto del lote viaja igual.
 
 **Encadenar dentro del MISMO lote**: la única op que crea algo cuyo id
 puedas necesitar referenciar EN OTRA op del mismo `mutate_tasks` es

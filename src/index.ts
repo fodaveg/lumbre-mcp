@@ -23,6 +23,7 @@ import {
 	planBatchPhases,
 	priorityToLevel,
 	refreshSync,
+	rescheduleSubtaskDecision,
 	runBatch,
 	taskNotFoundError,
 	uploadAttachment,
@@ -31,7 +32,8 @@ import {
 	type BrokenListPromise,
 	type LumbreConfig,
 	type LumbreTask,
-	type MutateTasksOp
+	type MutateTasksOp,
+	type SubtaskDecision
 } from './lumbre-client.js';
 import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
@@ -1321,11 +1323,13 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	 * criterio `allowSubtask` por tool, y sus tests). Lanza si no existe, o si
 	 * existe pero es una subtarea y `allowSubtask` es `false`; el llamante ya
 	 * está dentro de un `try/catch` que lo convierte en `errorResult`.
+	 *
+	 * `opts` es una `SubtaskDecision` entera (no un booleano suelto) porque el
+	 * caso de `reschedule_task` depende del payload y trae su PROPIO error —
+	 * ver `rescheduleSubtaskDecision`, la función que comparte con la op
+	 * `reschedule` de `mutate_tasks`.
 	 */
-	async function requireTaskExists(
-		taskId: string,
-		opts: { allowSubtask?: boolean } = {}
-	): Promise<void> {
+	async function requireTaskExists(taskId: string, opts: SubtaskDecision = {}): Promise<void> {
 		// Caché corta (`taskCache`, ver `existence-cache.ts`): si `taskId` se
 		// acaba de resolver con un listado en esta MISMA sesión (list_tasks,
 		// get_task, mutate_tasks), no repetimos el `GET /api/tasks?id=` — el TTL
@@ -1482,8 +1486,9 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		{
 			description:
 				`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada con date:null. ` +
-				`NO aplica a una SUBTAREA (rechaza su id con error): date:null la adoptaría en la Bandeja ` +
-				`y una subtarea no tiene lista propia. ${ASYNC_NOTE}`,
+				`Acepta también el id de una SUBTAREA, pero SOLO con una fecha: date:null sobre una ` +
+				`subtarea se rechaza con error (una subtarea sin fecha se queda en la checklist de su ` +
+				`padre, no cae a la Bandeja). ${ASYNC_NOTE}`,
 			inputSchema: {
 				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 				date: z
@@ -1493,7 +1498,11 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: false });
+				// Decisión CONDICIONAL, misma función que usa la op `reschedule` de
+				// `mutate_tasks` (`subtaskDecisionFor` → `buildBatchFromOps`): con
+				// fecha, una subtarea pasa; con `date: null` se rechaza, y con SU
+				// error, no con el genérico de lista/sección.
+				await requireTaskExists(input.taskId, rescheduleSubtaskDecision(input.date));
 				await mutateTaskInvalidating({
 					taskId: input.taskId,
 					kind: 'reschedule',
