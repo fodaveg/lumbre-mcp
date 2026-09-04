@@ -415,14 +415,26 @@ export function taskNotFoundError(taskId: string): Error {
 	);
 }
 
-/** Error uniforme cuando `taskId` SÍ existe pero es una subtarea y la tool no
- *  aplica ahí — ver `assertTaskUsable`. */
+/**
+ * Error uniforme cuando `taskId` SÍ existe pero es una subtarea y la tool no
+ * aplica ahí — ver `assertTaskUsable`.
+ *
+ * Solo lo ven ya las ops que siguen CERRADAS a una subtarea, así que el texto
+ * nombra el motivo REAL de cada una (residencia) en vez del viejo «es de
+ * residencia/agenda/edición»: desde que `update_task`/`op:"update"` aceptan un
+ * `subtaskId`, decir «edición» era falso y empujaba al modelo a rendirse en un
+ * caso que sí funciona.
+ */
 export function subtaskNotAllowedError(taskId: string): Error {
 	return new Error(
-		`El id ${taskId} es de una SUBTAREA: esta operación no aplica a una subtarea (es de residencia/` +
-			'agenda/edición, pensada para tareas de primer nivel). Si querías completarla, cancelarla o ' +
-			'borrarla, usa complete_subtask/cancel_task/delete_task; si querías operar sobre la tarea ' +
-			'PADRE, resuelve su id con list_tasks. No se ha encolado ninguna mutación.'
+		`El id ${taskId} es de una SUBTAREA y esta operación no aplica ahí: una subtarea no tiene ` +
+			'lista ni sección propias — vive en la checklist de su padre (docs/18-que-es-una-tarea.md ' +
+			'§2.5, prohibidos en subtarea: `somedayListId`, `sectionId`). Eso deja fuera move_to_list y ' +
+			'set_section, y también reschedule_task: su `date: null` la adoptaría en la Bandeja, ' +
+			'sacándola de la checklist. Si querías mover o reagendar la tarea entera, resuelve el id de ' +
+			'la tarea PADRE con list_tasks y opera sobre él. Sobre la SUBTAREA sí valen update_task ' +
+			'(texto, notas, prioridad, hora), complete_task/complete_subtask, cancel_task, delete_task ' +
+			'y add_subtask. No se ha encolado ninguna mutación.'
 	);
 }
 
@@ -439,19 +451,49 @@ export function subtaskNotAllowedError(taskId: string): Error {
  * `allowSubtask` (default `false`, code-review 🟠 — hallazgo tras la 1ª
  * versión de esta feature): ampliar `findTaskById` para que resuelva
  * subtareas (precondición de `complete_subtask`) dejaba, de rebote, que
- * CUALQUIER tool de mutación aceptara un `subtaskId` — incluidas
- * `reschedule_task`/`move_to_list` (`task-ops.moveTask`/
- * `reassignTaskProject`, SIN guard de `parentId`), que corromperían la ley de
- * residencia (docs/20-contrato-lista.md, ver `reconcileTaskInvariants` en
- * `task-ops.ts`) escribiendo `date`/`somedayListId` en la fila de una
- * subtarea. La política, tool por tool (ver cada `requireTaskExists(...)` en
- * `index.ts`):
+ * CUALQUIER tool de mutación aceptara un `subtaskId`, incluidas las que
+ * corromperían la ley de residencia escribiendo `somedayListId`/`sectionId`
+ * en la fila de una subtarea.
+ *
+ * QUÉ CAMBIÓ (2026-09-04): aquella primera versión cerró las cuatro de golpe
+ * («residencia/agenda/edición») apoyándose en que `task-ops.moveTask` no
+ * tenía guard de `parentId`. Esa premisa YA NO ES CIERTA y el conjunto de
+ * campos lo fija ahora un contrato normativo, no esta matriz:
+ * `docs/18-que-es-una-tarea.md` §2.5 «Subtareas [DECIDIDO 2 sep 2026]»
+ * PERMITE en una subtarea `content`, `notes`, `priority`, `time`, `date`,
+ * `daypart`, `done`, `position`/`dayPosition` y tags, y PROHÍBE
+ * `somedayListId`, `sectionId`, `reminders`, `deadline` y `recurrence`. Los
+ * cuatro campos de `update_task` son exactamente cuatro de los permitidos, y
+ * el guard de residencia vive HOY en la app (`src/lib/sync/task-ops.ts`:
+ * `moveTask` solo adopta en la Bandeja si `src.parentId === undefined`,
+ * `moveTaskToList` es no-op sobre una subtarea, `reconcileTaskInvariants`
+ * solo repara primer nivel) — no aquí.
+ *
+ * La política, tool por tool (ver cada `requireTaskExists(...)` en
+ * `index.ts`, y `TASK_TARGET_ALLOW_SUBTASK` para el gemelo de `mutate_tasks`):
  *  - `allowSubtask: true` — `complete_task`, `cancel_task`, `delete_task`,
- *    `complete_subtask`, `add_subtask` (no tocan residencia/agenda; `get_task`
- *    ni siquiera pasa por aquí, pero acepta un `subtaskId` igual).
- *  - `allowSubtask: false` (default) — `update_task`, `reschedule_task`,
- *    `set_section`, `move_to_list` (residencia/agenda/edición: no aplican a
- *    una subtarea).
+ *    `complete_subtask`, `add_subtask` (no tocan residencia) y, desde
+ *    2026-09-04, `update_task`: sus cuatro campos son accidentales PERMITIDOS
+ *    en subtarea (§2.5) y su camino en el servidor está medido como
+ *    subtask-safe — `inbound-materialize.ts` case `'update'` solo escribe
+ *    celdas (`editTaskContent`/`setTaskNotes`/`setTaskPriority`) y, para
+ *    `time` sin día, llama a `moveTask` con `date !== null`, la rama que NO
+ *    escribe `somedayListId`. `get_task` ni siquiera pasa por aquí, pero
+ *    acepta un `subtaskId` igual.
+ *  - `allowSubtask: false` (default) — `set_section` y `move_to_list`
+ *    (escriben `sectionId`/`somedayListId`, PROHIBIDOS en subtarea por §2.5);
+ *    `reschedule_task`; y `add_attachment`, que queda fuera del alcance de
+ *    §2.5 y conserva su criterio anterior.
+ *
+ * Por qué `reschedule_task` sigue CERRADA pese a que `date` es un accidental
+ * permitido: su rama `date: null` no pasa por `moveTask` sino por
+ * `task-ops.unscheduleTask`, que —a diferencia de sus vecinas— NO tiene guard
+ * de `parentId`: escribiría `somedayListId` (la Bandeja) en la subtarea y le
+ * pisaría `position`, que es justo el orden de la checklist del padre. Abrir
+ * la puerta exige antes ese guard en la app; mientras no exista, el error de
+ * este MCP es lo único que le dice al modelo que la operación no procede.
+ * Los dos cerrados por §2.5 lo están a propósito y en voz alta: hoy
+ * `moveTaskToList` se los tragaría como no-op MUDO.
  */
 export function assertTaskUsable(
 	task: LumbreTask | undefined,
@@ -979,6 +1021,17 @@ export type MutateTasksOp =
  * `requireTaskExists`). La PRESENCIA de una clave es la señal de "esta op
  * necesita comprobación de existencia" (ver `collectExistenceCheckIds`/
  * `buildBatchFromOps`).
+ *
+ * Quién decide cada valor: el contrato `docs/18-que-es-una-tarea.md` §2.5
+ * («Subtareas [DECIDIDO 2 sep 2026]»), no esta tabla — una op vale sobre una
+ * subtarea si los campos que escribe están entre los ACCIDENTALES PERMITIDOS
+ * ahí. `update` pasó a `true` el 2026-09-04 porque sus cuatro campos
+ * (`content`/`notes`/`priority`/`time`) son cuatro de los permitidos;
+ * `set_section` y `move_to_list` siguen en `false` porque escriben
+ * `sectionId`/`somedayListId`, PROHIBIDOS; y `reschedule` sigue en `false`
+ * aunque `date` esté permitido, por el agujero de `task-ops.unscheduleTask`
+ * en la app. El porqué completo, con el camino de servidor medido de cada
+ * una, en el JSDoc de `assertTaskUsable`.
  */
 const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> = {
 	complete: true,
@@ -986,7 +1039,7 @@ const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> =
 	delete: true,
 	add_subtask: true,
 	complete_subtask: true,
-	update: false,
+	update: true,
 	reschedule: false,
 	set_section: false,
 	move_to_list: false

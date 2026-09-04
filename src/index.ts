@@ -1420,9 +1420,9 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'update_task',
 		{
 			description:
-				`Edita texto, notas, prioridad u hora de una tarea existente (NO subtareas: rechaza su id ` +
-				`con error). Los campos que omitas no cambian; \`notes\` REEMPLAZA las anteriores enteras. ` +
-				`${ASYNC_NOTE}`,
+				`Edita texto, notas, prioridad u hora de una tarea existente, o de una SUBTAREA suya (los ` +
+				`cuatro campos valen igual en una subtarea). Los campos que omitas no cambian; \`notes\` ` +
+				`REEMPLAZA las anteriores enteras. ${ASYNC_NOTE}`,
 			inputSchema: {
 				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 				content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
@@ -1453,7 +1453,11 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				);
 			}
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: false });
+				// `allowSubtask: true` (2026-09-04): `content`/`notes`/`priority`/
+				// `time` son cuatro de los accidentales PERMITIDOS en una subtarea
+				// por `docs/18-que-es-una-tarea.md` §2.5 — ver el JSDoc de
+				// `assertTaskUsable` para el camino de servidor que lo respalda.
+				await requireTaskExists(input.taskId, { allowSubtask: true });
 				await mutateTaskInvalidating({
 					taskId: input.taskId,
 					kind: 'update',
@@ -1478,7 +1482,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		{
 			description:
 				`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada con date:null. ` +
-				`NO aplica a una SUBTAREA (rechaza su id con error). ${ASYNC_NOTE}`,
+				`NO aplica a una SUBTAREA (rechaza su id con error): date:null la adoptaría en la Bandeja ` +
+				`y una subtarea no tiene lista propia. ${ASYNC_NOTE}`,
 			inputSchema: {
 				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 				date: z

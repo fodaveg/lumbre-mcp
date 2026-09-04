@@ -359,11 +359,17 @@ server-side, ver ese endpoint).
 - `cancel_task({ taskId, cancelled? })` — cancela la tarea (`cancelled`
   default `true`): equivalente a completarla, pero marcada como "no se hizo
   ni se hará" (distinto de `complete_task`). `cancelled: false` la restaura.
-- `update_task({ taskId, content?, notes?, priority? })` — edita texto/notas/
-  prioridad; solo toca los campos que envíes. `priority` es `'p1'..'p4'`
-  (`p4` = quitar la prioridad).
+- `update_task({ taskId, content?, notes?, priority?, time? })` — edita texto/
+  notas/prioridad/hora; solo toca los campos que envíes. `priority` es
+  `'p1'..'p4'` (`p4` = quitar la prioridad). **Acepta también el id de una
+  SUBTAREA**: los cuatro campos son accidentales PERMITIDOS en una subtarea
+  (`docs/18-que-es-una-tarea.md` §2.5 del repo principal).
 - `reschedule_task({ taskId, date })` — mueve la tarea a otro día
-  (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con `date: null`.
+  (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con `date: null`. **NO
+  acepta el id de una subtarea** (lo rechaza con error): `date: null` la
+  adoptaría en la Bandeja, y una subtarea no tiene lista propia — vive en la
+  checklist de su padre (§2.5). Para reagendar lo que la contiene, opera sobre
+  la tarea PADRE.
 - `delete_task({ taskId })` — borra (soft-delete) la tarea. **Acción
   delicada**: sin confirmación inmediata ni deshacer desde la tool; confírmalo
   con el usuario antes de llamarla.
@@ -504,6 +510,20 @@ o un campo válido en general pero ajeno a esa op — p. ej.
 `{ op: "complete", date: "2026-01-01" }`) se rechaza igual que antes, solo
 que ahora entra en el mismo informe de éxito parcial que un `taskId`
 inexistente, en vez de tumbar la llamada entera.
+
+**Qué ops aceptan el id de una SUBTAREA** (mismo criterio, MISMOS valores,
+que las tools individuales — lo fija `docs/18-que-es-una-tarea.md` §2.5 del
+repo principal, no este conector):
+
+- **Sí**: `complete`, `cancel`, `delete`, `add_subtask`, `complete_subtask` y
+  `update` (sus cuatro campos —`content`, `notes`, `priority`, `time`— son
+  accidentales PERMITIDOS en una subtarea).
+- **No** (se descarta esa op con un error que explica por qué, las demás del
+  lote siguen): `set_section` y `move_to_list`, porque escriben `sectionId`/
+  `somedayListId`, PROHIBIDOS en una subtarea (no tiene lista ni sección
+  propias: vive en la checklist de su padre); y `reschedule`, porque su
+  `date: null` la adoptaría en la Bandeja. Para eso, opera sobre el id de la
+  tarea PADRE.
 
 **Encadenar dentro del MISMO lote**: la única op que crea algo cuyo id
 puedas necesitar referenciar EN OTRA op del mismo `mutate_tasks` es

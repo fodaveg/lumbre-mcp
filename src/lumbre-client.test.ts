@@ -81,20 +81,38 @@ describe('assertTaskUsable', () => {
 	 * cambio accidental del flag en una tool rompa este test, no solo el
 	 * comportamiento en producción.
 	 */
-	const ACCEPT_SUBTASK = ['complete_task', 'cancel_task', 'delete_task', 'complete_subtask', 'add_subtask'];
-	const REJECT_SUBTASK = ['update_task', 'reschedule_task', 'set_section', 'move_to_list'];
+	const ACCEPT_SUBTASK = [
+		'complete_task',
+		'cancel_task',
+		'delete_task',
+		'complete_subtask',
+		'add_subtask',
+		'update_task'
+	];
+	const REJECT_SUBTASK = ['reschedule_task', 'set_section', 'move_to_list'];
 
-	it.each(ACCEPT_SUBTASK)('%s: acepta un subtaskId (residencia/agenda intactas)', () => {
+	it.each(ACCEPT_SUBTASK)('%s: acepta un subtaskId (no escribe residencia)', () => {
 		expect(() => assertTaskUsable(subtask(), 'sub-1', { allowSubtask: true })).not.toThrow();
 	});
 
-	it.each(REJECT_SUBTASK)('%s: RECHAZA un subtaskId (evita corromper residencia/agenda)', () => {
+	it.each(REJECT_SUBTASK)('%s: RECHAZA un subtaskId (evita corromper la residencia)', () => {
 		expect(() => assertTaskUsable(subtask(), 'sub-1', { allowSubtask: false })).toThrow(subtaskNotAllowedError('sub-1').message);
 	});
 
 	it('los mensajes de error mencionan explícitamente cómo seguir (list_tasks/get_task/complete_subtask)', () => {
 		expect(taskNotFoundError('x').message).toMatch(/list_tasks/);
 		expect(subtaskNotAllowedError('x').message).toMatch(/complete_subtask/);
+	});
+
+	it('subtaskNotAllowedError NO afirma que editar una subtarea esté prohibido — update_task sí vale', () => {
+		// Regresión del texto viejo («es de residencia/agenda/edición»): desde
+		// que `update_task` acepta un `subtaskId`, decir "edición" mandaba al
+		// modelo a rendirse en un caso que funciona. El mensaje debe nombrar el
+		// motivo REAL (lista/sección) y apuntar a update_task como vía viva.
+		const message = subtaskNotAllowedError('x').message;
+		expect(message).toMatch(/update_task/);
+		expect(message).not.toMatch(/residencia\/agenda\/edición/);
+		expect(message).toMatch(/lista ni sección/i);
 	});
 
 	it('taskNotFoundError NO afirma que la tarea no existe — nombra la posibilidad de que esté archivada', () => {
@@ -411,12 +429,42 @@ describe('buildBatchFromOps', () => {
 		expect(batchOps).toEqual([{ type: 'mutate', taskId: 't1', kind: 'delete', payload: {} }]);
 	});
 
-	it('subtarea SIN allowSubtask (update/reschedule/set_section/move_to_list): se descarta', () => {
+	it.each([
+		[
+			'reschedule',
+			{ op: 'reschedule', taskId: 's1', date: '2026-01-01' } satisfies MutateTasksOp
+		],
+		['set_section', { op: 'set_section', taskId: 's1', section: 'Bugs' } satisfies MutateTasksOp],
+		['move_to_list', { op: 'move_to_list', taskId: 's1', list: 'Proyecto' } satisfies MutateTasksOp]
+	])('subtarea en `op:"%s"` (residencia): se descarta', (_name, op) => {
 		const sub = topLevel('s1', { parentId: 't1' });
-		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 's1', content: 'x' }];
-		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', sub]]));
+		const { batchOps, skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
 		expect(batchOps).toEqual([]);
 		expect(skipped[0].error).toMatch(/SUBTAREA/);
+	});
+
+	/**
+	 * Contracara POSITIVA de la anterior: `op:"update"` sobre una subtarea NO
+	 * se descarta y llega ENTERA a la traducción a `BatchOp` — sus cuatro
+	 * campos son accidentales permitidos en subtarea (docs/18 §2.5). Si
+	 * alguien vuelve a poner `update: false` en `TASK_TARGET_ALLOW_SUBTASK`,
+	 * este test se pone rojo aquí, no en producción.
+	 */
+	it('subtarea en `op:"update"`: se ACEPTA y viaja en batchOps (docs/18 §2.5)', () => {
+		const sub = topLevel('s1', { parentId: 't1' });
+		const ops: MutateTasksOp[] = [
+			{ op: 'update', taskId: 's1', content: 'texto nuevo', notes: 'nota', priority: 'p1', time: '09:30' }
+		];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', sub]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: 's1',
+				kind: 'update',
+				payload: { content: 'texto nuevo', notes: 'nota', priority: 1, time: '09:30' }
+			}
+		]);
 	});
 
 	it('subtarea CON allowSubtask (complete/cancel/delete/add_subtask/complete_subtask): se acepta', () => {
