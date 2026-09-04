@@ -432,29 +432,8 @@ export function subtaskNotAllowedError(taskId: string): Error {
 			'§2.5, prohibidos en subtarea: `somedayListId`, `sectionId`). Eso deja fuera move_to_list y ' +
 			'set_section. Si querías cambiar de lista o de sección lo que la contiene, resuelve el id de ' +
 			'la tarea PADRE con list_tasks y opera sobre él. Sobre la SUBTAREA sí valen update_task ' +
-			'(texto, notas, prioridad, hora), reschedule_task con una fecha, complete_task/' +
-			'complete_subtask, cancel_task, delete_task y add_subtask. No se ha encolado ninguna ' +
-			'mutación.'
-	);
-}
-
-/**
- * Error del ÚNICO caso condicional de la matriz: `reschedule` sobre una
- * subtarea con `date: null` (desagendar / mandar a «Algún día»). Separado de
- * `subtaskNotAllowedError` porque el motivo NO es el de aquel («no tiene lista
- * ni sección»): `date` sí es un accidental permitido en subtarea, lo que falla
- * es el camino que recorre el servidor para quitarlo. Ver
- * `rescheduleSubtaskDecision` para la condición y su condición de SALIDA.
- */
-export function subtaskUnscheduleNotAllowedError(taskId: string): Error {
-	return new Error(
-		`El id ${taskId} es de una SUBTAREA y \`date: null\` (desagendar, mandar a "Algún día"/Bandeja) ` +
-			'no aplica ahí: una subtarea sin fecha se queda en la checklist de su padre, NO cae a la ' +
-			'Bandeja (docs/18-que-es-una-tarea.md §2.5). Lo que SÍ puedes hacer sobre esta subtarea: ' +
-			'darle o cambiarle la fecha (reschedule_task con date:"YYYY-MM-DD"), editarla con ' +
-			'update_task (texto, notas, prioridad, hora), o completarla, cancelarla o borrarla ' +
-			'(complete_subtask/cancel_task/delete_task). Si querías desagendar la tarea que la ' +
-			'contiene, resuelve el id del PADRE con list_tasks y opera sobre él. No se ha encolado ' +
+			'(texto, notas, prioridad, hora), reschedule_task (darle fecha o quitársela con date:null), ' +
+			'complete_task/complete_subtask, cancel_task, delete_task y add_subtask. No se ha encolado ' +
 			'ninguna mutación.'
 	);
 }
@@ -499,27 +478,30 @@ export function subtaskUnscheduleNotAllowedError(taskId: string): Error {
  *    subtask-safe — `inbound-materialize.ts` case `'update'` solo escribe
  *    celdas (`editTaskContent`/`setTaskNotes`/`setTaskPriority`) y, para
  *    `time` sin día, llama a `moveTask` con `date !== null`, la rama que NO
- *    escribe `somedayListId`. `get_task` ni siquiera pasa por aquí, pero
- *    acepta un `subtaskId` igual.
+ *    escribe `somedayListId`. También `reschedule_task`/`op:"reschedule"`,
+ *    SIN condición sobre el payload desde 2026-09-04 (ver más abajo).
+ *    `get_task` ni siquiera pasa por aquí, pero acepta un `subtaskId` igual.
  *  - `allowSubtask: false` (default) — `set_section` y `move_to_list`
  *    (escriben `sectionId`/`somedayListId`, PROHIBIDOS en subtarea por §2.5);
  *    y `add_attachment`, que queda fuera del alcance de §2.5 y conserva su
  *    criterio anterior.
- *  - **CONDICIONAL** — `reschedule_task`/`op:"reschedule"`: depende del
- *    PAYLOAD, no de la tool. Con una fecha pasa; con `date: null` se rechaza.
- *    La condición vive en UN solo sitio, `rescheduleSubtaskDecision`, que
- *    consumen las dos superficies (ver su JSDoc, incluida la condición de
- *    SALIDA de este apaño).
+ *
+ * `reschedule` estuvo CONDICIONADO al payload (sí con fecha, no con
+ * `date: null`) mientras `task-ops.unscheduleTask` de la app no tuvo guard de
+ * `parentId` y desagendar una subtarea le escribía `somedayListId` y le pisaba
+ * `position`. Esa condición de salida se CUMPLIÓ: el guard entró en la app en
+ * `a745235a` (desplegado; `unscheduleTask` abre con
+ * `if (t.parentId !== undefined) { unscheduleSubtask(store, t); return; }`, y
+ * `unscheduleSubtask` solo limpia fecha y hora). El guard vive en
+ * `unscheduleTask` misma, que es la que llama el gemelo headless
+ * `inbound-materialize.ts` —el camino que recorre una mutación del MCP—, no
+ * solo la fachada cliente; por eso `reschedule` pasó a `true` a secas y se
+ * retiraron `rescheduleSubtaskDecision`, `subtaskDecisionFor` y
+ * `subtaskUnscheduleNotAllowedError`.
  *
  * Los dos cerrados por §2.5 lo están a propósito y en voz alta: hoy
  * `moveTaskToList` se los tragaría como no-op MUDO, así que este error es lo
  * único que le dice al modelo que no pasó nada.
- *
- * `opts.subtaskError` existe por ese caso condicional: el rechazo de
- * `reschedule` con `date: null` NO es el genérico de residencia («no tiene
- * lista ni sección») y decirle eso al modelo lo mandaría a la conclusión
- * equivocada («entonces tampoco puedo ponerle fecha», que sí puede). Por
- * defecto, `subtaskNotAllowedError`.
  */
 export function assertTaskUsable(
 	task: LumbreTask | undefined,
@@ -527,60 +509,23 @@ export function assertTaskUsable(
 	opts: SubtaskDecision = {}
 ): asserts task is LumbreTask {
 	if (!task) throw taskNotFoundError(taskId);
-	if (!opts.allowSubtask && task.parentId) {
-		throw (opts.subtaskError ?? subtaskNotAllowedError)(taskId);
-	}
+	if (!opts.allowSubtask && task.parentId) throw subtaskNotAllowedError(taskId);
 }
 
 /**
- * Qué puede hacer una op con un `subtaskId`: si lo acepta y, si no, con QUÉ
- * error lo rechaza. Es lo que `assertTaskUsable` recibe como `opts`, y lo que
- * devuelve `rescheduleSubtaskDecision`/`subtaskDecisionFor` — así la decisión
- * y su explicación viajan JUNTAS y no puede quedar una superficie que rechace
- * con el motivo de otra.
+ * Qué puede hacer una tool/op con un `subtaskId`: es lo que `assertTaskUsable`
+ * recibe como `opts` y lo que pasa cada `requireTaskExists(...)` de
+ * `index.ts`. Un objeto con nombre, y no un booleano suelto, porque
+ * `{ allowSubtask: true }` en la llamada dice QUÉ decide ese flag y un `true`
+ * pelado no.
+ *
+ * Tuvo también un `subtaskError` inyectable, que existía solo para el caso
+ * condicional de `reschedule` (`date: null`); retirado el 2026-09-04 con él
+ * — ver el JSDoc de `assertTaskUsable`. Hoy el rechazo es siempre
+ * `subtaskNotAllowedError`.
  */
 export interface SubtaskDecision {
 	allowSubtask?: boolean;
-	/** Error a lanzar si el target resulta ser una subtarea y no se acepta.
-	 *  Por defecto `subtaskNotAllowedError`. */
-	subtaskError?: (taskId: string) => Error;
-}
-
-/**
- * Política de subtarea de un `reschedule`, según su `date`. PUNTO ÚNICO: lo
- * llaman las DOS superficies —la tool individual `reschedule_task`
- * (`index.ts`) y la op `reschedule` de `mutate_tasks` (vía
- * `subtaskDecisionFor` → `buildBatchFromOps`)— justo para que no quede un
- * agujero por el que entre una y no la otra.
- *
- * DECISIÓN CONDICIONAL Y TEMPORAL (2026-09-04). `date` es un accidental
- * PERMITIDO en una subtarea (`docs/18-que-es-una-tarea.md` §2.5), así que
- * darle o cambiarle la fecha debería valer, y VALE: esa rama del servidor
- * (`inbound-materialize.ts` case `'reschedule'` con `date !== null`) llama a
- * `task-ops.moveTask`, que solo adopta en la Bandeja si
- * `src.parentId === undefined` y escribe el orden en `dayPosition` — medido
- * subtask-safe.
- *
- * Lo que NO vale es `date: null`: esa rama no pasa por `moveTask` sino por
- * `task-ops.unscheduleTask`, que —a diferencia de sus vecinas
- * `moveTask`/`moveTaskToList`/`reconcileTaskInvariants`— NO tiene guard de
- * `parentId`. Sobre una subtarea escribiría `somedayListId` (la Bandeja,
- * PROHIBIDO por §2.5, que dice literalmente que una subtarea sin fecha se
- * queda en la checklist de su padre) y le pisaría `position`, que es el orden
- * DENTRO de esa checklist (`liveSubtasksOf` + `sortTasks`). O sea: pérdida de
- * dato real, no un no-op.
- *
- * CONDICIÓN DE SALIDA, para que esto no se quede aquí para siempre: cuando
- * `task-ops.unscheduleTask` tenga su guard de `parentId` en el repo de la app,
- * esta función sobra — `reschedule` pasa a `allowSubtask: true` a secas en
- * `TASK_TARGET_ALLOW_SUBTASK`, se borra el refinamiento de
- * `subtaskDecisionFor`, `reschedule_task` vuelve a un `requireTaskExists`
- * plano y `subtaskUnscheduleNotAllowedError` se retira con su test.
- */
-export function rescheduleSubtaskDecision(date: string | null): SubtaskDecision {
-	return date === null
-		? { allowSubtask: false, subtaskError: subtaskUnscheduleNotAllowedError }
-		: { allowSubtask: true };
 }
 
 /** Adjunto ya descargado: tipo MIME (de la respuesta) + bytes. */
@@ -1105,20 +1050,22 @@ export type MutateTasksOp =
  * («Subtareas [DECIDIDO 2 sep 2026]»), no esta tabla — una op vale sobre una
  * subtarea si los campos que escribe están entre los ACCIDENTALES PERMITIDOS
  * ahí. `update` pasó a `true` el 2026-09-04 porque sus cuatro campos
- * (`content`/`notes`/`priority`/`time`) son cuatro de los permitidos;
+ * (`content`/`notes`/`priority`/`time`) son cuatro de los permitidos, y
+ * `reschedule` ese mismo día (`date` también es de los permitidos) en cuanto
+ * la app cerró su único agujero, el desagendar sin guard de `parentId` —
+ * `task-ops.unscheduleTask`, arreglado en `a745235a`, ver `assertTaskUsable`.
  * `set_section` y `move_to_list` siguen en `false` porque escriben
  * `sectionId`/`somedayListId`, PROHIBIDOS. El porqué completo, con el camino
  * de servidor medido de cada una, en el JSDoc de `assertTaskUsable`.
  *
- * ⚠ ESTA TABLA NO SE LEE SOLA. Es un booleano PLANO y no sabe expresar el
- * único caso que depende del PAYLOAD (`reschedule`: sí con fecha, no con
- * `date: null` — ver `rescheduleSubtaskDecision`). Su entrada `reschedule`
- * está en `false` a propósito, por FAIL-SAFE: quien la lea sin el refinamiento
- * de `subtaskDecisionFor` se queda en el lado seguro (rechaza de más), nunca
- * en el que corrompe. El consumidor correcto es `subtaskDecisionFor`, NO esta
- * tabla; `collectExistenceCheckIds` sí la mira directamente, pero solo por la
- * PRESENCIA de la clave (qué ops necesitan comprobación de existencia), que
- * eso no depende del payload.
+ * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
+ * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
+ * `collectExistenceCheckIds` (solo por la PRESENCIA de la clave: qué ops
+ * necesitan comprobación de existencia). Ninguna op depende ya del PAYLOAD;
+ * si alguna volviera a depender, no se refina aquí a mano en cada consumidor
+ * —eso es justo lo que abre un agujero por una superficie y no por la otra—
+ * sino en una función compartida por las dos, como fue
+ * `rescheduleSubtaskDecision` hasta el 2026-09-04.
  */
 const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> = {
 	complete: true,
@@ -1127,31 +1074,10 @@ const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> =
 	add_subtask: true,
 	complete_subtask: true,
 	update: true,
-	// FAIL-SAFE, no la última palabra: `subtaskDecisionFor` lo refina con el
-	// `date` de la op. Ver el ⚠ de arriba.
-	reschedule: false,
+	reschedule: true,
 	set_section: false,
 	move_to_list: false
 };
-
-/**
- * Decisión de subtarea de UNA op ya formada de `mutate_tasks` — la que
- * `buildBatchFromOps` pasa a `assertTaskUsable`. `undefined` si la op no
- * targetea una tarea (lista/sección/`add_task`: no comprueban existencia, ver
- * `TASK_TARGET_ALLOW_SUBTASK`).
- *
- * Existe para que el único caso CONDICIONAL de la matriz (`reschedule`, que
- * depende de su `date`) se resuelva con la MISMA función que usa la tool
- * individual `reschedule_task` en `index.ts` —`rescheduleSubtaskDecision`—
- * en vez de con una copia de la condición aquí. Si la condición cambia, se
- * cambia en un sitio y las dos superficies se mueven juntas.
- */
-export function subtaskDecisionFor(op: MutateTasksOp): SubtaskDecision | undefined {
-	const allowSubtask = TASK_TARGET_ALLOW_SUBTASK[op.op];
-	if (allowSubtask === undefined) return undefined;
-	if (op.op === 'reschedule') return rescheduleSubtaskDecision(op.date);
-	return { allowSubtask };
-}
 
 /** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
  *  de lista/sección/creación (ver `TASK_TARGET_ALLOW_SUBTASK`). */
@@ -1327,8 +1253,8 @@ export interface BuildBatchResult {
 /**
  * Núcleo PURO (sin red) de `mutate_tasks`: valida localmente cada op
  * (`localValidationError`) y, si targetea una tarea, comprueba su existencia
- * contra `existing` (`assertTaskUsable`, con la decisión de subtarea que le
- * toque — ver `subtaskDecisionFor`); lo que pasa ambos filtros se traduce a
+ * contra `existing` (`assertTaskUsable`, con el `allowSubtask` que le toque —
+ * ver `TASK_TARGET_ALLOW_SUBTASK`); lo que pasa ambos filtros se traduce a
  * `BatchOp` (`translateOp`). Separado de la llamada real (`findTasksByIds` +
  * `runBatch`, en `index.ts`) para poder testearlo sin mockear `fetch` — mismo
  * patrón que `assertTaskUsable`/`lumbre-client.test.ts`.
@@ -1347,14 +1273,14 @@ export function buildBatchFromOps(
 			skipped.push({ index, error: localError });
 			return;
 		}
-		// `subtaskDecisionFor`, NO `TASK_TARGET_ALLOW_SUBTASK` a pelo: la tabla
-		// es un booleano plano y no sabe del caso condicional (`reschedule` con
-		// `date: null`) — ver su ⚠.
-		const decision = subtaskDecisionFor(op);
-		if (decision !== undefined) {
+		// `undefined` = la op no targetea una tarea (lista/sección/`add_task`):
+		// no comprueba existencia. Mismo criterio, MISMA tabla, que
+		// `collectExistenceCheckIds`.
+		const allowSubtask = TASK_TARGET_ALLOW_SUBTASK[op.op];
+		if (allowSubtask !== undefined) {
 			const targetId = targetIdOf(op)!;
 			try {
-				assertTaskUsable(existing.get(targetId), targetId, decision);
+				assertTaskUsable(existing.get(targetId), targetId, { allowSubtask });
 			} catch (err) {
 				skipped.push({ index, error: err instanceof Error ? err.message : String(err) });
 				return;

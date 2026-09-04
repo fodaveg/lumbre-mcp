@@ -12,11 +12,8 @@ import {
 	listLists,
 	listTasks,
 	planBatchPhases,
-	rescheduleSubtaskDecision,
 	runBatch,
-	subtaskDecisionFor,
 	subtaskNotAllowedError,
-	subtaskUnscheduleNotAllowedError,
 	taskNotFoundError,
 	uploadAttachment,
 	type BatchOp,
@@ -90,7 +87,8 @@ describe('assertTaskUsable', () => {
 		'delete_task',
 		'complete_subtask',
 		'add_subtask',
-		'update_task'
+		'update_task',
+		'reschedule_task'
 	];
 	const REJECT_SUBTASK = ['set_section', 'move_to_list'];
 
@@ -100,15 +98,6 @@ describe('assertTaskUsable', () => {
 
 	it.each(REJECT_SUBTASK)('%s: RECHAZA un subtaskId (evita corromper la residencia)', () => {
 		expect(() => assertTaskUsable(subtask(), 'sub-1', { allowSubtask: false })).toThrow(subtaskNotAllowedError('sub-1').message);
-	});
-
-	it('`subtaskError` inyectado: el rechazo sale con ESE error, no con el genérico', () => {
-		expect(() =>
-			assertTaskUsable(subtask(), 'sub-1', {
-				allowSubtask: false,
-				subtaskError: subtaskUnscheduleNotAllowedError
-			})
-		).toThrow(subtaskUnscheduleNotAllowedError('sub-1').message);
 	});
 
 	it('los mensajes de error mencionan explícitamente cómo seguir (list_tasks/get_task/complete_subtask)', () => {
@@ -127,6 +116,18 @@ describe('assertTaskUsable', () => {
 		expect(message).toMatch(/lista ni sección/i);
 	});
 
+	it('subtaskNotAllowedError NO condiciona reschedule_task a llevar fecha — date:null también vale', () => {
+		// Regresión del texto que acompañaba al refinamiento condicional
+		// («reschedule_task con una fecha»): desde que el guard de `parentId`
+		// está en `task-ops.unscheduleTask` (app, a745235a), desagendar una
+		// subtarea es legal y decir lo contrario manda al modelo a operar sobre
+		// el padre, que es OTRA tarea.
+		const message = subtaskNotAllowedError('x').message;
+		expect(message).not.toMatch(/reschedule_task con una fecha/);
+		expect(message).toMatch(/reschedule_task/);
+		expect(message).toMatch(/date:null/);
+	});
+
 	it('taskNotFoundError NO afirma que la tarea no existe — nombra la posibilidad de que esté archivada', () => {
 		// Regresión: `findTaskById` filtra las ARCHIVADAS incluso con
 		// `includeDone=true` (ver su JSDoc en lumbre-client.ts), así que "no
@@ -139,48 +140,32 @@ describe('assertTaskUsable', () => {
 });
 
 /**
- * Superficie 1 de las DOS que comparten la condición: la tool individual
- * `reschedule_task` (`index.ts`), que hace exactamente
- * `requireTaskExists(taskId, rescheduleSubtaskDecision(input.date))` →
- * `assertTaskUsable(task, taskId, decision)`. Se prueba esa composición y no
- * la tool: importar `index.ts` en un test no es seguro (conecta un
- * `StdioServerTransport` y exige `LUMBRE_TOKEN` al cargar el módulo), mismo
- * motivo por el que `assertTaskUsable` se testea aislada más arriba.
- * La superficie 2 (`op:"reschedule"` de `mutate_tasks`) está en
- * `describe('buildBatchFromOps')`, y las dos llaman a la MISMA
- * `rescheduleSubtaskDecision` — si divergieran, uno de los dos bloques cae.
+ * Superficie 1 de las DOS que aceptan un `subtaskId` en un `reschedule`: la
+ * tool individual `reschedule_task` (`index.ts`), que hace exactamente
+ * `requireTaskExists(taskId, { allowSubtask: true })` →
+ * `assertTaskUsable(task, taskId, { allowSubtask: true })`. Se prueba esa
+ * composición y no la tool: importar `index.ts` en un test no es seguro
+ * (conecta un `StdioServerTransport` y exige `LUMBRE_TOKEN` al cargar el
+ * módulo), mismo motivo por el que `assertTaskUsable` se testea aislada más
+ * arriba. La superficie 2 (`op:"reschedule"` de `mutate_tasks`) está en
+ * `describe('buildBatchFromOps')` — si divergieran, uno de los dos bloques cae.
+ *
+ * Hasta el 2026-09-04 esto era CONDICIONAL (`rescheduleSubtaskDecision`):
+ * pasaba con fecha y se rechazaba con `date: null`, porque el
+ * `task-ops.unscheduleTask` de la app no tenía guard de `parentId` y le habría
+ * escrito `somedayListId` a la subtarea. El guard entró en `a745235a` y está
+ * desplegado, así que la decisión ya NO mira el payload: aquí solo queda lo
+ * que esta capa pura puede aseverar (el flag), y quien prueba los DOS payloads
+ * llamando a la tool de verdad es `index.test.ts` — un test aquí «con fecha» y
+ * otro «con date:null» ejecutarían exactamente la misma línea.
  */
-describe('rescheduleSubtaskDecision (tool individual reschedule_task)', () => {
-	it('subtarea + fecha: PASA (date es un accidental permitido, §2.5; el servidor usa moveTask)', () => {
-		const decision = rescheduleSubtaskDecision('2026-01-01');
-		expect(decision.allowSubtask).toBe(true);
-		expect(() => assertTaskUsable(subtask(), 'sub-1', decision)).not.toThrow();
+describe('reschedule_task sobre una subtarea (tool individual)', () => {
+	it('subtarea: PASA, mire lo que mire el payload (date es un accidental permitido, §2.5)', () => {
+		expect(() => assertTaskUsable(subtask(), 'sub-1', { allowSubtask: true })).not.toThrow();
 	});
 
-	it('subtarea + date:null: se RECHAZA, y con SU error (no el genérico de lista/sección)', () => {
-		const decision = rescheduleSubtaskDecision(null);
-		expect(decision.allowSubtask).toBe(false);
-		expect(() => assertTaskUsable(subtask(), 'sub-1', decision)).toThrow(
-			subtaskUnscheduleNotAllowedError('sub-1').message
-		);
-		// El motivo importa: con el genérico, el modelo concluiría que tampoco
-		// puede ponerle fecha a la subtarea — que sí puede.
-		expect(() => assertTaskUsable(subtask(), 'sub-1', decision)).not.toThrow(
-			subtaskNotAllowedError('sub-1').message
-		);
-	});
-
-	it('CONTROL — tarea RAÍZ + date:null: sigue pasando (esto no cambia para una tarea de primer nivel)', () => {
-		expect(() =>
-			assertTaskUsable(topLevelTask(), 'top-1', rescheduleSubtaskDecision(null))
-		).not.toThrow();
-	});
-
-	it('el error de desagendar dice qué SÍ se puede hacer con la subtarea', () => {
-		const message = subtaskUnscheduleNotAllowedError('x').message;
-		expect(message).toMatch(/reschedule_task con date:"YYYY-MM-DD"/);
-		expect(message).toMatch(/update_task/);
-		expect(message).toMatch(/delete_task/);
+	it('CONTROL — tarea RAÍZ: sigue pasando (esto nunca cambió para primer nivel)', () => {
+		expect(() => assertTaskUsable(topLevelTask(), 'top-1', { allowSubtask: true })).not.toThrow();
 	});
 });
 
@@ -498,10 +483,12 @@ describe('buildBatchFromOps', () => {
 	});
 
 	/**
-	 * Superficie 2 de la decisión CONDICIONAL (la 1 es la tool individual, en
-	 * `describe('rescheduleSubtaskDecision …')`): con fecha entra, con
-	 * `date: null` se descarta. Las dos salen de la MISMA
-	 * `rescheduleSubtaskDecision`, vía `subtaskDecisionFor`.
+	 * Superficie 2 (la 1 es la tool individual, en
+	 * `describe('reschedule_task sobre una subtarea …')` y, con el cableado
+	 * real, en `index.test.ts`): un `op:"reschedule"` sobre una subtarea entra
+	 * con CUALQUIER payload. Fue condicional (fecha sí, `date: null` no) hasta
+	 * el 2026-09-04; la condición se retiró al entrar en la app el guard de
+	 * `parentId` de `task-ops.unscheduleTask` (`a745235a`).
 	 */
 	it('subtarea en `op:"reschedule"` CON fecha: se ACEPTA y viaja en batchOps', () => {
 		const sub = topLevel('s1', { parentId: 't1' });
@@ -513,13 +500,13 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
-	it('subtarea en `op:"reschedule"` con date:null: se descarta con el error de DESAGENDAR', () => {
+	it('subtarea en `op:"reschedule"` con date:null: TAMBIÉN se acepta y viaja en batchOps', () => {
 		const sub = topLevel('s1', { parentId: 't1' });
 		const ops: MutateTasksOp[] = [{ op: 'reschedule', taskId: 's1', date: null }];
 		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', sub]]));
-		expect(batchOps).toEqual([]);
-		expect(skipped).toEqual([
-			{ index: 0, error: subtaskUnscheduleNotAllowedError('s1').message }
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 's1', kind: 'reschedule', payload: { date: null } }
 		]);
 	});
 
@@ -532,7 +519,9 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
-	it('el descarte de un `reschedule` con date:null NO tumba el resto del lote (éxito PARCIAL, como los demás)', () => {
+	it('un lote de `reschedule` sobre la MISMA subtarea (con fecha y sin ella) viaja ENTERO', () => {
+		// Antes el primer elemento se descartaba y el lote salía a 2 de 3; el
+		// índice original de los que sí viajaban es lo que hay que conservar.
 		const sub = topLevel('s1', { parentId: 't1' });
 		const ops: MutateTasksOp[] = [
 			{ op: 'reschedule', taskId: 's1', date: null },
@@ -544,29 +533,28 @@ describe('buildBatchFromOps', () => {
 			['t1', topLevel('t1')]
 		]);
 		const { batchOps, originalIndexes, skipped } = buildBatchFromOps(ops, existing);
-		expect(skipped).toEqual([{ index: 0, error: expect.stringMatching(/SUBTAREA/) }]);
-		expect(originalIndexes).toEqual([1, 2]); // se conservan los índices ORIGINALES
-		expect(batchOps).toHaveLength(2);
+		expect(skipped).toEqual([]);
+		expect(originalIndexes).toEqual([0, 1, 2]);
+		expect(batchOps).toHaveLength(3);
 	});
 
-	it('`subtaskDecisionFor`: solo `reschedule` depende del payload; el resto sale de la tabla', () => {
-		// Guardarraíl del punto único: si alguien añadiera OTRA op condicional
-		// sin pasar por `subtaskDecisionFor`, las dos superficies divergirían.
-		expect(subtaskDecisionFor({ op: 'reschedule', taskId: 's1', date: null })).toEqual({
-			allowSubtask: false,
-			subtaskError: subtaskUnscheduleNotAllowedError
-		});
-		expect(subtaskDecisionFor({ op: 'reschedule', taskId: 's1', date: '2026-01-01' })).toEqual({
-			allowSubtask: true
-		});
-		expect(subtaskDecisionFor({ op: 'update', taskId: 's1', content: 'x' })).toEqual({
-			allowSubtask: true
-		});
-		expect(subtaskDecisionFor({ op: 'set_section', taskId: 's1', section: null })).toEqual({
-			allowSubtask: false
-		});
-		// Op que NO targetea una tarea: sin comprobación de existencia.
-		expect(subtaskDecisionFor({ op: 'create_list', name: 'X' })).toBeUndefined();
+	it('la decisión de subtarea de una op sale de la tabla, y solo la de una tarea targeteada', () => {
+		// Guardarraíl de que ninguna op depende ya del PAYLOAD: el mismo
+		// `reschedule` con y sin fecha tiene que dar el MISMO veredicto, y una
+		// op que no targetea una tarea no comprueba existencia.
+		const sub = topLevel('s1', { parentId: 't1' });
+		const existing = new Map([['s1', sub]]);
+		for (const date of [null, '2026-01-01']) {
+			const built = buildBatchFromOps([{ op: 'reschedule', taskId: 's1', date }], existing);
+			expect(built.skipped).toEqual([]);
+			expect(built.batchOps).toHaveLength(1);
+		}
+		expect(buildBatchFromOps([{ op: 'update', taskId: 's1', content: 'x' }], existing).skipped).toEqual([]);
+		expect(
+			buildBatchFromOps([{ op: 'set_section', taskId: 's1', section: null }], existing).skipped
+		).toEqual([{ index: 0, error: subtaskNotAllowedError('s1').message }]);
+		// Op que NO targetea una tarea: pasa sin estar en `existing`.
+		expect(buildBatchFromOps([{ op: 'create_list', name: 'X' }], new Map()).skipped).toEqual([]);
 	});
 
 	/**

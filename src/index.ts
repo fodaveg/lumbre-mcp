@@ -23,7 +23,6 @@ import {
 	planBatchPhases,
 	priorityToLevel,
 	refreshSync,
-	rescheduleSubtaskDecision,
 	runBatch,
 	taskNotFoundError,
 	uploadAttachment,
@@ -1324,10 +1323,9 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	 * existe pero es una subtarea y `allowSubtask` es `false`; el llamante ya
 	 * está dentro de un `try/catch` que lo convierte en `errorResult`.
 	 *
-	 * `opts` es una `SubtaskDecision` entera (no un booleano suelto) porque el
-	 * caso de `reschedule_task` depende del payload y trae su PROPIO error —
-	 * ver `rescheduleSubtaskDecision`, la función que comparte con la op
-	 * `reschedule` de `mutate_tasks`.
+	 * `opts` es una `SubtaskDecision` (objeto con nombre) y no un booleano
+	 * suelto para que la llamada diga QUÉ decide el flag: `{ allowSubtask: true }`
+	 * se lee en el sitio, un `true` pelado repartido por diez tools no.
 	 */
 	async function requireTaskExists(taskId: string, opts: SubtaskDecision = {}): Promise<void> {
 		// Caché corta (`taskCache`, ver `existence-cache.ts`): si `taskId` se
@@ -1486,9 +1484,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		{
 			description:
 				`Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada con date:null. ` +
-				`Acepta también el id de una SUBTAREA, pero SOLO con una fecha: date:null sobre una ` +
-				`subtarea se rechaza con error (una subtarea sin fecha se queda en la checklist de su ` +
-				`padre, no cae a la Bandeja). ${ASYNC_NOTE}`,
+				`Acepta también el id de una SUBTAREA (una subtarea con date:null se queda sin fecha en ` +
+				`la checklist de su padre; no cae a la Bandeja). ${ASYNC_NOTE}`,
 			inputSchema: {
 				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 				date: z
@@ -1498,11 +1495,13 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				// Decisión CONDICIONAL, misma función que usa la op `reschedule` de
-				// `mutate_tasks` (`subtaskDecisionFor` → `buildBatchFromOps`): con
-				// fecha, una subtarea pasa; con `date: null` se rechaza, y con SU
-				// error, no con el genérico de lista/sección.
-				await requireTaskExists(input.taskId, rescheduleSubtaskDecision(input.date));
+				// `allowSubtask: true` SIN condición sobre el payload (2026-09-04):
+				// `date` es un accidental permitido en subtarea (docs/18 §2.5) y
+				// desagendar una ya no la saca de la checklist de su padre — el
+				// guard de `parentId` de `task-ops.unscheduleTask` entró en la app
+				// en `a745235a`. Mismo valor que la tabla de `mutate_tasks`
+				// (`TASK_TARGET_ALLOW_SUBTASK`, entrada `reschedule`).
+				await requireTaskExists(input.taskId, { allowSubtask: true });
 				await mutateTaskInvalidating({
 					taskId: input.taskId,
 					kind: 'reschedule',

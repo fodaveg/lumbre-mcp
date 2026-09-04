@@ -1107,6 +1107,125 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 	});
 });
 
+/**
+ * CABLEADO de la tool individual `reschedule_task` sobre una SUBTAREA — el
+ * `assertTaskUsable` puro ya se prueba en `lumbre-client.test.ts`, pero esa
+ * prueba no ve con qué `allowSubtask` la llama `index.ts`, que es justo donde
+ * vivía la restricción retirada el 2026-09-04. Aquí se llama la tool DE VERDAD
+ * (servidor real + `fetch` mockeado) y se comprueba que la mutación llega a
+ * `POST /api/mutations`.
+ *
+ * Qué se retiró: `reschedule_task` aceptaba un `subtaskId` solo CON fecha
+ * porque el `task-ops.unscheduleTask` de la app no tenía guard de `parentId`.
+ * Lo tiene desde `a745235a` (desplegado), así que `date: null` sobre una
+ * subtarea ya es legal y solo le limpia fecha y hora.
+ */
+describe('reschedule_task sobre una SUBTAREA (cableado real de la tool)', () => {
+	const SUB_ID = '44444444-4444-4444-4444-444444444444';
+	const PARENT_ID = '55555555-5555-5555-5555-555555555555';
+
+	function subtaskRow(overrides: Record<string, unknown> = {}) {
+		return {
+			id: SUB_ID,
+			content: 'subtarea de prueba',
+			notes: null,
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			parentId: PARENT_ID,
+			...overrides
+		};
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	/** Payloads de los `POST /api/mutations` que llegaron al servidor. */
+	function mutationBodies(fetchSpy: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
+		return fetchSpy.mock.calls
+			.filter((call) => String(call[0]).includes('/api/mutations'))
+			.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
+	}
+
+	async function buildClientWith(fetchSpy: ReturnType<typeof vi.fn>) {
+		vi.stubGlobal('fetch', fetchSpy);
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'reschedule-subtask-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function subtaskFetch() {
+		return vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([subtaskRow()]);
+			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('con fecha: la encola (date es un accidental permitido en subtarea, docs/18 §2.5)', async () => {
+		const fetchSpy = subtaskFetch();
+		const client = await buildClientWith(fetchSpy);
+		const result = await client.callTool({
+			name: 'reschedule_task',
+			arguments: { taskId: SUB_ID, date: '2026-01-01' }
+		});
+		expect(result.isError).not.toBe(true);
+		expect(mutationBodies(fetchSpy)).toEqual([
+			{ taskId: SUB_ID, kind: 'reschedule', payload: { date: '2026-01-01' } }
+		]);
+	});
+
+	it('con date:null: TAMBIÉN la encola — ya no se rechaza (guard de parentId en la app, a745235a)', async () => {
+		const fetchSpy = subtaskFetch();
+		const client = await buildClientWith(fetchSpy);
+		const result = await client.callTool({
+			name: 'reschedule_task',
+			arguments: { taskId: SUB_ID, date: null }
+		});
+		expect(result.isError).not.toBe(true);
+		// La propiedad que importa: la mutación VIAJA. Antes se cortaba aquí y
+		// nunca se hacía este POST.
+		expect(mutationBodies(fetchSpy)).toEqual([
+			{ taskId: SUB_ID, kind: 'reschedule', payload: { date: null } }
+		]);
+	});
+
+	it('CONTROL — move_to_list sobre la MISMA subtarea sigue rechazándose (residencia, §2.5)', async () => {
+		// Que `reschedule` se abriera no puede haber abierto las otras dos: si
+		// este control cae, la apertura fue más ancha de lo pedido.
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/lists')) return jsonResponse([]);
+			if (u.includes('/api/tasks?id=')) return jsonResponse([subtaskRow()]);
+			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClientWith(fetchSpy);
+		const result = await client.callTool({
+			name: 'move_to_list',
+			arguments: { taskId: SUB_ID, listId: PARENT_ID }
+		});
+		expect(result.isError).toBe(true);
+		expect(mutationBodies(fetchSpy)).toEqual([]);
+	});
+});
+
 describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍNCRONO)', () => {
 	const TASK_ID = '22222222-2222-2222-2222-222222222222';
 	const SUB_ID = '33333333-3333-3333-3333-333333333333';
