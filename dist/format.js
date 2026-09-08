@@ -398,4 +398,17 @@ export function formatListSummaries(lists) {
     const body = lists.map((l) => `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})`);
     return [header, ...body].join('\n');
 }
+/**
+ * Formatea los vínculos de una lista sin seguirlos ni leer su destino. Cada
+ * fila conserva la metadata que identifica el vínculo y su URL literal,
+ * incluido el esquema `obsidian://` cuando la lista enlaza una nota local.
+ */
+export function formatListLinks(listId, links) {
+    if (links.length === 0)
+        return `Sin vínculos para la lista ${listId}.`;
+    const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} de la lista ${listId}:`;
+    const body = links.map((link) => `· ${link.label} — ${link.url}\n` +
+        `  id: ${link.id} · listId: ${link.listId} · kind: ${link.kind} · targetKey: ${link.targetKey} · updatedAt: ${link.updatedAt}`);
+    return [header, ...body].join('\n');
+}
 //# sourceMappingURL=format.js.map

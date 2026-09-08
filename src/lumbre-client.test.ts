@@ -9,6 +9,7 @@ import {
 	filterPhase2AfterPhase1,
 	findTaskById,
 	findTasksByIds,
+	getListLinks,
 	listLists,
 	listTasks,
 	planBatchPhases,
@@ -319,6 +320,65 @@ describe('listLists', () => {
 	it('respuesta sin `lists` (array) lanza LumbreApiError', async () => {
 		mockFetchJson({ not: 'lists' });
 		await expect(listLists(config)).rejects.toThrow(/inesperada/);
+	});
+});
+
+describe('getListLinks', () => {
+	const LIST_ID = '11111111-1111-4111-8111-111111111111';
+	const links = [
+		{
+			id: '22222222-2222-4222-8222-222222222222',
+			listId: LIST_ID,
+			kind: 'obsidian-note',
+			targetKey: 'projects/lumbre.md',
+			url: 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md',
+			label: 'Proyecto Lumbre',
+			updatedAt: '2026-09-08T09:00:00.000Z'
+		}
+	];
+
+	it('manda GET /api/list-links?listId= con Bearer y conserva metadata y URL obsidian://', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ links }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		expect(await getListLinks(config, LIST_ID)).toEqual(links);
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe(`https://lumbre.test/api/list-links?listId=${LIST_ID}`);
+		expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
+	});
+
+	it('una respuesta sin links no se confunde con una lista vacía', async () => {
+		mockFetchJson({ not: 'links' });
+		await expect(getListLinks(config, LIST_ID)).rejects.toThrow(/inesperada/);
+	});
+
+	it('401 conserva el error de credencial común del cliente', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ message: 'unauthorized' }), {
+				status: 401,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await expect(getListLinks(config, LIST_ID)).rejects.toThrow(/Token inválido/);
+	});
+
+	it('propaga un 5xx de la API en vez de devolver una lista vacía', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ message: 'índice de vínculos no disponible' }), {
+				status: 503,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await expect(getListLinks(config, LIST_ID)).rejects.toThrow(
+			/Lumbre respondió 503: índice de vínculos no disponible/
+		);
 	});
 });
 

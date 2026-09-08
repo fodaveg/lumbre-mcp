@@ -1,4 +1,4 @@
-import type { LumbreListSummary, LumbreTask, TaskScope } from './lumbre-client.js';
+import type { LumbreListLink, LumbreListSummary, LumbreTask, TaskScope } from './lumbre-client.js';
 import {
 	DEFAULT_NOTES_RECENT_HOURS,
 	formatNoteMarker,
@@ -438,6 +438,22 @@ export function formatListSummaries(lists: LumbreListSummary[]): string {
 	const header = `${lists.length} lista${lists.length === 1 ? '' : 's'}:`;
 	const body = lists.map(
 		(l) => `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})`
+	);
+	return [header, ...body].join('\n');
+}
+
+/**
+ * Formatea los vínculos de una lista sin seguirlos ni leer su destino. Cada
+ * fila conserva la metadata que identifica el vínculo y su URL literal,
+ * incluido el esquema `obsidian://` cuando la lista enlaza una nota local.
+ */
+export function formatListLinks(listId: string, links: LumbreListLink[]): string {
+	if (links.length === 0) return `Sin vínculos para la lista ${listId}.`;
+	const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} de la lista ${listId}:`;
+	const body = links.map(
+		(link) =>
+			`· ${link.label} — ${link.url}\n` +
+			`  id: ${link.id} · listId: ${link.listId} · kind: ${link.kind} · targetKey: ${link.targetKey} · updatedAt: ${link.updatedAt}`
 	);
 	return [header, ...body].join('\n');
 }

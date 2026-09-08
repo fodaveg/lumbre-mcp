@@ -224,6 +224,12 @@ presentar esa hipótesis como un fallo observado.
   distingue ambos casos: úsala para comprobar si una lista existe (p. ej. el
   usuario dice que la acaba de crear) o para resolver su `listId` sin
   depender de que ya tenga tareas. Sin parámetros.
+- `get_list_links({ listId })` — lee los vínculos configurados para una lista
+  (vía `GET /api/list-links?listId=`), con su URL y metadata completa. Puede
+  devolver destinos `obsidian://`; el MCP los presenta como vínculos y nunca
+  abre ni lee contenido de Obsidian. Si la lista no tiene vínculos, devuelve
+  una respuesta vacía clara. Un error de autenticación o de la API se devuelve
+  como error, nunca como una lista vacía.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
   recortar (notas íntegras y verbatim, `createdAt` sin recortar, lista/sección
   con sus ids). `includeArchived: true` permite recuperarla aunque esté
@@ -731,10 +737,10 @@ stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
 registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
-de las 20 tools de siempre — así no duplicas la superficie de `tools/list` en
+de las 21 tools de siempre — así no duplicas la superficie de `tools/list` en
 el contexto de cada sesión (pesa ~24 KB de JSON; dos copias son el doble, y el
 modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 20, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 21, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

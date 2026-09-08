@@ -16,6 +16,7 @@ import {
 	findTaskById,
 	findTasksByIds,
 	getAttachment,
+	getListLinks,
 	listBrlEntries,
 	listLists,
 	listTasks,
@@ -34,7 +35,7 @@ import {
 	type MutateTasksOp,
 	type SubtaskDecision
 } from './lumbre-client.js';
-import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
+import { formatListLinks, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
 import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
 import {
@@ -640,14 +641,14 @@ export interface CreateServerOptions {
 	 * conector stdio LOCAL dedicado a adjuntos (ver README, "Transporte HTTP
 	 * remoto"): con `'attachments'`, solo `add_attachment`/`read_attachment`/
 	 * `delete_attachment`; con cualquier otro valor (incluido `undefined`, el
-	 * default), las 20 de siempre. Existe para que David pueda tener el
-	 * conector remoto (20 tools) Y un conector local de adjuntos a la vez sin
-	 * duplicar las 20 en el contexto de cada sesión (`tools/list` ya pesa ~24
+	 * default), las 21 de siempre. Existe para que David pueda tener el
+	 * conector remoto (21 tools) Y un conector local de adjuntos a la vez sin
+	 * duplicar las 21 en el contexto de cada sesión (`tools/list` ya pesa ~24
 	 * KB de JSON; dos
 	 * copias son dos veces ese coste, y el modelo encima tendría que acertar
 	 * cuál de los dos `add_task`/`list_tasks` usar). `main()` la lee de
 	 * `LUMBRE_MCP_TOOLSET` (env); `http.ts` NUNCA la pasa — el conector
-	 * remoto sigue exponiendo las 20 siempre, pase lo que pase con la env del
+	 * remoto sigue exponiendo las 21 siempre, pase lo que pase con la env del
 	 * proceso que lo arrancó.
 	 */
 	toolset?: 'all' | 'attachments';
@@ -658,14 +659,14 @@ export interface CreateServerOptions {
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
- * transporte remoto). Registra las 20 de siempre salvo que
+ * transporte remoto). Registra las 21 de siempre salvo que
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
  * quedan `add_attachment`/`read_attachment`/`delete_attachment` — las demás
  * se registran igual
- * (para no bifurcar cada una de las 17 llamadas a `registerTool` con un
+ * (para no bifurcar cada una de las 18 llamadas a `registerTool` con un
  * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
- * estado intermedio de "20 registradas".
+ * estado intermedio de "21 registradas".
  *
  * `taskCache`/`brlCache` (cachés cortas de existencia, ver
  * `existence-cache.ts`) salen del registro de MÓDULO indexado por
@@ -1089,6 +1090,26 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			try {
 				const lists = await listLists(config);
 				return textResult(formatListSummaries(lists));
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
+	);
+
+	const getListLinksTool = server.registerTool(
+		'get_list_links',
+		{
+			description:
+				'Lee las notas vinculadas de UNA lista por su listId (incluye URL y metadata; puede ser ' +
+					'Obsidian obsidian://). No abre ni lee el contenido de los destinos. Lista vacía si no tiene vínculos.',
+			inputSchema: {
+				listId: z.string().uuid().describe('Id de la lista (ver list_lists o list_tasks)')
+			}
+		},
+		async (input) => {
+			try {
+				const links = await getListLinks(config, input.listId);
+				return textResult(formatListLinks(input.listId, links));
 			} catch (err) {
 				return errorResult(err);
 			}
@@ -2072,18 +2093,19 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	);
 
 	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
-	// retira las 17 tools que NO son `add_attachment`/`read_attachment`/
+	// retira las 18 tools que NO son `add_attachment`/`read_attachment`/
 	// `delete_attachment` — TODAS se registraron arriba igual (para no bifurcar
-	// cada una de las 17 llamadas a `registerTool` con un `if`), así que aquí
+	// cada una de las 18 llamadas a `registerTool` con un `if`), así que aquí
 	// solo se deshace lo
 	// que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
-	// cliente llega a ver el `tools/list` de 20 en el intermedio.
+	// cliente llega a ver el `tools/list` de 21 en el intermedio.
 	if (toolset === 'attachments') {
 		for (const tool of [
 			addTaskTool,
 			refreshSyncTool,
 			listTasksTool,
 			listListsTool,
+			getListLinksTool,
 			getTaskTool,
 			completeTaskTool,
 			cancelTaskTool,
@@ -2116,7 +2138,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
  * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
  * `read_attachment`/`delete_attachment`, pensado para un SEGUNDO conector
- * stdio local dedicado (David enchufa a la vez el remoto de las 20 tools y
+ * stdio local dedicado (David enchufa a la vez el remoto de las 21 tools y
  * este, sin duplicar superficie — ver README). Cualquier otro valor (incluido
  * no ponerla) cae
  * al default `'all'` de `createServer` — nunca falla por un valor raro, un

@@ -288,6 +288,19 @@ export interface LumbreListSummary {
 	taskCount: number;
 }
 
+/** Vínculo de una lista de "Algún día" (`GET /api/list-links?listId=`).
+ * `url` se conserva literal: puede ser una URL web o `obsidian://`, que el
+ * MCP solo presenta como vínculo; nunca lee ni interpreta su contenido. */
+export interface LumbreListLink {
+	id: string;
+	listId: string;
+	kind: string;
+	targetKey: string;
+	url: string;
+	label: string;
+	updatedAt: string;
+}
+
 /**
  * `GET /api/tasks?includeLists=1`: enumera TODAS las listas de "Algún día"
  * vivas del usuario, INCLUIDAS las que no tienen ninguna tarea todavía. Sin
@@ -302,6 +315,20 @@ export async function listLists(config: LumbreConfig): Promise<LumbreListSummary
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1.');
 	}
 	return (body as { lists: LumbreListSummary[] }).lists;
+}
+
+/**
+ * `GET /api/list-links?listId=`: lee los vínculos configurados para UNA lista.
+ * Una lista sin vínculos devuelve `[]`; no se consulta ni se expone contenido
+ * del destino, incluidos los targets con esquema `obsidian://`.
+ */
+export async function getListLinks(config: LumbreConfig, listId: string): Promise<LumbreListLink[]> {
+	const params = new URLSearchParams({ listId });
+	const body = await request(config, `/api/list-links?${params.toString()}`);
+	if (!body || typeof body !== 'object' || !Array.isArray((body as { links?: unknown }).links)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/list-links?listId=.');
+	}
+	return (body as { links: LumbreListLink[] }).links;
 }
 
 /**

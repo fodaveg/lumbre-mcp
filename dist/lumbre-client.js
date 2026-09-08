@@ -102,6 +102,19 @@ export async function listLists(config) {
     return body.lists;
 }
 /**
+ * `GET /api/list-links?listId=`: lee los vínculos configurados para UNA lista.
+ * Una lista sin vínculos devuelve `[]`; no se consulta ni se expone contenido
+ * del destino, incluidos los targets con esquema `obsidian://`.
+ */
+export async function getListLinks(config, listId) {
+    const params = new URLSearchParams({ listId });
+    const body = await request(config, `/api/list-links?${params.toString()}`);
+    if (!body || typeof body !== 'object' || !Array.isArray(body.links)) {
+        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/list-links?listId=.');
+    }
+    return body.links;
+}
+/**
  * Busca UNA tarea por `id` vía `GET /api/tasks?id=` (lookup directo, no
  * listado — ver ese endpoint en el repo principal) y la devuelve, o
  * `undefined` si no existe/no es del usuario del token. A diferencia del
