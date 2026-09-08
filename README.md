@@ -397,7 +397,7 @@ Sin tool suelta desde el 2026-08-27 (podadas `create_list`/`nest_list`/
 las cubría entero, ver "Ejecutar varias operaciones a la vez" más abajo).
 Mueve una tarea a otra lista, crea/anida/renombra/borra una lista con
 `mutate_tasks({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
-"rename_list"|"remove_list", ... }] })` — un solo elemento en `ops` para una
+"rename_list"|"remove_list"|"set_list_notes", ... }] })` — un solo elemento en `ops` para una
 operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
 
 - `move_to_list`: `taskId*`, uno de [`listId`, `list`]. `listId` (id ESTABLE,
@@ -420,6 +420,14 @@ operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
   fecha quedan como tarea de día normal); sus listas hijas pasan a primer
   nivel. No aplica a la última lista viva ni a la Bandeja de entrada canónica
   (se ignora en silencio en ambos casos).
+- `set_list_notes`: `listId*`, `notes*` [`revive`] — reemplaza la nota de la
+  lista. `notes: null` o `""` la borra; `revive: true` explícito restaura una
+  nota borrada previamente. Requiere un servidor compatible con el
+  `kind: "setListNotes"` (Lumbre desde `8a46be41`). Un servidor anterior
+  rechazará la operación y `mutate_tasks` la informará como fallo parcial.
+  El payload que recibe es
+  `{ type: "mutate", taskId: listId, kind: "setListNotes", payload: { notes,
+  revive? } }`.
 
 ### Registro del día (BRL — add-on experimental)
 
@@ -467,7 +475,8 @@ comprobación y las encola en una sola petición (`ops`, máx. 200), en vez de
 una tool call por operación. La mayoría de las tools individuales de arriba
 SIGUEN existiendo para una operación suelta — excepto las 5 ops de LISTA
 (`create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list`), sin
-tool suelta desde el 2026-08-27: `mutate_tasks` es su ÚNICA vía. Éxito
+tool suelta desde el 2026-08-27, y la nueva `set_list_notes`, disponible solo
+en `mutate_tasks`. Éxito
 PARCIAL: una op inválida (`taskId` inexistente, subtarea donde no aplica,
 forma equivocada para esa `op`) no impide las demás — el resultado detalla,
 por posición 0-indexada en `ops`, qué falló y por qué, y el `id` de cada una
@@ -480,12 +489,12 @@ significado que la tool individual equivalente cuando existe: `op:"add_task"`
 `cancel_task`, `op:"update"` = `update_task`, `op:"reschedule"` =
 `reschedule_task`, `op:"delete"` = `delete_task`, `op:"set_section"` =
 `set_section`, `op:"add_subtask"` = `add_subtask`, `op:"complete_subtask"` =
-`complete_subtask`, `op:"remove_section"` = `remove_section`. Las 5 restantes
+`complete_subtask`, `op:"remove_section"` = `remove_section`. Las 6 restantes
 (`op:"move_to_list"`, `op:"create_list"`, `op:"nest_list"`,
-`op:"rename_list"`, `op:"remove_list"`) son gestión de listas de "Algún día"
+`op:"rename_list"`, `op:"remove_list"`, `op:"set_list_notes"`) son gestión de listas de "Algún día"
 (paridad UI↔MCP) y ya NO tienen tool suelta equivalente — ver esa sección más
 arriba para el detalle campo a campo de cada una. El schema que expone la
-tool es deliberadamente laxo (los 21 campos que usan las 15 ops, todos
+tool es deliberadamente laxo (los 22 campos que usan las 16 ops, todos
 opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
@@ -504,6 +513,7 @@ create_list: name* [color, icon, listId]
 nest_list: listId*, parentId*
 rename_list: listId*, name*
 remove_list: listId*
+set_list_notes: listId*, notes* [revive]
 ```
 
 Un elemento que no encaja en la forma de SU `op` (campo obligatorio ausente,

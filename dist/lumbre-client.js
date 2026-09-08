@@ -517,7 +517,8 @@ export async function runBatch(config, ops) {
  * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
  * matriz de `requireTaskExists` en `index.ts` (ver el JSDoc de
  * `assertTaskUsable` para el porqué completo). Las ops de LISTA/SECCIÓN
- * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`) y
+ * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
+ * `set_list_notes`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
  * existencia (mismo criterio que sus tools individuales, que tampoco llaman
  * `requireTaskExists`). La PRESENCIA de una clave es la señal de "esta op
@@ -707,6 +708,16 @@ function translateOp(op) {
             };
         case 'remove_list':
             return { type: 'mutate', taskId: op.listId, kind: 'removeList', payload: {} };
+        case 'set_list_notes':
+            return {
+                type: 'mutate',
+                taskId: op.listId,
+                kind: 'setListNotes',
+                payload: {
+                    notes: op.notes,
+                    ...(op.revive !== undefined ? { revive: op.revive } : {})
+                }
+            };
     }
 }
 /**

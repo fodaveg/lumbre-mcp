@@ -260,11 +260,11 @@ describe('tools/list — superficie completa', () => {
 		expect(mutateTasks).toBeDefined();
 		// No es una aserción de tamaño exacto (ver el test de arriba para el
 		// techo global) — solo confirma que `ops` sigue siendo un array con un
-		// `op` enum de las 15 operaciones (el aplanado no perdió ninguna).
+		// `op` enum de las 16 operaciones (el aplanado no perdió ninguna).
 		const opsSchema = (mutateTasks!.inputSchema as { properties?: Record<string, unknown> }).properties?.ops as
 			| { items?: { properties?: { op?: { enum?: string[] } } } }
 			| undefined;
-		expect(opsSchema?.items?.properties?.op?.enum).toHaveLength(15);
+		expect(opsSchema?.items?.properties?.op?.enum).toHaveLength(16);
 	});
 
 	it('`mutate_brl` expone las 3 ops (add/update/delete)', () => {
@@ -441,7 +441,7 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 	});
 });
 
-describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto interno)', () => {
+describe('mutate_tasks — las 16 `op` siguen aceptándose (esquema estricto interno)', () => {
 	/** Un caso por op: el payload VÁLIDO mínimo/representativo, y variantes
 	 *  INVÁLIDAS por campo que falta y por campo que sobra (ajeno a esa op,
 	 *  pero válido en general — p. ej. `date` en `complete`) — mismo criterio
@@ -586,10 +586,21 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 			valid: { op: 'remove_list', listId: '11111111-1111-1111-1111-111111111111' },
 			missingField: 'listId',
 			extraField: { op: 'remove_list', listId: '11111111-1111-1111-1111-111111111111', icon: '🎯' }
+		},
+		{
+			op: 'set_list_notes',
+			valid: { op: 'set_list_notes', listId: '11111111-1111-1111-1111-111111111111', notes: null, revive: true },
+			missingField: 'notes',
+			extraField: {
+				op: 'set_list_notes',
+				listId: '11111111-1111-1111-1111-111111111111',
+				notes: 'nota',
+				name: 'ajeno'
+			}
 		}
 	];
 
-	it('cubre las 15 operaciones (guardarraíl del propio test)', () => {
+	it('cubre las 16 operaciones (guardarraíl del propio test)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
@@ -606,7 +617,8 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 				'create_list',
 				'nest_list',
 				'rename_list',
-				'remove_list'
+				'remove_list',
+				'set_list_notes'
 			].sort()
 		);
 	});
@@ -631,6 +643,16 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 		});
 	}
 
+	it('update con notes:null pasa el schema expuesto pero el estricto lo rechaza', () => {
+		const invalidUpdate = {
+			op: 'update',
+			taskId: '11111111-1111-1111-1111-111111111111',
+			notes: null
+		};
+		expect(mutateTasksOpSchema.safeParse(invalidUpdate).success).toBe(true);
+		expect(mutateTasksStrictOpSchema.safeParse(invalidUpdate).success).toBe(false);
+	});
+
 	it('op desconocida: ambos schemas la rechazan', () => {
 		const bogus = { op: 'not_a_real_op', taskId: '11111111-1111-1111-1111-111111111111' };
 		expect(mutateTasksOpSchema.safeParse(bogus).success).toBe(false);
@@ -641,7 +663,7 @@ describe('mutate_tasks — las 15 `op` siguen aceptándose (esquema estricto int
 		const result = mutateTasksOpSchema.safeParse({
 			op: 'complete',
 			taskId: '11111111-1111-1111-1111-111111111111',
-			// `donee` no es ninguno de los 21 campos conocidos — typo real de
+			// `donee` no es ninguno de los 22 campos conocidos — typo real de
 			// `done`, no un campo válido en otra op (ver el test de arriba para
 			// ESE caso, que el schema EXPUESTO SÍ deja pasar a propósito).
 			donee: true
@@ -775,6 +797,49 @@ describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lot
 		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
 		expect(text).toContain('[1] add_task: id nueva-1');
 		expect(text).toContain('[2] add_task: id nueva-2');
+	});
+
+	it('create_list + set_list_notes viajan juntos; un servidor aún sin ese kind lo informa como fallo parcial', async () => {
+		// Backend simulado: este test acredita el cableado MCP y que una respuesta
+		// de error no se presenta como éxito; no acredita la materialización CRDT.
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			expect(String(url)).toBe('https://lumbre.test/api/batch');
+			const body = JSON.parse(String(init?.body)) as { ops: unknown[] };
+			expect(body.ops).toEqual([
+				{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'Trabajo' } },
+				{
+					type: 'mutate',
+					taskId: LIST_ID,
+					kind: 'setListNotes',
+					payload: { notes: 'Contexto restaurado', revive: true }
+				}
+			]);
+			return jsonResponse({
+				ok: true,
+				results: [
+					{ index: 0, type: 'mutate', ok: true, id: LIST_ID },
+					{ index: 1, type: 'mutate', ok: false, error: 'kind de mutación desconocido: setListNotes' }
+				]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'create_list', name: 'Trabajo', listId: LIST_ID },
+					{ op: 'set_list_notes', listId: LIST_ID, notes: 'Contexto restaurado', revive: true }
+				]
+			}
+		});
+
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+		const text = resultText(result);
+		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
+		expect(text).toContain('[1] set_list_notes: kind de mutación desconocido: setListNotes');
 	});
 
 	it('create_list FALLA en fase 1: las altas dependientes NO viajan en ninguna petición y salen como fallo', async () => {

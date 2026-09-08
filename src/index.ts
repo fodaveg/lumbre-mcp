@@ -268,8 +268,8 @@ const BRL_DATE = 'Día del registro, YYYY-MM-DD';
  * caracteres — el 27% de toda la superficie de `tools/list` — ver la tarea
  * que lo motivó, 2026-07-25):
  *
- * - `mutateTasksOpSchema` (EXPUESTO, más abajo): UN objeto plano con los 21
- *   campos que usan las 15 ops, TODOS opcionales, cada uno con su
+ * - `mutateTasksOpSchema` (EXPUESTO, más abajo): UN objeto plano con los 22
+ *   campos que usan las 16 ops, TODOS opcionales, cada uno con su
  *   `.describe()` UNA sola vez. Antes esto era un `z.discriminatedUnion` de
  *   15 ramas casi idénticas → `anyOf` con los mismos campos y las mismas
  *   descripciones repetidas 15 veces en el JSON Schema que ve el modelo. El
@@ -416,13 +416,21 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			op: z.literal('remove_list'),
 			listId: z.string().uuid()
 		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('set_list_notes'),
+			listId: z.string().uuid(),
+			notes: z.string().max(10000).nullable(),
+			revive: z.boolean().optional()
+		})
 		.strict()
 ]);
 
 /**
  * Schema EXPUESTO de un elemento de `ops` (ver el JSDoc de
  * `mutateTasksStrictOpSchema` de arriba para el porqué de tenerlos
- * separados): plano, los 21 campos que usan las 15 ops TODOS opcionales
+ * separados): plano, los 22 campos que usan las 16 ops TODOS opcionales
  * (salvo `op`). Poda de superficie (2026-08-25, medido: bajó el JSON Schema
  * EXPUESTO de este objeto de 3.994 a 3.683 caracteres — ver el test de
  * superficie en `index.test.ts`): cada campo tiene `.describe()` SOLO si
@@ -455,7 +463,8 @@ export const mutateTasksOpSchema = z
 				'create_list',
 				'nest_list',
 				'rename_list',
-				'remove_list'
+				'remove_list',
+				'set_list_notes'
 			])
 			.describe('Operación a ejecutar — contrato por-op en la description de `ops`'),
 		taskId: z.string().uuid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
@@ -475,7 +484,10 @@ export const mutateTasksOpSchema = z
 		name: z.string().min(1).max(200).optional(),
 		list: z.string().max(200).optional().describe('Nombre de la lista destino (se crea si no existe)'),
 		section: z.string().max(200).nullable().optional().describe('Nombre de la sección, o null para quitarla'),
-		notes: z.string().max(10000).optional().describe('Notas (reemplaza las anteriores enteras)'),
+		notes: z
+			.union([z.string().max(10000), z.null()])
+			.optional()
+			.describe('Notas (reemplaza las anteriores enteras; null las borra en set_list_notes)'),
 		priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente … p4 = ninguna'),
 		date: z
 			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
@@ -493,6 +505,7 @@ export const mutateTasksOpSchema = z
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
 		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar'),
 		color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
+		revive: z.boolean().optional().describe('true restaura una nota de lista borrada previamente'),
 		// `icon`: sin describe propio — mismo criterio que `text`/`name`; su
 		// semántica (emoji/icono de la lista) ya la dice el nombre del campo.
 		icon: z.string().max(16).optional(),
@@ -531,7 +544,7 @@ function formatOpShapeError(op: string, error: z.ZodError): string {
  * suya. `mutateBrlOpSchema` (EXPUESTO, más abajo): un objeto plano con los 5
  * campos que usan las 3 ops, todos opcionales salvo `op`/`date` (`date` es
  * obligatorio en las 3, así que no gana nada quedando opcional). A
- * diferencia de `mutateTasksOpSchema` (15 ops, 21 campos), aquí el ahorro de
+ * diferencia de `mutateTasksOpSchema` (16 ops, 22 campos), aquí el ahorro de
  * aplanar es pequeño — 3 ops con casi los mismos 2-3 campos cada una— así que
  * el peso real de este schema sale de medirlo (ver el test de superficie en
  * `index.test.ts`), no se asume solo por copiar el patrón.
@@ -1889,7 +1902,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 							'taskId*, section* · move_to_list: taskId*, uno de [listId, list] · add_subtask: ' +
 							'taskId*, subtasks* · complete_subtask: subtaskId* [done] · remove_section: sectionId* ' +
 							'· create_list: name* [color, icon, listId] · nest_list: listId*, parentId* · ' +
-							'rename_list: listId*, name* · remove_list: listId*'
+							'rename_list: listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* [revive]'
 					)
 			}
 		},

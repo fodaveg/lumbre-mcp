@@ -742,6 +742,7 @@ export type MutationKind =
 	| 'nestList'
 	| 'renameList'
 	| 'removeList'
+	| 'setListNotes'
 	| 'createBrlEntry'
 	| 'updateBrlEntry'
 	| 'removeBrlEntry';
@@ -830,6 +831,13 @@ export interface RenameListMutationPayload {
 /** Borra la lista `MutateTaskInput.taskId`. Sin campos — espejo de
  *  `RemoveListPayload`. */
 export type RemoveListMutationPayload = Record<string, never>;
+/** Contrato de `setListNotes` del servidor: reemplaza la nota de una
+ * lista de "Algún día". `null` o una cadena vacía indican borrado; `revive:
+ * true` restaura una nota borrada previamente. */
+export interface SetListNotesMutationPayload {
+	notes: string | null;
+	revive?: boolean;
+}
 /** Crea una entrada de registro (BRL, add-on experimental): `date` el día al
  *  que pertenece y `entry` su texto —`- …` nota, `= …` pensamiento; sin
  *  marcador es una nota—. El id de la entrada nueva viaja en
@@ -870,6 +878,7 @@ export interface MutateTaskInput {
 		| NestListMutationPayload
 		| RenameListMutationPayload
 		| RemoveListMutationPayload
+		| SetListNotesMutationPayload
 		| CreateBrlEntryMutationPayload
 		| UpdateBrlEntryMutationPayload
 		| RemoveBrlEntryMutationPayload;
@@ -1032,14 +1041,16 @@ export type MutateTasksOp =
 	  }
 	| { op: 'nest_list'; listId: string; parentId: string | null }
 	| { op: 'rename_list'; listId: string; name: string }
-	| { op: 'remove_list'; listId: string };
+	| { op: 'remove_list'; listId: string }
+	| { op: 'set_list_notes'; listId: string; notes: string | null; revive?: boolean };
 
 /**
  * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
  * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
  * matriz de `requireTaskExists` en `index.ts` (ver el JSDoc de
  * `assertTaskUsable` para el porqué completo). Las ops de LISTA/SECCIÓN
- * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`) y
+ * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
+ * `set_list_notes`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
  * existencia (mismo criterio que sus tools individuales, que tampoco llaman
  * `requireTaskExists`). La PRESENCIA de una clave es la señal de "esta op
@@ -1231,6 +1242,16 @@ function translateOp(op: MutateTasksOp): BatchOp {
 			};
 		case 'remove_list':
 			return { type: 'mutate', taskId: op.listId, kind: 'removeList', payload: {} };
+		case 'set_list_notes':
+			return {
+				type: 'mutate',
+				taskId: op.listId,
+				kind: 'setListNotes',
+				payload: {
+					notes: op.notes,
+					...(op.revive !== undefined ? { revive: op.revive } : {})
+				}
+			};
 	}
 }
 

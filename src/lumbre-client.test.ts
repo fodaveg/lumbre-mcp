@@ -606,6 +606,25 @@ describe('buildBatchFromOps', () => {
 		expect(batchOps[0]).toEqual({ type: 'ingest', task: { text: 'nueva tarea' } });
 	});
 
+	it('set_list_notes traduce nota, borrado y revive sin comprobar existencia de tarea', () => {
+		const listId = 'l1';
+		const { batchOps, originalIndexes, skipped } = buildBatchFromOps(
+			[
+				{ op: 'set_list_notes', listId, notes: 'Contexto de la lista' },
+				{ op: 'set_list_notes', listId, notes: null, revive: true },
+				{ op: 'set_list_notes', listId, notes: '', revive: false }
+			],
+			new Map()
+		);
+		expect(skipped).toEqual([]);
+		expect(originalIndexes).toEqual([0, 1, 2]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: listId, kind: 'setListNotes', payload: { notes: 'Contexto de la lista' } },
+			{ type: 'mutate', taskId: listId, kind: 'setListNotes', payload: { notes: null, revive: true } },
+			{ type: 'mutate', taskId: listId, kind: 'setListNotes', payload: { notes: '', revive: false } }
+		]);
+	});
+
 	it('validación local: `update` sin ningún campo a cambiar se descarta ANTES de comprobar existencia', () => {
 		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 't1' }];
 		// `existing` vacío a propósito: si la validación local no cortara antes,
