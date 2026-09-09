@@ -368,6 +368,41 @@ describe('getListLinks', () => {
 		await expect(getListLinks(config, LIST_ID)).rejects.toThrow(/Token inválido/);
 	});
 
+	// Tarea 0a717ae9: `unauthorizedApiError` (único sitio que decide el texto
+	// de un 401, ver su JSDoc) según `config.authMode` — un caso por modo.
+	it('401 en modo `authMode: "token"` (o sin indicar, el default): mismo mensaje de siempre, nombra LUMBRE_TOKEN', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ message: 'unauthorized' }), {
+				status: 401,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const tokenConfig: LumbreConfig = { ...config, authMode: 'token' };
+		await expect(getListLinks(tokenConfig, LIST_ID)).rejects.toThrow(/Token inválido.*LUMBRE_TOKEN/);
+	});
+
+	it('401 en modo `authMode: "oauth"`: NO nombra LUMBRE_TOKEN, invita a reconectar sin exponer el token', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ message: 'unauthorized' }), {
+				status: 401,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const oauthConfig: LumbreConfig = { ...config, authMode: 'oauth' };
+		let message = '';
+		try {
+			await getListLinks(oauthConfig, LIST_ID);
+			throw new Error('debía lanzar LumbreApiError');
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toMatch(/autorización OAuth.*no es válida o fue revocada/);
+		expect(message).not.toMatch(/LUMBRE_TOKEN/);
+		expect(message).not.toContain(oauthConfig.token);
+	});
+
 	it('propaga un 5xx de la API en vez de devolver una lista vacía', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(
 			new Response(JSON.stringify({ message: 'índice de vínculos no disponible' }), {

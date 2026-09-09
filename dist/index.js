@@ -89,7 +89,10 @@ function loadConfig() {
         process.exit(1);
     }
     const baseUrl = process.env.LUMBRE_BASE_URL?.trim() || 'https://app.lumbre.pro';
-    return { baseUrl, token };
+    // `authMode: 'token'` — este proceso stdio SIEMPRE lee una credencial
+    // estática de env (ver el JSDoc de `LumbreConfig.authMode`); un 401 de la
+    // API sí puede resolverse configurando `LUMBRE_TOKEN` de nuevo.
+    return { baseUrl, token, authMode: 'token' };
 }
 function textResult(text) {
     return { content: [{ type: 'text', text }] };

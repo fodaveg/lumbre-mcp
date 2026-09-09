@@ -229,7 +229,13 @@ presentar esa hipótesis como un fallo observado.
   devolver destinos `obsidian://`; el MCP los presenta como vínculos y nunca
   abre ni lee contenido de Obsidian. Si la lista no tiene vínculos, devuelve
   una respuesta vacía clara. Un error de autenticación o de la API se devuelve
-  como error, nunca como una lista vacía.
+  como error, nunca como una lista vacía. Como el resto de tools, un 401
+  contra Lumbre viaja como error de autenticación — el texto depende del modo
+  del conector (ver "Autenticación — OAuth 2.1 con consentimiento en Lumbre" y
+  "Conector stdio local" más abajo): con `LUMBRE_TOKEN` (stdio, o Bearer
+  directo/path HTTP) dice que el token no está configurado o no es válido; con
+  el conector remoto autorizado por OAuth dice que la autorización OAuth no es
+  válida o fue revocada, sin mencionar `LUMBRE_TOKEN` ni exponer ningún token.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
   recortar (notas íntegras y verbatim, `createdAt` sin recortar, lista/sección
   con sus ids). `includeArchived: true` permite recuperarla aunque esté
@@ -711,6 +717,21 @@ de fallar o mezclar. El token del path se valida de FORMA antes de usarse
 segmento que no case — vacío, con más de un tramo, con caracteres fuera de
 `[0-9a-f]` — se trata exactamente como "sin credencial" y responde 401, sin
 recortes ni normalizaciones.
+
+**El 401 de una tool, distinto del 401 de la puerta**: lo de arriba es el 401
+que responde el relé ANTES de llamar a ninguna tool, cuando la petición no
+trae ninguna credencial utilizable. Hay un 401 distinto, más tarde en el
+camino: la credencial SÍ resolvió aquí (el access token OAuth es válido, o el
+Bearer directo/path tiene forma correcta) pero `app.lumbre.pro` la rechaza al
+llamar a la tool — p. ej. porque se revocó desde la propia Lumbre. Ese error lo
+ve el modelo como el resultado de la tool, no como un fallo de transporte, y el
+texto cambia según de dónde salió la credencial: con OAuth dice que la
+autorización no es válida o fue revocada e invita a reconectar, sin mencionar
+`LUMBRE_TOKEN` en ningún momento (el proceso remoto no lo lee); con Bearer
+directo o token en el path — el mismo tipo de credencial estática que
+`LUMBRE_TOKEN` — conserva el mensaje de siempre. Un solo sitio decide ese
+texto (`unauthorizedApiError` en `src/lumbre-client.ts`), reutilizado por
+todas las tools.
 
 **El coste de la forma heredada del path**: el token queda guardado en la
 configuración del conector del lado de Anthropic (claude.ai) y visible en

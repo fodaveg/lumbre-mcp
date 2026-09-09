@@ -8,6 +8,22 @@ export class LumbreApiError extends Error {
         this.name = 'LumbreApiError';
     }
 }
+/**
+ * Mensaje de un 401 de la API de Lumbre, según `config.authMode` — ÚNICO sitio
+ * que decide ese texto (tarea 0a717ae9), reutilizado por `request`,
+ * `getAttachment` y `uploadAttachment`. Antes las tres funciones repetían el
+ * mismo literal a mano y siempre nombraban `LUMBRE_TOKEN`, aunque el proceso
+ * corriera en modo OAuth (`http.ts`, token resuelto de un access token OAuth
+ * 2.1 vía `resolveAccessToken`) — ahí ese nombre no significa nada para quien
+ * lo lee (nunca configuró ningún `LUMBRE_TOKEN`) ni le dice cómo arreglarlo:
+ * el problema no es un env var suyo, es la autorización OAuth con Lumbre.
+ */
+function unauthorizedApiError(config) {
+    if (config.authMode === 'oauth') {
+        return new LumbreApiError('La autorización OAuth de Lumbre no es válida o fue revocada. Vuelve a conectar Lumbre desde tu cliente.', 401);
+    }
+    return new LumbreApiError('Token inválido o no configurado (LUMBRE_TOKEN). Consíguelo en Ajustes → email entrante de Lumbre.', 401);
+}
 /** Cuerpo de error `{ message }` que produce `error()` de SvelteKit, si acaso. */
 function extractMessage(body) {
     if (body && typeof body === 'object' && 'message' in body) {
@@ -39,7 +55,7 @@ async function request(config, path, init = {}) {
         : await res.text().catch(() => null);
     if (!res.ok) {
         if (res.status === 401) {
-            throw new LumbreApiError('Token inválido o no configurado (LUMBRE_TOKEN). Consíguelo en Ajustes → email entrante de Lumbre.', 401);
+            throw unauthorizedApiError(config);
         }
         if (res.status === 429) {
             throw new LumbreApiError('Demasiadas peticiones a Lumbre; espera un momento y reintenta.', 429);
@@ -326,7 +342,7 @@ export async function getAttachment(config, id) {
     }
     if (!res.ok) {
         if (res.status === 401) {
-            throw new LumbreApiError('Token inválido o no configurado (LUMBRE_TOKEN). Consíguelo en Ajustes → email entrante de Lumbre.', 401);
+            throw unauthorizedApiError(config);
         }
         if (res.status === 404) {
             throw new LumbreApiError(`Adjunto ${id} no encontrado (o no pertenece al dueño del token).`, 404);
@@ -429,7 +445,7 @@ export async function uploadAttachment(config, input) {
         : await res.text().catch(() => null);
     if (!res.ok) {
         if (res.status === 401) {
-            throw new LumbreApiError('Token inválido o no configurado (LUMBRE_TOKEN). Consíguelo en Ajustes → email entrante de Lumbre.', 401);
+            throw unauthorizedApiError(config);
         }
         if (res.status === 404) {
             throw new LumbreApiError(extractMessage(body) ?? 'La tarea no existe, está borrada o archivada.', 404);

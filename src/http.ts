@@ -189,9 +189,21 @@ async function handleMcpRequest(
 	// incorrecta cae exactamente por esta misma rama, como "sin credencial".
 	const presentedBearer = tokenFromHeader(req);
 	let token = pathToken;
+	// `authMode` (ver `LumbreConfig.authMode`, tarea 0a717ae9): `'oauth'` SOLO
+	// cuando el bearer presentado es un access token OAuth 2.1 resuelto por el
+	// broker (`resolveAccessToken`) a la credencial upstream — un 401 de
+	// app.lumbre.pro con esa credencial no lo arregla nadie tocando
+	// `LUMBRE_TOKEN`. El Bearer directo y el token en el path (formas de
+	// compatibilidad, ver el JSDoc de cabecera) siguen siendo el mismo tipo de
+	// credencial estática que `LUMBRE_TOKEN`, así que conservan `'token'`.
+	let authMode: LumbreConfig['authMode'] = 'token';
 	if (presentedBearer) {
-		if (oauth.isOAuthAccessToken(presentedBearer)) token = await oauth.resolveAccessToken(presentedBearer);
-		else token = presentedBearer;
+		if (oauth.isOAuthAccessToken(presentedBearer)) {
+			token = await oauth.resolveAccessToken(presentedBearer);
+			authMode = 'oauth';
+		} else {
+			token = presentedBearer;
+		}
 	}
 	if (!token) {
 		sendJsonRpcError(
@@ -217,7 +229,7 @@ async function handleMcpRequest(
 		return;
 	}
 
-	const config: LumbreConfig = { baseUrl, token };
+	const config: LumbreConfig = { baseUrl, token, authMode };
 	// CONTRATO M1: la única LLAMADA a la factory real de `index.ts`.
 	// `localFilesystem: false` — este proceso corre en el VPS compartido, no
 	// en la máquina de quien pregunta: `add_attachment({ file_path })` NUNCA

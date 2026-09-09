@@ -1,6 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { mkdtemp } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * Tests del transporte HTTP remoto (`http.ts`, tarea M2, cableado a la
@@ -268,6 +271,97 @@ describe('POST /mcp — la caché de existencia SOBREVIVE entre peticiones HTTP 
 		const second = await toolCall('tok-cache-b', 202, 'complete_task', { taskId: TASK_ID });
 		expect(second.isError).not.toBe(true);
 		expect(countExistenceGets(fetchSpy)).toBe(2);
+	});
+});
+
+describe('POST /mcp — el 401 de una tool según el modo de autenticación (tarea 0a717ae9)', () => {
+	/**
+	 * `request()`/`getAttachment`/`uploadAttachment` (`lumbre-client.ts`)
+	 * convertían CUALQUIER 401 de `app.lumbre.pro` en «Token inválido o no
+	 * configurado (LUMBRE_TOKEN)», también cuando la credencial venía de un
+	 * access token OAuth 2.1 resuelto por el broker — un mensaje que no dice
+	 * nada de cómo arreglarlo (este proceso remoto nunca lee `LUMBRE_TOKEN`) y
+	 * confunde a quien lo usa. `unauthorizedApiError` decide ahora el texto
+	 * según `config.authMode`, fijado en `handleMcpRequest` (`http.ts`) según
+	 * de dónde salió el token. Un caso por modo, con una tool real
+	 * (`list_lists`, sin parámetros) contra un 401 mockeado de Lumbre.
+	 */
+	const originalFetch = globalThis.fetch;
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	async function callListLists(
+		target: string,
+		authorization: string
+	): Promise<{ isError?: boolean; text: string }> {
+		const res = await fetch(`${target}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization },
+			body: JSON.stringify({
+				jsonrpc: '2.0',
+				id: 1,
+				method: 'tools/call',
+				params: { name: 'list_lists', arguments: {} }
+			})
+		});
+		const body = (await res.json()) as {
+			result?: { isError?: boolean; content?: Array<{ text?: string }> };
+		};
+		return { isError: body.result?.isError, text: body.result?.content?.[0]?.text ?? '' };
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('modo token (Bearer directo, mismo tipo de credencial que LUMBRE_TOKEN): conserva el mensaje de siempre', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string | URL, init?: RequestInit) => {
+				const u = String(url);
+				if (u.startsWith(baseUrl)) return originalFetch(url, init);
+				return jsonResponse({ message: 'unauthorized' }, 401);
+			})
+		);
+
+		const { isError, text } = await callListLists(baseUrl, 'Bearer tok-directo-revocado');
+		expect(isError).toBe(true);
+		expect(text).toMatch(/LUMBRE_TOKEN/);
+	});
+
+	it('modo OAuth (access token resuelto por el broker): NO nombra LUMBRE_TOKEN, invita a reconectar', async () => {
+		const { createHttpApp } = await import('./http.js');
+		const { OAuthService } = await import('./oauth.js');
+		const stateDir = await mkdtemp(join(tmpdir(), 'lumbre-mcp-401-oauth-'));
+		const oauth = new OAuthService({ stateDir });
+		vi.spyOn(oauth, 'isOAuthAccessToken').mockReturnValue(true);
+		vi.spyOn(oauth, 'resolveAccessToken').mockResolvedValue('upstream-token-revocado');
+
+		const oauthApp = createHttpApp('https://app.lumbre.test', oauth);
+		const oauthServer = oauthApp.listen(0);
+		await new Promise<void>((resolve) => oauthServer.once('listening', resolve));
+		const oauthBaseUrl = `http://127.0.0.1:${(oauthServer.address() as AddressInfo).port}`;
+
+		try {
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async (url: string | URL, init?: RequestInit) => {
+					const u = String(url);
+					if (u.startsWith(oauthBaseUrl)) return originalFetch(url, init);
+					return jsonResponse({ message: 'unauthorized' }, 401);
+				})
+			);
+
+			const { isError, text } = await callListLists(oauthBaseUrl, 'Bearer lm_at_cualquiera');
+			expect(isError).toBe(true);
+			expect(text).not.toMatch(/LUMBRE_TOKEN/);
+			expect(text).toMatch(/OAuth/);
+			expect(text).toMatch(/reconecta|Vuelve a conectar/i);
+		} finally {
+			await new Promise<void>((resolve, reject) => oauthServer.close((err) => (err ? reject(err) : resolve())));
+		}
 	});
 });
 
