@@ -146,8 +146,9 @@ presentar esa hipótesis como un fallo observado.
   mismo endpoint que usa email-to-task/Atajos de iOS). Se encola y se
   materializa en el planificador la próxima vez que un dispositivo tuyo
   sincronice; no es instantáneo si no hay ningún dispositivo online. Acepta
-  `list` (nombre, se crea si no existe) o `listId` (id ESTABLE de la lista,
+  `list` (nombre, se crea como proyecto si no existe) o `listId` (id ESTABLE del proyecto o área,
   preferente sobre `list`, inmune a renames — sácalo de `list_tasks`).
+  `tags` fija sus tags propios; `[]` declara explícitamente que nace sin tags.
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
   por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
   fecha), `overdue` o `all`; puede incluir completadas con `includeDone`.
@@ -163,18 +164,20 @@ presentar esa hipótesis como un fallo observado.
   `upcoming` lo sirve la APP; hasta que la versión con ese scope esté
   desplegada, pedirlo responde `scope inválido` — comprobado contra prod el
   2026-07-26.) `list`
-  filtra además por el nombre (case-insensitive) de una lista de "Algún
-  día"/proyecto — sin `scope` explícito junto con `list`, el alcance temporal
-  por defecto pasa a `all` (la mayoría de las tareas de una lista no tienen
-  fecha). Un `list` que no existe (aún) devuelve una lista vacía, no un error.
-  Si alguna tarea del lote tiene lista, la respuesta empieza con una leyenda
-  (`· lista "Nombre" — listId: <uuid>`), una línea por lista distinta, para
+  filtra además por el nombre (case-insensitive) de un proyecto o área — sin
+  `scope` explícito junto con `list`, el alcance temporal por defecto pasa a
+  `all` (la mayoría de sus tareas no tienen fecha). Un `list` que no existe
+  (aún) devuelve una consulta vacía, no un error. Si alguna tarea del lote
+  pertenece a un proyecto o área, la respuesta empieza con una leyenda
+  (`· proyecto/área "Nombre" — listId: <uuid>`), una línea por destino distinto, para
   que puedas usar ese `listId` en `add_task` o en `mutate_tasks` (`op:
   "move_to_list"`) sin ambigüedad.
-  Cada tarea muestra su `createdAt` (recortado a minuto) para desempatar
-  duplicados. `notes` controla las notas de cada tarea, default `'auto'`
+  Cada tarea distingue `#tags` propios de `heredados:#tags` efectivos y muestra
+  su `createdAt` (recortado a minuto) para desempatar duplicados. `notes`
+  controla las notas de cada tarea, default `'auto'`
   (2026-07-25, sustituye al viejo truncado fijo a 240 chars): GARANTÍA — una
-  nota sale ÍNTEGRA (si `content` lleva `@done`/`#done`, si `notesUpdatedAt`
+  nota sale ÍNTEGRA (si lleva `@done` inline o el tag propio `done`; `#done`
+  inline queda como fallback para servidores antiguos sin arrays de tags; si `notesUpdatedAt`
   —la marca de última edición de la nota que expone la API, derivada del HLC
   de su celda CRDT— es POSTERIOR a la última vez que este MCP la mostró
   —huella local best-effort en
@@ -217,17 +220,17 @@ presentar esa hipótesis como un fallo observado.
   nota se repliega a marcador — nunca a medias ni vacía haciéndose pasar por
   "sin nota" (misma garantía de arriba). El resultado observable es idéntico
   al de una sola petición; solo cambia cuántos bytes viajan.
-- `list_lists()` — enumera TODAS tus listas de "Algún día", con su recuento de
-  tareas (vía `GET /api/tasks?includeLists=1`) — INCLUIDAS las que todavía no
+- `list_lists()` — enumera TODOS tus proyectos y áreas, con su recuento de
+  tareas (vía `GET /api/tasks?includeLists=1`) — INCLUIDOS los que todavía no
   tienen ninguna tarea. A diferencia de `list_tasks({ list })`, que responde
-  `[]` tanto si la lista no existe como si existe pero está vacía, `list_lists`
-  distingue ambos casos: úsala para comprobar si una lista existe (p. ej. el
+  `[]` tanto si el destino no existe como si existe pero está vacío, `list_lists`
+  distingue ambos casos: úsala para comprobar si un proyecto o área existe (p. ej. el
   usuario dice que la acaba de crear) o para resolver su `listId` sin
   depender de que ya tenga tareas. Sin parámetros.
-- `get_list_links({ listId })` — lee los vínculos configurados para una lista
+- `get_list_links({ listId })` — lee los vínculos configurados para un proyecto o área
   (vía `GET /api/list-links?listId=`), con su URL y metadata completa. Puede
   devolver destinos `obsidian://`; el MCP los presenta como vínculos y nunca
-  abre ni lee contenido de Obsidian. Si la lista no tiene vínculos, devuelve
+  abre ni lee contenido de Obsidian. Si el destino no tiene vínculos, devuelve
   una respuesta vacía clara. Un error de autenticación o de la API se devuelve
   como error, nunca como una lista vacía. Como el resto de tools, un 401
   contra Lumbre viaja como error de autenticación — el texto depende del modo
@@ -237,7 +240,7 @@ presentar esa hipótesis como un fallo observado.
   el conector remoto autorizado por OAuth dice que la autorización OAuth no es
   válida o fue revocada, sin mencionar `LUMBRE_TOKEN` ni exponer ningún token.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
-  recortar (notas íntegras y verbatim, `createdAt` sin recortar, lista/sección
+  recortar (notas íntegras y verbatim, `createdAt` sin recortar, proyecto o área/sección
   con sus ids). `includeArchived: true` permite recuperarla aunque esté
   archivada. Si
   tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/
@@ -311,7 +314,7 @@ presentar esa hipótesis como un fallo observado.
   cambios de un dispositivo offline que aún no los mandó no se pueden
   recuperar desde aquí.
 
-### Referencias a otras tareas/listas, resueltas EN VIVO
+### Referencias a otras tareas y a proyectos/áreas, resueltas EN VIVO
 
 Una nota (o el texto de una tarea) puede llevar referencias
 `[[task:ID|Etiqueta]]` / `[[list:ID|Etiqueta]]`, que la app pinta como chips
@@ -325,7 +328,7 @@ viejo — y una referencia rota era **indistinguible** de una viva. Desde
 →tarea[pendiente] "Título ACTUAL" ✎573 ↻24jul id:<uuid>
 →tarea[hecha] "Título ACTUAL" id:<uuid>
 →tarea[ROTA] id:<uuid>
-→lista "Nombre ACTUAL" id:<uuid>
+→proyecto/área "Nombre ACTUAL" id:<uuid>
 ```
 
 - Manda el **id**, no la etiqueta: si el título cambió, se enseña el ACTUAL (la
@@ -341,7 +344,7 @@ viejo — y una referencia rota era **indistinguible** de una viva. Desde
   tamaño de la respuesta y hay ciclos posibles: A→B y B→A).
 - Coste: **cero** peticiones extra si el lote no tiene referencias; UNA
   (`GET /api/tasks?ids=`, con todos los ids de golpe, tope 200) si las tiene; y
-  una segunda (`?includeLists=1`) solo si además hay referencias a listas. Nunca
+  una segunda (`?includeLists=1`) solo si además hay referencias a proyectos o áreas. Nunca
   una petición por referencia. Si esa llamada falla, la referencia sale como
   `sin resolver` (nunca como rota) y el listado se devuelve igual.
 - La cabecera del listado resume lo que hay (`refs: 2 vivas · 1 con nota ✎ …`).
@@ -371,10 +374,11 @@ server-side, ver ese endpoint).
 - `cancel_task({ taskId, cancelled? })` — cancela la tarea (`cancelled`
   default `true`): equivalente a completarla, pero marcada como "no se hizo
   ni se hará" (distinto de `complete_task`). `cancelled: false` la restaura.
-- `update_task({ taskId, content?, notes?, priority?, time? })` — edita texto/
-  notas/prioridad/hora; solo toca los campos que envíes. `priority` es
+- `update_task({ taskId, content?, notes?, tags?, priority?, time? })` — edita
+  texto, notas, tags propios, prioridad u hora; solo toca los campos que envíes.
+  `tags: []` quita todos los tags propios; omitirlo los conserva. `priority` es
   `'p1'..'p4'` (`p4` = quitar la prioridad). **Acepta también el id de una
-  SUBTAREA**: los cuatro campos son accidentales PERMITIDOS en una subtarea
+  SUBTAREA**: los cinco campos son accidentales PERMITIDOS en una subtarea
   (`docs/18-que-es-una-tarea.md` §2.5 del repo principal).
 - `reschedule_task({ taskId, date })` — mueve la tarea a otro día
   (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con `date: null`.
@@ -396,44 +400,44 @@ server-side, ver ese endpoint).
   `get_task` de su tarea padre). Mismo mecanismo que `complete_task`: no
   cascada nada sobre la tarea padre.
 - `remove_section({ sectionId })` — borra (tombstone) una sección/heading
-  dentro de una lista de "Algún día"/proyecto. Sus tareas NUNCA se borran:
+  dentro de un proyecto o área. Sus tareas NUNCA se borran:
   solo pierden la sección (quedan sueltas, "sin sección", dentro de la MISMA
-  lista). Sin `list_sections` todavía: resuelve el `sectionId` desde el campo
+  residencia). Sin `list_sections` todavía: resuelve el `sectionId` desde el campo
   `sectionId` de una tarea que ya viva ahí (`list_tasks`/`get_task`).
 
-### Gestión de listas de "Algún día" (paridad UI↔MCP)
+### Gestión de proyectos y áreas (paridad UI↔MCP)
 
 Sin tool suelta desde el 2026-08-27 (podadas `create_list`/`nest_list`/
 `rename_list`/`remove_list`/`move_to_list`: cero o casi cero uso real medido
 —19 llamadas/mes en total, 12 de ellas `move_to_list`— y `mutate_tasks` ya
 las cubría entero, ver "Ejecutar varias operaciones a la vez" más abajo).
-Mueve una tarea a otra lista, crea/anida/renombra/borra una lista con
+Mueve una tarea a otro proyecto o área, y crea/anida/renombra/borra contenedores con
 `mutate_tasks({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
 "rename_list"|"remove_list"|"set_list_notes", ... }] })` — un solo elemento en `ops` para una
 operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
 
 - `move_to_list`: `taskId*`, uno de [`listId`, `list`]. `listId` (id ESTABLE,
-  ver la leyenda de listas al principio de `list_tasks`) es preferente sobre
-  `list` (nombre, se crea si no existe); `listId: null` desvincula la tarea
-  de su lista actual. Conserva la fecha de la tarea y limpia su sección.
-- `create_list`: `name*` [`color`, `icon`, `listId`] — crea una lista/proyecto
-  nueva; el resultado trae el `listId` generado (o el que tú le hayas dado,
+  ver la leyenda de proyectos y áreas al principio de `list_tasks`) es preferente sobre
+  `list` (nombre, se crea como proyecto si no existe); `listId: null` desvincula la tarea
+  de su proyecto o área actual. Conserva la fecha de la tarea y limpia su sección.
+- `create_list`: `name*` [`color`, `icon`, `listId`] — crea un proyecto nuevo;
+  el resultado trae el `listId` generado (o el que tú le hayas dado,
   ver "Encadenar dentro del MISMO lote" más abajo). `color` acepta uno de
   `red|amber|green|blue|violet|pink` o un hex `#rrggbb`; sin color/icono por
   defecto.
-- `nest_list`: `listId*`, `parentId*` — fija el padre de una lista EXISTENTE
-  (la anida), o la deja de primer nivel con `parentId: null` (desanidar). Un
-  anidado rechazado (ciclo, auto-anidado, o la Bandeja de entrada, que nunca
+- `nest_list`: `listId*`, `parentId*` — fija el padre de un proyecto EXISTENTE
+  (lo anida), o lo deja de primer nivel con `parentId: null` (desanidar). Un
+  anidado rechazado (área como hija, ciclo, auto-anidado, o la Bandeja de entrada, que nunca
   es anidable) se descarta en silencio.
-- `rename_list`: `listId*`, `name*` — renombra una lista EXISTENTE; su
+- `rename_list`: `listId*`, `name*` — renombra un proyecto o área EXISTENTE; su
   identidad y sus tareas no cambian.
-- `remove_list`: `listId*` — borra una lista EXISTENTE. Sus tareas NUNCA se
-  pierden (las sin fecha se reasignan a otra lista viva; las "prestadas" con
-  fecha quedan como tarea de día normal); sus listas hijas pasan a primer
-  nivel. No aplica a la última lista viva ni a la Bandeja de entrada canónica
+- `remove_list`: `listId*` — borra un proyecto o área EXISTENTE. Sus tareas NUNCA se
+  pierden (las sin fecha se reasignan a otra residencia viva; las "prestadas" con
+  fecha quedan como tarea de día normal); sus proyectos hijos pasan a primer
+  nivel. No aplica al último contenedor vivo ni a la Bandeja de entrada canónica
   (se ignora en silencio en ambos casos).
-- `set_list_notes`: `listId*`, `notes*` [`revive`] — reemplaza la nota de la
-  lista. `notes: null` o `""` la borra; `revive: true` explícito restaura una
+- `set_list_notes`: `listId*`, `notes*` [`revive`] — reemplaza la nota del
+  proyecto o área. `notes: null` o `""` la borra; `revive: true` explícito restaura una
   nota borrada previamente. Requiere un servidor compatible con el
   `kind: "setListNotes"` (Lumbre desde `8a46be41`). Un servidor anterior
   rechazará la operación y `mutate_tasks` la informará como fallo parcial.
@@ -485,7 +489,7 @@ Vía PREFERENTE en cuanto haya más de una operación seguida (crear y/o
 mutar): resuelve TODAS las existencias de tarea del lote en una sola
 comprobación y las encola en una sola petición (`ops`, máx. 200), en vez de
 una tool call por operación. La mayoría de las tools individuales de arriba
-SIGUEN existiendo para una operación suelta — excepto las 5 ops de LISTA
+SIGUEN existiendo para una operación suelta — excepto las 6 ops de proyecto/área
 (`create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list`), sin
 tool suelta desde el 2026-08-27, y la nueva `set_list_notes`, disponible solo
 en `mutate_tasks`. Éxito
@@ -506,14 +510,14 @@ significado que la tool individual equivalente cuando existe: `op:"add_task"`
 `op:"rename_list"`, `op:"remove_list"`, `op:"set_list_notes"`) gestionan proyectos y áreas
 (paridad UI↔MCP) y ya NO tienen tool suelta equivalente — ver esa sección más
 arriba para el detalle campo a campo de cada una. El schema que expone la
-tool es deliberadamente laxo (los 22 campos que usan las 16 ops, todos
+tool es deliberadamente laxo (los campos que usan las 16 ops, todos
 opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
-add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes]
+add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
-update: taskId*, ≥1 de [content, notes, priority, time]
+update: taskId*, ≥1 de [content, notes, tags, priority, time]
 reschedule: taskId*, date*
 delete: taskId*
 set_section: taskId*, section*
@@ -540,13 +544,13 @@ que las tools individuales). Quién lo decide: `docs/18-que-es-una-tarea.md`
 los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 
 - **Sí**: `complete`, `cancel`, `delete`, `add_subtask`, `complete_subtask`,
-  `update` (sus cuatro campos —`content`, `notes`, `priority`, `time`— son
+  `update` (sus cinco campos —`content`, `notes`, `tags`, `priority`, `time`— son
   accidentales permitidos) y `reschedule`, con fecha o con `date: null`
   (`date` también lo es). Una subtarea con `date: null` se queda sin fecha en
   la checklist de su padre; no cae a la Bandeja.
 - **No** (se descarta esa op, las demás del lote siguen): `set_section` y
   `move_to_list`, porque escriben `sectionId`/`somedayListId`, PROHIBIDOS en
-  una subtarea (no tiene lista ni sección propias: vive en la checklist de su
+  una subtarea (no tiene proyecto, área ni sección propios: vive en la checklist de su
   padre). Para eso, opera sobre el id de la tarea PADRE.
 
 El rechazo es por-op y con el motivo REAL de esa op (no un error genérico):
@@ -564,7 +568,7 @@ puede referenciar dentro de la misma llamada). Un `add_task` con `listId` del
 sin mirar el orden de `ops` — una garantía DELIBERADA, en la dirección
 contraria, para que crear una tarea y mutarla en el mismo lote funcione. Esa
 misma garantía deja sin cubrir justo la pareja opuesta, `create_list` seguido
-de un alta que depende de él: la lista aún no existe cuando se materializan las
+de un alta que depende de él: el proyecto aún no existe cuando se materializan las
 altas. El cliente MCP lo detecta y manda las mutaciones (incluido el
 `create_list`) en una petición y las altas dependientes en otra — una petición
 de más SOLO en ese caso, transparente para quien escribe `ops`; la pareja
@@ -578,7 +582,7 @@ dependían de él no se mandan y aparecen en el informe como un fallo más,
 citando la op que lo causó. El encadenado es SIEMPRE por `listId` (el uuid
 que tú le diste al `create_list`), nunca por `list` (nombre): la detección
 de la dependencia solo mira `listId` a propósito, así que un `add_task` con
-`list: "Trabajo"` apuntando al NOMBRE de una lista que se crea en el mismo
+`list: "Trabajo"` apuntando al NOMBRE de un proyecto que se crea en el mismo
 lote no encadena — usa el `listId`.
 
 ## Compilar

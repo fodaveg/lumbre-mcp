@@ -89,6 +89,12 @@ describe('hasDoneTag — capa 1 (sin estado)', () => {
 		expect(hasDoneTag('Arreglar el bug #done')).toBe(true);
 	});
 
+	it('con tags explícitos, `done` se decide solo por los PROPIOS y @done inline', () => {
+		expect(hasDoneTag('Arreglar el bug', ['done'])).toBe(true);
+		expect(hasDoneTag('Arreglar el bug #done', [])).toBe(false);
+		expect(hasDoneTag('Arreglar el bug @done', [])).toBe(true);
+	});
+
 	it('es case-insensitive', () => {
 		expect(hasDoneTag('Arreglar el bug @DONE')).toBe(true);
 	});
@@ -117,6 +123,18 @@ describe('decideAutoNoteRender — matriz de decisión pura (capa 2 por MARCA, n
 	it('#done → íntegra', () => {
 		const d = decideAutoNoteRender('Tarea #done', 'una nota cualquiera'.length, undefined, undefined, opts);
 		expect(d.kind).toBe('full');
+	});
+
+	it('un `done` efectivo heredado no convierte la nota en íntegra', () => {
+		const d = decideAutoNoteRender(
+			'Tarea #done',
+			'una nota cualquiera'.length,
+			undefined,
+			undefined,
+			opts,
+			[]
+		);
+		expect(d.kind).toBe('marker');
 	});
 
 	describe('CON registro local (huella previa)', () => {
@@ -391,6 +409,19 @@ describe('recordNotesSeen', () => {
 });
 
 describe('computeAutoNotesRender — huella real, dos pasadas consecutivas', () => {
+	it('un tag `done` heredado no activa la lectura íntegra', async () => {
+		const t = task({
+			id: 'inherited-done',
+			content: 'Tarea sin marca inline',
+			tags: [],
+			effectiveTags: ['done'],
+			notes: 'nota fuera de la ventana',
+			notesUpdatedAt: '2026-07-01T00:00:00.000Z'
+		});
+		const result = await computeAutoNotesRender([t], { now: NOW });
+		expect(result.perTask.get(t.id)?.kind).toBe('marker');
+	});
+
 	it('1ª pasada (dentro de ventana) → íntegra; 2ª SIN cambios (misma marca) → marcador; 3ª con marca POSTERIOR → íntegra', async () => {
 		const t = task({
 			id: 'seq-1',

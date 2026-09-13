@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LumbreTask } from './lumbre-client.js';
-import { formatTaskFull, formatTaskList } from './format.js';
+import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 
 /**
  * `creada:<timestamp>` en `formatTask` (tarea de perf, 2026-08-25): antes iba
@@ -158,6 +158,26 @@ describe('nomenclatura de proyectos y áreas', () => {
 			'Proyectos y áreas (1):\n· Casa — 0 tareas (listId: 11111111-1111-1111-1111-111111111111)'
 		);
 		expect(formatListSummaries([])).toBe('Sin proyectos ni áreas.');
+	});
+
+	it('distingue tags propios de los heredados en tareas y proyectos', () => {
+		const tasks = [
+			task({ id: 'a', content: 'Preparar cierre', tags: ['finanzas'], effectiveTags: ['casa', 'finanzas'] })
+		];
+		expect(formatTaskList(tasks, 'today', { notesMode: 'none' })).toContain(
+			'(#finanzas, heredados:#casa)'
+		);
+		expect(
+			formatListSummaries([
+				{
+					id: '11111111-1111-1111-1111-111111111111',
+					name: 'Casa',
+					taskCount: 1,
+					tags: ['hogar'],
+					effectiveTags: ['familia', 'hogar']
+				}
+			])
+		).toContain('· #hogar, heredados:#familia');
 	});
 });
 

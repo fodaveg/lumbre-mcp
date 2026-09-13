@@ -1,5 +1,6 @@
 import { DEFAULT_NOTES_RECENT_HOURS, formatNoteMarker } from './notes.js';
 import { refCounts, renderRefs } from './refs.js';
+import { formatTags } from './tag-format.js';
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority) {
     return priority ? `p${priority}` : '';
@@ -120,31 +121,31 @@ function duplicateTitleKeys(tasks) {
  *  único en el lote) no aporta nada y solo alarga la línea. */
 function formatTask(t, opts, isDuplicateTitle) {
     const box = t.done ? '[x]' : '[ ]';
-    const tags = [];
+    const metadata = formatTags(t.tags, t.effectiveTags);
     const prio = priorityLabel(t.priority);
     if (prio)
-        tags.push(prio);
+        metadata.push(prio);
     // La hora se pega a la fecha en el MISMO tag ("2026-09-04 17:45"), nunca un
     // tag propio: una tarea sin hora no debe costar ni un carácter más en esta
     // línea, que se manda al modelo en cada `list_tasks`. Sin fecha pero con
     // hora (raro pero posible), la hora sola hace de tag en vez de perderse.
     if (t.date && t.time)
-        tags.push(`${t.date} ${t.time}`);
+        metadata.push(`${t.date} ${t.time}`);
     else if (t.date)
-        tags.push(t.date);
+        metadata.push(t.date);
     else if (t.time)
-        tags.push(t.time);
+        metadata.push(t.time);
     if (t.deadline)
-        tags.push(`⚑${t.deadline}`);
+        metadata.push(`⚑${t.deadline}`);
     if (t.archivedAt)
-        tags.push(`archivada:${t.archivedAt.slice(0, 10)}`);
+        metadata.push(`archivada:${t.archivedAt.slice(0, 10)}`);
     // `createdAt` recortado a minuto (sin segundos/ms): SOLO si hay otra tarea
     // con el mismo título en este mismo lote — sirve para desempatar
     // duplicados ("deja el más nuevo") sin alargar la línea de más en el caso
     // normal (título único), que es la inmensa mayoría.
     if (isDuplicateTitle)
-        tags.push(`creada:${t.createdAt.slice(0, 16)}`);
-    const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
+        metadata.push(`creada:${t.createdAt.slice(0, 16)}`);
+    const suffix = metadata.length > 0 ? ` (${metadata.join(', ')})` : '';
     // El id (UUID) al final de la línea: TODAS las tools de mutación
     // (update_task, complete_task, reschedule_task, delete_task, set_section) lo
     // EXIGEN, y `list_tasks` es el único sitio donde el modelo puede obtenerlo.
@@ -171,7 +172,7 @@ function formatTask(t, opts, isDuplicateTitle) {
 /**
  * Tarea → bloque legible con TODOS sus campos (para `get_task`, ver
  * `index.ts`): a diferencia de `formatTask` (pensado para listados, una línea
- * por tarea), este vuelca lista/sección/`createdAt` explícitos y las notas
+ * por tarea), este vuelca proyecto o área/sección/`createdAt` explícitos y las notas
  * SIEMPRE íntegras y verbatim (ver `notesFull`) — el caso de uso es leer una
  * tarea entera para poder reeditar su nota con `update_task` sin perder nada.
  *
@@ -188,6 +189,8 @@ export function formatTaskFull(t, refs) {
     const lines = [
         `Tarea ${t.id}`,
         `- contenido: ${renderRefs(t.content, refs)}`,
+        `- tags propios: ${t.tags && t.tags.length > 0 ? t.tags.map((tag) => `#${tag}`).join(', ') : '(ninguno)'}`,
+        `- tags efectivos: ${t.effectiveTags && t.effectiveTags.length > 0 ? t.effectiveTags.map((tag) => `#${tag}`).join(', ') : '(ninguno)'}`,
         `- estado: ${t.done ? 'hecha' : 'pendiente'}`,
         `- archivada: ${t.archivedAt ?? 'no'}`,
         `- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
@@ -214,20 +217,22 @@ export function formatTaskFull(t, refs) {
     if (t.subtasks && t.subtasks.length > 0) {
         lines.push('- subtareas:');
         for (const s of t.subtasks) {
-            lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}  · id: ${s.id}`);
+            const tags = formatTags(s.tags, s.effectiveTags);
+            const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
+            lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}${suffix}  · id: ${s.id}`);
         }
     }
     return lines.join('\n');
 }
 /**
- * Leyenda de listas: una línea por lista de "Algún día" DISTINTA presente en
+ * Leyenda de proyectos y áreas: una línea por destino DISTINTO presente en
  * el lote (deduplicada por el par `(nombre, listId)`, no solo por nombre —
- * dos listas distintas pueden compartir nombre, ver el comentario de
- * `distinctLists` más abajo). Da al modelo el `listId` ESTABLE de cada lista
+ * dos destinos distintos pueden compartir nombre, ver el comentario de
+ * `distinctLists` más abajo). Da al modelo el `listId` ESTABLE de cada destino
  * sin que tenga que inspeccionar tarea por tarea; lo necesita para `add_task`
- * (`listId`) y `move_to_list`. Tareas sin lista, o cuya lista aún no tenga
+ * (`listId`) y `move_to_list`. Tareas sin residencia, o cuyo destino aún no tenga
  * `somedayListId` resuelto, no aportan entrada. Devuelve `[]` si ninguna
- * tarea del lote tiene lista (el llamante omite la leyenda en ese caso).
+ * tarea del lote tiene residencia (el llamante omite la leyenda en ese caso).
  */
 function listLegend(tasks) {
     const seen = new Set();
@@ -395,18 +400,22 @@ export function formatListSummaries(lists) {
     if (lists.length === 0)
         return 'Sin proyectos ni áreas.';
     const header = `Proyectos y áreas (${lists.length}):`;
-    const body = lists.map((l) => `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})`);
+    const body = lists.map((l) => {
+        const tags = formatTags(l.tags, l.effectiveTags);
+        const suffix = tags.length > 0 ? ` · ${tags.join(', ')}` : '';
+        return `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})${suffix}`;
+    });
     return [header, ...body].join('\n');
 }
 /**
- * Formatea los vínculos de una lista sin seguirlos ni leer su destino. Cada
+ * Formatea los vínculos de un proyecto o área sin seguirlos ni leer su destino. Cada
  * fila conserva la metadata que identifica el vínculo y su URL literal,
- * incluido el esquema `obsidian://` cuando la lista enlaza una nota local.
+ * incluido el esquema `obsidian://` cuando el destino enlaza una nota local.
  */
 export function formatListLinks(listId, links) {
     if (links.length === 0)
-        return `Sin vínculos para la lista ${listId}.`;
-    const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} de la lista ${listId}:`;
+        return `Sin vínculos para el proyecto o área ${listId}.`;
+    const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} del proyecto o área ${listId}:`;
     const body = links.map((link) => `· ${link.label} — ${link.url}\n` +
         `  id: ${link.id} · listId: ${link.listId} · kind: ${link.kind} · targetKey: ${link.targetKey} · updatedAt: ${link.updatedAt}`);
     return [header, ...body].join('\n');

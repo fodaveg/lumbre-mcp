@@ -1,5 +1,6 @@
 import { findTasksByIds, listLists, type LumbreConfig, type LumbreTask } from './lumbre-client.js';
 import { formatNoteMarker } from './notes.js';
+import { formatTags } from './tag-format.js';
 
 /**
  * Resolución EN VIVO de las referencias `[[task:ID|Etiqueta]]` /
@@ -80,6 +81,8 @@ export interface RefResolution {
 	tasks: Map<string, LumbreTask>;
 	/** Nombre ACTUAL de cada lista viva, por id. */
 	lists: Map<string, string>;
+	/** Tags de listas resueltas, separados del mapa histórico de nombres. */
+	listTags: Map<string, { own?: string[]; effective?: string[] }>;
 	checkedTasks: Set<string>;
 	checkedLists: Set<string>;
 	/** Todos los ids referenciados en el lote (comprobados o no) — solo para
@@ -95,6 +98,7 @@ export function emptyRefResolution(): RefResolution {
 	return {
 		tasks: new Map(),
 		lists: new Map(),
+		listTags: new Map(),
 		checkedTasks: new Set(),
 		checkedLists: new Set(),
 		refTaskIds: [],
@@ -168,7 +172,10 @@ export async function resolveRefs(
 	if (listIds.length > 0) {
 		try {
 			const lists = await listLists(config);
-			for (const l of lists) resolution.lists.set(l.id, l.name);
+			for (const l of lists) {
+				resolution.lists.set(l.id, l.name);
+				resolution.listTags.set(l.id, { own: l.tags, effective: l.effectiveTags });
+			}
 			// `listLists` trae TODAS las listas vivas, así que cualquier id de lista
 			// referenciado queda comprobado: si no está en el mapa, es que ya no
 			// existe (rota), no que no se haya mirado.
@@ -197,6 +204,11 @@ function noteHint(t: LumbreTask): string {
 	const trimmed = t.notes?.trim() ?? '';
 	if (trimmed === '') return '';
 	return ` ${formatNoteMarker(trimmed.length, t.notesUpdatedAt ?? null)}`;
+}
+
+function tagHint(t: LumbreTask): string {
+	const tags = formatTags(t.tags, t.effectiveTags);
+	return tags.length > 0 ? ` ${tags.join(',')}` : '';
 }
 
 /** Aplana las referencias que pueda traer DENTRO el título de una tarea ya
@@ -236,12 +248,15 @@ export function renderRefs(text: string, resolution?: RefResolution): string {
 			const task = resolution.tasks.get(id);
 			if (!task) return `→tarea[ROTA] id:${id}`;
 			const title = flattenRefTokens(task.content);
-			return `→tarea[${taskStateLabel(task)}] "${title}"${noteHint(task)} id:${id}`;
+			return `→tarea[${taskStateLabel(task)}] "${title}"${tagHint(task)}${noteHint(task)} id:${id}`;
 		}
 		if (!resolution.checkedLists.has(id)) return `→proyecto/área[sin resolver] id:${id}`;
 		const name = resolution.lists.get(id);
 		if (name === undefined) return `→proyecto/área[ROTO] id:${id}`;
-		return `→proyecto/área "${flattenRefTokens(name)}" id:${id}`;
+		const listTags = resolution.listTags.get(id);
+		const tags = formatTags(listTags?.own, listTags?.effective);
+		const tagSuffix = tags.length > 0 ? ` ${tags.join(',')}` : '';
+		return `→proyecto/área "${flattenRefTokens(name)}"${tagSuffix} id:${id}`;
 	});
 }
 

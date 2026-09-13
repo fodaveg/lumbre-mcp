@@ -8,13 +8,18 @@ import { join } from 'node:path';
  *  (espacio/inicio/fin de línea) para no colar `@doneish` ni una palabra que
  *  simplemente contenga "done". `@done`/`#done` es el estado en el que David
  *  escribe su feedback ("trabajo del agente hecho, pendiente de mi revisión"),
- *  así que su nota siempre sale íntegra en modo `auto` — capa 1, SIN estado
- *  (no depende del fichero de huellas, ver más abajo). Exportada con test
- *  propio (ver `notes.test.ts`) para que un cambio de convención futuro no
- *  mate esta regla en silencio.
+ *  así que su nota siempre sale íntegra en modo `auto` — capa 1, SIN estado.
+ *  Tras la migración a tags estructurados, `@done` inline sigue siendo
+ *  explícito; `#done` inline solo es fallback cuando el servidor viejo no
+ *  trae `ownTags`. Con array presente manda exclusivamente el tag PROPIO
+ *  `done`, nunca `effectiveTags` heredados.
  */
-export function hasDoneTag(content) {
-    return /(?:^|\s)[@#]done(?=\s|$)/i.test(content);
+export function hasDoneTag(content, ownTags) {
+    if (/(?:^|\s)@done(?=\s|$)/i.test(content))
+        return true;
+    if (ownTags !== undefined)
+        return ownTags.some((tag) => tag.normalize('NFC').toLowerCase() === 'done');
+    return /(?:^|\s)#done(?=\s|$)/i.test(content);
 }
 /** `true` si la tarea tiene una nota no vacía. Con el texto presente (`notes`,
  *  modo `full` de siempre, o un servidor VIEJO que ignoró `notes=length`)
@@ -55,7 +60,8 @@ export const DEFAULT_NOTES_RECENT_HOURS = 24;
  * huellas, para poder testear la matriz de decisión sin mockear el
  * filesystem ni el reloj). Dos capas, en este orden:
  *
- * 1. Por TAG, sin estado: `@done`/`#done` en `content` → siempre íntegra.
+ * 1. Por TAG, sin estado: `@done` inline o `done` propio → siempre íntegra;
+ *    `#done` inline solo con respuestas viejas sin array de tags.
  * 2. Por MARCA (`notesUpdatedAt`, desde 2026-07-25 — antes era un hash local
  *    del texto, ver el histórico de este fichero): si hay `previous` (la
  *    última huella vista de esta tarea) y `notesUpdatedAt` es POSTERIOR a
@@ -85,11 +91,11 @@ export const DEFAULT_NOTES_RECENT_HOURS = 24;
  * `computeAutoNotesRender`), sin esperar a la fase 2 que trae el texto
  * completo de las que salgan íntegras.
  */
-export function decideAutoNoteRender(content, noteLength, notesUpdatedAt, previous, opts) {
+export function decideAutoNoteRender(content, noteLength, notesUpdatedAt, previous, opts, ownTags) {
     const length = noteLength;
     const updated = parseNotesUpdatedAt(notesUpdatedAt);
     const updatedAt = updated ? notesUpdatedAt : null;
-    if (hasDoneTag(content))
+    if (hasDoneTag(content, ownTags))
         return { kind: 'full', length, updatedAt };
     if (previous) {
         const previousMark = parseNotesUpdatedAt(previous.u);
@@ -418,10 +424,7 @@ export async function computeAutoNotesRender(tasks, opts = {}, store = fileNotes
     for (const t of withNotes) {
         const previous = readSeenEntry(previousState[t.id]);
         const length = noteLengthOf(t);
-        const decision = decideAutoNoteRender(t.content, length, t.notesUpdatedAt, previous, {
-            now,
-            windowHours
-        });
+        const decision = decideAutoNoteRender(t.content, length, t.notesUpdatedAt, previous, { now, windowHours }, t.tags);
         perTask.set(t.id, decision);
         if (decision.kind === 'full')
             fullCount++;

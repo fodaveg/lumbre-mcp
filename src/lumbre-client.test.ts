@@ -757,6 +757,30 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+	it('update conserva la diferencia de protocolo entre tags omitidos y `[]`', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const { batchOps: omitted } = buildBatchFromOps(
+			[{ op: 'update', taskId: 't1', content: 'nuevo' }],
+			existing
+		);
+		const { batchOps: emptied } = buildBatchFromOps(
+			[{ op: 'update', taskId: 't1', tags: [] }],
+			existing
+		);
+		expect(omitted[0]).toEqual({
+			type: 'mutate',
+			taskId: 't1',
+			kind: 'update',
+			payload: { content: 'nuevo' }
+		});
+		expect(emptied[0]).toEqual({
+			type: 'mutate',
+			taskId: 't1',
+			kind: 'update',
+			payload: { tags: [] }
+		});
+	});
+
 	/**
 	 * Encadenado intra-lote (code-review 🟠 #3b): `create_list` con `listId`
 	 * PRE-GENERADO por el llamante (en vez de dejar que el servidor asigne

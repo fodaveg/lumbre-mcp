@@ -199,6 +199,8 @@ const recurrenceSchema = z
 	})
 	.describe('Recurrencia simple (freq + interval), como la celda "Repetir" del quick-add de Lumbre');
 
+const tagSchema = z.string().regex(/^[\p{L}\p{N}_][\p{L}\p{N}_-]*$/u);
+
 /**
  * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
  * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
@@ -314,6 +316,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
 			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 			deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+			tags: z.array(tagSchema).optional(),
 			time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
 			recurrence: recurrenceSchema.optional(),
 			subtasks: z.array(z.string()).optional(),
@@ -340,6 +343,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			taskId: z.string().uuid(),
 			content: z.string().min(1).max(2000).optional(),
 			notes: z.string().max(10000).optional(),
+			tags: z.array(tagSchema).optional(),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
 			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional()
 		})
@@ -434,7 +438,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 /**
  * Schema EXPUESTO de un elemento de `ops` (ver el JSDoc de
  * `mutateTasksStrictOpSchema` de arriba para el porqué de tenerlos
- * separados): plano, los 22 campos que usan las 16 ops TODOS opcionales
+ * separados): plano, los campos que usan las 16 ops TODOS opcionales
  * (salvo `op`). Poda de superficie (2026-08-25, medido: bajó el JSON Schema
  * EXPUESTO de este objeto de 3.994 a 3.683 caracteres — ver el test de
  * superficie en `index.test.ts`): cada campo tiene `.describe()` SOLO si
@@ -444,8 +448,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
  * `content`, `name`, `deadline`, `icon` y `recurrence` se quedan sin
  * `.describe()` propio porque esa info ya vive en el nombre del campo, en
  * `recurrenceSchema`, o en la tool individual (`create_list` para `icon`).
- * `.strict()` aquí solo pilla un nombre de campo que no es NINGUNO de los 21
- * conocidos (typo); que un campo válido en general no aplique a la `op`
+ * `.strict()` aquí solo pilla un nombre de campo desconocido (typo); que un campo válido en general no aplique a la `op`
  * concreta de ESE elemento lo pilla `mutateTasksStrictOpSchema` en el
  * handler, no este schema.
  */
@@ -485,6 +488,7 @@ export const mutateTasksOpSchema = z
 		// ya está en la description de `ops`.
 		text: z.string().min(1).max(2000).optional(),
 		content: z.string().min(1).max(2000).optional(),
+		tags: z.array(tagSchema).optional(),
 		name: z.string().min(1).max(200).optional(),
 		list: z.string().max(200).optional().describe('Nombre del proyecto o área destino (se crea como proyecto si no existe)'),
 		section: z.string().max(200).nullable().optional().describe('Nombre de la sección, o null para quitarla'),
@@ -509,9 +513,9 @@ export const mutateTasksOpSchema = z
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
 		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar'),
 		color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
-		revive: z.boolean().optional().describe('true restaura una nota de lista borrada previamente'),
+		revive: z.boolean().optional().describe('true restaura una nota de proyecto o área borrada previamente'),
 		// `icon`: sin describe propio — mismo criterio que `text`/`name`; su
-		// semántica (emoji/icono de la lista) ya la dice el nombre del campo.
+		// semántica (emoji/icono del proyecto o área) ya la dice el nombre del campo.
 		icon: z.string().max(16).optional(),
 		parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id del proyecto o área padre, o null para desanidar')
 	})
@@ -732,7 +736,11 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
 				recurrence: recurrenceSchema.optional(),
 				subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
-				notes: z.string().max(10000).optional().describe('Notas/descripción larga')
+				notes: z.string().max(10000).optional().describe('Notas/descripción larga'),
+				tags: z
+					.array(tagSchema)
+					.optional()
+					.describe('Tags propios; [] deja la tarea explícitamente sin tags')
 			}
 		},
 		async (input) => {
@@ -1103,10 +1111,10 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'get_list_links',
 		{
 			description:
-				'Lee las notas vinculadas de UNA lista por su listId (incluye URL y metadata; puede ser ' +
-					'Obsidian obsidian://). No abre ni lee el contenido de los destinos. Lista vacía si no tiene vínculos.',
+				'Lee los vínculos configurados para UN proyecto o área por su listId (incluye URL y metadata; puede ser ' +
+					'Obsidian obsidian://). No abre ni lee el contenido de los destinos. Respuesta vacía si no tiene vínculos.',
 			inputSchema: {
-				listId: z.string().uuid().describe('Id de la lista (ver list_lists o list_tasks)')
+				listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
 			}
 		},
 		async (input) => {
@@ -1459,9 +1467,9 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'update_task',
 		{
 			description:
-				`Edita texto, notas, prioridad u hora de una tarea existente, o de una SUBTAREA suya (los ` +
-				`cuatro campos valen igual en una subtarea). Los campos que omitas no cambian; \`notes\` ` +
-				`REEMPLAZA las anteriores enteras. ${ASYNC_NOTE}`,
+				`Edita texto, notas, tags propios, prioridad u hora de una tarea existente, o de una ` +
+				`SUBTAREA suya (los cinco campos valen igual en una subtarea). Los campos que omitas ` +
+				`no cambian; \`notes\` REEMPLAZA las anteriores enteras. ${ASYNC_NOTE}`,
 			inputSchema: {
 				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
 				content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
@@ -1470,6 +1478,10 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.max(10000)
 					.optional()
 					.describe('Nuevas notas/descripción (reemplaza las anteriores por completo)'),
+				tags: z
+					.array(tagSchema)
+					.optional()
+					.describe('Reemplazo completo de tags propios; [] los quita'),
 				priority: z
 					.enum(['p1', 'p2', 'p3', 'p4'])
 					.optional()
@@ -1484,16 +1496,17 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			if (
 				input.content === undefined &&
 				input.notes === undefined &&
+				input.tags === undefined &&
 				input.priority === undefined &&
 				input.time === undefined
 			) {
 				return errorResult(
-					new Error('Indica al menos un campo a cambiar (content, notes, priority o time).')
+					new Error('Indica al menos un campo a cambiar (content, notes, tags, priority o time).')
 				);
 			}
 			try {
 				// `allowSubtask: true` (2026-09-04): `content`/`notes`/`priority`/
-				// `time` son cuatro de los accidentales PERMITIDOS en una subtarea
+				// `tags`/`time` son cinco de los accidentales PERMITIDOS en una subtarea
 				// por `docs/18-que-es-una-tarea.md` §2.5 — ver el JSDoc de
 				// `assertTaskUsable` para el camino de servidor que lo respalda.
 				await requireTaskExists(input.taskId, { allowSubtask: true });
@@ -1503,6 +1516,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					payload: {
 						...(input.content !== undefined ? { content: input.content } : {}),
 						...(input.notes !== undefined ? { notes: input.notes } : {}),
+						...(input.tags !== undefined ? { tags: input.tags } : {}),
 						...(input.priority !== undefined ? { priority: priorityToLevel(input.priority) } : {}),
 						...(input.time !== undefined ? { time: input.time } : {})
 					}
@@ -1650,7 +1664,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	// ── Gestión de listas de "Algún día" (paridad UI↔MCP, docs/20-contrato-lista.md) ──
+	// ── Gestión de proyectos y áreas (paridad UI↔MCP, docs/20-contrato-lista.md) ──
 	//
 	// `create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list` NO
 	// tienen tool suelta desde el 2026-08-27 (podadas: 3.506 bytes de
@@ -1920,8 +1934,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
-							'priority, date, deadline, time, recurrence, subtasks, notes] · complete: taskId* ' +
-							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, ' +
+							'priority, date, deadline, time, recurrence, subtasks, notes, tags] · complete: taskId* ' +
+							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time] · reschedule: taskId*, date* · delete: taskId* · set_section: ' +
 							'taskId*, section* · move_to_list: taskId*, uno de [listId, list] · add_subtask: ' +
 							'taskId*, subtasks* · complete_subtask: subtaskId* [done] · remove_section: sectionId* ' +

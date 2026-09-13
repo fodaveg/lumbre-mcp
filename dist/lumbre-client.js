@@ -103,11 +103,11 @@ export async function listTasks(config, input) {
     return body;
 }
 /**
- * `GET /api/tasks?includeLists=1`: enumera TODAS las listas de "Algún día"
- * vivas del usuario, INCLUIDAS las que no tienen ninguna tarea todavía. Sin
- * esto, una lista con 0 tareas es invisible para el MCP — `list_tasks` solo
- * puede "ver" una lista a través de las tareas que contiene, así que una
- * lista recién creada (por la app o por `create_list`) no aparece en ningún
+ * `GET /api/tasks?includeLists=1`: enumera TODOS los proyectos y áreas
+ * vivos del usuario, INCLUIDOS los que no tienen ninguna tarea todavía. Sin
+ * esto, un contenedor con 0 tareas es invisible para el MCP — `list_tasks` solo
+ * puede "verlo" a través de las tareas que contiene, así que un proyecto
+ * recién creado (por la app o por `create_list`) no aparece en ningún
  * sitio hasta que se le añade la primera tarea (bug real, b00303b5).
  */
 export async function listLists(config) {
@@ -118,8 +118,8 @@ export async function listLists(config) {
     return body.lists;
 }
 /**
- * `GET /api/list-links?listId=`: lee los vínculos configurados para UNA lista.
- * Una lista sin vínculos devuelve `[]`; no se consulta ni se expone contenido
+ * `GET /api/list-links?listId=`: lee los vínculos configurados para UN proyecto o área.
+ * Un destino sin vínculos devuelve `[]`; no se consulta ni se expone contenido
  * del destino, incluidos los targets con esquema `obsidian://`.
  */
 export async function getListLinks(config, listId) {
@@ -277,7 +277,7 @@ export function subtaskNotAllowedError(taskId) {
  * PERMITE en una subtarea `content`, `notes`, `priority`, `time`, `date`,
  * `daypart`, `done`, `position`/`dayPosition` y tags, y PROHÍBE
  * `somedayListId`, `sectionId`, `reminders`, `deadline` y `recurrence`. Los
- * cuatro campos de `update_task` son exactamente cuatro de los permitidos, y
+ * cinco campos de `update_task` son exactamente cinco de los permitidos, y
  * el guard de residencia vive HOY en la app (`src/lib/sync/task-ops.ts`:
  * `moveTask` solo adopta en la Bandeja si `src.parentId === undefined`,
  * `moveTaskToList` es no-op sobre una subtarea, `reconcileTaskInvariants`
@@ -287,7 +287,7 @@ export function subtaskNotAllowedError(taskId) {
  * `index.ts`, y `TASK_TARGET_ALLOW_SUBTASK` para el gemelo de `mutate_tasks`):
  *  - `allowSubtask: true` — `complete_task`, `cancel_task`, `delete_task`,
  *    `complete_subtask`, `add_subtask` (no tocan residencia) y, desde
- *    2026-09-04, `update_task`: sus cuatro campos son accidentales PERMITIDOS
+ *    2026-09-04, `update_task`: sus cinco campos son accidentales PERMITIDOS
  *    en subtarea (§2.5) y su camino en el servidor está medido como
  *    subtask-safe — `inbound-materialize.ts` case `'update'` solo escribe
  *    celdas (`editTaskContent`/`setTaskNotes`/`setTaskPriority`) y, para
@@ -545,7 +545,7 @@ export async function runBatch(config, ops) {
  * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
  * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
  * matriz de `requireTaskExists` en `index.ts` (ver el JSDoc de
- * `assertTaskUsable` para el porqué completo). Las ops de LISTA/SECCIÓN
+ * `assertTaskUsable` para el porqué completo). Las ops de PROYECTO/ÁREA/SECCIÓN
  * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
  * `set_list_notes`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
@@ -557,8 +557,8 @@ export async function runBatch(config, ops) {
  * Quién decide cada valor: el contrato `docs/18-que-es-una-tarea.md` §2.5
  * («Subtareas [DECIDIDO 2 sep 2026]»), no esta tabla — una op vale sobre una
  * subtarea si los campos que escribe están entre los ACCIDENTALES PERMITIDOS
- * ahí. `update` pasó a `true` el 2026-09-04 porque sus cuatro campos
- * (`content`/`notes`/`priority`/`time`) son cuatro de los permitidos, y
+ * ahí. `update` pasó a `true` el 2026-09-04 porque sus cinco campos
+ * (`content`/`notes`/`tags`/`priority`/`time`) son cinco de los permitidos, y
  * `reschedule` ese mismo día (`date` también es de los permitidos) en cuanto
  * la app cerró su único agujero, el desagendar sin guard de `parentId` —
  * `task-ops.unscheduleTask`, arreglado en `a745235a`, ver `assertTaskUsable`.
@@ -620,9 +620,10 @@ function localValidationError(op) {
     if (op.op === 'update') {
         if (op.content === undefined &&
             op.notes === undefined &&
+            op.tags === undefined &&
             op.priority === undefined &&
             op.time === undefined) {
-            return 'update: indica al menos un campo a cambiar (content, notes, priority o time).';
+            return 'update: indica al menos un campo a cambiar (content, notes, tags, priority o time).';
         }
     }
     if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
@@ -664,6 +665,7 @@ function translateOp(op) {
                 payload: {
                     ...(op.content !== undefined ? { content: op.content } : {}),
                     ...(op.notes !== undefined ? { notes: op.notes } : {}),
+                    ...(op.tags !== undefined ? { tags: op.tags } : {}),
                     ...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
                     ...(op.time !== undefined ? { time: op.time } : {})
                 }

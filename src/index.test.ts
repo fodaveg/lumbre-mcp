@@ -522,7 +522,7 @@ describe('get_list_links — registro y contrato HTTP', () => {
 		const empty = await client.callTool({ name: 'get_list_links', arguments: { listId: LIST_ID } });
 		expect(empty.isError).not.toBe(true);
 		const emptyText = ((empty as { content: { text: string }[] }).content[0]).text;
-		expect(emptyText).toBe(`Sin vínculos para la lista ${LIST_ID}.`);
+		expect(emptyText).toBe(`Sin vínculos para el proyecto o área ${LIST_ID}.`);
 	});
 
 	it('devuelve el error de auth y rechaza un listId inválido antes de consultar la API', async () => {
@@ -777,12 +777,30 @@ describe('mutate_tasks — las 16 `op` siguen aceptándose (esquema estricto int
 		const result = mutateTasksOpSchema.safeParse({
 			op: 'complete',
 			taskId: '11111111-1111-1111-1111-111111111111',
-			// `donee` no es ninguno de los 22 campos conocidos — typo real de
+			// `donee` no es ninguno de los campos conocidos — typo real de
 			// `done`, no un campo válido en otra op (ver el test de arriba para
 			// ESE caso, que el schema EXPUESTO SÍ deja pasar a propósito).
 			donee: true
 		});
 		expect(result.success).toBe(false);
+	});
+
+	it('add_task/update aceptan tags válidos y conservan `[]` como valor explícito', () => {
+		expect(
+			mutateTasksStrictOpSchema.safeParse({ op: 'add_task', text: 'Nueva', tags: ['casa_2'] })
+				.success
+		).toBe(true);
+		expect(
+			mutateTasksStrictOpSchema.safeParse({
+				op: 'update',
+				taskId: '11111111-1111-1111-1111-111111111111',
+				tags: []
+			}).success
+		).toBe(true);
+		expect(
+			mutateTasksStrictOpSchema.safeParse({ op: 'add_task', text: 'Nueva', tags: ['#inválido'] })
+				.success
+		).toBe(false);
 	});
 });
 

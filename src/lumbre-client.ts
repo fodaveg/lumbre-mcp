@@ -41,6 +41,9 @@ export interface IngestRecurrence {
 
 export interface AddTaskInput {
 	text: string;
+	/** Tags propios explícitos; `[]` declara deliberadamente que la tarea no
+	 *  tiene ninguno. */
+	tags?: string[];
 	list?: string;
 	/** Id ESTABLE de la lista de "Algún día" destino (lote 2 — identidad de
 	 *  listas), alternativa a `list` (por nombre) inmune a renames. Preferente
@@ -115,17 +118,23 @@ export interface LumbreAttachment {
 }
 
 /** Una subtarea (checklist, #17) tal como la devuelve `GET /api/tasks?id=`
- *  dentro de `subtasks` de su tarea padre — ver `LumbreTask.subtasks`. Solo
- *  `id`/`content`/`done`: el orden del array YA es el orden de la checklist. */
+ *  dentro de `subtasks` de su tarea padre. El orden del array YA es el orden
+ *  de la checklist; sus tags efectivos coinciden con los propios. */
 export interface LumbreSubtask {
 	id: string;
 	content: string;
 	done: boolean;
+	tags?: string[];
+	effectiveTags?: string[];
 }
 
 export interface LumbreTask {
 	id: string;
 	content: string;
+	/** Tags propios de la tarea. Opcional para tolerar servidores anteriores. */
+	tags?: string[];
+	/** Tags propios más los heredados de sección/proyecto/área. */
+	effectiveTags?: string[];
 	/** Notas/descripción larga de la tarea, o null si no tiene. */
 	notes: string | null;
 	/** ISO 8601 de la última edición de la NOTA (derivada del HLC de su celda
@@ -309,16 +318,19 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	return body as LumbreTask[];
 }
 
-/** Resumen de una lista de "Algún día" (`GET /api/tasks?includeLists=1`). */
+/** Resumen de un proyecto o área (`GET /api/tasks?includeLists=1`). */
 export interface LumbreListSummary {
 	id: string;
 	name: string;
+	/** Tags propios y efectivos del proyecto/área; opcionales por compatibilidad. */
+	tags?: string[];
+	effectiveTags?: string[];
 	/** Nº de tareas de primer nivel vivas en la lista; 0 es un valor legítimo
 	 *  (lista recién creada, o vaciada) — NO significa que la lista no exista. */
 	taskCount: number;
 }
 
-/** Vínculo de una lista de "Algún día" (`GET /api/list-links?listId=`).
+/** Vínculo de un proyecto o área (`GET /api/list-links?listId=`).
  * `url` se conserva literal: puede ser una URL web o `obsidian://`, que el
  * MCP solo presenta como vínculo; nunca lee ni interpreta su contenido. */
 export interface LumbreListLink {
@@ -332,11 +344,11 @@ export interface LumbreListLink {
 }
 
 /**
- * `GET /api/tasks?includeLists=1`: enumera TODAS las listas de "Algún día"
- * vivas del usuario, INCLUIDAS las que no tienen ninguna tarea todavía. Sin
- * esto, una lista con 0 tareas es invisible para el MCP — `list_tasks` solo
- * puede "ver" una lista a través de las tareas que contiene, así que una
- * lista recién creada (por la app o por `create_list`) no aparece en ningún
+ * `GET /api/tasks?includeLists=1`: enumera TODOS los proyectos y áreas
+ * vivos del usuario, INCLUIDOS los que no tienen ninguna tarea todavía. Sin
+ * esto, un contenedor con 0 tareas es invisible para el MCP — `list_tasks` solo
+ * puede "verlo" a través de las tareas que contiene, así que un proyecto
+ * recién creado (por la app o por `create_list`) no aparece en ningún
  * sitio hasta que se le añade la primera tarea (bug real, b00303b5).
  */
 export async function listLists(config: LumbreConfig): Promise<LumbreListSummary[]> {
@@ -348,8 +360,8 @@ export async function listLists(config: LumbreConfig): Promise<LumbreListSummary
 }
 
 /**
- * `GET /api/list-links?listId=`: lee los vínculos configurados para UNA lista.
- * Una lista sin vínculos devuelve `[]`; no se consulta ni se expone contenido
+ * `GET /api/list-links?listId=`: lee los vínculos configurados para UN proyecto o área.
+ * Un destino sin vínculos devuelve `[]`; no se consulta ni se expone contenido
  * del destino, incluidos los targets con esquema `obsidian://`.
  */
 export async function getListLinks(config: LumbreConfig, listId: string): Promise<LumbreListLink[]> {
@@ -520,7 +532,7 @@ export function subtaskNotAllowedError(taskId: string): Error {
  * PERMITE en una subtarea `content`, `notes`, `priority`, `time`, `date`,
  * `daypart`, `done`, `position`/`dayPosition` y tags, y PROHÍBE
  * `somedayListId`, `sectionId`, `reminders`, `deadline` y `recurrence`. Los
- * cuatro campos de `update_task` son exactamente cuatro de los permitidos, y
+ * cinco campos de `update_task` son exactamente cinco de los permitidos, y
  * el guard de residencia vive HOY en la app (`src/lib/sync/task-ops.ts`:
  * `moveTask` solo adopta en la Bandeja si `src.parentId === undefined`,
  * `moveTaskToList` es no-op sobre una subtarea, `reconcileTaskInvariants`
@@ -530,7 +542,7 @@ export function subtaskNotAllowedError(taskId: string): Error {
  * `index.ts`, y `TASK_TARGET_ALLOW_SUBTASK` para el gemelo de `mutate_tasks`):
  *  - `allowSubtask: true` — `complete_task`, `cancel_task`, `delete_task`,
  *    `complete_subtask`, `add_subtask` (no tocan residencia) y, desde
- *    2026-09-04, `update_task`: sus cuatro campos son accidentales PERMITIDOS
+ *    2026-09-04, `update_task`: sus cinco campos son accidentales PERMITIDOS
  *    en subtarea (§2.5) y su camino en el servidor está medido como
  *    subtask-safe — `inbound-materialize.ts` case `'update'` solo escribe
  *    celdas (`editTaskContent`/`setTaskNotes`/`setTaskPriority`) y, para
@@ -804,6 +816,8 @@ export interface CompleteMutationPayload {
 export interface UpdateMutationPayload {
 	content?: string;
 	notes?: string;
+	/** Reemplazo completo de tags propios. `[]` los quita; ausente no los toca. */
+	tags?: string[];
 	/** Nivel `1|2|3` (p1–p3), o `null` para quitar la prioridad (p4/ninguna).
 	 *  El tool `update_task` traduce el `'p1'..'p4'` de cara al modelo a este
 	 *  nivel antes de llamar aquí (ver `index.ts`). */
@@ -1057,6 +1071,7 @@ export type MutateTasksOp =
 			taskId: string;
 			content?: string;
 			notes?: string;
+			tags?: string[];
 			priority?: 'p1' | 'p2' | 'p3' | 'p4';
 			time?: string | null;
 	  }
@@ -1099,7 +1114,7 @@ export type MutateTasksOp =
  * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
  * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
  * matriz de `requireTaskExists` en `index.ts` (ver el JSDoc de
- * `assertTaskUsable` para el porqué completo). Las ops de LISTA/SECCIÓN
+ * `assertTaskUsable` para el porqué completo). Las ops de PROYECTO/ÁREA/SECCIÓN
  * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
  * `set_list_notes`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
@@ -1111,8 +1126,8 @@ export type MutateTasksOp =
  * Quién decide cada valor: el contrato `docs/18-que-es-una-tarea.md` §2.5
  * («Subtareas [DECIDIDO 2 sep 2026]»), no esta tabla — una op vale sobre una
  * subtarea si los campos que escribe están entre los ACCIDENTALES PERMITIDOS
- * ahí. `update` pasó a `true` el 2026-09-04 porque sus cuatro campos
- * (`content`/`notes`/`priority`/`time`) son cuatro de los permitidos, y
+ * ahí. `update` pasó a `true` el 2026-09-04 porque sus cinco campos
+ * (`content`/`notes`/`tags`/`priority`/`time`) son cinco de los permitidos, y
  * `reschedule` ese mismo día (`date` también es de los permitidos) en cuanto
  * la app cerró su único agujero, el desagendar sin guard de `parentId` —
  * `task-ops.unscheduleTask`, arreglado en `a745235a`, ver `assertTaskUsable`.
@@ -1174,10 +1189,11 @@ function localValidationError(op: MutateTasksOp): string | null {
 		if (
 			op.content === undefined &&
 			op.notes === undefined &&
+			op.tags === undefined &&
 			op.priority === undefined &&
 			op.time === undefined
 		) {
-			return 'update: indica al menos un campo a cambiar (content, notes, priority o time).';
+			return 'update: indica al menos un campo a cambiar (content, notes, tags, priority o time).';
 		}
 	}
 	if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
@@ -1220,6 +1236,7 @@ function translateOp(op: MutateTasksOp): BatchOp {
 				payload: {
 					...(op.content !== undefined ? { content: op.content } : {}),
 					...(op.notes !== undefined ? { notes: op.notes } : {}),
+					...(op.tags !== undefined ? { tags: op.tags } : {}),
 					...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
 					...(op.time !== undefined ? { time: op.time } : {})
 				}

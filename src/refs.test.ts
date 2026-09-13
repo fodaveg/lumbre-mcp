@@ -142,7 +142,17 @@ describe('resolveRefs — coste en peticiones', () => {
 	it('referencias a LISTAS: una `?includeLists=1` (peor caso del lote = 2 llamadas)', async () => {
 		const spy = mockFetchSequence([
 			[task({ id: ID_A })],
-			{ lists: [{ id: LIST_ID, name: 'Proyecto ACTUAL', taskCount: 3 }] }
+			{
+				lists: [
+					{
+						id: LIST_ID,
+						name: 'Proyecto ACTUAL',
+						taskCount: 3,
+						tags: ['propio'],
+						effectiveTags: ['heredado', 'propio']
+					}
+				]
+			}
 		]);
 		const resolution = await resolveRefs(config, [
 			`[[task:${ID_A}|x]] y [[list:${LIST_ID}|Nombre viejo]]`
@@ -150,6 +160,9 @@ describe('resolveRefs — coste en peticiones', () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 		expect(spy.mock.calls[1][0]).toBe('https://lumbre.test/api/tasks?includeLists=1');
 		expect(resolution.lists.get(LIST_ID)).toBe('Proyecto ACTUAL');
+		expect(renderRefs(`[[list:${LIST_ID}|Nombre viejo]]`, resolution)).toBe(
+			`→proyecto/área "Proyecto ACTUAL" #propio,heredados:#heredado id:${LIST_ID}`
+		);
 	});
 
 	it('solo referencias a listas: NO se pide `?ids=`', async () => {
@@ -215,6 +228,15 @@ describe('renderRefs — una referencia resuelta enseña el estado REAL', () => 
 		const resolution = resolutionOf([task({ done: true })]);
 		expect(renderRefs(`[[task:${ID_A}|x]]`, resolution)).toBe(
 			`→tarea[hecha] "Título ACTUAL" id:${ID_A}`
+		);
+	});
+
+	it('declara tags propios y heredados sin confundir su procedencia', () => {
+		const resolution = resolutionOf([
+			task({ tags: ['propio'], effectiveTags: ['heredado', 'propio'] })
+		]);
+		expect(renderRefs(`[[task:${ID_A}|x]]`, resolution)).toBe(
+			`→tarea[pendiente] "Título ACTUAL" #propio,heredados:#heredado id:${ID_A}`
 		);
 	});
 
