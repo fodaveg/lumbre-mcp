@@ -1,7 +1,7 @@
 # Lectura
 
 Este modo es estrictamente no mutante. Sirve para «qué tengo hoy», buscar una tarea,
-resumir una lista o leer feedback.
+resumir un proyecto o área, o leer feedback.
 
 - No añadas estados, completes tareas ni reorganices datos por el mero hecho de
   leerlos.
@@ -9,9 +9,9 @@ resumir una lista o leer feedback.
   `@done`; resumir o inspeccionar sigue siendo lectura pura.
 - No cargues `mcp-safe-operations.md` para una lectura ordinaria sin escritura,
   configuración ni diagnóstico de conexión.
-- Preguntar si una lista existe, incluso vacía, sigue siendo lectura: no cargues
+- Preguntar si un proyecto o área existe, incluso vacío, sigue siendo lectura: no cargues
   `backlog.md` salvo que haya que clasificar o reorganizar.
-- Acota por fecha, alcance, lista o ids. No revises el backlog completo salvo que la
+- Acota por fecha, alcance, proyecto, área o ids. No revises el backlog completo salvo que la
   petición lo necesite.
 - `refresh_sync` solo fuerza el flush de cambios que ya llegaron al servidor: es una
   operación de lectura. Úsala antes de releer cuando importa la frescura y el cambio

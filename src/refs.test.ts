@@ -269,16 +269,16 @@ describe('renderRefs — una referencia resuelta enseña el estado REAL', () => 
 			`1) →tarea[pendiente] "Viva" id:${ID_A} ` +
 				`2) →tarea[hecha] "Cerrada" id:${ID_B} ` +
 				`3) →tarea[ROTA] id:${ID_C} ` +
-				`4) →lista "Proyecto ACTUAL" id:${LIST_ID}`
+				`4) →proyecto/área "Proyecto ACTUAL" id:${LIST_ID}`
 		);
 	});
 
-	it('LISTA rota: mismo trato que una tarea rota', () => {
+	it('proyecto o área roto: mismo trato que una tarea rota', () => {
 		const resolution = emptyRefResolution();
 		resolution.checkedLists.add(LIST_ID);
 		resolution.refListIds = [LIST_ID];
 		expect(renderRefs(`[[list:${LIST_ID}|Nombre viejo]]`, resolution)).toBe(
-			`→lista[ROTA] id:${LIST_ID}`
+			`→proyecto/área[ROTO] id:${LIST_ID}`
 		);
 	});
 
@@ -358,7 +358,7 @@ describe('integración con los pintores (format.ts)', () => {
 		});
 		const out = formatTaskFull(detail, resolution);
 		expect(out).toContain(`→tarea[pendiente] "Migrar el sync" id:${ID_B}`);
-		expect(out).toContain(`→lista "Proyecto ACTUAL" id:${LIST_ID}`);
+		expect(out).toContain(`→proyecto/área "Proyecto ACTUAL" id:${LIST_ID}`);
 		expect(out).not.toContain('nombre viejo');
 		expect(out).not.toContain('lista vieja');
 	});

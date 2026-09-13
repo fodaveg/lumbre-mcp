@@ -80,12 +80,12 @@ invariant(
 );
 invariant(
   "READ_ROUTE_EXCLUDES_OTHER_REFERENCES",
-  hasAll(readRoute, [/solo/i, /ninguna otra\s+referencia/i, /enumere listas/i]),
+  hasAll(readRoute, [/solo/i, /ninguna otra\s+referencia/i, /enumere proyectos y áreas/i]),
   "the router must make progressive disclosure explicit before references are loaded",
 );
 invariant(
   "READ_EMPTY_LIST_STAYS_READ_ONLY",
-  hasAll(modeRouter, [/lista vac[ií]a/i, /enumera listas/i, /sin activar triaje/i]),
+  hasAll(modeRouter, [/proyecto vac[ií]o/i, /enumera proyectos y áreas/i, /sin activar triaje/i]),
   "empty-list discovery must be routed as reading",
 );
 
@@ -135,7 +135,7 @@ invariant(
 );
 invariant(
   "MOVE_TO_LIST_CLEARS_SECTION",
-  hasAll(normalizedSafeOperations, [/Mover de lista limpia la secci[oó]n/i, /mueve primero/i, /reasigna despu[eé]s/i]),
+  hasAll(normalizedSafeOperations, [/Cambiar de proyecto o área limpia la secci[oó]n/i, /mueve primero/i, /reasigna despu[eé]s/i]),
   "the section reset and safe repair order must be explicit",
 );
 invariant(

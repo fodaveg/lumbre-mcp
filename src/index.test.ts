@@ -117,6 +117,18 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
+	it('presenta proyectos y áreas sin renombrar tools ni parámetros list/listId', () => {
+		const listLists = tools.find((tool) => tool.name === 'list_lists')!;
+		expect(listLists.description).toMatch(/proyectos y áreas/i);
+		const addTask = tools.find((tool) => tool.name === 'add_task')!;
+		const properties = (addTask.inputSchema as { properties: Record<string, { description?: string }> })
+			.properties;
+		expect(properties.list.description).toMatch(/proyecto o área/i);
+		expect(properties.listId.description).toMatch(/proyecto o área/i);
+		expect(properties).toHaveProperty('list');
+		expect(properties).toHaveProperty('listId');
+	});
+
 	it('ningún `inputSchema` (a ningún nivel de anidación) trae `$schema` (tarea c)', () => {
 		const hasSchemaKey = (value: unknown): boolean => {
 			if (Array.isArray(value)) return value.some(hasSchemaKey);

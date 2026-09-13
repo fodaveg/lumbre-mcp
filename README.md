@@ -503,7 +503,7 @@ significado que la tool individual equivalente cuando existe: `op:"add_task"`
 `set_section`, `op:"add_subtask"` = `add_subtask`, `op:"complete_subtask"` =
 `complete_subtask`, `op:"remove_section"` = `remove_section`. Las 6 restantes
 (`op:"move_to_list"`, `op:"create_list"`, `op:"nest_list"`,
-`op:"rename_list"`, `op:"remove_list"`, `op:"set_list_notes"`) son gestión de listas de "Algún día"
+`op:"rename_list"`, `op:"remove_list"`, `op:"set_list_notes"`) gestionan proyectos y áreas
 (paridad UI↔MCP) y ya NO tienen tool suelta equivalente — ver esa sección más
 arriba para el detalle campo a campo de cada una. El schema que expone la
 tool es deliberadamente laxo (los 22 campos que usan las 16 ops, todos

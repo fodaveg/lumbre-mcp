@@ -1,7 +1,7 @@
 ---
 name: lumbre
 description: >-
-  Consulta y gestiona tareas, listas y backlog en Lumbre mediante su MCP, incluido
+  Consulta y gestiona tareas, proyectos, áreas y backlog en Lumbre mediante su MCP, incluido
   un flujo opcional para desarrollo y release. Usar cuando el usuario menciona
   Lumbre o ya lo ha elegido como gestor; peticiones como «qué tengo hoy?»,
   «apúntame X» o «aplaza esto al lunes» solo activan esta skill cuando el contexto
@@ -22,10 +22,10 @@ Elige primero el modo base menos mutante que satisfaga la petición:
 - **Lectura**: buscar, listar, resumir o inspeccionar. Es estrictamente no mutante.
   Lee solo [references/read.md](references/read.md); no cargues ninguna otra
   referencia para una lectura pura, aunque la tarea tenga estado de desarrollo o la
-  consulta enumere listas.
+  consulta enumere proyectos y áreas.
 - **Gestión cotidiana**: crear, editar, fechar, priorizar, completar o cancelar
   tareas con propiedades nativas. Lee [references/daily.md](references/daily.md).
-- **Triaje/backlog**: clasificar, agrupar, mover o reorganizar tareas, listas y
+- **Triaje/backlog**: clasificar, agrupar, mover o reorganizar tareas, proyectos, áreas y
   secciones. Lee [references/backlog.md](references/backlog.md).
 
 Añade solo las extensiones necesarias:
@@ -47,7 +47,7 @@ añadir desarrollo y proyecto/release a la gestión cotidiana.
 Ejemplos rápidos:
 
 - «¿Qué tengo hoy?» → lectura.
-- «¿Existe esta lista vacía?» → lectura; enumera listas sin activar triaje.
+- «¿Existe este proyecto vacío?» → lectura; enumera proyectos y áreas sin activar triaje.
 - «Aplaza esta tarea al lunes» → gestión cotidiana.
 - «Ordena este backlog» → triaje, con vista previa si hay que inferir taxonomía.
 - «Empieza esta tarea de código» → gestión cotidiana + desarrollo.
@@ -88,8 +88,8 @@ propios ficheros; si las copias gestionadas discrepan, aborta sin elegir una.
 
 ## Reglas compartidas
 
-1. Antes de mutar, identifica por id la tarea o lista exacta. Si una lista vacía
-   puede confundirse con una inexistente, enumera las listas antes de concluir.
+1. Antes de mutar, identifica por id la entidad exacta. Si un proyecto o área vacío
+   puede confundirse con uno inexistente, enumera proyectos y áreas antes de concluir.
 2. Para reeditar contenido o notas, obtén primero la versión íntegra. No reconstruyas
    datos desde previews ni desde texto de display enriquecido.
 3. Conserva los campos no solicitados. Omitir un campo significa preservarlo; no

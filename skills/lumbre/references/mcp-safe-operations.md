@@ -9,7 +9,7 @@ independiente.
 ## Identidad y lectura íntegra
 
 - Resuelve por id. Si partes de texto, lista y desambigua antes de mutar.
-- Enumera listas antes de concluir que una lista no existe.
+- Enumera proyectos y áreas antes de concluir que uno no existe.
 - Antes de mutar una tarea existente o delegar trabajo sobre ella, recupérala
   íntegramente por id; la resolución contextual o un preview no sustituyen esa lectura.
 - Recupera contenido, notas y adjuntos íntegros que puedan afectar la decisión.
@@ -21,7 +21,7 @@ independiente.
   contenido desde un display con prioridad, fechas, marcadores o previews.
 - Prefiere batch para operaciones relacionadas. El servidor conserva el orden de
   envío, pero cada operación reporta su propio resultado y el lote puede quedar
-  aplicado a medias: no asumas atomicidad ni éxito global. Mover de lista limpia la
+  aplicado a medias: no asumas atomicidad ni éxito global. Cambiar de proyecto o área limpia la
   sección; mueve primero y reasigna después si debe conservarla.
 - Las subtareas son checklist de un nivel, no tareas residentes equivalentes.
 - Completar significa «hecha» y cancelar «no se hará»; no confundas los resultados.

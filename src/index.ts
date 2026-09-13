@@ -477,7 +477,7 @@ export const mutateTasksOpSchema = z
 		listId: z
 			.union([z.string().uuid(), z.null()])
 			.optional()
-			.describe('Id de lista: destino, padre, o uno que tú generes para encadenar con create_list'),
+			.describe('Id del proyecto o área: destino, padre, o uno generado para encadenar con create_list'),
 		// `text`/`content`/`name`/`deadline`: sin describe propio — el nombre
 		// del campo ya lo dice todo (texto de la tarea nueva o su nuevo
 		// texto/título, nombre de la lista, fecha límite) y no hay semántica
@@ -486,7 +486,7 @@ export const mutateTasksOpSchema = z
 		text: z.string().min(1).max(2000).optional(),
 		content: z.string().min(1).max(2000).optional(),
 		name: z.string().min(1).max(200).optional(),
-		list: z.string().max(200).optional().describe('Nombre de la lista destino (se crea si no existe)'),
+		list: z.string().max(200).optional().describe('Nombre del proyecto o área destino (se crea como proyecto si no existe)'),
 		section: z.string().max(200).nullable().optional().describe('Nombre de la sección, o null para quitarla'),
 		notes: z
 			.union([z.string().max(10000), z.null()])
@@ -513,7 +513,7 @@ export const mutateTasksOpSchema = z
 		// `icon`: sin describe propio — mismo criterio que `text`/`name`; su
 		// semántica (emoji/icono de la lista) ya la dice el nombre del campo.
 		icon: z.string().max(16).optional(),
-		parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id de la lista padre, o null para desanidar')
+		parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id del proyecto o área padre, o null para desanidar')
 	})
 	.strict();
 
@@ -694,7 +694,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		{
 			description:
 				'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
-				'"recuérdame", "añade a mi lista/tarea". Se encola y se materializa al sincronizar. ' +
+				'"recuérdame", "añade a mi proyecto/área". Se encola y se materializa al sincronizar. ' +
 				'`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
 			inputSchema: {
 				text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
@@ -703,7 +703,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.max(200)
 					.optional()
 					.describe(
-						'Nombre de la lista de "Algún día" destino (se crea si no existe). Sin lista y sin ' +
+						'Nombre del proyecto o área destino (se crea como proyecto si no existe). Sin `list` y sin ' +
 							'date, el cliente la coloca en "hoy" al materializarla.'
 					),
 				listId: z
@@ -711,7 +711,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.uuid()
 					.optional()
 					.describe(
-						'Id ESTABLE de la lista destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
+						'Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
 							'de list_tasks. Si se omite, se usa `list` por nombre (se crea si no existe).'
 					),
 				section: z
@@ -819,7 +819,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			description:
 				'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
 				'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
-				'vacío igual que una lista vacía existente — usa list_lists para distinguir. `section` ' +
+				'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
 				'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
 				'`notes` controla las notas de cada tarea (default ' +
 				'"auto": íntegra si @done/#done, si cambió desde la última vez que la viste, o si se tocó ' +
@@ -846,13 +846,13 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				list: z
 					.string()
 					.optional()
-					.describe('Nombre (case-insensitive) de una lista de "Algún día"/proyecto a filtrar'),
+					.describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
 				section: z
 					.string()
 					.optional()
 					.describe(
 						'Nombre (case-insensitive) de una sección dentro de `list` a filtrar (Fase B, ' +
-							'listas=proyectos); combinado con `list`, solo casa una sección de ESA lista'
+							'proyectos/áreas); combinado con `list`, solo casa una sección de ESE destino'
 					),
 				includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
 				includeArchived: z
@@ -1083,8 +1083,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'list_lists',
 		{
 			description:
-				'Enumera TODAS las listas de "Algún día" con su recuento de tareas, incluidas las ' +
-				'vacías (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacía de ' +
+				'Enumera TODOS los proyectos y áreas con su recuento de tareas, incluidos los ' +
+				'vacíos (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacío de ' +
 				'inexistente. Sin parámetros.',
 
 			inputSchema: {}
@@ -1124,7 +1124,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		{
 			description:
 				'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
-				'lista/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
+				'proyecto o área/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
 				'obtener el id de una subtarea. `includeArchived` permite recuperarla si está archivada. ' +
 				'Error si el taskId no existe.',
 
@@ -1583,8 +1583,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'set_section',
 		{
 			description:
-				'Mueve una tarea existente a una sección dentro de SU lista (se crea si no existe), o ' +
-				'la saca con section:null. Se ignora si la tarea no tiene lista propia. NO aplica a ' +
+				'Mueve una tarea existente a una sección dentro de SU proyecto o área (se crea si no existe), o ' +
+				'la saca con section:null. Se ignora si la tarea no tiene residencia propia. NO aplica a ' +
 				'subtareas. ' + ASYNC_NOTE,
 
 			inputSchema: {
@@ -1594,7 +1594,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					.max(200)
 					.nullable()
 					.describe(
-						'Nombre de la sección destino dentro de la lista de la tarea (se crea si no existe). ' +
+						'Nombre de la sección destino dentro del proyecto o área de la tarea (se crea si no existe). ' +
 							'null = quitarla de su sección actual.'
 					)
 			}
@@ -1621,8 +1621,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		'remove_section',
 		{
 			description:
-				'Borra una sección dentro de una lista; sus tareas no se borran, solo quedan sueltas ' +
-				'en la MISMA lista. Resuelve `sectionId` desde una tarea que viva ahí ' +
+				'Borra una sección dentro de un proyecto o área; sus tareas no se borran, solo quedan sueltas ' +
+				'en el MISMO contenedor. Resuelve `sectionId` desde una tarea que viva ahí ' +
 				'(list_tasks/get_task); si no existe, se ignora. ' + ASYNC_NOTE,
 
 			inputSchema: {
@@ -1906,7 +1906,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			description:
 				`Vía PREFERENTE para VARIAS operaciones de golpe (crear y/o mutar): resuelve existencias y ` +
 				`encola en UNA sola llamada, en vez de una tool call por operación. Cada elemento de \`ops\` ` +
-				`equivale a su tool individual (mapeo op↔tool en el README) — salvo las ops de LISTA, sin ` +
+				`equivale a su tool individual (mapeo op↔tool en el README) — salvo las ops de proyecto/área, sin ` +
 				`tool suelta desde el 2026-08-27: mutate_tasks es su ÚNICA vía. Contrato por-op en la ` +
 				`description de \`ops\`. Éxito PARCIAL: una op inválida no bloquea las ` +
 				`demás — el resultado detalla qué falló por posición y el \`id\` de cada una encolada ` +

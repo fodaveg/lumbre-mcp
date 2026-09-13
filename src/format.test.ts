@@ -138,6 +138,29 @@ describe('formato de la hora (`time`) — se pega a la fecha, no ocupa tag ni l�
 	});
 });
 
+describe('nomenclatura de proyectos y áreas', () => {
+	it('el detalle conserva listId pero presenta la residencia como proyecto o área', () => {
+		const output = formatTaskFull(
+			task({ list: 'Casa', somedayListId: '11111111-1111-1111-1111-111111111111' })
+		);
+		expect(output).toContain(
+			'- proyecto/área: "Casa" (listId: 11111111-1111-1111-1111-111111111111)'
+		);
+		expect(output).not.toContain('- lista:');
+	});
+
+	it('el inventario nombra proyectos y áreas sin cambiar listId', () => {
+		expect(
+			formatListSummaries([
+				{ id: '11111111-1111-1111-1111-111111111111', name: 'Casa', taskCount: 0 }
+			])
+		).toBe(
+			'Proyectos y áreas (1):\n· Casa — 0 tareas (listId: 11111111-1111-1111-1111-111111111111)'
+		);
+		expect(formatListSummaries([])).toBe('Sin proyectos ni áreas.');
+	});
+});
+
 describe('formato de tareas archivadas', () => {
 	it('el listado distingue una archivada de una viva con la fecha de archivo', () => {
 		const output = formatTaskList(

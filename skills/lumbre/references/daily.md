@@ -5,7 +5,7 @@ Usa las propiedades nativas de Lumbre para tareas personales u operativas:
 - fecha y hora para cuándo ocurre o vence;
 - recurrencia para hábitos u obligaciones repetidas;
 - prioridad para importancia relativa;
-- lista y sección para residencia y agrupación;
+- proyecto o área para residencia, y sección para agrupación;
 - subtareas para una checklist breve;
 - completar para trabajo realizado y cancelar para trabajo que no se hará.
 

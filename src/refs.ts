@@ -221,7 +221,7 @@ function flattenRefTokens(text: string): string {
  * →tarea[hecha] "Título ACTUAL" id:<uuid>          (sin notas → sin marcador)
  * →tarea[ROTA] id:<uuid>                            (ya no existe)
  * →tarea[sin resolver] id:<uuid>                    (no se pudo comprobar)
- * →lista "Nombre ACTUAL" id:<uuid>
+ * →proyecto/área "Nombre ACTUAL" id:<uuid>
  * ```
  *
  * La etiqueta guardada en la nota NO se pinta nunca: o hay título actual (que
@@ -238,10 +238,10 @@ export function renderRefs(text: string, resolution?: RefResolution): string {
 			const title = flattenRefTokens(task.content);
 			return `→tarea[${taskStateLabel(task)}] "${title}"${noteHint(task)} id:${id}`;
 		}
-		if (!resolution.checkedLists.has(id)) return `→lista[sin resolver] id:${id}`;
+		if (!resolution.checkedLists.has(id)) return `→proyecto/área[sin resolver] id:${id}`;
 		const name = resolution.lists.get(id);
-		if (name === undefined) return `→lista[ROTA] id:${id}`;
-		return `→lista "${flattenRefTokens(name)}" id:${id}`;
+		if (name === undefined) return `→proyecto/área[ROTO] id:${id}`;
+		return `→proyecto/área "${flattenRefTokens(name)}" id:${id}`;
 	});
 }
 

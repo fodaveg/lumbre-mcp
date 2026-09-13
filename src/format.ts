@@ -230,7 +230,7 @@ export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 				: (t.date ?? (t.time ? `(sin fecha) ${t.time}` : '(sin fecha)'))
 		}`,
 		`- deadline: ${t.deadline ? `⚑${t.deadline}` : '(sin deadline)'}`,
-		`- lista: ${t.list ? `"${t.list}"${t.somedayListId ? ` (listId: ${t.somedayListId})` : ''}` : '(sin lista)'}`,
+		`- proyecto/área: ${t.list ? `"${t.list}"${t.somedayListId ? ` (listId: ${t.somedayListId})` : ''}` : '(ninguno)'}`,
 		`- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
 		`- creada: ${t.createdAt}`
 	];
@@ -271,7 +271,7 @@ function listLegend(tasks: LumbreTask[]): string[] {
 		const key = `${t.list} ${t.somedayListId}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
-		lines.push(`· lista "${t.list}" — listId: ${t.somedayListId}`);
+		lines.push(`· proyecto/área "${t.list}" — listId: ${t.somedayListId}`);
 	}
 	return lines;
 }
@@ -414,7 +414,7 @@ export function formatTaskList(
 	const groups: { key: string; label: string; tasks: LumbreTask[] }[] = [];
 	for (const t of tasks) {
 		const sectionLabel = t.section ?? '(sin sección)';
-		const listLabel = t.list ?? '(sin lista)';
+		const listLabel = t.list ?? '(sin proyecto ni área)';
 		const label = showList ? `${listLabel} · ${sectionLabel}` : sectionLabel;
 		// Clave de agrupación separada de la etiqueta visible: JSON.stringify
 		// evita colisiones si un nombre de lista/sección contiene el separador.
@@ -434,8 +434,8 @@ export function formatTaskList(
  * del MCP, indistinguible de "no existe").
  */
 export function formatListSummaries(lists: LumbreListSummary[]): string {
-	if (lists.length === 0) return 'Sin listas.';
-	const header = `${lists.length} lista${lists.length === 1 ? '' : 's'}:`;
+	if (lists.length === 0) return 'Sin proyectos ni áreas.';
+	const header = `Proyectos y áreas (${lists.length}):`;
 	const body = lists.map(
 		(l) => `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})`
 	);
