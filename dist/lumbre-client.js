@@ -130,6 +130,66 @@ export async function getListLinks(config, listId) {
     }
     return body.links;
 }
+function isListLink(value, listId, url, label) {
+    if (!value || typeof value !== 'object')
+        return false;
+    const link = value;
+    return (typeof link.id === 'string' &&
+        link.listId === listId &&
+        link.kind === 'obsidian' &&
+        link.targetKey === url &&
+        link.url === url &&
+        link.label === label &&
+        typeof link.updatedAt === 'string');
+}
+/** Escritura síncrona e idempotente de un vínculo de nota de Obsidian. */
+export async function linkListNote(config, input) {
+    const url = input.url.trim();
+    const label = input.label.trim();
+    const body = await request(config, '/api/list-links', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            type: 'link',
+            listId: input.listId,
+            target: { kind: 'obsidian', url, label }
+        })
+    });
+    if (!body ||
+        typeof body !== 'object' ||
+        body.ok !== true ||
+        body.type !== 'link' ||
+        body.listId !== input.listId ||
+        typeof body.deleted !== 'boolean' ||
+        !isListLink(body.link, input.listId, url, label)) {
+        throw new LumbreApiError('Lumbre no confirmó el vínculo de lista (respuesta inesperada).');
+    }
+    return body;
+}
+/** Retirada síncrona e idempotente de un vínculo de nota de Obsidian. */
+export async function unlinkListNote(config, input) {
+    const url = input.url.trim();
+    const label = input.label.trim();
+    const body = await request(config, '/api/list-links', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            type: 'unlink',
+            listId: input.listId,
+            target: { kind: 'obsidian', url, label }
+        })
+    });
+    if (!body ||
+        typeof body !== 'object' ||
+        body.ok !== true ||
+        body.type !== 'unlink' ||
+        body.listId !== input.listId ||
+        typeof body.deleted !== 'boolean' ||
+        typeof body.removed !== 'boolean') {
+        throw new LumbreApiError('Lumbre no confirmó la retirada del vínculo de lista (respuesta inesperada).');
+    }
+    return body;
+}
 /**
  * Busca UNA tarea por `id` vía `GET /api/tasks?id=` (lookup directo, no
  * listado — ver ese endpoint en el repo principal) y la devuelve, o

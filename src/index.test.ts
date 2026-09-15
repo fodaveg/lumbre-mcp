@@ -87,6 +87,8 @@ describe('tools/list — superficie completa', () => {
 		'list_tasks',
 		'list_lists',
 		'get_list_links',
+		'link_list_note',
+		'unlink_list_note',
 		'get_task',
 		'read_attachment',
 		'add_attachment',
@@ -105,13 +107,13 @@ describe('tools/list — superficie completa', () => {
 		'mutate_brl'
 	];
 
-	it('sigue exponiendo las 21 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 23 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27)', () => {
-		expect(tools).toHaveLength(21);
+		expect(tools).toHaveLength(23);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
-	it('ninguna tool trae `title` (tarea d: quitados de las 21 registraciones)', () => {
+	it('ninguna tool trae `title` (tarea d: quitados de las 23 registraciones)', () => {
 		for (const tool of tools) {
 			expect(tool).not.toHaveProperty('title');
 		}
@@ -166,7 +168,7 @@ describe('tools/list — superficie completa', () => {
 		expect(output.required).toEqual(expect.arrayContaining(['deleted', 'attachment_id']));
 	});
 
-	it('techo de bytes de las 21 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 23 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -239,9 +241,13 @@ describe('tools/list — superficie completa', () => {
 		// Re-medido el 2026-09-08 al añadir `get_list_links`: 21 tools, 24.521
 		// caracteres. La nueva tool conserva URL y metadata de vínculos sin leer
 		// su destino, incluidos los de Obsidian; el techo mantiene ~4% de holgura.
+		// Re-medido el 2026-09-15 al añadir `link_list_note` y
+		// `unlink_list_note`: 23 tools, 26.489 caracteres. Ambas comparten el
+		// mismo contrato de entrada y escriben de forma síncrona vía
+		// `POST /api/list-links`.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 25500;
+		const CHAR_CEILING = 27850;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -552,6 +558,104 @@ describe('get_list_links — registro y contrato HTTP', () => {
 		expect(invalid.isError).toBe(true);
 		expect(((invalid as { content: { text: string }[] }).content[0]).text).toMatch(/Invalid uuid/);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('link_list_note / unlink_list_note — registro, validación y contrato HTTP', () => {
+	const LIST_ID = '11111111-1111-4111-8111-111111111111';
+	const URL = 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md';
+	const LINK = {
+		id: '22222222-2222-4222-8222-222222222222',
+		listId: LIST_ID,
+		kind: 'obsidian',
+		targetKey: URL,
+		url: URL,
+		label: 'Proyecto Lumbre',
+		updatedAt: '2026-09-15T09:00:00.000Z'
+	};
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'write-list-links-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('link y unlink mandan el POST exacto, recortan una vez y muestran tombstone/removed=false', async () => {
+		const fetchSpy = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({ ok: true, type: 'link', listId: LIST_ID, deleted: true, link: LINK }),
+					{ status: 200, headers: { 'content-type': 'application/json' } }
+				)
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({ ok: true, type: 'unlink', listId: LIST_ID, deleted: false, removed: false }),
+					{ status: 200, headers: { 'content-type': 'application/json' } }
+				)
+			);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const linked = await client.callTool({
+			name: 'link_list_note',
+			arguments: { listId: LIST_ID, url: `  ${URL}  `, label: '  Proyecto Lumbre  ' }
+		});
+		expect(linked.isError).not.toBe(true);
+		expect(((linked as { content: { text: string }[] }).content[0]).text).toMatch(/deleted=true/);
+
+		const unlinked = await client.callTool({
+			name: 'unlink_list_note',
+			arguments: { listId: LIST_ID, url: URL, label: 'Proyecto Lumbre' }
+		});
+		expect(unlinked.isError).not.toBe(true);
+		expect(((unlinked as { content: { text: string }[] }).content[0]).text).toMatch(
+			/removed=false; deleted=false/
+		);
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		for (const [index, type] of ['link', 'unlink'].entries()) {
+			const [requestUrl, init] = fetchSpy.mock.calls[index] as [string, RequestInit];
+			expect(requestUrl).toBe('https://lumbre.test/api/list-links');
+			expect(init.method).toBe('POST');
+			expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${TEST_CONFIG.token}`);
+			expect(JSON.parse(String(init.body))).toEqual({
+				type,
+				listId: LIST_ID,
+				target: { kind: 'obsidian', url: URL, label: 'Proyecto Lumbre' }
+			});
+		}
+	});
+
+	it.each([
+		['uuid', { listId: 'no-es-uuid', url: URL, label: 'Nota' }],
+		['protocolo', { listId: LIST_ID, url: 'https://example.com/nota', label: 'Nota' }],
+		['vacía tras trim', { listId: LIST_ID, url: '   ', label: 'Nota' }],
+		['sin destino', { listId: LIST_ID, url: 'obsidian://', label: 'Nota' }],
+		['credenciales', { listId: LIST_ID, url: 'obsidian://user:pass@open?file=nota', label: 'Nota' }],
+		['más de 2048 caracteres', { listId: LIST_ID, url: `obsidian://open?file=${'a'.repeat(2_048)}`, label: 'Nota' }],
+		['más de 2048 bytes UTF-8', { listId: LIST_ID, url: `obsidian://open?file=${'á'.repeat(1_020)}`, label: 'Nota' }],
+		['label vacío tras trim', { listId: LIST_ID, url: URL, label: '   ' }],
+		['label mayor de 300', { listId: LIST_ID, url: URL, label: 'a'.repeat(301) }]
+	])('rechaza %s antes de tocar red', async (_name, args) => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'link_list_note', arguments: args });
+		expect(result.isError).toBe(true);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 });
 
@@ -1913,8 +2017,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 21 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(21);
+	it('sin `toolset` (default): las 23 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(23);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -1925,8 +2029,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 21, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(21);
+	it('`toolset: "all"` (explícito): las 23, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(23);
 	});
 });
 

@@ -239,6 +239,19 @@ presentar esa hipótesis como un fallo observado.
   directo/path HTTP) dice que el token no está configurado o no es válido; con
   el conector remoto autorizado por OAuth dice que la autorización OAuth no es
   válida o fue revocada, sin mencionar `LUMBRE_TOKEN` ni exponer ningún token.
+- `link_list_note({ listId, url, label })` — vincula de forma síncrona e
+  idempotente una nota de Obsidian con un proyecto o área mediante
+  `POST /api/list-links`. `url` debe ser un deep link `obsidian://` sin
+  credenciales (máx. 2.048 caracteres y bytes UTF-8) y `label`, tras recortarlo,
+  debe medir 1..300 caracteres. Solo se recortan los extremos: la URL se guarda
+  sin normalizar. La respuesta incluye `deleted=true` si la lista está en la
+  papelera y devuelve la metadata del vínculo confirmado.
+- `unlink_list_note({ listId, url, label })` — retira ese vínculo por la URL
+  exacta (tras recortar extremos). Es síncrona e idempotente: `removed=false`
+  confirma que ya no estaba registrado; también muestra `deleted`. La API exige
+  `label` aunque la identidad de la retirada sea la URL. Ambas escrituras usan
+  el mismo Bearer que el resto del MCP, incluido el conector remoto OAuth cuando
+  el endpoint compatible está desplegado.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
   recortar (notas íntegras y verbatim, `createdAt` sin recortar, proyecto o área/sección
   con sus ids). `includeArchived: true` permite recuperarla aunque esté
@@ -762,10 +775,10 @@ stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
 registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
-de las 21 tools de siempre — así no duplicas la superficie de `tools/list` en
-el contexto de cada sesión (pesa ~24 KB de JSON; dos copias son el doble, y el
+de las 23 tools de siempre — así no duplicas la superficie de `tools/list` en
+el contexto de cada sesión (pesa ~26 KB de JSON; dos copias son el doble, y el
 modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 21, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 23, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

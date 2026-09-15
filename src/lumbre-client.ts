@@ -343,6 +343,33 @@ export interface LumbreListLink {
 	updatedAt: string;
 }
 
+/** Destino de nota que acepta `POST /api/list-links`. La API exige también
+ * `label` al desvincular, aunque solo usa `url` como identidad del destino. */
+export interface ListNoteLinkInput {
+	listId: string;
+	url: string;
+	label: string;
+}
+
+export interface LinkListNoteResult {
+	ok: true;
+	type: 'link';
+	listId: string;
+	/** La lista estaba en la papelera, pero el vínculo se escribió igualmente. */
+	deleted: boolean;
+	link: LumbreListLink;
+}
+
+export interface UnlinkListNoteResult {
+	ok: true;
+	type: 'unlink';
+	listId: string;
+	/** La lista estaba en la papelera al procesar la petición. */
+	deleted: boolean;
+	/** `false` es éxito idempotente: el vínculo ya no estaba registrado. */
+	removed: boolean;
+}
+
 /**
  * `GET /api/tasks?includeLists=1`: enumera TODOS los proyectos y áreas
  * vivos del usuario, INCLUIDOS los que no tienen ninguna tarea todavía. Sin
@@ -371,6 +398,77 @@ export async function getListLinks(config: LumbreConfig, listId: string): Promis
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/list-links?listId=.');
 	}
 	return (body as { links: LumbreListLink[] }).links;
+}
+
+function isListLink(value: unknown, listId: string, url: string, label: string): value is LumbreListLink {
+	if (!value || typeof value !== 'object') return false;
+	const link = value as Partial<LumbreListLink>;
+	return (
+		typeof link.id === 'string' &&
+		link.listId === listId &&
+		link.kind === 'obsidian' &&
+		link.targetKey === url &&
+		link.url === url &&
+		link.label === label &&
+		typeof link.updatedAt === 'string'
+	);
+}
+
+/** Escritura síncrona e idempotente de un vínculo de nota de Obsidian. */
+export async function linkListNote(config: LumbreConfig, input: ListNoteLinkInput): Promise<LinkListNoteResult> {
+	const url = input.url.trim();
+	const label = input.label.trim();
+	const body = await request(config, '/api/list-links', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			type: 'link',
+			listId: input.listId,
+			target: { kind: 'obsidian', url, label }
+		})
+	});
+	if (
+		!body ||
+		typeof body !== 'object' ||
+		(body as { ok?: unknown }).ok !== true ||
+		(body as { type?: unknown }).type !== 'link' ||
+		(body as { listId?: unknown }).listId !== input.listId ||
+		typeof (body as { deleted?: unknown }).deleted !== 'boolean' ||
+		!isListLink((body as { link?: unknown }).link, input.listId, url, label)
+	) {
+		throw new LumbreApiError('Lumbre no confirmó el vínculo de lista (respuesta inesperada).');
+	}
+	return body as LinkListNoteResult;
+}
+
+/** Retirada síncrona e idempotente de un vínculo de nota de Obsidian. */
+export async function unlinkListNote(
+	config: LumbreConfig,
+	input: ListNoteLinkInput
+): Promise<UnlinkListNoteResult> {
+	const url = input.url.trim();
+	const label = input.label.trim();
+	const body = await request(config, '/api/list-links', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			type: 'unlink',
+			listId: input.listId,
+			target: { kind: 'obsidian', url, label }
+		})
+	});
+	if (
+		!body ||
+		typeof body !== 'object' ||
+		(body as { ok?: unknown }).ok !== true ||
+		(body as { type?: unknown }).type !== 'unlink' ||
+		(body as { listId?: unknown }).listId !== input.listId ||
+		typeof (body as { deleted?: unknown }).deleted !== 'boolean' ||
+		typeof (body as { removed?: unknown }).removed !== 'boolean'
+	) {
+		throw new LumbreApiError('Lumbre no confirmó la retirada del vínculo de lista (respuesta inesperada).');
+	}
+	return body as UnlinkListNoteResult;
 }
 
 /**

@@ -10,6 +10,7 @@ import {
 	findTaskById,
 	findTasksByIds,
 	getListLinks,
+	linkListNote,
 	listLists,
 	listTasks,
 	planBatchPhases,
@@ -17,6 +18,7 @@ import {
 	subtaskNotAllowedError,
 	taskNotFoundError,
 	uploadAttachment,
+	unlinkListNote,
 	type BatchOp,
 	type BatchResultItem,
 	type LumbreConfig,
@@ -413,6 +415,108 @@ describe('getListLinks', () => {
 		vi.stubGlobal('fetch', fetchSpy);
 		await expect(getListLinks(config, LIST_ID)).rejects.toThrow(
 			/Lumbre respondió 503: índice de vínculos no disponible/
+		);
+	});
+});
+
+describe('linkListNote / unlinkListNote', () => {
+	const LIST_ID = '11111111-1111-4111-8111-111111111111';
+	const URL = 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md';
+	const LINK = {
+		id: '22222222-2222-4222-8222-222222222222',
+		listId: LIST_ID,
+		kind: 'obsidian',
+		targetKey: URL,
+		url: URL,
+		label: 'Proyecto Lumbre',
+		updatedAt: '2026-09-15T09:00:00.000Z'
+	};
+
+	it('manda link por POST con Bearer, JSON y valores recortados; devuelve el tombstone y metadata', async () => {
+		const response = { ok: true, type: 'link', listId: LIST_ID, deleted: true, link: LINK };
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify(response), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		expect(
+			await linkListNote(config, { listId: LIST_ID, url: `  ${URL}  `, label: '  Proyecto Lumbre  ' })
+		).toEqual(response);
+		const [requestUrl, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(requestUrl).toBe('https://lumbre.test/api/list-links');
+		expect(init.method).toBe('POST');
+		expect(init.headers).toEqual({
+			authorization: 'Bearer tok-123',
+			'content-type': 'application/json'
+		});
+		expect(JSON.parse(String(init.body))).toEqual({
+			type: 'link',
+			listId: LIST_ID,
+			target: { kind: 'obsidian', url: URL, label: 'Proyecto Lumbre' }
+		});
+	});
+
+	it('manda unlink con label requerido y conserva removed=false como éxito idempotente', async () => {
+		const response = { ok: true, type: 'unlink', listId: LIST_ID, deleted: false, removed: false };
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify(response), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		expect(await unlinkListNote(config, { listId: LIST_ID, url: URL, label: 'Proyecto Lumbre' })).toEqual(
+			response
+		);
+		const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(JSON.parse(String(init.body))).toEqual({
+			type: 'unlink',
+			listId: LIST_ID,
+			target: { kind: 'obsidian', url: URL, label: 'Proyecto Lumbre' }
+		});
+	});
+
+	it.each([
+		['link sin ok', linkListNote, { type: 'link', listId: LIST_ID, deleted: false, link: LINK }],
+		['link sin deleted', linkListNote, { ok: true, type: 'link', listId: LIST_ID, link: LINK }],
+		['link sin metadata', linkListNote, { ok: true, type: 'link', listId: LIST_ID, deleted: false }],
+		[
+			'unlink sin removed',
+			unlinkListNote,
+			{ ok: true, type: 'unlink', listId: LIST_ID, deleted: false }
+		],
+		[
+			'respuesta para otra lista',
+			unlinkListNote,
+			{ ok: true, type: 'unlink', listId: '33333333-3333-4333-8333-333333333333', deleted: false, removed: true }
+		]
+	] as const)('rechaza una respuesta malformada: %s', async (_name, operation, response) => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify(response), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await expect(operation(config, { listId: LIST_ID, url: URL, label: 'Proyecto Lumbre' })).rejects.toThrow(
+			/respuesta inesperada/
+		);
+	});
+
+	it('propaga los errores HTTP con el helper común', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ message: 'Lista no encontrada en esta cuenta' }), {
+				status: 404,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await expect(linkListNote(config, { listId: LIST_ID, url: URL, label: 'Proyecto Lumbre' })).rejects.toThrow(
+			/Lumbre respondió 404: Lista no encontrada/
 		);
 	});
 });

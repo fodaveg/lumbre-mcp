@@ -31,9 +31,10 @@ const issuer = url ? new URL(url).origin : undefined;
 const resource = issuer ? `${issuer}/mcp` : undefined;
 const scope = 'lumbre:mcp';
 
-// Techo de bytes de `tools/list` para las 21 tools reales — MISMA fuente que
-// `src/index.test.ts` ("techo de bytes de las 21 tools", `CHAR_CEILING`):
-// medido 24.521 al añadir `get_list_links` (21 tools); antes, 22.198 tras podar las 5 tools sueltas de lista (create_list/
+// Techo de bytes de `tools/list` para las 23 tools reales — MISMA fuente que
+// `src/index.test.ts` ("techo de bytes de las 23 tools", `CHAR_CEILING`):
+// medido 26.489 al añadir `link_list_note`/`unlink_list_note` (23 tools); antes, 24.521 con
+// `get_list_links` (21 tools), y 22.198 tras podar las 5 tools sueltas de lista (create_list/
 // nest_list/rename_list/remove_list/move_to_list, cubiertas entero por
 // mutate_tasks) y sustituir add_brl_entry/update_brl_entry/delete_brl_entry
 // por mutate_brl (2026-08-27) + ~5% de holgura. Si ese test cambia su techo,
@@ -47,8 +48,8 @@ const scope = 'lumbre:mcp';
 // smoke en rojo por un recuento congelado, no por un fallo real. Si tocas el
 // número de tools, `grep -rn "CHAR_CEILING\|EXPECTED_TOOL_COUNT" src scripts`
 // enseña los TRES sitios de golpe.
-const CHAR_CEILING = 25500;
-const EXPECTED_TOOL_COUNT = 21;
+const CHAR_CEILING = 27850;
+const EXPECTED_TOOL_COUNT = 23;
 
 if (!url) {
 	console.error('smoke-remote: falta la URL. Uso: node scripts/smoke-remote.mjs <url> <token>');

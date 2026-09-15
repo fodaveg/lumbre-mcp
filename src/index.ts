@@ -17,6 +17,7 @@ import {
 	findTasksByIds,
 	getAttachment,
 	getListLinks,
+	linkListNote,
 	listBrlEntries,
 	listLists,
 	listTasks,
@@ -27,6 +28,7 @@ import {
 	runBatch,
 	taskNotFoundError,
 	uploadAttachment,
+	unlinkListNote,
 	LumbreApiError,
 	type BatchResultItem,
 	type BrokenListPromise,
@@ -147,6 +149,28 @@ function errorResult(err: unknown) {
 	const message = err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err);
 	return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
 }
+
+/** Misma validación pura que aplica Lumbre antes de guardar un destino de
+ * Obsidian. Recibe el valor ya recortado y no lo normaliza ni reserializa. */
+function isValidObsidianDeepLink(raw: string): boolean {
+	if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048) return false;
+	try {
+		const url = new URL(raw);
+		return url.protocol === 'obsidian:' && !url.username && !url.password && raw.length > 'obsidian://'.length;
+	} catch {
+		return false;
+	}
+}
+
+const listNoteTargetInputSchema = {
+	listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)'),
+	url: z
+		.string()
+		.trim()
+		.refine(isValidObsidianDeepLink, 'URL de Obsidian inválida')
+		.describe('Deep link obsidian:// de la nota (máx. 2048 caracteres y bytes UTF-8)'),
+	label: z.string().trim().min(1).max(300).describe('Nombre visible de la nota (1..300 caracteres)')
+};
 
 /**
  * Comando `claude mcp add` LISTO PARA COPIAR del conector stdio local acotado
@@ -648,14 +672,14 @@ export interface CreateServerOptions {
 	 * conector stdio LOCAL dedicado a adjuntos (ver README, "Transporte HTTP
 	 * remoto"): con `'attachments'`, solo `add_attachment`/`read_attachment`/
 	 * `delete_attachment`; con cualquier otro valor (incluido `undefined`, el
-	 * default), las 21 de siempre. Existe para que David pueda tener el
-	 * conector remoto (21 tools) Y un conector local de adjuntos a la vez sin
-	 * duplicar las 21 en el contexto de cada sesión (`tools/list` ya pesa ~24
+	 * default), las 23 de siempre. Existe para que David pueda tener el
+	 * conector remoto (23 tools) Y un conector local de adjuntos a la vez sin
+	 * duplicar las 23 en el contexto de cada sesión (`tools/list` ya pesa ~26
 	 * KB de JSON; dos
 	 * copias son dos veces ese coste, y el modelo encima tendría que acertar
 	 * cuál de los dos `add_task`/`list_tasks` usar). `main()` la lee de
 	 * `LUMBRE_MCP_TOOLSET` (env); `http.ts` NUNCA la pasa — el conector
-	 * remoto sigue exponiendo las 21 siempre, pase lo que pase con la env del
+	 * remoto sigue exponiendo las 23 siempre, pase lo que pase con la env del
 	 * proceso que lo arrancó.
 	 */
 	toolset?: 'all' | 'attachments';
@@ -666,14 +690,14 @@ export interface CreateServerOptions {
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
- * transporte remoto). Registra las 21 de siempre salvo que
+ * transporte remoto). Registra las 23 de siempre salvo que
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
  * quedan `add_attachment`/`read_attachment`/`delete_attachment` — las demás
  * se registran igual
- * (para no bifurcar cada una de las 18 llamadas a `registerTool` con un
+ * (para no bifurcar cada una de las 20 llamadas a `registerTool` con un
  * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
- * estado intermedio de "21 registradas".
+ * estado intermedio de "23 registradas".
  *
  * `taskCache`/`brlCache` (cachés cortas de existencia, ver
  * `existence-cache.ts`) salen del registro de MÓDULO indexado por
@@ -1121,6 +1145,48 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			try {
 				const links = await getListLinks(config, input.listId);
 				return textResult(formatListLinks(input.listId, links));
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
+	);
+
+	const linkListNoteTool = server.registerTool(
+		'link_list_note',
+		{
+			description:
+				'Vincula de forma síncrona e idempotente una nota de Obsidian con un proyecto o área. ' +
+				'Guarda solo el deep link y el nombre visible; no lee ni copia el contenido de la nota.',
+			inputSchema: listNoteTargetInputSchema
+		},
+		async (input) => {
+			try {
+				const result = await linkListNote(config, input);
+				return textResult(
+					`Nota vinculada al proyecto o área ${result.listId}. deleted=${result.deleted}.\n` +
+					formatListLinks(result.listId, [result.link])
+				);
+			} catch (err) {
+				return errorResult(err);
+			}
+		}
+	);
+
+	const unlinkListNoteTool = server.registerTool(
+		'unlink_list_note',
+		{
+			description:
+				'Desvincula de forma síncrona e idempotente una nota de Obsidian de un proyecto o área. ' +
+				'`removed=false` confirma que el vínculo ya no estaba registrado.',
+			inputSchema: listNoteTargetInputSchema
+		},
+		async (input) => {
+			try {
+				const result = await unlinkListNote(config, input);
+				return textResult(
+					`Vínculo de nota retirado del proyecto o área ${result.listId}. ` +
+					`removed=${result.removed}; deleted=${result.deleted}.`
+				);
 			} catch (err) {
 				return errorResult(err);
 			}
@@ -2110,9 +2176,9 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	);
 
 	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
-	// retira las 18 tools que NO son `add_attachment`/`read_attachment`/
+	// retira las 20 tools que NO son `add_attachment`/`read_attachment`/
 	// `delete_attachment` — TODAS se registraron arriba igual (para no bifurcar
-	// cada una de las 18 llamadas a `registerTool` con un `if`), así que aquí
+	// cada una de las 20 llamadas a `registerTool` con un `if`), así que aquí
 	// solo se deshace lo
 	// que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
 	// cliente llega a ver el `tools/list` de 21 en el intermedio.
@@ -2123,6 +2189,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			listTasksTool,
 			listListsTool,
 			getListLinksTool,
+			linkListNoteTool,
+			unlinkListNoteTool,
 			getTaskTool,
 			completeTaskTool,
 			cancelTaskTool,
@@ -2155,7 +2223,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
  * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
  * `read_attachment`/`delete_attachment`, pensado para un SEGUNDO conector
- * stdio local dedicado (David enchufa a la vez el remoto de las 21 tools y
+ * stdio local dedicado (David enchufa a la vez el remoto de las 23 tools y
  * este, sin duplicar superficie — ver README). Cualquier otro valor (incluido
  * no ponerla) cae
  * al default `'all'` de `createServer` — nunca falla por un valor raro, un
