@@ -226,7 +226,20 @@ presentar esa hipótesis como un fallo observado.
   `[]` tanto si el destino no existe como si existe pero está vacío, `list_lists`
   distingue ambos casos: úsala para comprobar si un proyecto o área existe (p. ej. el
   usuario dice que la acaba de crear) o para resolver su `listId` sin
-  depender de que ya tenga tareas. Sin parámetros.
+  depender de que ya tenga tareas. Sin parámetros. Si un proyecto o área tiene
+  nota, su línea termina con el marcador `✎N ↻DDmmm` (2026-09-16, tarea
+  827a7878) — el MISMO marcador que usa `list_tasks` para una nota sin leer
+  (tamaño en chars + fecha de la última edición): nunca vuelca la nota entera
+  aquí, que es un listado de MUCHOS destinos; léela íntegra con `get_list`.
+  Servidores anteriores a esta feature (sin `notes`/`notesUpdatedAt` en la
+  respuesta) simplemente no muestran marcador, sin romper nada.
+- `get_list({ listId })` — devuelve el detalle completo de UN proyecto o área:
+  nombre, tipo (proyecto/área), padre, estado (cierre/aparcado/fecha, cuando
+  el servidor los trae) y recuento de tareas, seguidos de su nota ÍNTEGRA y
+  verbatim (2026-09-16, tarea 827a7878) — útil para leerla ANTES de
+  reescribirla con `mutate_tasks({ op: "set_list_notes" })`, que la reemplaza
+  entera. Da error explícito si el `listId` no existe entre los proyectos/áreas
+  visibles del usuario.
 - `get_list_links({ listId })` — lee los vínculos configurados para un proyecto o área
   (vía `GET /api/list-links?listId=`), con su URL y metadata completa. Puede
   devolver destinos `obsidian://`; el MCP los presenta como vínculos y nunca
@@ -775,10 +788,10 @@ stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
 registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
-de las 23 tools de siempre — así no duplicas la superficie de `tools/list` en
-el contexto de cada sesión (pesa ~26 KB de JSON; dos copias son el doble, y el
+de las 24 tools de siempre — así no duplicas la superficie de `tools/list` en
+el contexto de cada sesión (pesa ~27 KB de JSON; dos copias son el doble, y el
 modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 23, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 24, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

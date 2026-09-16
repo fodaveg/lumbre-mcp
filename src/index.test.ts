@@ -87,6 +87,7 @@ describe('tools/list — superficie completa', () => {
 		'list_tasks',
 		'list_lists',
 		'get_list_links',
+		'get_list',
 		'link_list_note',
 		'unlink_list_note',
 		'get_task',
@@ -107,9 +108,10 @@ describe('tools/list — superficie completa', () => {
 		'mutate_brl'
 	];
 
-	it('sigue exponiendo las 23 tools, por nombre (podadas create_list/nest_list/rename_list/' +
-		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27)', () => {
-		expect(tools).toHaveLength(23);
+	it('sigue exponiendo las 24 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27; ' +
+		'añadida get_list el 2026-09-16, tarea 827a7878)', () => {
+		expect(tools).toHaveLength(24);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -168,7 +170,7 @@ describe('tools/list — superficie completa', () => {
 		expect(output.required).toEqual(expect.arrayContaining(['deleted', 'attachment_id']));
 	});
 
-	it('techo de bytes de las 23 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 24 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -245,9 +247,12 @@ describe('tools/list — superficie completa', () => {
 		// `unlink_list_note`: 23 tools, 26.489 caracteres. Ambas comparten el
 		// mismo contrato de entrada y escriben de forma síncrona vía
 		// `POST /api/list-links`.
+		// Re-medido el 2026-09-16 al añadir `get_list` (tarea 827a7878, nota
+		// íntegra de un proyecto/área + tipo/padre/estado): 24 tools, 27.110
+		// caracteres = +621 sobre las 23 anteriores.
 		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
 		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 27850;
+		const CHAR_CEILING = 28500;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -460,6 +465,127 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		]);
 		expect(text).toContain(`→tarea[hecha] "Dependencia archivada ACTUAL" id:${REFERENCED_ID}`);
 		expect(text).not.toContain('→tarea[ROTA]');
+	});
+});
+
+describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', () => {
+	const LIST_ID = '33333333-3333-4333-8333-333333333333';
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'list-notes-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	it('list_lists pinta el marcador ✎N ↻fecha cuando la lista tiene nota, y nada cuando no', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				lists: [
+					{
+						id: LIST_ID,
+						name: 'Con nota',
+						taskCount: 2,
+						notes: 'Una nota de proyecto con algo de sustancia.',
+						notesUpdatedAt: Date.parse('2026-09-10T12:00:00.000Z')
+					},
+					{
+						id: '44444444-4444-4444-8444-444444444444',
+						name: 'Sin nota',
+						taskCount: 0,
+						notes: null,
+						notesUpdatedAt: null
+					}
+				]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_lists', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+
+		expect(text).toContain(`Con nota — 2 tareas (listId: ${LIST_ID}) ✎43 ↻10sep`);
+		expect(text).toContain('Sin nota — 0 tareas (listId: 44444444-4444-4444-8444-444444444444)');
+		expect(text).not.toMatch(/Sin nota.*✎/);
+	});
+
+	it('list_lists no revienta ni pinta marcador contra un servidor SIN los campos de nota (compatibilidad)', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ lists: [{ id: LIST_ID, name: 'Lista vieja', taskCount: 1 }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_lists', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+		expect(text).toBe(`Proyectos y áreas (1):\n· Lista vieja — 1 tarea (listId: ${LIST_ID})`);
+	});
+
+	it('get_list devuelve nombre, tipo, padre, estado, recuento y la nota ÍNTEGRA y verbatim', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				lists: [
+					{
+						id: LIST_ID,
+						name: 'Proyecto con nota',
+						taskCount: 3,
+						kind: 'project',
+						parentListId: null,
+						closure: null,
+						someday: true,
+						date: null,
+						notes: 'Línea uno.\nLínea dos con más detalle.',
+						notesUpdatedAt: Date.parse('2026-09-10T12:00:00.000Z')
+					}
+				]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		expect(result.isError).not.toBe(true);
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+
+		expect(text).toContain(`Proyecto o área ${LIST_ID}`);
+		expect(text).toContain('- nombre: Proyecto con nota');
+		expect(text).toContain('- tipo: proyecto');
+		expect(text).toContain('- padre: (ninguno, de primer nivel)');
+		expect(text).toContain('- estado: aparcado');
+		expect(text).toContain('- tareas: 3');
+		expect(text).toContain('- notas:\nLínea uno.\nLínea dos con más detalle.');
+	});
+
+	it('get_list da error claro si el listId no existe', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ lists: [] }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		expect(result.isError).toBe(true);
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+		expect(text).toContain(LIST_ID);
+		expect(text).toMatch(/no está entre los proyectos\/áreas/);
 	});
 });
 
@@ -2017,8 +2143,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 23 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(23);
+	it('sin `toolset` (default): las 24 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(24);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -2029,8 +2155,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 23, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(23);
+	it('`toolset: "all"` (explícito): las 24, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(24);
 	});
 });
 

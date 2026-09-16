@@ -432,11 +432,40 @@ export function formatTaskList(
 	return [...prefix, header, ...body].join('\n');
 }
 
+/** ISO 8601 a partir de `notesUpdatedAt` (epoch ms) de un proyecto o área —
+ *  `LumbreListSummary.notesUpdatedAt` viaja en epoch ms (contrato de la tarea
+ *  827a7878), a diferencia de `LumbreTask.notesUpdatedAt`, que viaja en ISO;
+ *  `formatNoteMarker` solo sabe de ISO, así que aquí se convierte antes de
+ *  pasárselo. `null` si es ausente/inválido — mismo criterio "desconocido" del
+ *  resto del módulo. */
+function listNotesUpdatedAtIso(notesUpdatedAt: number | null | undefined): string | null {
+	if (typeof notesUpdatedAt !== 'number' || !Number.isFinite(notesUpdatedAt)) return null;
+	const d = new Date(notesUpdatedAt);
+	return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * Sufijo ` ✎N ↻DDmmm` si el proyecto o área TIENE nota, con el MISMO marcador
+ * `formatNoteMarker` que usa `list_tasks` para una nota sin leer (`notes.ts`)
+ * — reutilizado tal cual, para un solo formato de marcador en todo el MCP. A
+ * diferencia de `list_tasks`, aquí no hay huella/estado que decidir "leída o
+ * no": el marcador solo informa tamaño y fecha, y la nota íntegra se lee
+ * aparte con `get_list` (nunca se vuelca entera en `list_lists`, que es un
+ * listado de MUCHOS destinos). `''` si no hay nota o si el servidor todavía
+ * no expone `notes` (compatibilidad con uno anterior a la tarea 827a7878).
+ */
+function listNoteMarkerSuffix(l: LumbreListSummary): string {
+	if (!l.notes || l.notes.trim() === '') return '';
+	return ` ${formatNoteMarker(l.notes.trim().length, listNotesUpdatedAtIso(l.notesUpdatedAt))}`;
+}
+
 /**
  * Formatea el resultado de `list_lists` (`GET /api/tasks?includeLists=1`):
  * TODAS las listas vivas del usuario, con su recuento — INCLUIDAS las de
  * recuento 0 (b00303b5: antes una lista vacía no aparecía en NINGÚN sitio
- * del MCP, indistinguible de "no existe").
+ * del MCP, indistinguible de "no existe"). Si trae nota, la línea termina con
+ * el marcador `✎N ↻DDmmm` (`listNoteMarkerSuffix`) — nunca la nota entera,
+ * que se lee aparte con `get_list`.
  */
 export function formatListSummaries(lists: LumbreListSummary[]): string {
 	if (lists.length === 0) return 'Sin proyectos ni áreas.';
@@ -444,9 +473,51 @@ export function formatListSummaries(lists: LumbreListSummary[]): string {
 	const body = lists.map((l) => {
 		const tags = formatTags(l.tags, l.effectiveTags);
 		const suffix = tags.length > 0 ? ` · ${tags.join(', ')}` : '';
-		return `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})${suffix}`;
+		return `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})${suffix}${listNoteMarkerSuffix(l)}`;
 	});
 	return [header, ...body].join('\n');
+}
+
+/**
+ * Formatea el detalle completo de UN proyecto o área para `get_list`: nombre,
+ * tipo, padre, estado (cierre/aparcado/fecha) y recuento de tareas, seguidos
+ * de la nota ÍNTEGRA y verbatim (sin colapsar saltos de línea, mismo criterio
+ * que `notesFull`) — pensada para leerla antes de reescribirla con
+ * `set_list_notes`, que la REEMPLAZA entera.
+ *
+ * `kind`/`parentListId`/`closure`/`someday`/`date` son opcionales en
+ * `LumbreListSummary` por compatibilidad con un servidor anterior a estos
+ * campos: cada línea solo se muestra si el campo correspondiente VINO en la
+ * respuesta (`!== undefined`), nunca se inventa un valor por defecto.
+ */
+export function formatListDetail(l: LumbreListSummary): string {
+	const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`];
+
+	if (l.kind !== undefined) lines.push(`- tipo: ${l.kind === 'area' ? 'área' : 'proyecto'}`);
+	if (l.parentListId !== undefined) {
+		lines.push(`- padre: ${l.parentListId ?? '(ninguno, de primer nivel)'}`);
+	}
+
+	const stateKnown = l.closure !== undefined || l.someday !== undefined || l.date !== undefined;
+	if (stateKnown) {
+		const parts: string[] = [];
+		if (l.closure) {
+			const at = new Date(l.closure.at).toISOString();
+			parts.push(`cerrado (${l.closure.as === 'done' ? 'hecho' : 'cancelado'}, ${at})`);
+		}
+		if (l.someday) parts.push('aparcado');
+		if (l.date) parts.push(`fecha: ${l.date}`);
+		lines.push(`- estado: ${parts.length > 0 ? parts.join(' · ') : 'activo'}`);
+	}
+
+	lines.push(`- tareas: ${l.taskCount}`);
+
+	if (l.notes && l.notes.trim() !== '') {
+		lines.push(`- notas:\n${notesFull(l.notes)}`);
+	} else {
+		lines.push('- notas: (sin notas)');
+	}
+	return lines.join('\n');
 }
 
 /**

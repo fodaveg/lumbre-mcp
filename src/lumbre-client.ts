@@ -318,6 +318,17 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	return body as LumbreTask[];
 }
 
+/** Cierre de un proyecto (hecho/cancelado, con su marca de tiempo epoch ms);
+ *  SIEMPRE `null` en un área (`docs/20-contrato-lista.md` del repo principal).
+ *  Mismo shape que `ProjectClosure` de ese repo (`src/lib/types.ts`),
+ *  pass-through sin reinterpretar. */
+export interface LumbreListClosure {
+	v: 1;
+	id: string;
+	at: number;
+	as: 'done' | 'cancelled';
+}
+
 /** Resumen de un proyecto o área (`GET /api/tasks?includeLists=1`). */
 export interface LumbreListSummary {
 	id: string;
@@ -328,6 +339,33 @@ export interface LumbreListSummary {
 	/** Nº de tareas de primer nivel vivas en la lista; 0 es un valor legítimo
 	 *  (lista recién creada, o vaciada) — NO significa que la lista no exista. */
 	taskCount: number;
+	/** `'project'` o `'area'`; opcional por compatibilidad con un servidor
+	 *  anterior a este campo (no debería faltar ya, ver `+server.ts` del repo
+	 *  principal, que lo manda siempre con `?? 'project'`). */
+	kind?: 'project' | 'area';
+	/** Id del proyecto o área padre, o `null` si es de primer nivel; opcional
+	 *  por compatibilidad, mismo criterio que `kind`. */
+	parentListId?: string | null;
+	/** Cierre del proyecto, o `null` si sigue abierto; SIEMPRE `null` en un
+	 *  área. Opcional por compatibilidad, mismo criterio que `kind`. */
+	closure?: LumbreListClosure | null;
+	/** `true` si el proyecto está aparcado ("Algún día"); SIEMPRE `false` en
+	 *  un área. Opcional por compatibilidad, mismo criterio que `kind`. */
+	someday?: boolean;
+	/** Fecha programada del proyecto (`YYYY-MM-DD`), o `null`; SIEMPRE `null`
+	 *  en un área. Opcional por compatibilidad, mismo criterio que `kind`. */
+	date?: string | null;
+	/** Nota íntegra del proyecto/área en markdown, o `null` si no tiene.
+	 *  AUSENTE del todo (ni siquiera `null`) en un servidor anterior a esta
+	 *  feature (tarea 827a7878) — a diferencia de `LumbreTask.notes`, que
+	 *  siempre trae texto o `null`, aquí solo puede faltar la CLAVE. */
+	notes?: string | null;
+	/** Epoch ms de la última edición de la nota (derivado del HLC de su celda
+	 *  CRDT, mismo origen que `LumbreTask.notesUpdatedAt` pero en epoch ms en
+	 *  vez de ISO — contrato de la tarea 827a7878), o `null` si la nota nunca
+	 *  se tocó. Ausente si el servidor no expone la marca para listas; trátalo
+	 *  siempre como "desconocido", nunca falles por su ausencia. */
+	notesUpdatedAt?: number | null;
 }
 
 /** Vínculo de un proyecto o área (`GET /api/list-links?listId=`).
@@ -579,6 +617,20 @@ export function taskNotFoundError(taskId: string): Error {
 			'usuario. Puede que se transcribiera mal (resuélvelo de nuevo con list_tasks), que sea una ' +
 			'subtarea (usa get_task sobre la tarea padre) o que esté ARCHIVADA: reintenta list_tasks/' +
 			'get_task con includeArchived:true. No se ha encolado ninguna mutación.'
+	);
+}
+
+/**
+ * Error uniforme para un `listId` que no aparece entre los proyectos/áreas
+ * vivos del usuario (`get_list`) — mismo criterio que `taskNotFoundError`:
+ * dice SOLO lo que este chequeo sabe (no salió en `GET /api/tasks?includeLists=1`),
+ * sin afirmar que "no existe" a secas, y propone el siguiente paso.
+ */
+export function listNotFoundError(listId: string): Error {
+	return new Error(
+		`El id ${listId} no está entre los proyectos/áreas que devuelve el servidor para este usuario. ` +
+			'Puede que se transcribiera mal (resuélvelo de nuevo con list_lists) o que se haya borrado. ' +
+			'No se ha encolado ninguna mutación.'
 	);
 }
 

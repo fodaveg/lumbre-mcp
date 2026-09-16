@@ -293,6 +293,17 @@ export function taskNotFoundError(taskId) {
         'get_task con includeArchived:true. No se ha encolado ninguna mutación.');
 }
 /**
+ * Error uniforme para un `listId` que no aparece entre los proyectos/áreas
+ * vivos del usuario (`get_list`) — mismo criterio que `taskNotFoundError`:
+ * dice SOLO lo que este chequeo sabe (no salió en `GET /api/tasks?includeLists=1`),
+ * sin afirmar que "no existe" a secas, y propone el siguiente paso.
+ */
+export function listNotFoundError(listId) {
+    return new Error(`El id ${listId} no está entre los proyectos/áreas que devuelve el servidor para este usuario. ` +
+        'Puede que se transcribiera mal (resuélvelo de nuevo con list_lists) o que se haya borrado. ' +
+        'No se ha encolado ninguna mutación.');
+}
+/**
  * Error uniforme cuando `taskId` SÍ existe pero es una subtarea y la tool no
  * aplica ahí — ver `assertTaskUsable`.
  *
