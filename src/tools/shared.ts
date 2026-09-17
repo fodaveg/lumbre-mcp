@@ -1,4 +1,4 @@
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { NotesSeenStore } from '../notes.js';
 import type { BrlExistenceCache, TaskExistenceCache } from '../existence-cache.js';
 import { LumbreApiError, type LumbreConfig } from '../lumbre-client.js';
@@ -75,3 +75,17 @@ export function formatOpShapeError(op: string, error: z.ZodError): string {
 	});
 	return `${op}: ${parts.join('; ')}`;
 }
+
+/** Recurrencia simple (freq + interval), como la celda "Repetir" del quick-add
+ *  de Lumbre — compartida por `add_task` (`tools/tasks.ts`) y `mutate_tasks`
+ *  (`tools/batch.ts`, misma forma que la op `add_task`). */
+export const recurrenceSchema = z
+	.object({
+		freq: z.enum(['daily', 'weekly', 'monthly', 'yearly']).describe('Frecuencia de la repetición'),
+		interval: z.number().int().positive().optional().describe('Cada cuántas unidades (default 1)')
+	})
+	.describe('Recurrencia simple (freq + interval), como la celda "Repetir" del quick-add de Lumbre');
+
+/** Forma de un tag propio — compartida por `tools/tasks.ts` (`add_task`/
+ *  `update_task`) y `tools/batch.ts` (`mutateTasksOpSchema.tags`). */
+export const tagSchema = z.string().regex(/^[\p{L}\p{N}_][\p{L}\p{N}_-]*$/u);
