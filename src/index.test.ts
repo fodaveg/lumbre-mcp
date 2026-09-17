@@ -26,6 +26,7 @@ let mutateTasksStrictOpSchema: z.ZodTypeAny;
 let mutateBrlOpSchema: z.ZodTypeAny;
 let mutateBrlStrictOpSchema: z.ZodTypeAny;
 let effectiveNotesMode: (input: { notes?: NotesMode; fullNotes?: boolean }) => NotesMode;
+let effectiveScopeLabel: (input: { scope?: string; list?: string }) => string;
 let refTexts: (
 	tasks: { id: string; content: string; notes: string | null }[],
 	notesMode: string,
@@ -43,6 +44,7 @@ beforeAll(async () => {
 	mutateBrlOpSchema = indexModule.mutateBrlOpSchema;
 	mutateBrlStrictOpSchema = indexModule.mutateBrlStrictOpSchema;
 	effectiveNotesMode = indexModule.effectiveNotesMode;
+	effectiveScopeLabel = indexModule.effectiveScopeLabel as typeof effectiveScopeLabel;
 	refTexts = indexModule.refTexts as typeof refTexts;
 
 	const server = indexModule.createServer(TEST_CONFIG);
@@ -474,6 +476,42 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		]);
 		expect(text).toContain(`→tarea[hecha] "Dependencia archivada ACTUAL" id:${REFERENCED_ID}`);
 		expect(text).not.toContain('→tarea[ROTA]');
+	});
+
+	// Regresión del bug medido el 2026-09-17 en producción: la cabecera
+	// rotulaba "scope=today" para una llamada con `list` sin `scope`, cuyo
+	// contenido real era el de scope=all (el servidor amplía su propio
+	// default cuando hay `list`, ver `effectiveScopeLabel`).
+	it('list_tasks({ list, section }, sin scope) rotula la cabecera "scope=all", no "scope=today"', async () => {
+		const tasks = [
+			{
+				id: TASK_ID,
+				content: 'una tarea de addons',
+				notes: null,
+				done: false,
+				priority: null,
+				date: null,
+				deadline: null,
+				list: 'addons',
+				section: 'MCP',
+				createdAt: '2026-09-17T00:00:00.000Z',
+				parentId: null
+			}
+		];
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(tasks));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'list_tasks',
+			arguments: { list: 'addons', section: 'MCP' }
+		});
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		const text = first.type === 'text' ? first.text ?? '' : '';
+
+		expect(result.isError).not.toBe(true);
+		expect(text).toContain('(scope=all):');
+		expect(text).not.toContain('scope=today');
 	});
 });
 
@@ -1402,6 +1440,27 @@ describe('effectiveNotesMode — resuelve el modo de notas de list_tasks (con el
 
 	it('`notes` explícito GANA a `fullNotes` si ambos vienen', () => {
 		expect(effectiveNotesMode({ notes: 'none', fullNotes: true })).toBe('none');
+	});
+});
+
+// Bug real medido el 2026-09-17: `list_tasks({ list: "addons", section: "MCP" })`,
+// sin `scope`, rotuló la cabecera "scope=today" con el CONTENIDO de scope=all
+// (el servidor amplía su propio default a "all" cuando hay `list` sin `scope`
+// — ver el JSDoc de `ListTasksInput.list` en lumbre-client.ts — pero la
+// cabecera pintaba el default LOCAL de esta tool, "today", sin mirar `list`).
+describe('effectiveScopeLabel — la cabecera de list_tasks etiqueta lo que el servidor de verdad aplica', () => {
+	it('sin `scope` ni `list` → "today" (default de siempre)', () => {
+		expect(effectiveScopeLabel({})).toBe('today');
+	});
+
+	it('sin `scope`, con `list` → "all" (el servidor amplía el alcance; la cabecera debe seguirlo)', () => {
+		expect(effectiveScopeLabel({ list: 'addons' })).toBe('all');
+	});
+
+	it('`scope` explícito manda, tenga o no `list`', () => {
+		expect(effectiveScopeLabel({ scope: 'today', list: 'addons' })).toBe('today');
+		expect(effectiveScopeLabel({ scope: 'all', list: 'addons' })).toBe('all');
+		expect(effectiveScopeLabel({ scope: 'week' })).toBe('week');
 	});
 });
 

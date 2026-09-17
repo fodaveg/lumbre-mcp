@@ -36,7 +36,8 @@ import {
 	type LumbreConfig,
 	type LumbreTask,
 	type MutateTasksOp,
-	type SubtaskDecision
+	type SubtaskDecision,
+	type TaskScope
 } from './lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
@@ -240,6 +241,22 @@ const tagSchema = z.string().regex(/^[\p{L}\p{N}_][\p{L}\p{N}_-]*$/u);
  */
 export function effectiveNotesMode(input: { notes?: NotesMode; fullNotes?: boolean }): NotesMode {
 	return input.notes ?? (input.fullNotes ? 'full' : 'auto');
+}
+
+/**
+ * Alcance EFECTIVO de `list_tasks`, el que va en la cabecera de
+ * `formatTaskList` — tiene que ser el mismo default que aplica el SERVIDOR
+ * (ver el JSDoc de `ListTasksInput.list` en `lumbre-client.ts`: sin `scope`
+ * explícito y con `list`, el servidor amplía el alcance temporal a "all"),
+ * no el default LOCAL de esta tool ("today"). Bug real medido el 2026-09-17:
+ * `list_tasks({ list: "addons", section: "MCP" })`, sin `scope`, devolvía
+ * "3 tareas (scope=today)" con el contenido de scope=all — la cabecera
+ * pintaba `input.scope ?? 'today'` sin mirar `list`, mientras la petición al
+ * servidor sí se beneficiaba de su propio default ampliado. Función PURA —
+ * sin red — mismo patrón que `effectiveNotesMode`.
+ */
+export function effectiveScopeLabel(input: { scope?: TaskScope; list?: string }): TaskScope {
+	return input.scope ?? (input.list ? 'all' : 'today');
 }
 
 /**
@@ -961,7 +978,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 						includeArchived: input.includeArchived
 					});
 					return textResult(
-						formatTaskList(tasks, input.scope ?? 'today', {
+						formatTaskList(tasks, effectiveScopeLabel(input), {
 							notesMode: 'auto',
 							autoRender,
 							notesSinceLabel: input.notesSince,
@@ -981,7 +998,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 					const refs = await resolveRefs(config, refTexts(tasks, notesMode), {
 						includeArchived: input.includeArchived
 					});
-					return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
+					return textResult(formatTaskList(tasks, effectiveScopeLabel(input), { notesMode, refs }));
 				}
 
 				if (notesMode === 'auto') {
@@ -990,7 +1007,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 						includeArchived: input.includeArchived
 					});
 					return textResult(
-						formatTaskList(list, input.scope ?? 'today', {
+						formatTaskList(list, effectiveScopeLabel(input), {
 							notesMode,
 							autoRender,
 							notesWindowHours: input.notesRecentHours,
@@ -1019,7 +1036,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				const refs = await resolveRefs(config, refTexts(tasks, notesMode), {
 					includeArchived: input.includeArchived
 				});
-				return textResult(formatTaskList(tasks, input.scope ?? 'today', { notesMode, refs }));
+				return textResult(formatTaskList(tasks, effectiveScopeLabel(input), { notesMode, refs }));
 			} catch (err) {
 				return errorResult(err);
 			}
