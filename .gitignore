@@ -10,3 +10,6 @@ dist.new/
 .env
 .env.*
 !.env.example
+
+# Worktrees y estado local de los agentes; nunca se versiona.
+.claude/

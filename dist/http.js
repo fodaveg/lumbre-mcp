@@ -2,12 +2,14 @@
 import { createServer as createHttpServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createOAuthService, OAUTH_CHALLENGE } from './oauth.js';
+import { createAccountNotesSeenStore } from './notes.js';
+import { createOAuthService, OAUTH_CHALLENGE, stopReceiving } from './oauth.js';
 import { stripToolsListSchema } from './schema-strip.js';
 // CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
 // integrado). `createServer(config, opts)` NO cae en los defaults de `opts`
-// enteros: `localFilesystem: false` (ver más abajo) va explícito, pero la
-// huella de notas vistas (`notesSeenStore`) SÍ se deja en su default,
+// enteros: `localFilesystem: false` (ver más abajo) va explícito, y la huella
+// de notas vistas (`notesSeenStore`) va explícita TAMBIÉN — un store POR
+// CUENTA (`createAccountNotesSeenStore`, `notes.ts`), no el default
 // `fileNotesSeenStore` — ver el porqué en el punto donde se llama a
 // `createServer`, más abajo.
 import { createServer } from './index.js';
@@ -49,11 +51,41 @@ import { createServer } from './index.js';
 const DEFAULT_PORT = 8787;
 const DEFAULT_BASE_URL = 'https://app.lumbre.pro';
 /**
+ * Tope del cuerpo de una petición a `/mcp` (2 MiB). La cuenta, porque el
+ * número no es redondo por casualidad: el cuerpo legítimo más grande que
+ * existe es un `tools/call` de `add_attachment` con `content_base64`, cuyo
+ * tope decodificado es `MAX_BASE64_ATTACHMENT_BYTES` (1 MiB,
+ * `attachments.ts`). Base64 infla 4 bytes por cada 3, así que 1 MiB
+ * decodificado son 1.398.104 bytes de texto base64 (≈1,33 MiB), más el sobre
+ * JSON-RPC (método, `filename`, escapado de la cadena). 2 MiB deja ~700 KiB
+ * de margen sobre ese peor caso —un 50% largo— sin dejar que una petición
+ * anónima haga crecer la memoria del proceso sin límite: hasta hoy `readBody`
+ * acumulaba en un array de `Buffer` SIN tope y se alcanzaba con cualquier
+ * `Authorization: Bearer x` (el token solo se valida contra Lumbre más tarde,
+ * al llamar a la tool).
+ *
+ * El borde lleva su propio `request_body { max_size … }` (ver
+ * `deploy/mcp-lumbre-pro.caddy`), un pelín MÁS estricto a propósito: quien
+ * pase por Caddy choca antes ahí; este tope es la red de seguridad para quien
+ * alcance el contenedor por la red `edge` sin pasar por el borde.
+ */
+export const MAX_MCP_BODY_BYTES = 2 * 1024 * 1024;
+/**
+ * Código JSON-RPC del 413. Va en el rango reservado a errores de servidor
+ * (-32000..-32099, ver la spec JSON-RPC 2.0), como el -32000 genérico de
+ * 405/403 y el -32001 de "sin credencial": un código propio para que un
+ * cliente distinga "el cuerpo no cabe" de "no tienes permiso".
+ */
+const JSON_RPC_PAYLOAD_TOO_LARGE = -32002;
+/** El cuerpo superó `MAX_MCP_BODY_BYTES`. Se distingue del error de parseo
+ *  (400) porque el 413 lleva su propio status y su propio código. */
+class PayloadTooLargeError extends Error {
+}
+/**
  * Hosts permitidos, tanto para el header `Host` (protección DNS-rebinding
  * mínima: si alguien resuelve `mcp.lumbre.pro` a este proceso desde un
  * hostname distinto, se corta aquí) como para `Origin` (peticiones desde un
- * navegador). `localhost`/`127.0.0.1`/`::1` cubren desarrollo local; el
- * puerto NO se valida (cambia según quién lo levante en local).
+ * navegador). El puerto NO se valida (cambia según quién lo levante en local).
  *
  * El SDK trae `allowedHosts`/`allowedOrigins`/`enableDnsRebindingProtection`
  * en `StreamableHTTPServerTransportOptions`, pero están `@deprecated` a favor
@@ -61,7 +93,50 @@ const DEFAULT_BASE_URL = 'https://app.lumbre.pro';
  * que la validación viva aquí, ANTES de construir el transporte, en vez de
  * pasada como opción.
  */
-const ALLOWED_HOSTNAMES = new Set(['mcp.lumbre.pro', 'localhost', '127.0.0.1', '::1']);
+const ALLOWED_HOSTNAMES = new Set(['mcp.lumbre.pro']);
+/**
+ * `localhost`/`127.0.0.1`/`::1` cubren desarrollo local, pero hasta hoy se
+ * aceptaban TAMBIÉN en producción, donde el único cliente legítimo es Caddy
+ * (que llega con `Host: mcp.lumbre.pro` desde la red `edge`, una IP `172.x`).
+ * Un `Host: localhost` desde ahí no lo manda nadie legítimo: es exactamente la
+ * forma de saltarse la comprobación de rebinding.
+ *
+ * Ahora un hostname de loopback solo vale si la CONEXIÓN viene de loopback.
+ * Eso deja pasar lo que tiene que pasar y nada más:
+ *   · el healthcheck del contenedor (`wget http://127.0.0.1:8787/readyz`, ver
+ *     `deploy/compose.yml`), que sale y entra por la interfaz de loopback;
+ *   · los tests y el desarrollo local, que hablan con `127.0.0.1:<puerto>`;
+ *   · NO Caddy con un `Host` falsificado, ni nadie que alcance el contenedor
+ *     por el DNS de la red `edge`.
+ * `LUMBRE_MCP_ALLOW_LOOPBACK_HOST=1` fuerza el comportamiento antiguo para un
+ * entorno de desarrollo raro (un proxy local que reescribe el `Host`), y es
+ * explícita: no se enciende sola en producción.
+ */
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+function isLoopbackAddress(address) {
+    if (!address)
+        return false;
+    // Un socket IPv6 que recibe una conexión IPv4 la reporta mapeada
+    // (`::ffff:127.0.0.1`), que es como llegan los tests: `listen(0)` escucha
+    // en `::` y el cliente entra por 127.0.0.1.
+    const normalized = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+    return normalized === '::1' || /^127\./.test(normalized);
+}
+/**
+ * Decide si un hostname es aceptable para ESTA conexión. Exportada porque es
+ * la costura que testea `http.test.ts`: la diferencia entre producción y
+ * desarrollo es la IP del peer, y montar un listener en una interfaz no-
+ * loopback dentro de un test es frágil (depende de la red de la máquina).
+ */
+export function isAllowedHostname(hostname, remoteAddress) {
+    if (hostname === undefined)
+        return false;
+    if (ALLOWED_HOSTNAMES.has(hostname))
+        return true;
+    if (!LOOPBACK_HOSTNAMES.has(hostname))
+        return false;
+    return process.env.LUMBRE_MCP_ALLOW_LOOPBACK_HOST === '1' || isLoopbackAddress(remoteAddress);
+}
 function hostnameOf(headerValue) {
     const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
     if (!raw)
@@ -71,15 +146,19 @@ function hostnameOf(headerValue) {
         // (`https://mcp.lumbre.pro`). `URL` exige uno, así que si no trae `://`
         // se le pone uno neutro solo para poder parsear el hostname.
         const withScheme = raw.includes('://') ? raw : `http://${raw}`;
-        return new URL(withScheme).hostname;
+        const hostname = new URL(withScheme).hostname;
+        // `URL` devuelve los literales IPv6 ENTRE CORCHETES (`[::1]`), que es
+        // como se escriben en un `Host`/`Origin` pero no como está la lista:
+        // sin quitarlos, un `Host: [::1]:8787` —el de un healthcheck o un
+        // desarrollo local por IPv6— no casaba y se iba con un 403.
+        return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
     }
     catch {
         return undefined;
     }
 }
 function isAllowedHost(req) {
-    const hostname = hostnameOf(req.headers.host);
-    return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
+    return isAllowedHostname(hostnameOf(req.headers.host), req.socket.remoteAddress);
 }
 /** Sin `Origin` (curl, el SDK de un cliente MCP no-navegador) no hay ataque de
  *  DNS-rebinding que proteger — ese vector es específicamente "una página en
@@ -89,8 +168,7 @@ function isAllowedOrigin(req) {
     const origin = req.headers.origin;
     if (!origin)
         return true;
-    const hostname = hostnameOf(origin);
-    return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
+    return isAllowedHostname(hostnameOf(origin), req.socket.remoteAddress);
 }
 function tokenFromHeader(req) {
     const header = req.headers.authorization;
@@ -99,11 +177,18 @@ function tokenFromHeader(req) {
     const token = header.slice('Bearer '.length).trim();
     return token.length > 0 ? token : undefined;
 }
-/** Forma del token de email-to-task de Lumbre: 32 chars hexadecimales. Un
- *  segmento de path que no case NO es "un token raro" — es "sin token": no se
- *  recorta ni se normaliza, se trata exactamente igual que si no hubiera
- *  nada, y el 401 de siempre lo cubre. */
-const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/i;
+/** Forma del token de email-to-task de Lumbre: 32 chars hexadecimales EN
+ *  MINÚSCULAS. Un segmento de path que no case NO es "un token raro" — es
+ *  "sin token": no se recorta ni se normaliza, se trata exactamente igual que
+ *  si no hubiera nada, y el 401 de siempre lo cubre.
+ *
+ *  Sin la `i`, a propósito: el borde solo casa minúsculas
+ *  (`path_regexp ^/mcp/([0-9a-f]{32})$` en `deploy/mcp-lumbre-pro.caddy`), así
+ *  que un token en mayúsculas llegaba aquí SIN que Caddy lo hubiera sacado del
+ *  path — es decir, entrando entero en el pipeline de logs del borde, que es
+ *  justo lo que ese bloque existe para evitar. Aceptarlo aquí premiaba la
+ *  única forma de la URL que sí filtra el token. */
+const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/;
 function isWellFormedPathToken(segment) {
     return TOKEN_PATH_PATTERN.test(segment);
 }
@@ -111,10 +196,32 @@ function sendJsonRpcError(res, status, code, message, headers = {}) {
     res.writeHead(status, { 'content-type': 'application/json', ...headers });
     res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
 }
+/**
+ * Lee el cuerpo con un tope duro de bytes (`MAX_MCP_BODY_BYTES`).
+ *
+ * Dos comprobaciones, no una: el `content-length` declarado se mira ANTES de
+ * leer nada (así un cuerpo enorme y honesto se rechaza sin acumular ni un
+ * byte), y luego se cuenta lo que llega de verdad — porque `content-length`
+ * puede faltar (`transfer-encoding: chunked`) o mentir.
+ */
 function readBody(req) {
     return new Promise((resolve, reject) => {
+        const declared = Number(req.headers['content-length']);
+        if (Number.isFinite(declared) && declared > MAX_MCP_BODY_BYTES) {
+            reject(new PayloadTooLargeError());
+            return;
+        }
         const chunks = [];
-        req.on('data', (chunk) => chunks.push(chunk));
+        let size = 0;
+        req.on('data', (chunk) => {
+            size += chunk.length;
+            if (size > MAX_MCP_BODY_BYTES) {
+                chunks.length = 0;
+                reject(new PayloadTooLargeError());
+                return;
+            }
+            chunks.push(chunk);
+        });
         req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
         req.on('error', reject);
     });
@@ -177,6 +284,25 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
         }
     }
     if (!token) {
+        // El presupuesto se mira AQUÍ, en la única rama en la que la petición no
+        // trae credencial utilizable, y DESPUÉS de intentar resolverla. Estaba
+        // antes, arriba del todo, y eso cortaba TODO `POST /mcp` de esa IP
+        // aunque trajera un bearer bueno: claude.ai reintentando con un access
+        // token caducado (duran una hora) desde una IP de salida compartida
+        // agotaba el cupo, y el bearer ya refrescado se comía un 429. Una
+        // petición que resuelve no toca el limitador ni para leerlo.
+        //
+        // Lo que se paga por ese orden: el presupuesto ya no evita el trabajo
+        // de resolver, solo acota el ritmo de 401 que se pueden provocar. Sale
+        // a cuenta porque resolver es barato desde que el store está cacheado
+        // en memoria (`loadStore` en `oauth.ts`), y porque lo caro de verdad
+        // —leer el cuerpo, montar el `McpServer`— sigue detrás de esta puerta.
+        if (oauth.mcpAttemptsExhausted(req)) {
+            sendJsonRpcError(res, 429, -32000, 'Demasiados intentos de autenticación; inténtalo de nuevo más tarde.');
+            logRequest(`POST ${routeLabel}`, 429);
+            return;
+        }
+        oauth.recordFailedMcpAttempt(req);
         sendJsonRpcError(res, 401, -32001, 'Authorization requerida. Conecta este servidor mediante OAuth 2.1.', { 'www-authenticate': OAUTH_CHALLENGE });
         logRequest(`POST ${routeLabel}`, 401);
         return;
@@ -188,7 +314,19 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
         parsedBody = raw.length > 0 ? JSON.parse(raw) : undefined;
         methodLabel = describeMethod(parsedBody);
     }
-    catch {
+    catch (err) {
+        if (err instanceof PayloadTooLargeError) {
+            sendJsonRpcError(res, 413, JSON_RPC_PAYLOAD_TOO_LARGE, `El cuerpo de la petición supera el tope de ${MAX_MCP_BODY_BYTES} bytes.`);
+            // SIN `connection: close` en la cabecera, y está medido: Node marca
+            // entonces `res._last` y hace `destroySoon()` del socket en cuanto
+            // la respuesta termina, con el cliente todavía subiendo — RST, y el
+            // 413 no llega (`fetch failed … ECONNRESET`). El cierre lo hace
+            // `stopReceiving`, que espera a que el cliente acabe o a que se
+            // agote el margen.
+            stopReceiving(req);
+            logRequest(`POST ${routeLabel}`, 413);
+            return;
+        }
         sendJsonRpcError(res, 400, -32700, 'Parse error: el cuerpo no es JSON válido.');
         logRequest(`POST ${routeLabel}`, 400);
         return;
@@ -202,21 +340,24 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
     // el `fs.stat` corría aquí). Ver el JSDoc de `CreateServerOptions` en
     // `index.ts`.
     //
-    // `notesSeenStore` SIN pasar, así que cae al default (`fileNotesSeenStore`,
-    // el fichero en disco) también aquí, a propósito: es UNA sola huella
-    // compartida por todos los dispositivos que usan el mismo token (Claude
-    // Code, claude.ai web/móvil…), porque este proceso es un relé, no una
-    // máquina por dispositivo. El efecto es que una nota vista desde OTRO
-    // cliente sale aquí como marcador (`✎N`) aunque este dispositivo no la
-    // haya visto — pero el marcador no afirma que se leyó: dice literalmente
-    // "SIN LEER, usa get_task antes de darlas por revisadas" (`format.ts`), así
-    // que lo único que cuesta es un `get_task` de más, nunca perder la nota.
-    // Se probó lo contrario (una huella nula que nunca suprime nada,
-    // `nullNotesSeenStore`) y se midió el precio: en un `list_tasks` de 31
-    // tareas con nota, con huella 3.340 bytes, sin huella 33.224 — ~29,9 KB de
-    // más por llamada, contra el coste real de la huella compartida (un viaje
-    // ocasional de más). No compensa; revertido.
-    const mcpServer = createServer(config, { localFilesystem: false });
+    // `notesSeenStore: createAccountNotesSeenStore(token)` — este proceso es un
+    // RELÉ compartido (ver el JSDoc de cabecera), así que `token` puede ser
+    // cualquiera de VARIAS cuentas distintas en el mismo contenedor. El
+    // fichero único de siempre (`fileNotesSeenStore`, el default de
+    // `createServer`) mezclaba la huella de todas ellas: una nota "vista" por
+    // una cuenta salía como marcador para OTRA que nunca la vio, y el tráfico
+    // de una podía expulsar del cap de 2.000 entradas las de la otra. El
+    // store por cuenta (`notes.ts`) separa el fichero en disco
+    // (`notes-seen-<id>.json`, `<id>` derivado de `token`, nunca la credencial
+    // en sí) sin perder la ventaja original de compartir huella ENTRE
+    // dispositivos de la MISMA cuenta (Claude Code, claude.ai web/móvil…): el
+    // aislamiento es por cuenta, no por dispositivo. Ver el detalle de coste
+    // (huella nula descartada, ~29,9 KB de más por `list_tasks`) en el JSDoc
+    // de `createAccountNotesSeenStore`.
+    const mcpServer = createServer(config, {
+        localFilesystem: false,
+        notesSeenStore: createAccountNotesSeenStore(token)
+    });
     // `enableJsonResponse: true`: respuesta JSON directa en vez de un stream
     // SSE — este endpoint sirve llamadas sueltas de tool (petición → una
     // respuesta), no notificaciones de servidor a mitad de una tarea larga.
@@ -249,6 +390,21 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
 export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL, oauth = createOAuthService()) {
     return createHttpServer((req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost');
+        // Cabeceras de seguridad para TODA respuesta de este servidor, puestas
+        // en un solo sitio y antes de enrutar. Las rutas OAuth ya traían las
+        // suyas (`securityHeaders` en `oauth.ts`), pero el resto —errores
+        // JSON-RPC, `/healthz`, `/readyz`, 404, 405, y las respuestas que
+        // escribe el propio `StreamableHTTPServerTransport`— salían sin
+        // ninguna: una respuesta con token o con el resultado de una tool no
+        // debe quedarse en ninguna caché intermedia, ni interpretarse como un
+        // tipo distinto del declarado.
+        //
+        // `setHeader` y no `writeHead`: Node fusiona lo puesto aquí con lo que
+        // cada `writeHead` pase después, y en un choque GANA `writeHead` — así
+        // la metadata OAuth conserva su `cache-control: public, max-age=300`
+        // deliberado sin excepciones repartidas por el fichero.
+        res.setHeader('cache-control', 'no-store');
+        res.setHeader('x-content-type-options', 'nosniff');
         if (!isAllowedHost(req) || !isAllowedOrigin(req)) {
             res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
             res.end('Host/Origin no permitido.');
