@@ -98,6 +98,12 @@ const DEFAULT_PUBLIC_LIMITS: Record<PublicEndpoint, PublicLimit> = {
  */
 const DEFAULT_AUTHORIZE_BUDGET = { perClientPerMinute: 10, globalPerMinute: 60 };
 
+/** Techo de ventanas por `client_id` vivas a la vez. El path de un `client_id`
+ *  de claude.ai es libre, así que el mapa necesita un límite; 512 está muy por
+ *  encima de los clientes reales (dos) y de lo que cabe en un minuto con el
+ *  presupuesto global puesto. */
+const MAX_AUTHORIZE_CLIENT_WINDOWS = 512;
+
 /**
  * Intentos FALLIDOS de `/mcp` por IP y minuto (ver `mcpAttemptsExhausted`).
  *
@@ -111,6 +117,13 @@ const DEFAULT_AUTHORIZE_BUDGET = { perClientPerMinute: 10, globalPerMinute: 60 }
  * Se limita el FALLO y no la petición a propósito: limitar `/mcp` entero
  * castigaría al usuario real —el que hace las ráfagas— sin frenar al abuso,
  * que puede repartirse entre IPs igual de bien.
+ *
+ * Y se mira DESPUÉS de resolver la credencial, no antes: mirarlo antes cortaba
+ * también a quien traía un bearer bueno desde una IP que hubiera acumulado
+ * fallos (claude.ai reintentando con un access token caducado desde una salida
+ * compartida). El precio de ese orden es que el presupuesto ya no ahorra el
+ * trabajo de resolver —barato desde que el store se cachea en memoria—, solo
+ * acota el ritmo de 401 provocables.
  */
 const DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE = 30;
 
@@ -211,6 +224,14 @@ export interface OAuthServiceOptions {
 	 *  `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`. Inyectable para los tests. */
 	failedMcpAttemptsPerMinute?: number;
 	persistenceStep?: (step: PersistenceStep) => void | Promise<void>;
+	/**
+	 * Se espera justo después de leer y normalizar el store del disco, ANTES
+	 * de que nadie decida adoptarlo. Misma idea que `persistenceStep`: una
+	 * costura para que un test pueda intercalar una escritura en medio de una
+	 * lectura en vuelo de forma determinista, sin depender de tiempos (ver la
+	 * carrera que documenta `loadStore`). En producción no se pasa nunca.
+	 */
+	storeRead?: () => void | Promise<void>;
 	backchannel?: LumbreBackchannelApi;
 	backchannelSecret?: string;
 	lumbreAppBaseUrl?: string;
@@ -700,10 +721,16 @@ export class OAuthService {
 	private readonly suppliedEncryptionKey: boolean;
 	private readonly publicLimits: Record<PublicEndpoint, PublicLimit>;
 	private readonly persistenceStep?: OAuthServiceOptions['persistenceStep'];
+	private readonly storeRead?: OAuthServiceOptions['storeRead'];
 	private readonly backchannel: LumbreBackchannelApi;
 	private encryptionKey?: Buffer;
 	private keyPromise?: Promise<Buffer>;
 	private readonly rateWindows = new Map<string, { startedAt: number; count: number }>();
+	/** Ventanas del presupuesto de `/authorize`, fuera de `rateWindows` para
+	 *  que la expulsión por tamaño de ese mapa no pueda reiniciarlas; ver
+	 *  `enterAuthorizeBudget`. */
+	private authorizeGlobalWindow?: { startedAt: number; count: number };
+	private readonly authorizeClientWindows = new Map<string, { startedAt: number; count: number }>();
 	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0 };
 	private readonly clientMetadataCache = new Map<string, { metadata: ClientMetadata; expiresAt: number }>();
 	private readonly clientMetadataInFlight = new Map<string, Promise<ClientMetadata>>();
@@ -731,17 +758,27 @@ export class OAuthService {
 	 * (`deploy/compose.yml`), sin réplicas. Dos procesos NO comparten esta
 	 * memoria y se servirían grants viejos entre sí; si algún día se replica,
 	 * esto tiene que pasar a un almacén compartido o invalidarse por `mtime`.
-	 * Mitigación parcial que ya existe: `ensureReady` (y con él `/readyz`,
-	 * cada 5 s como mucho) fuerza una relectura del disco, así que un cambio
-	 * externo del fichero se acaba viendo.
+	 * Mitigación parcial que ya existe: `ensureReady` (y con él `/readyz`)
+	 * relee del disco y adopta lo leído, así que un cambio externo del fichero
+	 * se acaba viendo. El ritmo real lo marca quien llama: `READINESS_CACHE_MS`
+	 * solo impide repetirla antes de 5 s, y el único que la pide es el
+	 * healthcheck del contenedor, cada 30 s (`deploy/compose.yml`; Caddy no
+	 * publica `/readyz`). O sea: hasta 30 s de retraso, no 5.
 	 */
 	private cachedStore?: OAuthStore;
+	/**
+	 * Cambia con cada adopción o vaciado de `cachedStore`. Existe para que una
+	 * lectura de disco lanzada ANTES de una escritura no pueda adoptarse
+	 * DESPUÉS y pisarla; ver la carrera explicada en `loadStore`.
+	 */
+	private storeGeneration = 0;
 
 	constructor(options: OAuthServiceOptions = {}) {
 		this.stateDir = options.stateDir ?? defaultStateDir();
 		this.fetchFn = options.fetch ?? globalThis.fetch;
 		this.now = options.now ?? Date.now;
 		this.persistenceStep = options.persistenceStep;
+		this.storeRead = options.storeRead;
 		this.backchannel = options.backchannel ?? new LumbreBackchannel({
 			baseUrl: options.lumbreAppBaseUrl ?? process.env.LUMBRE_APP_BASE_URL,
 			secret: options.backchannelSecret ?? process.env.LUMBRE_MCP_BACKCHANNEL_SECRET,
@@ -917,9 +954,10 @@ export class OAuthService {
 
 	/**
 	 * ¿Esta IP agotó su presupuesto de intentos FALLIDOS contra `/mcp`? Lo
-	 * consulta `handleMcpRequest` (`http.ts`) ANTES de resolver la credencial.
-	 * Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE` para el porqué de limitar
-	 * el fallo y no la petición.
+	 * consulta `handleMcpRequest` (`http.ts`) SOLO en la rama en la que la
+	 * petición se quedó sin credencial utilizable, y después de intentar
+	 * resolverla: una petición que autentica no pasa por aquí ni para leer el
+	 * contador. Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`.
 	 */
 	mcpAttemptsExhausted(req: IncomingMessage): boolean {
 		const now = this.now();
@@ -938,20 +976,47 @@ export class OAuthService {
 	 * Presupuesto de `/authorize` por `client_id` y global, que se gasta JUSTO
 	 * ANTES de llamar al backchannel — el orden es el punto: pasada esta
 	 * puerta, la petición crea un registro real en app.lumbre.pro.
+	 *
+	 * NO usa `rateWindows`, y ese es justo el arreglo: ahí la expulsión por
+	 * TAMAÑO borra por orden de inserción, y la ventana global es de las claves
+	 * más viejas de cada minuto. Bastaba con generar 2.048 claves nuevas
+	 * —rotando IPs contra cualquier endpoint público, o contra el espacio
+	 * `mcp-failed:<ip>`— para expulsar y reiniciar precisamente el presupuesto
+	 * que tiene que resistir eso. Global y por cliente viven ahora en estado
+	 * propio, que solo limpia la caducidad.
+	 *
+	 * Las ventanas por `client_id` sí se acotan en número
+	 * (`MAX_AUTHORIZE_CLIENT_WINDOWS`), porque el path de un `client_id` de
+	 * claude.ai es libre y no se puede dejar crecer un mapa sin techo.
+	 * Expulsar una de ellas reinicia el cupo de ESE cliente, pero el global
+	 * —que es el que acota el total— sigue contando por debajo.
 	 */
 	private enterAuthorizeBudget(clientId: string): void {
 		const now = this.now();
-		this.pruneRateWindows(now);
-		const clientKey = `authorize-client:${clientId}`;
-		const globalKey = 'authorize-global';
+		if (this.authorizeGlobalWindow && this.authorizeGlobalWindow.startedAt + 60_000 <= now) {
+			this.authorizeGlobalWindow = undefined;
+		}
+		for (const [key, window] of this.authorizeClientWindows) {
+			if (window.startedAt + 60_000 <= now) this.authorizeClientWindows.delete(key);
+		}
+		const clientWindow = this.authorizeClientWindows.get(clientId);
 		if (
-			this.overRateLimit(clientKey, this.authorizeBudget.perClientPerMinute) ||
-			this.overRateLimit(globalKey, this.authorizeBudget.globalPerMinute)
+			(clientWindow !== undefined && clientWindow.count >= this.authorizeBudget.perClientPerMinute) ||
+			(this.authorizeGlobalWindow !== undefined &&
+				this.authorizeGlobalWindow.count >= this.authorizeBudget.globalPerMinute)
 		) {
 			throw new OAuthError('temporarily_unavailable', 'Demasiadas autorizaciones en curso; inténtalo de nuevo más tarde.', 429);
 		}
-		this.consumeRateWindow(clientKey, now);
-		this.consumeRateWindow(globalKey, now);
+		if (clientWindow) {
+			clientWindow.count += 1;
+		} else {
+			while (this.authorizeClientWindows.size >= MAX_AUTHORIZE_CLIENT_WINDOWS) {
+				this.authorizeClientWindows.delete(this.authorizeClientWindows.keys().next().value!);
+			}
+			this.authorizeClientWindows.set(clientId, { startedAt: now, count: 1 });
+		}
+		if (this.authorizeGlobalWindow) this.authorizeGlobalWindow.count += 1;
+		else this.authorizeGlobalWindow = { startedAt: now, count: 1 };
 	}
 
 	private enterPublicEndpoint(req: IncomingMessage, endpoint: PublicEndpoint): () => void {
@@ -1080,6 +1145,15 @@ export class OAuthService {
 			// `mutateStore`, gana uno y el otro se encuentra sin pendiente. El
 			// contrato de `/exchange` de Lumbre no es reintentable a ciegas
 			// (ver `README.md`), así que esa ventana no se abre.
+			//
+			// DE QUÉ DEPENDE ESTO AL OTRO LADO, comprobado en el repo `lumbre`:
+			// `exchangeMcpAuthorizationRequest`
+			// (`src/lib/server/repos/lumbre-mcp-integration.ts:126-146`) exige
+			// `approvedAt IS NOT NULL` dentro del mismo `DELETE … RETURNING`,
+			// así que una transacción DENEGADA no se puede canjear ni aunque un
+			// tercero mande `decision=approved` con el UUID acertado. Si esa
+			// condición desapareciera de allí, no basta con dejar la pendiente
+			// en pie: habría que volver a validar la decisión aquí.
 			const stored = (await this.loadStore()).authorizationRequests.find((item) => item.requestId === requestId);
 			if (!stored || stored.expiresAt <= this.now()) {
 				throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
@@ -1560,12 +1634,15 @@ export class OAuthService {
 		}
 		const key = await this.key();
 		// Readiness NO se contesta desde la caché: la gracia de `/readyz` es
-		// afirmar que el fichero de estado se puede leer y descifrar AHORA. De
-		// paso, esta relectura (una cada 5 s como mucho, ver `checkReady`)
-		// recoge un cambio externo del store, que es la única grieta conocida
-		// de la caché en memoria (ver `cachedStore`).
-		this.cachedStore = undefined;
-		const store = await this.loadStore();
+		// afirmar que el fichero de estado se puede leer y descifrar AHORA.
+		//
+		// Se lee del disco DIRECTAMENTE, sin vaciar antes la caché compartida:
+		// vaciarla abría un hueco en el que el resto de peticiones leían disco
+		// mientras esta validación estaba en vuelo, y era la mitad de la
+		// carrera que describe `loadStore`. Lo leído se adopta al final, y
+		// solo si nadie escribió mientras tanto.
+		const generation = this.storeGeneration;
+		const store = await this.readStore();
 		for (const grant of store.grants) {
 			validateClientIdUrl(grant.clientId);
 			if (
@@ -1602,6 +1679,11 @@ export class OAuthService {
 			if (!/^[a-f0-9]{64}$/.test(upstream)) throw new Error('outbox OAuth inválida');
 		}
 		if (await pathExists(this.storePath())) await chmod(this.storePath(), 0o600);
+		// Lo validado se adopta SOLO si nadie escribió durante la validación.
+		// Así `/readyz` sigue refrescando la caché con lo que hay en disco —que
+		// es como se recoge un cambio externo del fichero— sin poder pisar una
+		// escritura más nueva que la lectura.
+		if (generation === this.storeGeneration) this.adoptStore(store);
 		// Ejecuta también al arrancar la poda segura: grants/códigos caducados
 		// pasan al outbox antes de intentar la revocación upstream.
 		await this.mutateStore(() => false);
@@ -1679,21 +1761,59 @@ export class OAuthService {
 	}
 
 	/**
+	 * Sustituye la caché por un estado que YA está en disco y anota que el
+	 * estado vigente cambió. Solo lo llaman el `mutateStore` que acaba de
+	 * confirmar su `rename` y la validación de `ensureReady`.
+	 */
+	private adoptStore(store: OAuthStore): void {
+		this.cachedStore = store;
+		this.storeGeneration += 1;
+	}
+
+	/** Vacía la caché: la siguiente lectura vuelve al disco. */
+	private invalidateStore(): void {
+		this.cachedStore = undefined;
+		this.storeGeneration += 1;
+	}
+
+	/**
 	 * Estado del store, de memoria si lo hay y del disco si no. Siempre una
 	 * COPIA: quien la recibe puede mutarla sin contaminar la caché (ver
 	 * `cachedStore`).
+	 *
+	 * LA CARRERA QUE CIERRA `storeGeneration`, que estaba abierta y era grave:
+	 * entre que se lanza el `readFile` y resuelve pasa tiempo, y en ese hueco
+	 * un `mutateStore` puede completar su `rename` y adoptar el estado NUEVO.
+	 * Adoptar después la lectura vieja —que es lo que hacía -— dejaba la caché
+	 * un paso por detrás del disco: un token recién emitido dejaba de
+	 * resolver, uno recién revocado volvía a resolver, y el siguiente
+	 * `mutateStore` partía de esa caché vieja y la serializaba, perdiendo la
+	 * escritura anterior EN DISCO y sin ningún error.
+	 *
+	 * La regla: solo se adopta la lectura si la generación no cambió durante
+	 * el `await`. Si cambió, la lectura ya nació caduca y se descarta —se
+	 * devuelve el estado vigente, nunca el viejo.
 	 */
 	private async loadStore(): Promise<OAuthStore> {
 		const cached = this.cachedStore;
 		if (cached) return structuredClone(cached);
+		const generation = this.storeGeneration;
 		const store = await this.readStore();
+		if (generation !== this.storeGeneration) {
+			const current = this.cachedStore;
+			// Sin caché vigente (alguien la invalidó) se relee, pero tampoco se
+			// adopta: quien invalidó manda.
+			return current ? structuredClone(current) : await this.readStore();
+		}
 		this.cachedStore = store;
 		return structuredClone(store);
 	}
 
 	private async readStore(): Promise<OAuthStore> {
 		try {
-			return normalizeStore(JSON.parse(await readFile(this.storePath(), 'utf8')));
+			const store = normalizeStore(JSON.parse(await readFile(this.storePath(), 'utf8')));
+			await this.storeRead?.();
+			return store;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
 				return {
@@ -1808,7 +1928,7 @@ export class OAuthService {
 					// escritura y después de confirmar, nunca antes. `store` es
 					// la copia privada de esta pasada (ver `loadStore`), así que
 					// nadie más tiene una referencia a ella.
-					this.cachedStore = store;
+					this.adoptStore(store);
 					await this.persistenceStep?.('store-renamed');
 					await syncDirectory(dirname(this.storePath()));
 					await this.persistenceStep?.('state-directory-synced');
@@ -1820,7 +1940,7 @@ export class OAuthService {
 				// Ante CUALQUIER fallo se vacía: no sabemos si el fichero quedó
 				// como estaba o a medias, y una caché dudosa es peor que una
 				// lectura de más.
-				this.cachedStore = undefined;
+				this.invalidateStore();
 				failure = error;
 			}
 		});

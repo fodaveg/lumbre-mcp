@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { request as httpRequest, type Server } from 'node:http';
+import { request as httpRequest, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +26,17 @@ const servers: Server[] = [];
 const stateDirs: string[] = [];
 
 async function listen(oauth: OAuthService): Promise<string> {
-	const server = createHttpApp('https://app.lumbre.test', oauth).listen(0);
+	const server = createHttpApp('https://app.lumbre.test', oauth);
+	// `keepAliveTimeout` por defecto son 5 s, y `fetch` (undici) reutiliza
+	// sockets de su pool. Este fichero dura ya varios segundos —hay un test que
+	// mantiene una subida abierta 2 s—, así que un socket abierto al principio
+	// puede pasar de 5 s ocioso y ser reutilizado justo cuando el servidor lo
+	// está cerrando: `fetch failed` en un test que no tiene nada que ver, visto
+	// una vez en `al cap exacto…` (que por sí solo tarda 302 ms, o sea que no
+	// era lentitud suya). Subirlo aquí quita esa carrera; no cambia nada del
+	// servidor real, que este helper solo lo usa el test.
+	server.keepAliveTimeout = 60_000;
+	server.listen(0);
 	servers.push(server);
 	await new Promise<void>((resolve, reject) => {
 		if (server.listening) resolve();
@@ -1409,6 +1419,76 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
 	});
 
+	it('una lectura en vuelo NO pisa una escritura que termina antes (caché por generación)', async () => {
+		/**
+		 * La carrera: `ensureReady` lanza su lectura del disco, y mientras esa
+		 * lectura está en vuelo un `mutateStore` completa su `rename` y adopta
+		 * el estado nuevo. Si al resolver se adoptara la lectura vieja, la
+		 * caché quedaría un paso por detrás del disco: el token recién emitido
+		 * deja de resolver, y la siguiente escritura parte de ese estado viejo
+		 * y lo serializa, perdiendo la anterior EN DISCO y sin error ninguno.
+		 *
+		 * Se intercala a mano, sin depender de tiempos: la costura `storeRead`
+		 * deja la lectura ya hecha colgada de una promesa que suelta este test
+		 * cuando le conviene. El contenido leído es el de ANTES de la
+		 * escritura; lo que se retrasa es su entrega.
+		 */
+		const stateDir = await newStateDir();
+		let releaseRead: (() => void) | undefined;
+		let onRead: (() => void) | undefined;
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch(),
+			storeRead: async () => {
+				if (!onRead) return;
+				const announce = onRead;
+				onRead = undefined; // solo se cuelga la PRIMERA lectura
+				announce();
+				await new Promise<void>((resolveRead) => (releaseRead = resolveRead));
+			}
+		});
+		const baseUrl = await listen(oauth);
+		// Flujo completo: deja store y clave en disco, y la caché caliente.
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		const oldAccess = String(issued.access_token);
+		await oauth.ensureReady();
+
+		const storePath = join(stateDir, 'oauth-store.json');
+		const readStarted = new Promise<void>((resolveStarted) => (onRead = resolveStarted));
+		const readiness = oauth.ensureReady();
+		await readStarted;
+
+		// Con la lectura de readiness colgada, una rotación de refresh completa
+		// su escritura: emite un access token nuevo y retira el viejo.
+		const rotated = await refresh(baseUrl, String(issued.refresh_token));
+		expect(rotated.status).toBe(200);
+		const newAccess = String(((await rotated.json()) as { access_token: string }).access_token);
+		expect(await oauth.resolveAccessToken(newAccess)).toBe(UPSTREAM_TOKEN);
+
+		releaseRead!();
+		await readiness;
+
+		// Aquí estaba el fallo: al resolver, la lectura vieja se adoptaba y la
+		// caché volvía al estado ANTERIOR a la rotación — el token nuevo dejaba
+		// de resolver y el retirado volvía a valer.
+		expect(await oauth.resolveAccessToken(newAccess)).toBe(UPSTREAM_TOKEN);
+		expect(await oauth.resolveAccessToken(oldAccess)).toBeUndefined();
+
+		// Y la escritura SIGUIENTE no parte de ese estado viejo: al revocar, lo
+		// que queda en DISCO es coherente con lo que se acababa de emitir.
+		expect((await fetch(`${baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: newAccess, client_id: CLIENT_ID })
+		})).status).toBe(200);
+		const persisted = JSON.parse(await readFile(storePath, 'utf8')) as { grants: unknown[] };
+		expect(persisted.grants).toHaveLength(0);
+		// Una instancia nueva, que solo ve el disco, coincide: la revocación no
+		// se perdió al serializar desde la caché.
+		expect(await new OAuthService({ stateDir, fetch: oauthFetch() }).resolveAccessToken(newAccess)).toBeUndefined();
+	});
+
 	it('/mcp limita los intentos FALLIDOS por IP y no gasta presupuesto con los que autentican', async () => {
 		const oauth = new OAuthService({
 			stateDir: await newStateDir(),
@@ -1438,8 +1518,58 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		expect(await call()).toBe(401);
 		expect(await call('Bearer lm_at_no-existe')).toBe(401);
-		// Agotado: el tercer intento fallido ya no llega a resolver nada.
+		// Agotado: otro intento SIN credencial utilizable ya no recibe 401.
 		expect(await call()).toBe(429);
+
+		// Y esto es lo que el limitador NO puede hacer: con el cupo agotado
+		// desde esta misma IP, una petición con credencial válida sigue
+		// pasando. Es el caso real —claude.ai reintentando con un access token
+		// caducado desde una salida compartida y refrescándolo después—, y con
+		// el presupuesto mirado antes de resolver se comía un 429.
+		expect(await call(`Bearer ${access}`)).toBe(200);
+		// El token en el path tampoco se ve afectado.
+		expect((await fetch(`${baseUrl}/mcp/a1b2c3d4e5f60718293a4b5c6d7e8f90`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+			body: JSON.stringify({
+				jsonrpc: '2.0', id: 2, method: 'initialize',
+				params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'rate', version: '1' } }
+			})
+		})).status).toBe(200);
+	});
+
+	it('el presupuesto global de authorize sobrevive a la expulsión por tamaño de las ventanas por IP', async () => {
+		/**
+		 * `rateWindows` expulsa por orden de inserción al llegar a 2.048
+		 * claves, y la ventana global era de las más viejas de cada minuto:
+		 * bastaba generar claves nuevas —rotando IPs, y el espacio
+		 * `mcp-failed:<ip>` es gratis de llenar— para reiniciar justo el
+		 * presupuesto que tiene que resistir eso.
+		 */
+		const oauth = new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch(),
+			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } },
+			authorizeBudget: { perClientPerMinute: 300, globalPerMinute: 2 }
+		});
+		const baseUrl = await listen(oauth);
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		expect((await beginAuthorization(baseUrl)).status).toBe(429);
+
+		// Se inundan las ventanas por IP con 2.100 claves distintas del mismo
+		// minuto, directamente por la API pública del limitador (2.100
+		// peticiones HTTP solo harían el test lento, no más veraz).
+		for (let index = 0; index < 2_100; index += 1) {
+			const ip = `203.0.113.${index % 256}.${index}`;
+			oauth.recordFailedMcpAttempt({
+				headers: { 'x-forwarded-for': ip },
+				socket: { remoteAddress: ip }
+			} as unknown as IncomingMessage);
+		}
+
+		// El global sigue agotado: no se reinició con la expulsión.
+		expect((await beginAuthorization(baseUrl)).status).toBe(429);
 	});
 
 	it('un formulario descomunal se corta con 413 y el servidor deja de recibirlo', async () => {
@@ -1692,8 +1822,12 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// comparación directa de un hash de credencial— para que no vuelva a
 		// entrar una por descuido. Ver `matchesHash` en `oauth.ts`.
 		const source = await readFile('src/oauth.ts', 'utf8');
-		expect(source).not.toMatch(/(?:codeHash|accessHash|refreshHash|\.hash)\s*[!=]==\s*\w/);
-		expect(source).toMatch(/function matchesHash/);
-		expect(source).toMatch(/matchesHash\(item\.accessHash, hash\)/);
+		// Una sola comprobación, y cubre los DOS órdenes (`a.codeHash === b` y
+		// `b === a.codeHash`). Exige identificador a ambos lados justo para no
+		// casar con los `typeof grant.accessHash !== 'string'` de
+		// `normalizeStore`, que son chequeos de tipo, no de credencial.
+		expect(source).not.toMatch(
+			/\.(?:codeHash|accessHash|refreshHash|hash)\s*[!=]==\s*[A-Za-z_$]|[!=]==\s*\w+\.(?:codeHash|accessHash|refreshHash|hash)\b/
+		);
 	});
 });
