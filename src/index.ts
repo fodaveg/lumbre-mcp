@@ -200,29 +200,26 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	// JSDoc de `ToolCtx`) — crece según avanza la partición de este fichero.
 	const ctx: ToolCtx = { config, taskCache, brlCache, notesSeenStore, localFilesystem };
 
-	// Familia «sync» (extraída a `src/tools/sync.ts`, ver su JSDoc: por qué
-	// `refresh_sync` casi nunca hace falta tras una escritura de ESTE MCP).
-	const { refreshSyncTool } = registerSyncTools(server, ctx);
+	// Orden de REGISTRO por familia (decisión de David, 2026-09-17): no es el
+	// orden de MIGRACIÓN (sync→adjuntos→listas→BRL→tareas→lote, de menor a
+	// mayor riesgo — ver los commits de la tarea 3) ni depende de qué módulo
+	// necesita a cuál (`requireTaskExists`/`mutateTaskInvalidating` viven en
+	// `tools/task-existence.ts`, no en `tools/tasks.ts`, precisamente para que
+	// `tools/attachments.ts` pueda usarlas sin importar de `tools/tasks.ts`).
+	// Es el orden en que un cliente MCP VE las 24 tools en `tools/list`, y eso
+	// influye en cuál prueba antes un modelo: tareas individuales encabeza
+	// (ya empieza por alta/listado/lectura, lo más usado), luego el lote,
+	// listas y proyectos, adjuntos, BRL, y `sync` AL FINAL — `refresh_sync`
+	// casi nunca hace falta tras una escritura de este MCP (ver su JSDoc en
+	// `tools/sync.ts`), así que no debe encabezar el listado. Los 24 nombres y
+	// cada description/schema son BYTE A BYTE los mismos (ver el test de la
+	// lista de nombres, que compara por conjunto — usa `.sort()` — no por
+	// posición); el orden expuesto en `tools/list` no está bajo test en
+	// ningún sitio de este repo, así que este comentario es la única fuente
+	// de verdad de POR QUÉ es este orden y no otro.
 
-	// Familia «adjuntos» (extraída a `src/tools/attachments.ts`): las tres tools
-	// que quedan solas en `toolset: 'attachments'`, ver `CreateServerOptions`.
-	const { readAttachmentTool, addAttachmentTool, deleteAttachmentTool } = registerAttachmentTools(server, ctx);
-
-	// Familia «listas y proyectos» (extraída a `src/tools/lists.ts`, paridad
-	// UI↔MCP, `docs/20-contrato-lista.md`).
-	const { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool } =
-		registerListTools(server, ctx);
-
-	// Familia «tareas individuales» (extraída a `src/tools/tasks.ts`):
-	// add_task/list_tasks/get_task + las nueve de Fase 2 (PHASE2.md). El orden
-	// de REGISTRO cambia respecto al histórico intercalado (antes add_task,
-	// list_tasks y get_task caían entre sync/listas/adjuntos según dónde se
-	// había ido añadiendo cada una) — ahora sigue el orden de MIGRACIÓN, de
-	// menor a mayor riesgo (sync, adjuntos, listas, BRL, tareas, lote): un
-	// módulo por familia registra SUS tools de un tirón. Los 24 nombres y cada
-	// description/schema son BYTE A BYTE los mismos (ver el test de la lista de
-	// nombres, que compara por conjunto, no por posición); el orden expuesto en
-	// `tools/list` no está bajo test en ningún sitio de este repo.
+	// Familia «tareas individuales» (`src/tools/tasks.ts`): add_task/
+	// list_tasks/get_task + las nueve de Fase 2 (PHASE2.md).
 	const {
 		addTaskTool,
 		listTasksTool,
@@ -238,13 +235,29 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		completeSubtaskTool
 	} = registerTaskTools(server, ctx);
 
-	// Familia «BRL» (extraída a `src/tools/brl.ts`, add-on experimental de
-	// registro del día).
+	// Familia «lote de tareas» (`src/tools/batch.ts`, `plan-batch.md`): N
+	// operaciones de golpe — planifica fases y valida por-op.
+	const { mutateTasksTool } = registerBatchTool(server, ctx);
+
+	// Familia «listas y proyectos» (`src/tools/lists.ts`, paridad UI↔MCP,
+	// `docs/20-contrato-lista.md`).
+	const { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool } =
+		registerListTools(server, ctx);
+
+	// Familia «adjuntos» (`src/tools/attachments.ts`): las tres tools que
+	// quedan solas en `toolset: 'attachments'`, ver `CreateServerOptions`. Sus
+	// tres handles no se usan aquí (no entran en el filtro de abajo — son las
+	// que SE QUEDAN cuando `toolset` acota), así que no se desestructuran.
+	registerAttachmentTools(server, ctx);
+
+	// Familia «BRL» (`src/tools/brl.ts`, add-on experimental de registro del
+	// día).
 	const { listBrlEntriesTool, mutateBrlTool } = registerBrlTools(server, ctx);
 
-	// Familia «lote de tareas» (extraída a `src/tools/batch.ts`, `plan-batch.md`):
-	// la de MAYOR riesgo, última en migrar — planifica fases y valida por-op.
-	const { mutateTasksTool } = registerBatchTool(server, ctx);
+	// Familia «sync» (`src/tools/sync.ts`, ver su JSDoc: por qué `refresh_sync`
+	// casi nunca hace falta tras una escritura de ESTE MCP) — AL FINAL a
+	// propósito, ver el comentario de arriba.
+	const { refreshSyncTool } = registerSyncTools(server, ctx);
 
 	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
 	// retira las 21 tools que NO son `add_attachment`/`read_attachment`/
