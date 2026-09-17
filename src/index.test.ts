@@ -250,9 +250,18 @@ describe('tools/list — superficie completa', () => {
 		// Re-medido el 2026-09-16 al añadir `get_list` (tarea 827a7878, nota
 		// íntegra de un proyecto/área + tipo/padre/estado): 24 tools, 27.110
 		// caracteres = +621 sobre las 23 anteriores.
-		// Techo = medido + ~5% de holgura, no el valor exacto, para no tener
-		// que tocar este test por variaciones triviales de formato JSON.
-		const CHAR_CEILING = 28500;
+		// Re-medido el 2026-09-17 (poda de texto, sin quitar tools ni capacidad):
+		// (1) `ASYNC_NOTE` (13 usos) pierde el inciso "(como add_task)", que no
+		// era uno de los tres hechos que promete (se encola/se aplica al
+		// sincronizar/sin confirmación inmediata). (2) la `description` de
+		// `list_tasks` dejaba de repetir el criterio completo de `notes`, que
+		// ya detalla el `.describe()` de ese campo — se queda con un puntero
+		// corto y la GARANTÍA "nunca un texto recortado a medias" sigue
+		// visible. 24 tools, 26.764 caracteres = -346 sobre los 27.110 de
+		// arriba. Techo = medido + ~4,6% de holgura, no el valor exacto, para
+		// no tener que tocar este test por variaciones triviales de formato
+		// JSON.
+		const CHAR_CEILING = 28000;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});

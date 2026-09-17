@@ -268,17 +268,19 @@ export function refTexts(
 }
 
 /**
- * Aviso compartido en las tools de Fase 2 y en `mutate_tasks` (15 usos): la
- * app de Lumbre es ASÍNCRONA/eventual (igual que `add_task`) — cada mutación
- * se encola y se aplica la próxima vez que un dispositivo del usuario
- * sincronice, no al instante, y ninguna tool da confirmación inmediata de que
- * se aplicó de verdad (usa `list_tasks` más tarde para comprobarlo). Versión
- * CORTA a propósito: repetida 15 veces en `tools/list`, la redacción larga
- * costaba ~3.3k caracteres solo en esta frase — el detalle completo
- * (por qué es eventual, el rebote del WebSocket, etc.) vive una única vez en
- * `README.md` ("Qué hace — Fase 2").
+ * Aviso compartido en las tools de Fase 2 y en `mutate_tasks`/`mutate_brl` (13
+ * usos): la app de Lumbre es ASÍNCRONA/eventual (igual que `add_task`) — cada
+ * mutación se encola y se aplica la próxima vez que un dispositivo del
+ * usuario sincronice, no al instante, y ninguna tool da confirmación
+ * inmediata de que se aplicó de verdad (usa `list_tasks` más tarde para
+ * comprobarlo). Versión CORTA a propósito, y recortada de nuevo el
+ * 2026-09-17 (quitado "(como add_task)", que no es uno de los tres hechos que
+ * esta frase tiene que dar: se encola, se aplica al sincronizar, sin
+ * confirmación inmediata) — el detalle completo (por qué es eventual, el
+ * rebote del WebSocket, etc.) vive una única vez en `README.md` ("Qué hace —
+ * Fase 2").
  */
-const ASYNC_NOTE = 'Asíncrono (como add_task): se encola y se aplica al sincronizar, sin confirmación inmediata.';
+const ASYNC_NOTE = 'Asíncrono: se encola y se aplica al sincronizar, sin confirmación inmediata.';
 
 /**
  * Las cuatro tools de BRL (`list_brl_entries` + los tres verbos) son el espejo,
@@ -859,12 +861,9 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
 				'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
 				'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
-				'`notes` controla las notas de cada tarea (default ' +
-				'"auto": íntegra si @done/#done, si cambió desde la última vez que la viste, o si se tocó ' +
-				'hace poco (`notesRecentHours`), si no un marcador ✎N con su tamaño y fecha — NUNCA un ' +
-				'texto recortado a medias; la cabecera del listado detalla el criterio y te avisa de ' +
-				'cuáles no has leído). `notesSince` es una consulta de precisión aparte: solo lo tocado ' +
-				'desde esa fecha.',
+				'`notes` decide qué notas trae cada tarea (criterio completo en su `.describe()`; ' +
+				'GARANTÍA: nunca un texto recortado a medias; la cabecera avisa de las no leídas). ' +
+				'`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha.',
 
 			inputSchema: {
 				scope: z
