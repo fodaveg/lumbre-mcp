@@ -1,3 +1,4 @@
+import type { z } from 'zod';
 import type { NotesSeenStore } from '../notes.js';
 import type { BrlExistenceCache, TaskExistenceCache } from '../existence-cache.js';
 import { LumbreApiError, type LumbreConfig } from '../lumbre-client.js';
@@ -37,4 +38,40 @@ export function textResult(text: string) {
 export function errorResult(err: unknown) {
 	const message = err instanceof LumbreApiError ? err.message : err instanceof Error ? err.message : String(err);
 	return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
+}
+
+/**
+ * Aviso compartido en las tools de Fase 2 y en `mutate_tasks`/`mutate_brl` (13
+ * usos): la app de Lumbre es ASÍNCRONA/eventual (igual que `add_task`) — cada
+ * mutación se encola y se aplica la próxima vez que un dispositivo del
+ * usuario sincronice, no al instante, y ninguna tool da confirmación
+ * inmediata de que se aplicó de verdad (usa `list_tasks` más tarde para
+ * comprobarlo). Versión CORTA a propósito, y recortada de nuevo el
+ * 2026-09-17 (quitado "(como add_task)", que no es uno de los tres hechos que
+ * esta frase tiene que dar: se encola, se aplica al sincronizar, sin
+ * confirmación inmediata) — el detalle completo (por qué es eventual, el
+ * rebote del WebSocket, etc.) vive una única vez en `README.md` ("Qué hace —
+ * Fase 2"). Compartida por `tools/tasks.ts`, `tools/brl.ts` y `tools/batch.ts`
+ * (tarea de partir `index.ts` en `src/tools/`, 2026-09-17) — antes vivía
+ * aquí, en `index.ts`, como una única constante de módulo.
+ */
+export const ASYNC_NOTE = 'Asíncrono: se encola y se aplica al sincronizar, sin confirmación inmediata.';
+
+/**
+ * Mensaje legible para un elemento de `ops` que no encaja en la forma
+ * ESTRICTA de su `op` (`mutateTasksStrictOpSchema`/`mutateBrlStrictOpSchema`,
+ * ver `tools/batch.ts`/`tools/brl.ts`): identifica la op y, campo a campo,
+ * qué falta o qué sobra — para que el modelo pueda corregir ESE elemento
+ * concreto sin adivinar cuál campo venía mal. Compartida por `mutate_tasks` y
+ * `mutate_brl`: la forma del mensaje no depende de qué dominio mutan.
+ */
+export function formatOpShapeError(op: string, error: z.ZodError): string {
+	const parts = error.issues.map((issue) => {
+		if (issue.code === 'unrecognized_keys') {
+			return `campo(s) que no aplican a "${op}": ${issue.keys.join(', ')}`;
+		}
+		const field = issue.path.length > 0 ? issue.path.join('.') : '(op)';
+		return `${field}: ${issue.message}`;
+	});
+	return `${op}: ${parts.join('; ')}`;
 }
