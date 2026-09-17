@@ -157,7 +157,12 @@ function hostnameOf(headerValue: string | string[] | undefined): string | undefi
 		// (`https://mcp.lumbre.pro`). `URL` exige uno, así que si no trae `://`
 		// se le pone uno neutro solo para poder parsear el hostname.
 		const withScheme = raw.includes('://') ? raw : `http://${raw}`;
-		return new URL(withScheme).hostname;
+		const hostname = new URL(withScheme).hostname;
+		// `URL` devuelve los literales IPv6 ENTRE CORCHETES (`[::1]`), que es
+		// como se escriben en un `Host`/`Origin` pero no como está la lista:
+		// sin quitarlos, un `Host: [::1]:8787` —el de un healthcheck o un
+		// desarrollo local por IPv6— no casaba y se iba con un 403.
+		return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 	} catch {
 		return undefined;
 	}
@@ -285,16 +290,6 @@ async function handleMcpRequest(
 		return;
 	}
 
-	// Presupuesto de intentos FALLIDOS (ver `mcpAttemptsExhausted` en
-	// `oauth.ts`). Se mira ANTES de resolver la credencial: resolver un bearer
-	// `lm_at_…` toca el store del broker, y ese es justo el trabajo que no
-	// queremos regalarle a quien esté probando tokens a ciegas.
-	if (oauth.mcpAttemptsExhausted(req)) {
-		sendJsonRpcError(res, 429, -32000, 'Demasiados intentos de autenticación; inténtalo de nuevo más tarde.');
-		logRequest(`POST ${routeLabel}`, 429);
-		return;
-	}
-
 	// Fail-closed: sin token no se llega ni a leer el body. El servidor NO
 	// tiene token propio — es el de ESTA petición el que se usa para hablar
 	// con app.lumbre.pro (ver el JSDoc de cabecera). Cabecera gana sobre path
@@ -320,9 +315,24 @@ async function handleMcpRequest(
 		}
 	}
 	if (!token) {
-		// Solo los intentos SIN credencial utilizable gastan presupuesto: quien
-		// ya está autenticado nunca se topa con el limitador (ver el JSDoc de
-		// `mcpAttemptsExhausted`).
+		// El presupuesto se mira AQUÍ, en la única rama en la que la petición no
+		// trae credencial utilizable, y DESPUÉS de intentar resolverla. Estaba
+		// antes, arriba del todo, y eso cortaba TODO `POST /mcp` de esa IP
+		// aunque trajera un bearer bueno: claude.ai reintentando con un access
+		// token caducado (duran una hora) desde una IP de salida compartida
+		// agotaba el cupo, y el bearer ya refrescado se comía un 429. Una
+		// petición que resuelve no toca el limitador ni para leerlo.
+		//
+		// Lo que se paga por ese orden: el presupuesto ya no evita el trabajo
+		// de resolver, solo acota el ritmo de 401 que se pueden provocar. Sale
+		// a cuenta porque resolver es barato desde que el store está cacheado
+		// en memoria (`loadStore` en `oauth.ts`), y porque lo caro de verdad
+		// —leer el cuerpo, montar el `McpServer`— sigue detrás de esta puerta.
+		if (oauth.mcpAttemptsExhausted(req)) {
+			sendJsonRpcError(res, 429, -32000, 'Demasiados intentos de autenticación; inténtalo de nuevo más tarde.');
+			logRequest(`POST ${routeLabel}`, 429);
+			return;
+		}
 		oauth.recordFailedMcpAttempt(req);
 		sendJsonRpcError(
 			res,

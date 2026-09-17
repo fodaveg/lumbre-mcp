@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { request as httpRequest, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isAllowedHostname, MAX_MCP_BODY_BYTES } from './http.js';
@@ -586,6 +586,31 @@ describe('hostnames de loopback: solo desde loopback', () => {
 		expect(isAllowedHostname('127.0.0.1', '::1')).toBe(true);
 		expect(isAllowedHostname('evil.example', '127.0.0.1')).toBe(false);
 		expect(isAllowedHostname(undefined, '127.0.0.1')).toBe(false);
+	});
+
+	it('un Host IPv6 con corchetes (`[::1]:puerto`) pasa por la cabecera real, no solo por la función', async () => {
+		// `new URL(...).hostname` devuelve `[::1]` CON corchetes, que es como se
+		// escribe en un `Host`, y así no casaba con la lista: 403 a un
+		// healthcheck o a un desarrollo local por IPv6.
+		const status = await new Promise<number>((resolve, reject) => {
+			const url = new URL(baseUrl);
+			const req = httpRequest(
+				{
+					hostname: url.hostname,
+					port: url.port,
+					path: '/healthz',
+					method: 'GET',
+					headers: { host: `[::1]:${url.port}` }
+				},
+				(res) => {
+					res.resume();
+					res.once('end', () => resolve(res.statusCode ?? 0));
+				}
+			);
+			req.once('error', reject);
+			req.end();
+		});
+		expect(status).toBe(200);
 	});
 
 	it('LUMBRE_MCP_ALLOW_LOOPBACK_HOST=1 reabre la puerta a propósito', () => {
