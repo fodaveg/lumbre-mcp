@@ -40,6 +40,17 @@ el usuario de la imagen base;
 moverla a non-root exige preparar ownership de `/state` en la imagen/volumen y
 se deja para el cambio de runtime correspondiente, no para este lote OAuth.
 
+El store se sirve de una **caché en memoria** que se sustituye dentro de la cola
+de escritura, en cuanto el `rename` confirma: sin ella, cada petición con bearer
+OAuth releía, parseaba y normalizaba el fichero entero. La premisa es que **un
+solo proceso** escribe ese fichero, y hoy se cumple (un contenedor, un
+`node dist/http.js`, sin réplicas). Si alguna vez se replica el servicio, dos
+procesos no comparten esa memoria y se servirían grants viejos entre sí: habría
+que mover el store a un almacén compartido o invalidarlo por `mtime` ANTES de
+escalar. `/readyz` no se contesta desde la caché —fuerza una relectura del
+disco, una cada cinco segundos como mucho—, así que un cambio externo del
+fichero acaba viéndose.
+
 Cada reemplazo del store solicita `fsync` del temporal antes del `rename` y del
 directorio de estado después. Los tests sabotean y verifican ese orden; esto no
 equivale a certificar supervivencia a corte eléctrico del volumen o hardware del
@@ -124,6 +135,14 @@ ssh lumbre 'cd /srv/edge && docker compose --env-file .env exec -T caddy \
 ssh lumbre 'cd /srv/edge && docker compose --env-file .env exec -T caddy \
   caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile'
 ```
+
+El fragmento trae además dos cosas que hay que recargar para que surtan efecto:
+`request_body { max_size 2MB }` (el borde corta un cuerpo desmedido antes de que
+ocupe al contenedor; el tope de la app, 2 MiB, queda como red de seguridad para
+quien lo alcance por la red `edge` sin pasar por aquí) y un HSTS con
+`includeSubDomains` — sin `preload`, que se pide desde el ápice y afecta a todo
+el dominio. `src/caddy-config.test.ts` comprueba que el `max_size` del borde no
+se despega de la constante de la app.
 
 Validar ANTES de recargar: el `reload` de Caddy es en caliente y no corta
 conexiones vivas, pero una config inválida deja el borde entero (Lumbre, Senda,

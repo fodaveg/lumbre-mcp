@@ -746,10 +746,13 @@ Si una petición trae **las dos** (cabecera Y path), **gana la cabecera**: es
 la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
 la config del cliente), así que ante ambigüedad se prefiere la buena en vez
 de fallar o mezclar. El token del path se valida de FORMA antes de usarse
-(32 caracteres hexadecimales, la forma del token de email-to-task): un
-segmento que no case — vacío, con más de un tramo, con caracteres fuera de
-`[0-9a-f]` — se trata exactamente como "sin credencial" y responde 401, sin
-recortes ni normalizaciones.
+(32 caracteres hexadecimales **en minúsculas**, la forma del token de
+email-to-task): un segmento que no case — vacío, con más de un tramo, con
+caracteres fuera de `[0-9a-f]`, o los mismos 32 dígitos en mayúsculas — se
+trata exactamente como "sin credencial" y responde 401, sin recortes ni
+normalizaciones. Las mayúsculas se rechazan porque el matcher del borde solo
+casa minúsculas: un token en mayúsculas no se saca del path en Caddy y entraría
+entero en su pipeline de logs, que es justo lo que ese bloque evita.
 
 **El 401 de una tool, distinto del 401 de la puerta**: lo de arriba es el 401
 que responde el relé ANTES de llamar a ninguna tool, cuando la petición no
@@ -765,6 +768,52 @@ directo o token en el path — el mismo tipo de credencial estática que
 `LUMBRE_TOKEN` — conserva el mensaje de siempre. Un solo sitio decide ese
 texto (`unauthorizedApiError` en `src/lumbre-client.ts`), reutilizado por
 todas las tools.
+
+**Límites de la puerta** (todos por debajo de cualquier uso legítimo, y todos
+con su cuenta escrita en el código):
+
+| Límite | Valor | Por qué ese número |
+|---|---|---|
+| Cuerpo de `POST /mcp` | 2 MiB (413) | El cuerpo legítimo mayor es un `add_attachment` con `content_base64`: 1 MiB decodificado ≈ 1,33 MiB en base64 más el sobre JSON-RPC. El borde corta antes, en 2 MB (`deploy/mcp-lumbre-pro.caddy`) |
+| Intentos FALLIDOS de `/mcp` | 30 por minuto e IP (429) | Solo cuentan los que acaban en 401. Un cliente real recibe UNO, el de descubrimiento; las ráfagas de decenas de llamadas autenticadas no gastan nada |
+| `/authorize` | 30/min por IP, 10/min por `client_id`, 60/min global (429) | Cada `/authorize` válido crea un registro real en `app.lumbre.pro`. El uso real son unas pocas autorizaciones a la hora |
+| Formulario de `/token` y `/revoke` | 16 KiB (413) | Un `grant_type=refresh_token` completo no llega a 1 KiB |
+| Descarga de un adjunto | 25 MiB | El mismo tope AUTORITATIVO que al subir: si nada puede subir más, nada legítimo baja más |
+
+Al pasarse del tope de cuerpo la conexión se corta, pero no de golpe: se deja
+de procesar y se drena unos segundos para que el 413 llegue entero (si se
+destruye el socket con el cliente a medio subir, lo que recibe es un reset y no
+sabe por qué falló).
+
+El presupuesto de intentos fallidos es **por IP**, así que una IP que produzca
+401 en bucle se frena a sí misma —está rota o probando credenciales— y se
+recupera sola en menos de un minuto. La contrapartida conocida: varios
+dispositivos tras el mismo NAT comparten presupuesto.
+
+**Hosts de loopback solo desde loopback**: `Host`/`Origin` con `localhost`,
+`127.0.0.1` o `::1` se aceptan únicamente si la conexión llega por la interfaz
+de loopback (el healthcheck del contenedor, los tests, el desarrollo local).
+Desde la red `edge` de producción, donde el único cliente legítimo es Caddy con
+`Host: mcp.lumbre.pro`, ya no valen. `LUMBRE_MCP_ALLOW_LOOPBACK_HOST=1` los
+reabre para un entorno de desarrollo que lo necesite; no se enciende sola.
+
+**El callback de Lumbre y una decisión sin validar**: `decision=denied` NO
+consume la autorización pendiente. Ese callback es un GET público cuyo único
+secreto es el UUID `request`, y consumirla antes de contrastar nada con Lumbre
+permitía que quien conociera ese UUID abortara la autorización de otra persona.
+Una denegación legítima tampoco necesita borrar: la entrada caduca sola en diez
+minutos. `decision=approved` sí conserva el consumo atómico ANTES de
+`/exchange`, que es lo que garantiza una sola llamada de canje con dos
+callbacks concurrentes.
+
+**La outbox de revocación** tiene tope (256) y caducidad (30 días, la misma
+vigencia absoluta que una familia de refresh). Descartar un elemento significa
+que esa credencial upstream no se revoca desde aquí: es aceptable porque el
+grant local ya no existe y Lumbre puede revocarla desde la sesión web, y es
+preferible a que un fallo transitorio de Lumbre convierta el fichero de estado
+en algo que ya no arranca. No se hace en silencio (queda una línea en el log,
+sin credenciales), y deliberadamente no marca `/readyz` como no listo: esa
+sonda es el healthcheck del contenedor y un 503 ahí lo reiniciaría.
 
 **El coste de la forma heredada del path**: el token queda guardado en la
 configuración del conector del lado de Anthropic (claude.ai) y visible en
