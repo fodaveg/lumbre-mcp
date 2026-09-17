@@ -4,3 +4,9 @@ dist.new/
 .distcheck-tmp/
 .DS_Store
 *.log
+
+# El repo es público y `.env.example` invita a crear `.env` con una clave de
+# configuración: que ese fichero local nunca pueda acabar versionado.
+.env
+.env.*
+!.env.example

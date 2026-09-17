@@ -26,6 +26,18 @@ is_canonical_remote_path() {
 		[[ "$path" != *"/./"* && "$path" != */. && "$path" != *"/../"* && "$path" != */.. ]]
 }
 
+# Alias de `~/.ssh/config` o `usuario@host`: solo letras, dígitos, punto,
+# guion, guion bajo y arroba, y el primer carácter alfanumérico (para que no
+# empiece por un carácter que `ssh`/`rsync` pudieran interpretar como opción).
+is_valid_host() {
+	local host="$1"
+	[[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]
+}
+
+if ! is_valid_host "$HOST"; then
+	echo "ERROR: LUMBRE_MCP_HOST debe ser un alias o usuario@host válido." >&2
+	exit 1
+fi
 if ! is_canonical_remote_path "$DEST"; then
 	echo "ERROR: LUMBRE_MCP_DEST debe ser una ruta absoluta canónica simple." >&2
 	exit 1
@@ -59,10 +71,18 @@ ssh "$HOST" "test -r $ENV_FILE && test \$(stat -c %a $ENV_FILE) = 600" || {
 	exit 1
 }
 ssh "$HOST" "mkdir -p $DEST"
+# Un `.env` local nunca debe viajar al servidor (el repo es público y
+# `.env.example` invita a crear uno con una clave de configuración). El
+# `--include` va ANTES que el `--exclude` porque rsync evalúa los filtros en
+# el orden dado: si `.env*` llegara primero, `.env.example` también caería.
+# Ojo: excluir un fichero no lo borra en destino si ya está ahí de una copia
+# anterior; hay que retirarlo a mano si alguna vez se copió por error.
 rsync -az --delete \
 	--exclude '.git' \
 	--exclude 'node_modules' \
 	--exclude '.claude' \
+	--include '.env.example' \
+	--exclude '.env*' \
 	./ "$HOST:$DEST/"
 
 echo "==> Reconstruyendo y levantando el contenedor"

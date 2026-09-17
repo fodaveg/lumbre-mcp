@@ -47,6 +47,24 @@ VPS. `/readyz` comparte una sola comprobación concurrente, cacheada cinco
 segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
 `127.0.0.1`.
 
+### Un `.env` local nunca acaba en git, en la imagen ni en el servidor
+
+El repo es público y `.env.example` invita a crear un `.env` local con una
+clave de configuración. Tres capas lo mantienen fuera:
+
+- `.gitignore` y `.dockerignore` ignoran `.env` y `.env.*`, con la excepción
+  `!.env.example` para que la plantilla siga versionada (compruébalo con
+  `git check-ignore -v .env .env.local .env.example`: solo los dos primeros
+  deben salir en la lista).
+- `deploy/publicar.sh` excluye `.env*` del `rsync` que copia el árbol al
+  servidor, con `--include '.env.example'` antes del `--exclude` (rsync evalúa
+  los filtros en orden). Excluir no borra lo que ya estuviera copiado de antes
+  por error; hay que retirarlo a mano en el servidor.
+- `LUMBRE_MCP_HOST` pasa por la misma validación de formato que `DEST` y
+  `ENV_FILE`: alias de `~/.ssh/config` o `usuario@host`, solo letras, dígitos,
+  punto, guion, guion bajo y arroba, primer carácter alfanumérico. Un valor
+  inválido aborta antes de tocar `ssh` o `rsync`.
+
 ### Secreto del backchannel
 
 El secreto vive en `/srv/lumbre-mcp.env`, fuera de `/srv/lumbre-mcp`: el script

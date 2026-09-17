@@ -8,3 +8,8 @@ src
 scripts
 deploy
 *.md
+
+# Un `.env` local nunca debe acabar en la imagen; `.env.example` no es secreto.
+.env
+.env.*
+!.env.example
