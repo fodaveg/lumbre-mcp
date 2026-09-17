@@ -785,10 +785,19 @@ de procesar y se drena unos segundos para que el 413 llegue entero (si se
 destruye el socket con el cliente a medio subir, lo que recibe es un reset y no
 sabe por qué falló).
 
-El presupuesto de intentos fallidos es **por IP**, así que una IP que produzca
-401 en bucle se frena a sí misma —está rota o probando credenciales— y se
-recupera sola en menos de un minuto. La contrapartida conocida: varios
-dispositivos tras el mismo NAT comparten presupuesto.
+El presupuesto de intentos fallidos es **por IP** y se mira **después** de
+intentar resolver la credencial, solo en la rama en la que no hay ninguna
+utilizable: una petición que autentica no lo toca ni para leerlo, así que un
+cliente con el token recién refrescado nunca recibe un 429 por los 401 que esa
+misma IP acumulase antes. Lo que acota, entonces, es el ritmo de 401
+provocables, no el trabajo de resolver —que es barato desde que el store se
+cachea en memoria—. La contrapartida conocida: varios dispositivos tras el mismo
+NAT comparten presupuesto, y se recupera solo en menos de un minuto.
+
+El presupuesto global de `/authorize` vive en su propio estado, aparte de las
+ventanas por IP: esas se expulsan por tamaño cuando pasan de 2.048, y si el
+contador global compartiera ese mapa bastaría con rotar IPs para reiniciar justo
+el límite que debe resistirlo.
 
 **Hosts de loopback solo desde loopback**: `Host`/`Origin` con `localhost`,
 `127.0.0.1` o `::1` se aceptan únicamente si la conexión llega por la interfaz

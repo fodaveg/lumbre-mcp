@@ -47,9 +47,11 @@ solo proceso** escribe ese fichero, y hoy se cumple (un contenedor, un
 `node dist/http.js`, sin réplicas). Si alguna vez se replica el servicio, dos
 procesos no comparten esa memoria y se servirían grants viejos entre sí: habría
 que mover el store a un almacén compartido o invalidarlo por `mtime` ANTES de
-escalar. `/readyz` no se contesta desde la caché —fuerza una relectura del
-disco, una cada cinco segundos como mucho—, así que un cambio externo del
-fichero acaba viéndose.
+escalar. `/readyz` no se contesta desde la caché: relee del disco y adopta lo
+leído (solo si nadie escribió mientras validaba), así que un cambio externo del
+fichero acaba viéndose. El retraso máximo lo marca **el healthcheck, cada 30 s**
+—es el único que consume `/readyz`, porque el borde no lo publica—, no los
+cinco segundos de su caché interna, que solo evitan repetir la comprobación.
 
 Cada reemplazo del store solicita `fsync` del temporal antes del `rename` y del
 directorio de estado después. Los tests sabotean y verifican ese orden; esto no
