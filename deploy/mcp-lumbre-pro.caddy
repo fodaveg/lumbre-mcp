@@ -17,6 +17,20 @@
 # Sin `encode`: las respuestas son JSON pequeño y el transporte puede abrir
 # SSE, donde comprimir por buffer solo añade latencia.
 mcp.lumbre.pro {
+	# Tope del cuerpo en el BORDE, para que un cuerpo desmedido ni llegue a
+	# ocupar al contenedor. 2MB decimales (2.000.000 bytes) contra los 2 MiB
+	# (2.097.152) de `MAX_MCP_BODY_BYTES` en `src/http.ts`: el borde es un pelo
+	# MÁS estricto a propósito, así el que corta primero es siempre este y el
+	# de la app queda como red de seguridad para quien alcance el contenedor
+	# por la red `edge` sin pasar por aquí. Los dos siguen muy por encima del
+	# cuerpo legítimo más grande (un `add_attachment` con `content_base64` de
+	# 1 MiB decodificado ≈ 1,33 MiB de base64); la cuenta está en el JSDoc de
+	# esa constante, y `src/caddy-config.test.ts` comprueba que este número no
+	# se despega de ella.
+	request_body {
+		max_size 2MB
+	}
+
 	# Readiness descifra el store y solo pertenece al healthcheck interno del
 	# contenedor. El borde no la expone como amplificador público.
 	handle /readyz {
@@ -85,7 +99,13 @@ mcp.lumbre.pro {
 	}
 
 	header {
-		Strict-Transport-Security "max-age=31536000"
+		# `includeSubDomains` alcanza solo a los subdominios de ESTE host
+		# (`*.mcp.lumbre.pro`), que no existen: cierra la puerta a que alguien
+		# estrene uno mañana sin HSTS, y no toca a `lumbre.pro` ni a sus otros
+		# subdominios, que sirven sus propias cabeceras desde sus fragmentos.
+		# SIN `preload`, a propósito: eso sí se pide desde el ápice, afecta a
+		# todo el dominio y sacarse de la lista lleva meses.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		-Server
 	}
 
