@@ -155,7 +155,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 				'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
 				'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
 				'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
-				'`notes` decide qué notas trae cada tarea (criterio completo en su `.describe()`; ' +
+				'`notes` decide qué notas trae cada tarea (criterio completo en ese campo;' +
 				'GARANTÍA: nunca un texto recortado a medias; la cabecera avisa de las no leídas). ' +
 				'`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha.',
 

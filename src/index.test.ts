@@ -259,8 +259,9 @@ describe('tools/list — superficie completa', () => {
 		// `list_tasks` dejaba de repetir el criterio completo de `notes`, que
 		// ya detalla el `.describe()` de ese campo — se queda con un puntero
 		// corto y la GARANTÍA "nunca un texto recortado a medias" sigue
-		// visible. 24 tools, 26.764 caracteres = -346 sobre los 27.110 de
-		// arriba. Techo = medido + ~4,6% de holgura, no el valor exacto, para
+		// visible (el puntero dice "en ese campo", no `.describe()`: quien lee
+		// el listado es un modelo, no ve el código). 24 tools, 26.757
+		// caracteres = -353 sobre los 27.110 de arriba. Techo = medido + ~4,6% de holgura, no el valor exacto, para
 		// no tener que tocar este test por variaciones triviales de formato
 		// JSON.
 		const CHAR_CEILING = 28000;
