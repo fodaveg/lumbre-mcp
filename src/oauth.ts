@@ -35,6 +35,42 @@ const MAX_REFRESH_TOMBSTONES_PER_FAMILY = 64;
 const MAX_OUTBOX_RETRIES_PER_READINESS = 1;
 const READINESS_CACHE_MS = 5_000;
 
+/**
+ * Tope de la outbox de revocación y caducidad de cada elemento.
+ *
+ * Un elemento = una credencial upstream que este relé todavía no ha
+ * conseguido revocar en Lumbre. Sin tope ni caducidad crecía para siempre:
+ * basta con que `backchannel.revoke` falle (Lumbre caída, secreto rotado a
+ * medias) para que el elemento se quede ahí, y cada arranque los descifra
+ * todos (`ensureReady`).
+ *
+ * 256 elementos: el uso real son 1-3 cuentas y una credencial por
+ * autorización, así que cualquier backlog legítimo se cuenta con los dedos;
+ * 256 es dos órdenes de magnitud por encima y acota el fichero (~100 KB).
+ * 30 días: la misma vigencia absoluta que una familia de refresh
+ * (`REFRESH_TTL_MS`). Pasado ese plazo ya no queda ningún grant local que
+ * pueda usar esa credencial, y seguir intentando revocarla eternamente no
+ * arregla nada que no arregle ya Lumbre.
+ *
+ * QUÉ SE DESCARTA Y POR QUÉ ES SEGURO — descartar un elemento significa que
+ * esa credencial upstream NO se revoca desde aquí. Es aceptable porque:
+ *   1. el grant local ya no existe (se retiró al encolar la revocación), así
+ *      que ESTE relé no puede usar la credencial ni la sirve a nadie;
+ *   2. la credencial es del backchannel de Lumbre, que la puede caducar o
+ *      revocar desde la sesión web de la persona — no queda fuera de control,
+ *      queda fuera de NUESTRO control;
+ *   3. lo contrario (crecer sin límite) convierte un fallo transitorio de
+ *      Lumbre en un fichero de estado que ya no arranca.
+ * No es gratis, así que no se hace en silencio: se escribe una línea en
+ * stderr con el número descartado y el motivo, SIN credenciales ni
+ * credentialIds. Deliberadamente NO se marca degradación en `/readyz`: esa
+ * sonda es el healthcheck del contenedor (`deploy/compose.yml`), y un 503 ahí
+ * lo reinicia — tumbar el servicio entero por una revocación vieja que ya no
+ * afecta a ningún grant vivo sería un remedio peor que la enfermedad.
+ */
+const MAX_REVOCATION_OUTBOX_ITEMS = 256;
+const REVOCATION_OUTBOX_TTL_MS = 30 * 24 * 60 * 60_000;
+
 type PublicEndpoint = 'authorize' | 'token' | 'revoke';
 
 interface PublicLimit {
@@ -47,6 +83,36 @@ const DEFAULT_PUBLIC_LIMITS: Record<PublicEndpoint, PublicLimit> = {
 	token: { requestsPerMinute: 60, concurrent: 16 },
 	revoke: { requestsPerMinute: 60, concurrent: 16 }
 };
+
+/**
+ * Presupuesto de `/authorize` MÁS ALLÁ del límite por IP de
+ * `enterPublicEndpoint`. Cada `/authorize` válido crea un registro real en
+ * app.lumbre.pro, así que limitar solo por IP dejaba barato llenar
+ * `MAX_PENDING_ITEMS` desde una botnet: el coste del atacante era una IP
+ * distinta cada 30 peticiones.
+ *
+ * 10 por minuto y `client_id`, 60 por minuto en total. El uso legítimo son
+ * unas pocas autorizaciones a la HORA (una persona enchufando claude.ai o
+ * Codex), así que ambos números están ~100x por encima de lo real y ninguno
+ * puede molestar a nadie que esté conectando de verdad.
+ */
+const DEFAULT_AUTHORIZE_BUDGET = { perClientPerMinute: 10, globalPerMinute: 60 };
+
+/**
+ * Intentos FALLIDOS de `/mcp` por IP y minuto (ver `mcpAttemptsExhausted`).
+ *
+ * Solo cuentan los que acaban en 401 — ni los autenticados ni los 403/405. Un
+ * cliente MCP real hace ráfagas de decenas de llamadas por minuto, pero 401
+ * recibe UNO: el de descubrimiento, al conectar. Con 30/min cabe de sobra un
+ * cliente reconectando o varios dispositivos tras el mismo NAT, y a la vez
+ * queda acotado el ritmo al que se puede probar bearers a ciegas contra
+ * `resolveAccessToken`, que es el trabajo caro (toca el store).
+ *
+ * Se limita el FALLO y no la petición a propósito: limitar `/mcp` entero
+ * castigaría al usuario real —el que hace las ráfagas— sin frenar al abuso,
+ * que puede repartirse entre IPs igual de bien.
+ */
+const DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE = 30;
 
 interface AuthorizationRequest {
 	clientId: string;
@@ -93,6 +159,13 @@ interface RevocationOutboxItem {
 	resource: string;
 	scope: string;
 	upstream: EncryptedValue;
+	/** Epoch ms en que se encoló, para la caducidad de
+	 *  `REVOCATION_OUTBOX_TTL_MS`. OPCIONAL por migración: un store escrito
+	 *  antes de este campo sigue cargando tal cual (no es corrupción, es una
+	 *  versión anterior del mismo `version: 3`), y la primera poda le pone la
+	 *  marca del momento en que se lee — el peor caso es que un elemento
+	 *  heredado viva 30 días más de lo que le tocaba, nunca menos. */
+	queuedAt?: number;
 }
 
 interface UsedRefreshToken {
@@ -131,6 +204,12 @@ export interface OAuthServiceOptions {
 	fetch?: typeof fetch;
 	now?: () => number;
 	publicLimits?: Partial<Record<PublicEndpoint, Partial<PublicLimit>>>;
+	/** Presupuesto de `/authorize` por `client_id` y global; ver
+	 *  `DEFAULT_AUTHORIZE_BUDGET`. Inyectable para los tests. */
+	authorizeBudget?: Partial<typeof DEFAULT_AUTHORIZE_BUDGET>;
+	/** Intentos fallidos de `/mcp` por IP y minuto; ver
+	 *  `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`. Inyectable para los tests. */
+	failedMcpAttemptsPerMinute?: number;
 	persistenceStep?: (step: PersistenceStep) => void | Promise<void>;
 	backchannel?: LumbreBackchannelApi;
 	backchannelSecret?: string;
@@ -168,6 +247,22 @@ function equalText(a: string, b: string): boolean {
 	return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
 
+/**
+ * Compara dos hashes de credencial (`codeHash`, `accessHash`, `refreshHash`,
+ * tombstones) en tiempo constante.
+ *
+ * Es el MISMO `equalText` que ya se usaba para el PKCE, con otro nombre para
+ * que se lea qué se está comparando. Buscar un grant con `===` sobre estos
+ * campos deja un canal temporal: `===` de cadenas corta en el primer byte
+ * distinto, así que el tiempo de respuesta filtra cuántos caracteres del hash
+ * presentado coinciden con uno guardado. No es la vía más práctica de atacar
+ * esto —el hash no es el token, y hay que acertarlo entero—, pero es gratis
+ * cerrarla y el helper ya existía en el fichero.
+ */
+function matchesHash(stored: string, presented: string): boolean {
+	return equalText(stored, presented);
+}
+
 async function syncDirectory(path: string): Promise<void> {
 	const handle = await open(path, 'r');
 	try {
@@ -199,7 +294,53 @@ function oauthError(res: ServerResponse, error: unknown): void {
 	json(res, known.status, { error: known.code, error_description: known.message });
 }
 
+/** Margen para que un cliente que se pasó por poco termine de escribir y
+ *  llegue a LEER el 413 antes de que le cerremos. Ver `stopReceiving`. */
+const LINGERING_CLOSE_MS = 2_000;
+
+/**
+ * Deja de procesar el cuerpo y cierra la conexión, sin tragarse el resto.
+ *
+ * Lo importante, y lo que faltaba: a partir de aquí no se acumula NI UN BYTE
+ * más — se quitan los manejadores de `data` y lo que siga llegando se
+ * descarta. Eso es lo que cierra el agujero: quien mandaba un cuerpo
+ * interminable tenía al proceso guardándolo, o al menos leyéndolo, gratis.
+ *
+ * Por qué NO un `destroy()` seco, que fue el primer intento y se midió: con
+ * el cliente a medio subir, destruir el socket manda un RST, el 413 se pierde
+ * por el camino y `fetch` devuelve `EPIPE` en vez de la respuesta — o sea, un
+ * cliente que se pasa de tamaño no se entera de POR QUÉ falló. Así que se
+ * hace lo mismo que nginx con su `lingering_close`: se drena a la basura
+ * mientras el cliente termina, y se cierra en cuanto acaba (`end`) o al
+ * agotarse `LINGERING_CLOSE_MS`, lo que ocurra antes. La ventana está acotada
+ * en tiempo y no cuesta memoria.
+ *
+ * Vive aquí, y no en `http.ts`, solo por dependencias: `http.ts` ya importa
+ * de este módulo, y al revés se cerraría un ciclo.
+ */
+export function stopReceiving(req: IncomingMessage): void {
+	req.removeAllListeners('data');
+	req.resume();
+	let closed = false;
+	const close = (): void => {
+		if (closed) return;
+		closed = true;
+		clearTimeout(timer);
+		req.destroy();
+	};
+	const timer = setTimeout(close, LINGERING_CLOSE_MS);
+	timer.unref();
+	req.once('end', close);
+	req.once('error', close);
+	req.once('close', close);
+}
+
 async function readLimitedBody(req: IncomingMessage, limit = MAX_FORM_BYTES): Promise<string> {
+	const declared = Number(req.headers['content-length']);
+	if (Number.isFinite(declared) && declared > limit) {
+		stopReceiving(req);
+		throw new OAuthError('invalid_request', 'Formulario demasiado grande.', 413);
+	}
 	return await new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		let size = 0;
@@ -208,6 +349,8 @@ async function readLimitedBody(req: IncomingMessage, limit = MAX_FORM_BYTES): Pr
 			size += chunk.length;
 			if (size > limit && !exceeded) {
 				exceeded = true;
+				chunks.length = 0;
+				stopReceiving(req);
 				reject(new OAuthError('invalid_request', 'Formulario demasiado grande.', 413));
 				return;
 			}
@@ -502,7 +645,11 @@ function normalizeStore(value: unknown): OAuthStore {
 			typeof item.clientId !== 'string' ||
 			item.resource !== OAUTH_RESOURCE ||
 			item.scope !== OAUTH_SCOPE ||
-			!validEncryptedValue(item.upstream)
+			!validEncryptedValue(item.upstream) ||
+			// Ausente = store anterior a este campo, y eso NO es corrupción:
+			// se acepta y lo sella la primera poda. Presente pero no numérico
+			// sí lo es.
+			(item.queuedAt !== undefined && !Number.isFinite(item.queuedAt))
 		) {
 			throw new Error('outbox OAuth inválida');
 		}
@@ -563,6 +710,32 @@ export class OAuthService {
 	private readinessCache?: { expiresAt: number; error?: unknown };
 	private readinessInFlight?: Promise<void>;
 	private writeQueue: Promise<void> = Promise.resolve();
+	private readonly authorizeBudget: typeof DEFAULT_AUTHORIZE_BUDGET;
+	private readonly failedMcpAttemptsPerMinute: number;
+	/**
+	 * Último estado PERSISTIDO conocido del store, en memoria.
+	 *
+	 * Sin esto, `resolveAccessToken` —o sea, CADA petición a `/mcp` con un
+	 * bearer `lm_at_…`— leía, parseaba y normalizaba el fichero entero. La
+	 * caché se llena al leer de disco y se sustituye dentro de la cola de
+	 * escritura (`mutateStore`) en cuanto el `rename` ha terminado, así que
+	 * nunca se sirve un store anterior a una escritura ya confirmada; ante
+	 * cualquier error se vacía y la siguiente lectura vuelve al disco.
+	 *
+	 * Se entrega SIEMPRE una copia (`structuredClone`): los mutadores trabajan
+	 * sobre su propio objeto, de modo que una escritura abortada no puede
+	 * dejar la caché con un estado intermedio que nunca llegó al fichero.
+	 *
+	 * PREMISA, y hoy se cumple: UN SOLO PROCESO escribe este store. El
+	 * despliegue es un contenedor con un `node dist/http.js`
+	 * (`deploy/compose.yml`), sin réplicas. Dos procesos NO comparten esta
+	 * memoria y se servirían grants viejos entre sí; si algún día se replica,
+	 * esto tiene que pasar a un almacén compartido o invalidarse por `mtime`.
+	 * Mitigación parcial que ya existe: `ensureReady` (y con él `/readyz`,
+	 * cada 5 s como mucho) fuerza una relectura del disco, así que un cambio
+	 * externo del fichero se acaba viendo.
+	 */
+	private cachedStore?: OAuthStore;
 
 	constructor(options: OAuthServiceOptions = {}) {
 		this.stateDir = options.stateDir ?? defaultStateDir();
@@ -582,6 +755,8 @@ export class OAuthService {
 			token: { ...DEFAULT_PUBLIC_LIMITS.token, ...options.publicLimits?.token },
 			revoke: { ...DEFAULT_PUBLIC_LIMITS.revoke, ...options.publicLimits?.revoke }
 		};
+		this.authorizeBudget = { ...DEFAULT_AUTHORIZE_BUDGET, ...options.authorizeBudget };
+		this.failedMcpAttemptsPerMinute = options.failedMcpAttemptsPerMinute ?? DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE;
 	}
 
 	protectedResourceMetadata(): object {
@@ -710,26 +885,88 @@ export class OAuthService {
 		return { clientId: clientId!, redirectUri: redirectUri!, scope, resource, challenge, state };
 	}
 
-	private enterPublicEndpoint(req: IncomingMessage, endpoint: PublicEndpoint): () => void {
+	/** IP del cliente tal y como la ve este proceso: la ÚLTIMA entrada de
+	 *  `x-forwarded-for` es la que añade Caddy (el peer real), no la que
+	 *  pudiera haber falsificado quien llama. */
+	private remoteAddressOf(req: IncomingMessage): string {
 		const forwarded = req.headers['x-forwarded-for'];
 		const rawForwarded = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-		const remote = rawForwarded?.split(',').at(-1)?.trim().slice(0, 128) || req.socket.remoteAddress || 'unknown';
-		const now = this.now();
+		return rawForwarded?.split(',').at(-1)?.trim().slice(0, 128) || req.socket.remoteAddress || 'unknown';
+	}
+
+	/** Retira ventanas vencidas y acota el mapa; se llama antes de mirar o
+	 *  tocar cualquier ventana. */
+	private pruneRateWindows(now: number): void {
 		for (const [key, window] of this.rateWindows) {
 			if (window.startedAt + 60_000 <= now) this.rateWindows.delete(key);
 		}
 		while (this.rateWindows.size >= 2_048) this.rateWindows.delete(this.rateWindows.keys().next().value!);
+	}
+
+	/** ¿Esta clave ya agotó su cupo del minuto? No consume nada. */
+	private overRateLimit(key: string, limit: number): boolean {
+		const window = this.rateWindows.get(key);
+		return window !== undefined && window.count >= limit;
+	}
+
+	private consumeRateWindow(key: string, now: number): void {
+		const window = this.rateWindows.get(key);
+		if (window) window.count += 1;
+		else this.rateWindows.set(key, { startedAt: now, count: 1 });
+	}
+
+	/**
+	 * ¿Esta IP agotó su presupuesto de intentos FALLIDOS contra `/mcp`? Lo
+	 * consulta `handleMcpRequest` (`http.ts`) ANTES de resolver la credencial.
+	 * Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE` para el porqué de limitar
+	 * el fallo y no la petición.
+	 */
+	mcpAttemptsExhausted(req: IncomingMessage): boolean {
+		const now = this.now();
+		this.pruneRateWindows(now);
+		return this.overRateLimit(`mcp-failed:${this.remoteAddressOf(req)}`, this.failedMcpAttemptsPerMinute);
+	}
+
+	/** Anota un 401 de `/mcp` contra el presupuesto de esta IP. */
+	recordFailedMcpAttempt(req: IncomingMessage): void {
+		const now = this.now();
+		this.pruneRateWindows(now);
+		this.consumeRateWindow(`mcp-failed:${this.remoteAddressOf(req)}`, now);
+	}
+
+	/**
+	 * Presupuesto de `/authorize` por `client_id` y global, que se gasta JUSTO
+	 * ANTES de llamar al backchannel — el orden es el punto: pasada esta
+	 * puerta, la petición crea un registro real en app.lumbre.pro.
+	 */
+	private enterAuthorizeBudget(clientId: string): void {
+		const now = this.now();
+		this.pruneRateWindows(now);
+		const clientKey = `authorize-client:${clientId}`;
+		const globalKey = 'authorize-global';
+		if (
+			this.overRateLimit(clientKey, this.authorizeBudget.perClientPerMinute) ||
+			this.overRateLimit(globalKey, this.authorizeBudget.globalPerMinute)
+		) {
+			throw new OAuthError('temporarily_unavailable', 'Demasiadas autorizaciones en curso; inténtalo de nuevo más tarde.', 429);
+		}
+		this.consumeRateWindow(clientKey, now);
+		this.consumeRateWindow(globalKey, now);
+	}
+
+	private enterPublicEndpoint(req: IncomingMessage, endpoint: PublicEndpoint): () => void {
+		const remote = this.remoteAddressOf(req);
+		const now = this.now();
+		this.pruneRateWindows(now);
 		const key = `${endpoint}:${remote}`;
 		const limit = this.publicLimits[endpoint];
-		const window = this.rateWindows.get(key);
-		if (window && window.count >= limit.requestsPerMinute) {
+		if (this.overRateLimit(key, limit.requestsPerMinute)) {
 			throw new OAuthError('temporarily_unavailable', 'Demasiadas solicitudes; inténtalo de nuevo más tarde.', 429);
 		}
 		if (this.inFlight[endpoint] >= limit.concurrent) {
 			throw new OAuthError('temporarily_unavailable', 'El servidor está ocupado; inténtalo de nuevo.', 429);
 		}
-		if (window) window.count += 1;
-		else this.rateWindows.set(key, { startedAt: now, count: 1 });
+		this.consumeRateWindow(key, now);
 		this.inFlight[endpoint] += 1;
 		let released = false;
 		return () => {
@@ -750,6 +987,20 @@ export class OAuthService {
 				throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
 			}
 			const clientName = metadata.client_name!.trim().slice(0, 120);
+			// Las DOS puertas que faltaban antes de tocar app.lumbre.pro:
+			// presupuesto por `client_id` y global (el límite por IP de
+			// `enterPublicEndpoint` no basta: se reparte entre IPs), y el cupo
+			// de pendientes. Lo de `MAX_PENDING_ITEMS` ya se comprobaba, pero
+			// DESPUÉS del backchannel: llenar la cola dejaba mil registros
+			// creados en Lumbre que aquí ni se guardaban. Ahora se mira antes,
+			// y es barato porque el store está cacheado en memoria.
+			this.enterAuthorizeBudget(request.clientId);
+			const pendingNow = (await this.loadStore()).authorizationRequests.filter(
+				(item) => item.expiresAt > this.now()
+			).length;
+			if (pendingNow >= MAX_PENDING_ITEMS) {
+				throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+			}
 			const transactionId = randomBytes(32).toString('base64url');
 			let created;
 			try {
@@ -811,6 +1062,32 @@ export class OAuthService {
 			if (!requestId || !isValidRequestId(requestId) || (decision !== 'approved' && decision !== 'denied')) {
 				throw new OAuthError('invalid_request', 'Callback de Lumbre inválido.');
 			}
+			// `denied` NO consume la autorización pendiente, y esta asimetría es
+			// el arreglo, no un descuido: este callback es un GET público cuyo
+			// único "secreto" es el UUID `request`. Consumir la pendiente ANTES
+			// de contrastar la decisión con Lumbre significaba que cualquiera
+			// que conociera ese UUID podía mandar `decision=denied` y abortar
+			// la autorización de otra persona — una decisión que Lumbre nunca
+			// llegaba a confirmar. Dejándola en pie, un `denied` falsificado no
+			// destruye nada: el callback bueno sigue encontrando su pendiente,
+			// y la falsa solo redirige al navegador de quien la mandó. Un
+			// `denied` legítimo tampoco necesita borrar nada: la entrada caduca
+			// sola (`TRANSACTION_TTL_MS`, 10 min) y `mutateStore` la poda.
+			//
+			// `approved` sí conserva el consumo atómico ANTES de `exchange`,
+			// igual que hasta ahora: es lo que garantiza UNA sola llamada de
+			// canje: dos callbacks concurrentes compiten por el mismo
+			// `mutateStore`, gana uno y el otro se encuentra sin pendiente. El
+			// contrato de `/exchange` de Lumbre no es reintentable a ciegas
+			// (ver `README.md`), así que esa ventana no se abre.
+			const stored = (await this.loadStore()).authorizationRequests.find((item) => item.requestId === requestId);
+			if (!stored || stored.expiresAt <= this.now()) {
+				throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
+			}
+			if (decision === 'denied') {
+				this.redirectToClient(res, stored, { error: 'access_denied' });
+				return;
+			}
 			let pending: StoredAuthorizationRequest | undefined;
 			await this.mutateStore((store) => {
 				const found = store.authorizationRequests.find((item) => item.requestId === requestId);
@@ -823,10 +1100,6 @@ export class OAuthService {
 				throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
 			}
 			const authorized = pending;
-			if (decision === 'denied') {
-				this.redirectToClient(res, authorized, { error: 'access_denied' });
-				return;
-			}
 			let credential;
 			try {
 				const transactionId = decrypt(
@@ -935,7 +1208,7 @@ export class OAuthService {
 		const verifier = one(form, 'code_verifier');
 		const resource = one(form, 'resource');
 		const codeHash = digest(codeValue!);
-		const code = (await this.loadStore()).authorizationCodes.find((item) => item.codeHash === codeHash);
+		const code = (await this.loadStore()).authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash));
 		if (!code) throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
 		if (code.expiresAt <= this.now()) {
 			await this.retireAuthorizationCode(codeHash);
@@ -963,7 +1236,7 @@ export class OAuthService {
 	private async retireAuthorizationCode(codeHash: string): Promise<void> {
 		let credentialId: string | undefined;
 		await this.mutateStore((store) => {
-			const code = store.authorizationCodes.find((item) => item.codeHash === codeHash);
+			const code = store.authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash));
 			if (!code) return false;
 			credentialId = code.credentialId;
 			if (!store.revocationOutbox.some((item) => item.credentialId === code.credentialId)) {
@@ -973,10 +1246,11 @@ export class OAuthService {
 					clientId: code.clientId,
 					resource: code.resource,
 					scope: code.scope,
-					upstream: code.upstream
+					upstream: code.upstream,
+					queuedAt: this.now()
 				});
 			}
-			store.authorizationCodes = store.authorizationCodes.filter((item) => item.codeHash !== codeHash);
+			store.authorizationCodes = store.authorizationCodes.filter((item) => !matchesHash(item.codeHash, codeHash));
 			return true;
 		});
 		if (credentialId) await this.flushRevocationOutbox(credentialId);
@@ -1013,10 +1287,10 @@ export class OAuthService {
 		let issued = false;
 		await this.mutateStore((store) => {
 			const storedCode = store.authorizationCodes.find(
-				(item) => item.codeHash === codeHash && item.credentialId === code.credentialId && item.expiresAt > now
+				(item) => matchesHash(item.codeHash, codeHash) && item.credentialId === code.credentialId && item.expiresAt > now
 			);
 			if (!storedCode) return false;
-			store.authorizationCodes = store.authorizationCodes.filter((item) => item.codeHash !== codeHash);
+			store.authorizationCodes = store.authorizationCodes.filter((item) => !matchesHash(item.codeHash, codeHash));
 			store.grants.push({
 				provider: 'lumbre-web',
 				credentialId: code.credentialId,
@@ -1048,10 +1322,10 @@ export class OAuthService {
 		const nextRefresh = opaque(REFRESH_PREFIX);
 		const now = this.now();
 		const snapshot = await this.loadStore();
-		const usedSnapshot = snapshot.usedRefreshTokens.find((item) => item.hash === oldHash && item.expiresAt > now);
+		const usedSnapshot = snapshot.usedRefreshTokens.find((item) => matchesHash(item.hash, oldHash) && item.expiresAt > now);
 		const grantSnapshot = usedSnapshot
 			? snapshot.grants.find((item) => item.familyId === usedSnapshot.familyId)
-			: snapshot.grants.find((item) => item.refreshHash === oldHash);
+			: snapshot.grants.find((item) => matchesHash(item.refreshHash, oldHash));
 		if (
 			!grantSnapshot ||
 			grantSnapshot.provider !== 'lumbre-web' ||
@@ -1078,7 +1352,7 @@ export class OAuthService {
 		}
 		const result: { outcome: 'invalid' | 'rotated' | 'replayed' } = { outcome: 'invalid' };
 		await this.mutateStore((store) => {
-			const used = store.usedRefreshTokens.find((item) => item.hash === oldHash && item.expiresAt > now);
+			const used = store.usedRefreshTokens.find((item) => matchesHash(item.hash, oldHash) && item.expiresAt > now);
 			if (used) {
 				const familyGrant = store.grants.find((item) => item.familyId === used.familyId);
 				if (
@@ -1093,7 +1367,7 @@ export class OAuthService {
 				this.enqueueFamilyRevocation(store, familyGrant);
 				return true;
 			}
-			const grant = store.grants.find((item) => item.refreshHash === oldHash);
+			const grant = store.grants.find((item) => matchesHash(item.refreshHash, oldHash));
 			if (
 				!grant ||
 				grant.familyId !== grantSnapshot.familyId ||
@@ -1129,7 +1403,7 @@ export class OAuthService {
 	}
 
 	private addRefreshTombstone(store: OAuthStore, hash: string, familyId: string, expiresAt: number): boolean {
-		if (store.usedRefreshTokens.some((item) => item.hash === hash)) return true;
+		if (store.usedRefreshTokens.some((item) => matchesHash(item.hash, hash))) return true;
 		const familyCount = store.usedRefreshTokens.filter((item) => item.familyId === familyId).length;
 		if (familyCount >= MAX_REFRESH_TOMBSTONES_PER_FAMILY || store.usedRefreshTokens.length >= MAX_REFRESH_TOMBSTONES) {
 			return false;
@@ -1151,7 +1425,8 @@ export class OAuthService {
 				clientId: grant.clientId,
 				resource: grant.resource,
 				scope: grant.scope,
-				upstream: grant.upstream
+				upstream: grant.upstream,
+				queuedAt: this.now()
 			});
 		}
 		this.removeFamily(store, grant.familyId);
@@ -1174,7 +1449,8 @@ export class OAuthService {
 					credential.accessToken,
 					key,
 					grantContext(context.clientId, context.resource, context.scope)
-				)
+				),
+				queuedAt: this.now()
 			});
 			return true;
 		});
@@ -1230,9 +1506,9 @@ export class OAuthService {
 			let credentialId: string | undefined;
 			await this.mutateStore((store) => {
 				let familyId = store.grants.find(
-					(grant) => grant.provider === 'lumbre-web' && grant.clientId === clientId && (grant.accessHash === hash || grant.refreshHash === hash)
+					(grant) => grant.provider === 'lumbre-web' && grant.clientId === clientId && (matchesHash(grant.accessHash, hash) || matchesHash(grant.refreshHash, hash))
 				)?.familyId;
-				familyId ??= store.usedRefreshTokens.find((item) => item.hash === hash)?.familyId;
+				familyId ??= store.usedRefreshTokens.find((item) => matchesHash(item.hash, hash))?.familyId;
 				if (!familyId) return false;
 				const familyGrant = store.grants.find(
 					(grant) => grant.provider === 'lumbre-web' && grant.familyId === familyId && grant.clientId === clientId
@@ -1257,7 +1533,7 @@ export class OAuthService {
 			const hash = digest(token);
 			const now = this.now();
 			const store = await this.loadStore();
-			const grant = store.grants.find((item) => item.accessHash === hash);
+			const grant = store.grants.find((item) => matchesHash(item.accessHash, hash));
 			if (
 				!grant ||
 				grant.provider !== 'lumbre-web' ||
@@ -1283,6 +1559,12 @@ export class OAuthService {
 			if (await pathExists(this.storePath())) throw new Error('store OAuth presente sin su clave');
 		}
 		const key = await this.key();
+		// Readiness NO se contesta desde la caché: la gracia de `/readyz` es
+		// afirmar que el fichero de estado se puede leer y descifrar AHORA. De
+		// paso, esta relectura (una cada 5 s como mucho, ver `checkReady`)
+		// recoge un cambio externo del store, que es la única grieta conocida
+		// de la caché en memoria (ver `cachedStore`).
+		this.cachedStore = undefined;
 		const store = await this.loadStore();
 		for (const grant of store.grants) {
 			validateClientIdUrl(grant.clientId);
@@ -1396,7 +1678,20 @@ export class OAuthService {
 		return join(this.stateDir, 'oauth-store.json');
 	}
 
+	/**
+	 * Estado del store, de memoria si lo hay y del disco si no. Siempre una
+	 * COPIA: quien la recibe puede mutarla sin contaminar la caché (ver
+	 * `cachedStore`).
+	 */
 	private async loadStore(): Promise<OAuthStore> {
+		const cached = this.cachedStore;
+		if (cached) return structuredClone(cached);
+		const store = await this.readStore();
+		this.cachedStore = store;
+		return structuredClone(store);
+	}
+
+	private async readStore(): Promise<OAuthStore> {
 		try {
 			return normalizeStore(JSON.parse(await readFile(this.storePath(), 'utf8')));
 		} catch (error) {
@@ -1412,6 +1707,48 @@ export class OAuthService {
 			}
 			throw error;
 		}
+	}
+
+	/**
+	 * Poda la outbox de revocación: primero por caducidad, y si aun así sigue
+	 * sobre el tope, por antigüedad (FIFO, se conservan los más NUEVOS: los
+	 * viejos son los que más cerca están de caducar de todas formas, y su
+	 * credencial es la que más papeletas tiene de haber expirado ya arriba).
+	 * Devuelve si cambió algo (sellado de migración o descarte). Ver
+	 * `MAX_REVOCATION_OUTBOX_ITEMS` para la política y por qué es seguro.
+	 */
+	private pruneRevocationOutbox(store: OAuthStore, now: number): boolean {
+		const before = store.revocationOutbox.length;
+		// Los elementos heredados (sin `queuedAt`) se sellan ahora: empiezan a
+		// contar desde esta poda, nunca se descartan por sorpresa.
+		let stamped = 0;
+		for (const item of store.revocationOutbox) {
+			if (item.queuedAt === undefined) {
+				item.queuedAt = now;
+				stamped += 1;
+			}
+		}
+		store.revocationOutbox = store.revocationOutbox.filter(
+			(item) => (item.queuedAt ?? now) + REVOCATION_OUTBOX_TTL_MS > now
+		);
+		if (store.revocationOutbox.length > MAX_REVOCATION_OUTBOX_ITEMS) {
+			store.revocationOutbox = store.revocationOutbox
+				.slice()
+				.sort((a, b) => (a.queuedAt ?? 0) - (b.queuedAt ?? 0))
+				.slice(-MAX_REVOCATION_OUTBOX_ITEMS);
+		}
+		const discarded = before - store.revocationOutbox.length;
+		if (discarded > 0) {
+			// Sin credenciales, sin `credentialId`: solo el número y el motivo.
+			// Que se descarte no puede quedar sin rastro (ver la política), pero
+			// el rastro tampoco puede ser un secreto en un log.
+			console.error(
+				`[lumbre-mcp-oauth] outbox de revocación: ${discarded} pendiente(s) descartada(s) ` +
+					`por caducidad (${REVOCATION_OUTBOX_TTL_MS} ms) o tope (${MAX_REVOCATION_OUTBOX_ITEMS}); ` +
+					'esas credenciales upstream no se revocarán desde aquí'
+			);
+		}
+		return discarded > 0 || stamped > 0;
 	}
 
 	private async mutateStore(mutator: (store: OAuthStore) => boolean): Promise<boolean> {
@@ -1432,7 +1769,7 @@ export class OAuthService {
 					if (!store.revocationOutbox.some((item) => item.credentialId === code.credentialId)) {
 						store.revocationOutbox.push({
 							provider: 'lumbre-web', credentialId: code.credentialId, clientId: code.clientId,
-							resource: code.resource, scope: code.scope, upstream: code.upstream
+							resource: code.resource, scope: code.scope, upstream: code.upstream, queuedAt: now
 						});
 					}
 					housekeeping = true;
@@ -1447,6 +1784,10 @@ export class OAuthService {
 				store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > now);
 				housekeeping ||= usedBefore !== store.usedRefreshTokens.length || requestsBefore !== store.authorizationRequests.length;
 				changed = mutator(store) || housekeeping;
+				// La poda de la outbox va DESPUÉS del mutador: así lo que el
+				// mutador acabe de encolar entra ya en la cuenta del tope y no
+				// se cuela un elemento 257 hasta la siguiente escritura.
+				changed = this.pruneRevocationOutbox(store, now) || changed;
 				if (!changed) return;
 				// No serializamos nunca un estado intermedio incoherente aunque el
 				// proveedor reutilice por error un credentialId o haya una colisión.
@@ -1462,6 +1803,12 @@ export class OAuthService {
 					await handle.close();
 					handle = undefined;
 					await rename(temp, this.storePath());
+					// A partir del `rename` el fichero YA es este `store`, así
+					// que la caché puede adoptarlo: dentro de la cola de
+					// escritura y después de confirmar, nunca antes. `store` es
+					// la copia privada de esta pasada (ver `loadStore`), así que
+					// nadie más tiene una referencia a ella.
+					this.cachedStore = store;
 					await this.persistenceStep?.('store-renamed');
 					await syncDirectory(dirname(this.storePath()));
 					await this.persistenceStep?.('state-directory-synced');
@@ -1470,6 +1817,10 @@ export class OAuthService {
 					await unlink(temp).catch(() => undefined);
 				}
 			} catch (error) {
+				// Ante CUALQUIER fallo se vacía: no sabemos si el fichero quedó
+				// como estaba o a medias, y una caché dudosa es peor que una
+				// lectura de más.
+				this.cachedStore = undefined;
 				failure = error;
 			}
 		});

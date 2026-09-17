@@ -166,6 +166,20 @@ function oauthFetch(
 	};
 }
 
+/**
+ * Respuesta de `/requests` fechada con el reloj INYECTADO del test. Con un
+ * `now` falso, el `expiresAt` que fabrica `oauthFetch` por defecto (que usa el
+ * `Date.now()` real) cae fuera de la ventana que valida `handleAuthorize` y el
+ * consentimiento sale 502 en vez de 302.
+ */
+function pendingRequestBody(now: number, requestId = '50000000-0000-4000-8000-000000000001'): Record<string, unknown> {
+	return {
+		authorizationUrl: `https://app.lumbre.pro/integrations/lumbre-mcp?request=${requestId}`,
+		requestId,
+		expiresAt: new Date(now + 10 * 60_000).toISOString()
+	};
+}
+
 function authorizeUrl(baseUrl: string, overrides: Record<string, string> = {}): string {
 	const params = new URLSearchParams({
 		response_type: 'code',
@@ -882,7 +896,12 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const oauth = new OAuthService({
 			stateDir: await newStateDir(),
 			fetch: dynamicFetch,
-			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 300 } }
+			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 300 } },
+			// Este test mide la caché CIMD, no los presupuestos: hace 130
+			// autorizaciones en un segundo, muy por encima de lo que permite el
+			// presupuesto global (60/min) y el de por cliente. Se sube igual que
+			// ya se subía el límite por IP, por el mismo motivo.
+			authorizeBudget: { perClientPerMinute: 300, globalPerMinute: 300 }
 		});
 		const baseUrl = await listen(oauth);
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
@@ -1363,5 +1382,318 @@ describe('OAuth 2.1 para claude.ai', () => {
 		});
 		expect(response.status).toBe(405);
 		expect(await response.text()).not.toContain(UPSTREAM_TOKEN);
+	});
+
+	it('el store se sirve de memoria entre peticiones y la escritura lo invalida', async () => {
+		// Sin caché, CADA `/mcp` con bearer `lm_at_…` releía, parseaba y
+		// normalizaba el fichero entero. La prueba de que ahora no lo hace es
+		// que el resolver SIGUE funcionando con el fichero borrado; la de que
+		// la caché no se queda vieja es que un `revoke` —que sí escribe— se ve
+		// en el acto en la MISMA instancia.
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const tokens = await exchangeCode(baseUrl, code);
+		const access = String(tokens.access_token);
+		expect(await oauth.resolveAccessToken(access)).toBe(UPSTREAM_TOKEN);
+
+		await unlink(join(stateDir, 'oauth-store.json'));
+		expect(await oauth.resolveAccessToken(access)).toBe(UPSTREAM_TOKEN);
+
+		expect((await fetch(`${baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: access, client_id: CLIENT_ID })
+		})).status).toBe(200);
+		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
+	});
+
+	it('/mcp limita los intentos FALLIDOS por IP y no gasta presupuesto con los que autentican', async () => {
+		const oauth = new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch(),
+			failedMcpAttemptsPerMinute: 2
+		});
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const access = String((await exchangeCode(baseUrl, code)).access_token);
+		const call = async (authorization?: string): Promise<number> =>
+			(await fetch(`${baseUrl}/mcp`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					accept: 'application/json, text/event-stream',
+					...(authorization ? { authorization } : {})
+				},
+				body: JSON.stringify({
+					jsonrpc: '2.0', id: 1, method: 'initialize',
+					params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'rate', version: '1' } }
+				})
+			})).status;
+
+		// Un cliente MCP real hace ráfagas: cinco llamadas buenas seguidas, muy
+		// por encima del presupuesto, y ninguna lo toca.
+		for (let index = 0; index < 5; index += 1) expect(await call(`Bearer ${access}`)).toBe(200);
+
+		expect(await call()).toBe(401);
+		expect(await call('Bearer lm_at_no-existe')).toBe(401);
+		// Agotado: el tercer intento fallido ya no llega a resolver nada.
+		expect(await call()).toBe(429);
+	});
+
+	it('un formulario descomunal se corta con 413 y el servidor deja de recibirlo', async () => {
+		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
+		const url = new URL(`${baseUrl}/token`);
+
+		// (1) `content-length` declarado por encima del tope: se rechaza ANTES
+		// de leer un byte. Sin esa comprobación el servidor se quedaba
+		// esperando un cuerpo que no llega nunca y este test caducaba.
+		const declared = await new Promise<number>((resolve, reject) => {
+			const request = httpRequest(
+				{
+					hostname: url.hostname, port: url.port, path: '/token', method: 'POST',
+					headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': '999999999' }
+				},
+				(response) => {
+					response.resume();
+					resolve(response.statusCode ?? 0);
+				}
+			);
+			request.once('error', reject);
+			request.write('token=a');
+		});
+		expect(declared).toBe(413);
+
+		// (2) Sin `content-length` (chunked) y escribiendo sin parar: se
+		// responde 413 y la conexión se cierra sola. Sin el arreglo el 413
+		// también salía, pero el proceso seguía tragando el cuerpo para
+		// siempre y este `write` nunca fallaba.
+		const chunked = await new Promise<{ status: number; cut: boolean }>((resolve, reject) => {
+			let status = 0;
+			const request = httpRequest(
+				{
+					hostname: url.hostname, port: url.port, path: '/token', method: 'POST',
+					headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked' }
+				},
+				(response) => {
+					status = response.statusCode ?? 0;
+					response.resume();
+				}
+			);
+			const timer = setInterval(() => request.write(`relleno=${'a'.repeat(8 * 1024)}&`), 5);
+			const finish = (cut: boolean): void => {
+				clearInterval(timer);
+				request.destroy();
+				resolve({ status, cut });
+			};
+			request.once('error', () => finish(true));
+			request.once('close', () => finish(true));
+			setTimeout(() => finish(false), 10_000).unref();
+			request.once('response', () => undefined);
+			request.on('error', reject);
+		});
+		expect(chunked.status).toBe(413);
+		expect(chunked.cut).toBe(true);
+	}, 20_000);
+
+	it('la outbox de revocación caduca sus pendientes y no crece sin límite', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 1_000_000;
+		const storePath = join(stateDir, 'oauth-store.json');
+		// Un revoke con Lumbre caída deja la credencial en la outbox.
+		const failing = new OAuthService({
+			stateDir,
+			fetch: oauthFetch({ revokeStatus: 503, requestBody: pendingRequestBody(currentTime) }),
+			now: () => currentTime
+		});
+		const baseUrl = await listen(failing);
+		const { code } = await authorize(baseUrl);
+		const access = String((await exchangeCode(baseUrl, code)).access_token);
+		expect((await fetch(`${baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: access, client_id: CLIENT_ID })
+		})).status).toBe(200);
+		const queued = JSON.parse(await readFile(storePath, 'utf8')) as {
+			revocationOutbox: Array<Record<string, unknown>>;
+		};
+		expect(queued.revocationOutbox).toHaveLength(1);
+		expect(queued.revocationOutbox[0]!.queuedAt).toBe(currentTime);
+
+		// Pasados 30 días + 1 ms ya no queda ningún grant local que pueda usar
+		// esa credencial: la pendiente se descarta en la siguiente poda.
+		currentTime += 30 * 24 * 60 * 60_000 + 1;
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await new OAuthService({ stateDir, fetch: oauthFetch(), now: () => currentTime }).ensureReady();
+			expect(errors.mock.calls.map((call) => call.join(' ')).join('\n')).toMatch(/outbox de revocación: 1/);
+		} finally {
+			errors.mockRestore();
+		}
+		expect((JSON.parse(await readFile(storePath, 'utf8')) as {
+			revocationOutbox: unknown[];
+		}).revocationOutbox).toHaveLength(0);
+	});
+
+	it('una outbox heredada sin queuedAt sigue cargando, se sella y se recorta al tope', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 2_000_000;
+		const storePath = join(stateDir, 'oauth-store.json');
+		const first = new OAuthService({
+			stateDir,
+			fetch: oauthFetch({ revokeStatus: 503, requestBody: pendingRequestBody(currentTime) }),
+			now: () => currentTime
+		});
+		const baseUrl = await listen(first);
+		const { code } = await authorize(baseUrl);
+		const access = String((await exchangeCode(baseUrl, code)).access_token);
+		await fetch(`${baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: access, client_id: CLIENT_ID })
+		});
+		const store = JSON.parse(await readFile(storePath, 'utf8')) as {
+			revocationOutbox: Array<Record<string, unknown>>;
+		};
+		// Store de la versión ANTERIOR a este campo: 300 pendientes, ninguna
+		// con `queuedAt`. Debe cargar —no es corrupción, es una versión previa
+		// del mismo `version: 3`— y quedarse en el tope de 256.
+		const legacy = store.revocationOutbox[0]!;
+		delete legacy.queuedAt;
+		store.revocationOutbox = Array.from({ length: 300 }, (_, index) => ({
+			...legacy,
+			credentialId: `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`
+		}));
+		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
+
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await new OAuthService({
+				stateDir, fetch: oauthFetch({ revokeStatus: 503 }), now: () => currentTime
+			}).ensureReady();
+		} finally {
+			errors.mockRestore();
+		}
+		const pruned = JSON.parse(await readFile(storePath, 'utf8')) as {
+			revocationOutbox: Array<{ queuedAt?: number }>;
+		};
+		expect(pruned.revocationOutbox).toHaveLength(256);
+		expect(pruned.revocationOutbox.every((item) => item.queuedAt === currentTime)).toBe(true);
+	});
+
+	it('authorize limita por client_id y no llama al backchannel de más', async () => {
+		let requests = 0;
+		const backchannelFetch = oauthFetch({
+			onBackchannel: (path) => { if (path === 'requests') requests += 1; }
+		});
+		// Hace falta un SEGUNDO cliente con CIMD propio para distinguir "por
+		// client_id" de "global": `oauthFetch` solo sirve el documento de
+		// `CLIENT_ID`.
+		const twoClientsFetch: typeof fetch = async (input, init) => {
+			const clientId = String(input);
+			if (!clientId.startsWith('https://claude.ai/') || clientId === CLIENT_ID) {
+				return await backchannelFetch(input, init);
+			}
+			return new Response(
+				JSON.stringify({
+					client_id: clientId,
+					client_name: 'Otro cliente',
+					redirect_uris: [OAUTH_CALLBACK],
+					token_endpoint_auth_method: 'none'
+				}),
+				{ status: 200, headers: { 'content-type': 'application/json' } }
+			);
+		};
+		const oauth = new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: twoClientsFetch,
+			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } },
+			authorizeBudget: { perClientPerMinute: 2, globalPerMinute: 300 }
+		});
+		const baseUrl = await listen(oauth);
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		// El tercero con el MISMO client_id se queda fuera, y —esto es el
+		// punto— sin haber creado un registro más en app.lumbre.pro.
+		expect((await beginAuthorization(baseUrl)).status).toBe(429);
+		expect(requests).toBe(2);
+		// Otro cliente conserva su propio cupo: el límite es por client_id.
+		expect((await beginAuthorization(baseUrl, { client_id: 'https://claude.ai/oauth/otro.json' })).status).toBe(302);
+		expect(requests).toBe(3);
+	});
+
+	it('con la cola de pendientes llena se rechaza ANTES de crear el registro en Lumbre', async () => {
+		const stateDir = await newStateDir();
+		let requests = 0;
+		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } });
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		expect(requests).toBe(1);
+
+		const storePath = join(stateDir, 'oauth-store.json');
+		const store = JSON.parse(await readFile(storePath, 'utf8')) as {
+			authorizationRequests: Array<Record<string, unknown>>;
+		};
+		const pending = store.authorizationRequests[0]!;
+		store.authorizationRequests = Array.from({ length: 1_000 }, (_, index) => ({
+			...pending,
+			requestId: `40000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+		}));
+		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
+
+		// Instancia nueva para que lea del disco esa cola llena.
+		const full = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		expect((await beginAuthorization(full)).status).toBe(503);
+		// Antes el 503 llegaba DESPUÉS del backchannel: llenar la cola dejaba
+		// mil registros creados en Lumbre que aquí ni se guardaban.
+		expect(requests).toBe(1);
+	});
+
+	it('un decision=denied falsificado no aborta la autorización de otro', async () => {
+		let exchangeCalls = 0;
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'exchange') exchangeCalls += 1; } })
+		}));
+		const started = await beginAuthorization(baseUrl);
+		const requestId = new URL(started.headers.get('location')!).searchParams.get('request')!;
+
+		// Alguien que conoce el UUID manda un `denied`: se le redirige a él y
+		// ya está. La autorización pendiente NO se toca.
+		const forged = await fetch(`${baseUrl}/oauth/lumbre/callback?request=${requestId}&decision=denied`, {
+			redirect: 'manual'
+		});
+		expect(forged.status).toBe(302);
+		expect(new URL(forged.headers.get('location')!).searchParams.get('error')).toBe('access_denied');
+		expect(exchangeCalls).toBe(0);
+
+		// El callback de verdad sigue funcionando: antes se encontraba la
+		// pendiente ya consumida y devolvía 400.
+		const approved = await fetch(`${baseUrl}/oauth/lumbre/callback?request=${requestId}&decision=approved`, {
+			redirect: 'manual'
+		});
+		expect(approved.status).toBe(302);
+		expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toMatch(/^lm_code_/);
+		expect(exchangeCalls).toBe(1);
+
+		// Y sigue siendo de un solo uso: el consumo atómico antes de `exchange`
+		// no se ha aflojado.
+		expect((await fetch(`${baseUrl}/oauth/lumbre/callback?request=${requestId}&decision=approved`, {
+			redirect: 'manual'
+		})).status).toBe(400);
+		expect(exchangeCalls).toBe(1);
+	});
+
+	it('los hashes de credencial se comparan en tiempo constante', async () => {
+		// El canal temporal de un `===` no se observa desde un test (depende
+		// del planificador, del GC y de la máquina): lo que se congela aquí es
+		// la propiedad que sí se puede comprobar —que no queda ninguna
+		// comparación directa de un hash de credencial— para que no vuelva a
+		// entrar una por descuido. Ver `matchesHash` en `oauth.ts`.
+		const source = await readFile('src/oauth.ts', 'utf8');
+		expect(source).not.toMatch(/(?:codeHash|accessHash|refreshHash|\.hash)\s*[!=]==\s*\w/);
+		expect(source).toMatch(/function matchesHash/);
+		expect(source).toMatch(/matchesHash\(item\.accessHash, hash\)/);
 	});
 });
