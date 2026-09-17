@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isAllowedHostname, MAX_MCP_BODY_BYTES } from './http.js';
 
 /**
  * Tests del transporte HTTP remoto (`http.ts`, tarea M2, cableado a la
@@ -413,6 +414,20 @@ describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)'
 		expect(res.status).toBe(401);
 	});
 
+	it('el MISMO token en mayúsculas: 401 — la forma es hexadecimal en minúsculas, como en el borde', async () => {
+		// El matcher de Caddy (`^/mcp/([0-9a-f]{32})$`, ver
+		// `deploy/mcp-lumbre-pro.caddy`) solo casa minúsculas: un token en
+		// mayúsculas NO se saca del path en el borde y entra entero en su
+		// pipeline de logs. Aceptarlo aquí premiaba justo la forma de la URL
+		// que sí filtra el token.
+		const res = await fetch(`${baseUrl}/mcp/${VALID_PATH_TOKEN.toUpperCase()}`, {
+			method: 'POST',
+			headers: JSON_RPC_HEADERS,
+			body: JSON.stringify(initializeBody())
+		});
+		expect(res.status).toBe(401);
+	});
+
 	it('/mcp/ (segmento vacío): 401', async () => {
 		const res = await fetch(`${baseUrl}/mcp/`, {
 			method: 'POST',
@@ -463,6 +478,125 @@ describe('POST /mcp — método HTTP no soportado', () => {
 	it('GET /mcp: 405 (modo stateless, sin stream de servidor)', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, { method: 'GET', headers: JSON_RPC_HEADERS });
 		expect(res.status).toBe(405);
+	});
+});
+
+describe('POST /mcp — tope del cuerpo', () => {
+	/**
+	 * `readBody` acumulaba sin tope, y se alcanzaba con cualquier
+	 * `Authorization: Bearer x` (el token no se valida contra Lumbre hasta
+	 * llamar a una tool). Dos caminos, porque son dos comprobaciones
+	 * distintas: con `content-length` declarado —se rechaza ANTES de leer un
+	 * byte— y con `transfer-encoding: chunked`, donde esa cabecera no existe y
+	 * solo vale contar lo que llega.
+	 */
+	it('un cuerpo por encima del tope, con content-length: 413 con error JSON-RPC', async () => {
+		const res = await fetch(`${baseUrl}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-grande' },
+			body: 'x'.repeat(MAX_MCP_BODY_BYTES + 1)
+		});
+		expect(res.status).toBe(413);
+		const body = (await res.json()) as { jsonrpc: string; error: { code: number; message: string } };
+		expect(body.jsonrpc).toBe('2.0');
+		expect(body.error.code).toBe(-32002);
+		expect(body.error.message).toMatch(/tope/);
+	});
+
+	it('el mismo exceso SIN content-length (chunked) también corta: 413', async () => {
+		const chunk = 'x'.repeat(64 * 1024);
+		const total = Math.ceil((MAX_MCP_BODY_BYTES + 1) / chunk.length);
+		let sent = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (sent >= total) {
+					controller.close();
+					return;
+				}
+				sent += 1;
+				controller.enqueue(new TextEncoder().encode(chunk));
+			}
+		});
+		const res = await fetch(`${baseUrl}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-grande' },
+			body: stream,
+			// @ts-expect-error `duplex` es obligatorio en undici para un body
+			// de stream y todavía no está en los tipos de `RequestInit`.
+			duplex: 'half'
+		});
+		expect(res.status).toBe(413);
+		expect(((await res.json()) as { error: { code: number } }).error.code).toBe(-32002);
+		// Y el 413 llega ENTERO al cliente: `stopReceiving` drena en vez de
+		// resetear la conexión, así que quien se pasa de tamaño se entera de
+		// por qué (ver el porqué en su JSDoc, con el ECONNRESET que se midió).
+	});
+
+	it('un cuerpo normal sigue pasando (el tope no estorba al uso legítimo)', async () => {
+		const res = await fetch(`${baseUrl}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-normal' },
+			body: JSON.stringify(initializeBody(77))
+		});
+		expect(res.status).toBe(200);
+	});
+});
+
+describe('cabeceras de seguridad en TODA respuesta (no solo en las de OAuth)', () => {
+	it('healthz, 404, 401 y 405 llevan no-store y nosniff', async () => {
+		const responses = [
+			await fetch(`${baseUrl}/healthz`),
+			await fetch(`${baseUrl}/no-existe`),
+			await fetch(`${baseUrl}/mcp`, { method: 'GET', headers: JSON_RPC_HEADERS }),
+			await fetch(`${baseUrl}/mcp`, {
+				method: 'POST',
+				headers: JSON_RPC_HEADERS,
+				body: JSON.stringify(initializeBody(78))
+			})
+		];
+		for (const res of responses) {
+			expect(res.headers.get('cache-control')).toBe('no-store');
+			expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+		}
+	});
+
+	it('la metadata OAuth conserva su cache-control deliberado', async () => {
+		const res = await fetch(`${baseUrl}/.well-known/oauth-protected-resource/mcp`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get('cache-control')).toBe('public, max-age=300');
+		expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+	});
+});
+
+describe('hostnames de loopback: solo desde loopback', () => {
+	/**
+	 * Se prueba la función pura y no un listener en una interfaz no-loopback:
+	 * montar eso en un test depende de la red de la máquina que lo corra. Lo
+	 * que aquí se congela es la decisión, que es lo que cambió — antes
+	 * `localhost` valía viniera de donde viniera, incluido el `172.x` de la
+	 * red `edge` de producción.
+	 */
+	it('mcp.lumbre.pro vale siempre; localhost solo desde 127.x/::1', () => {
+		expect(isAllowedHostname('mcp.lumbre.pro', '172.18.0.5')).toBe(true);
+		expect(isAllowedHostname('localhost', '172.18.0.5')).toBe(false);
+		expect(isAllowedHostname('127.0.0.1', '172.18.0.5')).toBe(false);
+		expect(isAllowedHostname('::1', '10.0.0.9')).toBe(false);
+		expect(isAllowedHostname('localhost', '127.0.0.1')).toBe(true);
+		expect(isAllowedHostname('localhost', '::ffff:127.0.0.1')).toBe(true);
+		expect(isAllowedHostname('127.0.0.1', '::1')).toBe(true);
+		expect(isAllowedHostname('evil.example', '127.0.0.1')).toBe(false);
+		expect(isAllowedHostname(undefined, '127.0.0.1')).toBe(false);
+	});
+
+	it('LUMBRE_MCP_ALLOW_LOOPBACK_HOST=1 reabre la puerta a propósito', () => {
+		const previous = process.env.LUMBRE_MCP_ALLOW_LOOPBACK_HOST;
+		process.env.LUMBRE_MCP_ALLOW_LOOPBACK_HOST = '1';
+		try {
+			expect(isAllowedHostname('localhost', '172.18.0.5')).toBe(true);
+		} finally {
+			if (previous === undefined) delete process.env.LUMBRE_MCP_ALLOW_LOOPBACK_HOST;
+			else process.env.LUMBRE_MCP_ALLOW_LOOPBACK_HOST = previous;
+		}
 	});
 });
 

@@ -7,6 +7,7 @@ import { createAccountNotesSeenStore } from './notes.js';
 import {
 	createOAuthService,
 	OAUTH_CHALLENGE,
+	stopReceiving,
 	type OAuthService
 } from './oauth.js';
 import { stripToolsListSchema } from './schema-strip.js';
@@ -60,11 +61,43 @@ const DEFAULT_PORT = 8787;
 const DEFAULT_BASE_URL = 'https://app.lumbre.pro';
 
 /**
+ * Tope del cuerpo de una petición a `/mcp` (2 MiB). La cuenta, porque el
+ * número no es redondo por casualidad: el cuerpo legítimo más grande que
+ * existe es un `tools/call` de `add_attachment` con `content_base64`, cuyo
+ * tope decodificado es `MAX_BASE64_ATTACHMENT_BYTES` (1 MiB,
+ * `attachments.ts`). Base64 infla 4 bytes por cada 3, así que 1 MiB
+ * decodificado son 1.398.104 bytes de texto base64 (≈1,33 MiB), más el sobre
+ * JSON-RPC (método, `filename`, escapado de la cadena). 2 MiB deja ~700 KiB
+ * de margen sobre ese peor caso —un 50% largo— sin dejar que una petición
+ * anónima haga crecer la memoria del proceso sin límite: hasta hoy `readBody`
+ * acumulaba en un array de `Buffer` SIN tope y se alcanzaba con cualquier
+ * `Authorization: Bearer x` (el token solo se valida contra Lumbre más tarde,
+ * al llamar a la tool).
+ *
+ * El borde lleva su propio `request_body { max_size … }` (ver
+ * `deploy/mcp-lumbre-pro.caddy`), un pelín MÁS estricto a propósito: quien
+ * pase por Caddy choca antes ahí; este tope es la red de seguridad para quien
+ * alcance el contenedor por la red `edge` sin pasar por el borde.
+ */
+export const MAX_MCP_BODY_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Código JSON-RPC del 413. Va en el rango reservado a errores de servidor
+ * (-32000..-32099, ver la spec JSON-RPC 2.0), como el -32000 genérico de
+ * 405/403 y el -32001 de "sin credencial": un código propio para que un
+ * cliente distinga "el cuerpo no cabe" de "no tienes permiso".
+ */
+const JSON_RPC_PAYLOAD_TOO_LARGE = -32002;
+
+/** El cuerpo superó `MAX_MCP_BODY_BYTES`. Se distingue del error de parseo
+ *  (400) porque el 413 lleva su propio status y su propio código. */
+class PayloadTooLargeError extends Error {}
+
+/**
  * Hosts permitidos, tanto para el header `Host` (protección DNS-rebinding
  * mínima: si alguien resuelve `mcp.lumbre.pro` a este proceso desde un
  * hostname distinto, se corta aquí) como para `Origin` (peticiones desde un
- * navegador). `localhost`/`127.0.0.1`/`::1` cubren desarrollo local; el
- * puerto NO se valida (cambia según quién lo levante en local).
+ * navegador). El puerto NO se valida (cambia según quién lo levante en local).
  *
  * El SDK trae `allowedHosts`/`allowedOrigins`/`enableDnsRebindingProtection`
  * en `StreamableHTTPServerTransportOptions`, pero están `@deprecated` a favor
@@ -72,7 +105,49 @@ const DEFAULT_BASE_URL = 'https://app.lumbre.pro';
  * que la validación viva aquí, ANTES de construir el transporte, en vez de
  * pasada como opción.
  */
-const ALLOWED_HOSTNAMES = new Set(['mcp.lumbre.pro', 'localhost', '127.0.0.1', '::1']);
+const ALLOWED_HOSTNAMES = new Set(['mcp.lumbre.pro']);
+
+/**
+ * `localhost`/`127.0.0.1`/`::1` cubren desarrollo local, pero hasta hoy se
+ * aceptaban TAMBIÉN en producción, donde el único cliente legítimo es Caddy
+ * (que llega con `Host: mcp.lumbre.pro` desde la red `edge`, una IP `172.x`).
+ * Un `Host: localhost` desde ahí no lo manda nadie legítimo: es exactamente la
+ * forma de saltarse la comprobación de rebinding.
+ *
+ * Ahora un hostname de loopback solo vale si la CONEXIÓN viene de loopback.
+ * Eso deja pasar lo que tiene que pasar y nada más:
+ *   · el healthcheck del contenedor (`wget http://127.0.0.1:8787/readyz`, ver
+ *     `deploy/compose.yml`), que sale y entra por la interfaz de loopback;
+ *   · los tests y el desarrollo local, que hablan con `127.0.0.1:<puerto>`;
+ *   · NO Caddy con un `Host` falsificado, ni nadie que alcance el contenedor
+ *     por el DNS de la red `edge`.
+ * `LUMBRE_MCP_ALLOW_LOOPBACK_HOST=1` fuerza el comportamiento antiguo para un
+ * entorno de desarrollo raro (un proxy local que reescribe el `Host`), y es
+ * explícita: no se enciende sola en producción.
+ */
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+function isLoopbackAddress(address: string | undefined): boolean {
+	if (!address) return false;
+	// Un socket IPv6 que recibe una conexión IPv4 la reporta mapeada
+	// (`::ffff:127.0.0.1`), que es como llegan los tests: `listen(0)` escucha
+	// en `::` y el cliente entra por 127.0.0.1.
+	const normalized = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+	return normalized === '::1' || /^127\./.test(normalized);
+}
+
+/**
+ * Decide si un hostname es aceptable para ESTA conexión. Exportada porque es
+ * la costura que testea `http.test.ts`: la diferencia entre producción y
+ * desarrollo es la IP del peer, y montar un listener en una interfaz no-
+ * loopback dentro de un test es frágil (depende de la red de la máquina).
+ */
+export function isAllowedHostname(hostname: string | undefined, remoteAddress: string | undefined): boolean {
+	if (hostname === undefined) return false;
+	if (ALLOWED_HOSTNAMES.has(hostname)) return true;
+	if (!LOOPBACK_HOSTNAMES.has(hostname)) return false;
+	return process.env.LUMBRE_MCP_ALLOW_LOOPBACK_HOST === '1' || isLoopbackAddress(remoteAddress);
+}
 
 function hostnameOf(headerValue: string | string[] | undefined): string | undefined {
 	const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
@@ -89,8 +164,7 @@ function hostnameOf(headerValue: string | string[] | undefined): string | undefi
 }
 
 function isAllowedHost(req: IncomingMessage): boolean {
-	const hostname = hostnameOf(req.headers.host);
-	return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
+	return isAllowedHostname(hostnameOf(req.headers.host), req.socket.remoteAddress);
 }
 
 /** Sin `Origin` (curl, el SDK de un cliente MCP no-navegador) no hay ataque de
@@ -100,8 +174,7 @@ function isAllowedHost(req: IncomingMessage): boolean {
 function isAllowedOrigin(req: IncomingMessage): boolean {
 	const origin = req.headers.origin;
 	if (!origin) return true;
-	const hostname = hostnameOf(origin);
-	return hostname !== undefined && ALLOWED_HOSTNAMES.has(hostname);
+	return isAllowedHostname(hostnameOf(origin), req.socket.remoteAddress);
 }
 
 function tokenFromHeader(req: IncomingMessage): string | undefined {
@@ -111,11 +184,18 @@ function tokenFromHeader(req: IncomingMessage): string | undefined {
 	return token.length > 0 ? token : undefined;
 }
 
-/** Forma del token de email-to-task de Lumbre: 32 chars hexadecimales. Un
- *  segmento de path que no case NO es "un token raro" — es "sin token": no se
- *  recorta ni se normaliza, se trata exactamente igual que si no hubiera
- *  nada, y el 401 de siempre lo cubre. */
-const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/i;
+/** Forma del token de email-to-task de Lumbre: 32 chars hexadecimales EN
+ *  MINÚSCULAS. Un segmento de path que no case NO es "un token raro" — es
+ *  "sin token": no se recorta ni se normaliza, se trata exactamente igual que
+ *  si no hubiera nada, y el 401 de siempre lo cubre.
+ *
+ *  Sin la `i`, a propósito: el borde solo casa minúsculas
+ *  (`path_regexp ^/mcp/([0-9a-f]{32})$` en `deploy/mcp-lumbre-pro.caddy`), así
+ *  que un token en mayúsculas llegaba aquí SIN que Caddy lo hubiera sacado del
+ *  path — es decir, entrando entero en el pipeline de logs del borde, que es
+ *  justo lo que ese bloque existe para evitar. Aceptarlo aquí premiaba la
+ *  única forma de la URL que sí filtra el token. */
+const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/;
 
 function isWellFormedPathToken(segment: string): boolean {
 	return TOKEN_PATH_PATTERN.test(segment);
@@ -132,10 +212,32 @@ function sendJsonRpcError(
 	res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
 }
 
+/**
+ * Lee el cuerpo con un tope duro de bytes (`MAX_MCP_BODY_BYTES`).
+ *
+ * Dos comprobaciones, no una: el `content-length` declarado se mira ANTES de
+ * leer nada (así un cuerpo enorme y honesto se rechaza sin acumular ni un
+ * byte), y luego se cuenta lo que llega de verdad — porque `content-length`
+ * puede faltar (`transfer-encoding: chunked`) o mentir.
+ */
 function readBody(req: IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
+		const declared = Number(req.headers['content-length']);
+		if (Number.isFinite(declared) && declared > MAX_MCP_BODY_BYTES) {
+			reject(new PayloadTooLargeError());
+			return;
+		}
 		const chunks: Buffer[] = [];
-		req.on('data', (chunk: Buffer) => chunks.push(chunk));
+		let size = 0;
+		req.on('data', (chunk: Buffer) => {
+			size += chunk.length;
+			if (size > MAX_MCP_BODY_BYTES) {
+				chunks.length = 0;
+				reject(new PayloadTooLargeError());
+				return;
+			}
+			chunks.push(chunk);
+		});
 		req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
 		req.on('error', reject);
 	});
@@ -183,6 +285,16 @@ async function handleMcpRequest(
 		return;
 	}
 
+	// Presupuesto de intentos FALLIDOS (ver `mcpAttemptsExhausted` en
+	// `oauth.ts`). Se mira ANTES de resolver la credencial: resolver un bearer
+	// `lm_at_…` toca el store del broker, y ese es justo el trabajo que no
+	// queremos regalarle a quien esté probando tokens a ciegas.
+	if (oauth.mcpAttemptsExhausted(req)) {
+		sendJsonRpcError(res, 429, -32000, 'Demasiados intentos de autenticación; inténtalo de nuevo más tarde.');
+		logRequest(`POST ${routeLabel}`, 429);
+		return;
+	}
+
 	// Fail-closed: sin token no se llega ni a leer el body. El servidor NO
 	// tiene token propio — es el de ESTA petición el que se usa para hablar
 	// con app.lumbre.pro (ver el JSDoc de cabecera). Cabecera gana sobre path
@@ -208,6 +320,10 @@ async function handleMcpRequest(
 		}
 	}
 	if (!token) {
+		// Solo los intentos SIN credencial utilizable gastan presupuesto: quien
+		// ya está autenticado nunca se topa con el limitador (ver el JSDoc de
+		// `mcpAttemptsExhausted`).
+		oauth.recordFailedMcpAttempt(req);
 		sendJsonRpcError(
 			res,
 			401,
@@ -225,7 +341,24 @@ async function handleMcpRequest(
 		const raw = await readBody(req);
 		parsedBody = raw.length > 0 ? JSON.parse(raw) : undefined;
 		methodLabel = describeMethod(parsedBody);
-	} catch {
+	} catch (err) {
+		if (err instanceof PayloadTooLargeError) {
+			sendJsonRpcError(
+				res,
+				413,
+				JSON_RPC_PAYLOAD_TOO_LARGE,
+				`El cuerpo de la petición supera el tope de ${MAX_MCP_BODY_BYTES} bytes.`
+			);
+			// SIN `connection: close` en la cabecera, y está medido: Node marca
+			// entonces `res._last` y hace `destroySoon()` del socket en cuanto
+			// la respuesta termina, con el cliente todavía subiendo — RST, y el
+			// 413 no llega (`fetch failed … ECONNRESET`). El cierre lo hace
+			// `stopReceiving`, que espera a que el cliente acabe o a que se
+			// agote el margen.
+			stopReceiving(req);
+			logRequest(`POST ${routeLabel}`, 413);
+			return;
+		}
 		sendJsonRpcError(res, 400, -32700, 'Parse error: el cuerpo no es JSON válido.');
 		logRequest(`POST ${routeLabel}`, 400);
 		return;
@@ -292,6 +425,22 @@ export function createHttpApp(
 ) {
 	return createHttpServer((req, res) => {
 		const url = new URL(req.url ?? '/', 'http://localhost');
+
+		// Cabeceras de seguridad para TODA respuesta de este servidor, puestas
+		// en un solo sitio y antes de enrutar. Las rutas OAuth ya traían las
+		// suyas (`securityHeaders` en `oauth.ts`), pero el resto —errores
+		// JSON-RPC, `/healthz`, `/readyz`, 404, 405, y las respuestas que
+		// escribe el propio `StreamableHTTPServerTransport`— salían sin
+		// ninguna: una respuesta con token o con el resultado de una tool no
+		// debe quedarse en ninguna caché intermedia, ni interpretarse como un
+		// tipo distinto del declarado.
+		//
+		// `setHeader` y no `writeHead`: Node fusiona lo puesto aquí con lo que
+		// cada `writeHead` pase después, y en un choque GANA `writeHead` — así
+		// la metadata OAuth conserva su `cache-control: public, max-age=300`
+		// deliberado sin excepciones repartidas por el fichero.
+		res.setHeader('cache-control', 'no-store');
+		res.setHeader('x-content-type-options', 'nosniff');
 
 		if (!isAllowedHost(req) || !isAllowedOrigin(req)) {
 			res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
