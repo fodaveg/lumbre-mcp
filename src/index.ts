@@ -13,18 +13,13 @@ import {
 	filterPhase2AfterPhase1,
 	findTaskById,
 	findTasksByIds,
-	getListLinks,
-	linkListNote,
 	listBrlEntries,
-	listLists,
-	listNotFoundError,
 	listTasks,
 	mutateTask,
 	planBatchPhases,
 	priorityToLevel,
 	runBatch,
 	taskNotFoundError,
-	unlinkListNote,
 	LumbreApiError,
 	type BatchResultItem,
 	type BrokenListPromise,
@@ -33,11 +28,12 @@ import {
 	type MutateTasksOp,
 	type TaskScope
 } from './lumbre-client.js';
-import { formatListDetail, formatListLinks, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
+import { formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
 import { errorResult, textResult, type ToolCtx } from './tools/shared.js';
 import { registerSyncTools } from './tools/sync.js';
 import { registerAttachmentTools } from './tools/attachments.js';
+import { registerListTools } from './tools/lists.js';
 import { requireTaskExists, mutateTaskInvalidating } from './tools/task-existence.js';
 import {
 	computeAutoNotesRender,
@@ -144,28 +140,6 @@ function loadConfig(): LumbreConfig {
 	// API sí puede resolverse configurando `LUMBRE_TOKEN` de nuevo.
 	return { baseUrl, token, authMode: 'token' };
 }
-
-/** Misma validación pura que aplica Lumbre antes de guardar un destino de
- * Obsidian. Recibe el valor ya recortado y no lo normaliza ni reserializa. */
-function isValidObsidianDeepLink(raw: string): boolean {
-	if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048) return false;
-	try {
-		const url = new URL(raw);
-		return url.protocol === 'obsidian:' && !url.username && !url.password && raw.length > 'obsidian://'.length;
-	} catch {
-		return false;
-	}
-}
-
-const listNoteTargetInputSchema = {
-	listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)'),
-	url: z
-		.string()
-		.trim()
-		.refine(isValidObsidianDeepLink, 'URL de Obsidian inválida')
-		.describe('Deep link obsidian:// de la nota (máx. 2048 caracteres y bytes UTF-8)'),
-	label: z.string().trim().min(1).max(300).describe('Nombre visible de la nota (1..300 caracteres)')
-};
 
 const recurrenceSchema = z
 	.object({
@@ -1017,111 +991,10 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		return { list, autoRender };
 	}
 
-	const listListsTool = server.registerTool(
-		'list_lists',
-		{
-			description:
-				'Enumera TODOS los proyectos y áreas con su recuento de tareas, incluidos los ' +
-				'vacíos (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacío de ' +
-				'inexistente. Sin parámetros.',
-
-			inputSchema: {}
-		},
-		async () => {
-			try {
-				const lists = await listLists(config);
-				return textResult(formatListSummaries(lists));
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
-
-	const getListLinksTool = server.registerTool(
-		'get_list_links',
-		{
-			description:
-				'Lee los vínculos configurados para UN proyecto o área por su listId (incluye URL y metadata; puede ser ' +
-					'Obsidian obsidian://). No abre ni lee el contenido de los destinos. Respuesta vacía si no tiene vínculos.',
-			inputSchema: {
-				listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
-			}
-		},
-		async (input) => {
-			try {
-				const links = await getListLinks(config, input.listId);
-				return textResult(formatListLinks(input.listId, links));
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
-
-	const getListTool = server.registerTool(
-		'get_list',
-		{
-			description:
-				'Devuelve el detalle completo de UN proyecto o área por su listId: nombre, tipo (proyecto/área), ' +
-					'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas y la nota ' +
-					'ÍNTEGRA y verbatim — útil antes de reescribirla con mutate_tasks({op:"set_list_notes"}), que la ' +
-					'reemplaza entera. Error si el listId no existe.',
-			inputSchema: {
-				listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
-			}
-		},
-		async (input) => {
-			try {
-				const lists = await listLists(config);
-				const list = lists.find((l) => l.id === input.listId);
-				if (!list) return errorResult(listNotFoundError(input.listId));
-				return textResult(formatListDetail(list));
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
-
-	const linkListNoteTool = server.registerTool(
-		'link_list_note',
-		{
-			description:
-				'Vincula de forma síncrona e idempotente una nota de Obsidian con un proyecto o área. ' +
-				'Guarda solo el deep link y el nombre visible; no lee ni copia el contenido de la nota.',
-			inputSchema: listNoteTargetInputSchema
-		},
-		async (input) => {
-			try {
-				const result = await linkListNote(config, input);
-				return textResult(
-					`Nota vinculada al proyecto o área ${result.listId}. deleted=${result.deleted}.\n` +
-					formatListLinks(result.listId, [result.link])
-				);
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
-
-	const unlinkListNoteTool = server.registerTool(
-		'unlink_list_note',
-		{
-			description:
-				'Desvincula de forma síncrona e idempotente una nota de Obsidian de un proyecto o área. ' +
-				'`removed=false` confirma que el vínculo ya no estaba registrado.',
-			inputSchema: listNoteTargetInputSchema
-		},
-		async (input) => {
-			try {
-				const result = await unlinkListNote(config, input);
-				return textResult(
-					`Vínculo de nota retirado del proyecto o área ${result.listId}. ` +
-					`removed=${result.removed}; deleted=${result.deleted}.`
-				);
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
+	// Familia «listas y proyectos» (extraída a `src/tools/lists.ts`, paridad
+	// UI↔MCP, `docs/20-contrato-lista.md`).
+	const { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool } =
+		registerListTools(server, ctx);
 
 	const getTaskTool = server.registerTool(
 		'get_task',
