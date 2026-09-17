@@ -7,15 +7,12 @@ import { stripToolsListSchema } from './schema-strip.js';
 import { z } from 'zod';
 import {
 	addTask,
-	assertTaskUsable,
 	buildBatchFromOps,
 	collectExistenceCheckIds,
-	deleteAttachment,
 	excludeIngestForBrokenListPromises,
 	filterPhase2AfterPhase1,
 	findTaskById,
 	findTasksByIds,
-	getAttachment,
 	getListLinks,
 	linkListNote,
 	listBrlEntries,
@@ -27,7 +24,6 @@ import {
 	priorityToLevel,
 	runBatch,
 	taskNotFoundError,
-	uploadAttachment,
 	unlinkListNote,
 	LumbreApiError,
 	type BatchResultItem,
@@ -35,14 +31,14 @@ import {
 	type LumbreConfig,
 	type LumbreTask,
 	type MutateTasksOp,
-	type SubtaskDecision,
 	type TaskScope
 } from './lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 import { resolveRefs } from './refs.js';
 import { errorResult, textResult, type ToolCtx } from './tools/shared.js';
 import { registerSyncTools } from './tools/sync.js';
-import { decodeBase64Attachment, readLocalAttachment } from './attachments.js';
+import { registerAttachmentTools } from './tools/attachments.js';
+import { requireTaskExists, mutateTaskInvalidating } from './tools/task-existence.js';
 import {
 	computeAutoNotesRender,
 	computeNotesSinceRender,
@@ -170,50 +166,6 @@ const listNoteTargetInputSchema = {
 		.describe('Deep link obsidian:// de la nota (máx. 2048 caracteres y bytes UTF-8)'),
 	label: z.string().trim().min(1).max(300).describe('Nombre visible de la nota (1..300 caracteres)')
 };
-
-/**
- * Comando `claude mcp add` LISTO PARA COPIAR del conector stdio local acotado
- * a adjuntos (`LUMBRE_MCP_TOOLSET=attachments`, ver `CreateServerOptions` y
- * `toolsetFromEnv`): solo registra las tres tools de adjuntos
- * (`add_attachment`/`read_attachment`/`delete_attachment`) para poder tenerlo
- * enchufado A LA VEZ que el conector
- * remoto sin duplicar la superficie de `tools/list` en el contexto de cada
- * sesión. Usado tanto en `remoteFileAccessError` (el error que ve el modelo
- * en el momento en que lo necesita) como en el README.
- */
-const LOCAL_ATTACHMENTS_CONNECTOR_COMMAND =
-	'claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments ' +
-	'-- node /ruta/absoluta/a/lumbre-mcp/dist/index.js';
-
-/**
- * Error de `add_attachment({ file_path })` cuando este servidor NO ve el
- * disco del usuario (`localFilesystem: false`, ver `CreateServerOptions` —
- * hoy, el transporte HTTP remoto de `http.ts`/`mcp.lumbre.pro`). A propósito
- * NO reintenta ni delega en `readLocalAttachment`/`fs.stat`: contra ESTE
- * proceso, cualquier ruta —exista o no en la máquina del usuario— resolvería
- * contra el disco del VPS, así que un "No existe el fichero" ahí sería un
- * error LITERALMENTE CIERTO pero sobre la máquina equivocada — el bug real
- * que motiva esta pieza (medido el 2026-08-27: la captura sí existía en el
- * Mac de David en ese mismo instante). Explica la topología y las dos
- * salidas: `content_base64` para algo pequeño, o el conector local de arriba
- * para algo grande.
- */
-function remoteFileAccessError(): string {
-	return (
-		'Este conector corre en mcp.lumbre.pro (transporte HTTP remoto) y no tiene forma de ver ' +
-			'el disco de tu ordenador — "file_path" no funciona aquí, y un "no existe el fichero" ' +
-			'sería sobre el disco del SERVIDOR, no el tuyo, así que ni se ha intentado leer. Dos ' +
-			'alternativas:\n' +
-			'  1. Fichero pequeño (unos KB — un .txt, un .log): pásalo con `content_base64` en vez ' +
-			'de `file_path` (y `filename`, obligatorio en ese modo).\n' +
-			'  2. Fichero grande (una captura, un PDF): añade el conector LOCAL de Lumbre, que sí ' +
-			'corre en tu máquina y ve tu disco:\n\n' +
-			`     ${LOCAL_ATTACHMENTS_CONNECTOR_COMMAND}\n\n` +
-			'     (sustituye "tu-token" por tu token de email-to-task y la ruta por la de tu clon; ' +
-			'ver README, "Transporte HTTP remoto"). Con ese conector enchufado, add_attachment ahí ' +
-			'sí puede usar file_path.'
-	);
-}
 
 const recurrenceSchema = z
 	.object({
@@ -1220,232 +1172,17 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		}
 	);
 
-	server.registerTool(
-		'read_attachment',
-		{
-			description:
-				'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
-				'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
-				'devuelve solo su metadata — no hay forma de leer su contenido con esta tool.',
-			inputSchema: {
-				attachment_id: z
-					.string()
-					.uuid()
-					.describe('Id del adjunto (ver el campo `attachments` de list_tasks)')
-			}
-		},
-		async (input) => {
-			try {
-				const { contentType, bytes } = await getAttachment(config, input.attachment_id);
-				if (contentType.startsWith('image/')) {
-					return {
-						content: [
-							{ type: 'image' as const, data: bytes.toString('base64'), mimeType: contentType }
-						]
-					};
-				}
-				return textResult(
-					`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
-						'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
-						'servidor MCP; no hay forma de mostrártelo a partir de aquí).'
-				);
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
-
-	server.registerTool(
-		'add_attachment',
-		{
-			description:
-				'Sube un fichero y lo deja adjunto a una tarea (SÍNCRONA, a diferencia de add_task/' +
-				'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
-				'`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
-				'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
-				'devuelve un error explicativo, nunca intenta leer tu disco. `content_base64` funciona ' +
-				'siempre, pero es SOLO para ficheros de unos KB (un .txt, un .log): el argumento lo emites ' +
-				'TÚ como modelo, y una imagen de unos cientos de KB son ~100-200k tokens en base64 — tope ' +
-				'1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
-				'sacar un nombre). Ver README para el detalle de mimes/límites y el conector local dedicado.',
-			inputSchema: {
-				taskId: z.string().uuid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
-				file_path: z
-					.string()
-					.min(1)
-					.optional()
-					.describe(
-						'Ruta LOCAL del fichero, absoluta o "~/…" (una relativa se rechaza). Exactamente uno ' +
-							'de file_path/content_base64. Solo funciona si ESTE conector corre en tu máquina ' +
-							'(stdio local) — contra el conector remoto da un error explicativo con la alternativa.'
-					),
-				content_base64: z
-					.string()
-					.min(1)
-					.optional()
-					.describe(
-						'Bytes del fichero en base64, para cuando no hay file_path posible (conector remoto) ' +
-							'o el fichero es pequeño. SOLO para unos KB (un .txt/.log corto) — tope 1 MB ' +
-							'decodificado; para algo más grande usa file_path con el conector local. Exactamente ' +
-							'uno de file_path/content_base64. Requiere `filename`.'
-					),
-				filename: z
-					.string()
-					.min(1)
-					.optional()
-					.describe(
-						'Nombre con el que se guarda. Con file_path, opcional (por defecto su basename); con ' +
-							'content_base64, OBLIGATORIO (no hay ruta de la que sacarlo).'
-					)
-			}
-		},
-		async (input) => {
-			try {
-				const hasFilePath = input.file_path !== undefined;
-				const hasBase64 = input.content_base64 !== undefined;
-				if (hasFilePath === hasBase64) {
-					return errorResult(
-						new Error(
-							hasFilePath
-								? 'Indica UNA sola vía: file_path o content_base64, no las dos a la vez.'
-								: 'Indica una vía para el fichero: file_path (conector local) o content_base64 ' +
-									'(cualquier conector, ficheros pequeños).'
-						)
-					);
-				}
-
-				let file: { bytes: Buffer; filename: string; mime: string };
-				if (hasBase64) {
-					if (!input.filename?.trim()) {
-						return errorResult(
-							new Error('filename es obligatorio con content_base64 (no hay ruta de la que sacarlo).')
-						);
-					}
-					// Decodifica/valida ANTES de tocar red (`requireTaskExists` incluida)
-					// — un base64 inválido o por encima del tope no debe gastar la
-					// llamada de existencia.
-					file = decodeBase64Attachment(input.content_base64!, input.filename);
-					await requireTaskExists(input.taskId, { allowSubtask: false });
-				} else if (!localFilesystem) {
-					// Ni requireTaskExists ni uploadAttachment: contra este disco NO
-					// existe una ruta correcta que probar (ver `remoteFileAccessError`),
-					// así que ni se toca la red.
-					return errorResult(new Error(remoteFileAccessError()));
-				} else {
-					await requireTaskExists(input.taskId, { allowSubtask: false });
-					file = await readLocalAttachment(input.file_path!, input.filename);
-				}
-
-				const attachment = await uploadAttachment(config, {
-					taskId: input.taskId,
-					filename: file.filename,
-					mime: file.mime,
-					bytes: file.bytes
-				});
-				return textResult(
-					`Adjunto subido a Lumbre: "${attachment.filename}" (${attachment.mime}, ${attachment.size} ` +
-						`bytes, id ${attachment.id}) en la tarea ${input.taskId}. Ya está enlazado (esta vía es ` +
-						'SÍNCRONA): léelo con read_attachment cuando quieras, sin esperar a ningún sync.'
-				);
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
-
-	server.registerTool(
-		'delete_attachment',
-		{
-			description:
-				'Elimina un adjunto de Lumbre por su id (ver `attachments` en get_task/list_tasks). ' +
-				'Es una operación DESTRUCTIVA y sin deshacer desde el MCP: úsala solo con autorización ' +
-				'clara. El éxito confirma que el adjunto ya no está disponible para esa cuenta.',
-			inputSchema: {
-				attachment_id: z
-					.string()
-					.uuid()
-					.describe('Id del adjunto que se va a eliminar (ver get_task/list_tasks)')
-			},
-			outputSchema: {
-				deleted: z.literal(true),
-				attachment_id: z.string().uuid()
-			}
-		},
-		async (input) => {
-			try {
-				await deleteAttachment(config, input.attachment_id);
-				return {
-					content: [
-						{
-							type: 'text' as const,
-							text: `Adjunto ${input.attachment_id} eliminado de Lumbre. La operación no se puede deshacer desde el MCP.`
-						}
-					],
-					structuredContent: { deleted: true as const, attachment_id: input.attachment_id }
-				};
-			} catch (err) {
-				return errorResult(err);
-			}
-		}
-	);
+	// Familia «adjuntos» (extraída a `src/tools/attachments.ts`): las tres tools
+	// que quedan solas en `toolset: 'attachments'`, ver `CreateServerOptions`.
+	const { readAttachmentTool, addAttachmentTool, deleteAttachmentTool } = registerAttachmentTools(server, ctx);
 
 	// ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
-
-	/**
-	 * Comprueba que `taskId` EXISTE antes de encolar cualquier mutación sobre él,
-	 * y (SELECTIVAMENTE, ver `allowSubtask`) que no sea una subtarea si la tool
-	 * no admite una ahí. `/api/mutations` NO valida esto server-side (deliberado
-	 * — ver el JSDoc de ese endpoint: `tasks` es una proyección que puede ir
-	 * desfasada del CRDT real, así que el drenaje del CLIENTE descarta en
-	 * silencio cualquier `taskId` que no encuentre). Sin el chequeo de
-	 * EXISTENCIA aquí, un id mal transcrito (typo real que mordió a David el
-	 * 2026-07-17: `9c184fe4-2103-…` en vez de `9c184fe4-ddb2-4103-…`) se
-	 * encolaba igual y el MCP contestaba "Encolado…" tan tranquilo, perdiendo la
-	 * mutación sin avisar. La EXISTENCIA sí se puede comprobar en el acto (a
-	 * diferencia de si la mutación llegó a APLICARSE, que sigue siendo asíncrono
-	 * — ver `ASYNC_NOTE`), así que sí merece la pena gastar la llamada extra a
-	 * `GET /api/tasks?id=` (vía `findTaskById`) antes de encolar.
-	 *
-	 * Fino wrapper de red sobre `assertTaskUsable` (`lumbre-client.ts`, función
-	 * PURA que hace la comprobación en sí — allí vive el JSDoc completo del
-	 * criterio `allowSubtask` por tool, y sus tests). Lanza si no existe, o si
-	 * existe pero es una subtarea y `allowSubtask` es `false`; el llamante ya
-	 * está dentro de un `try/catch` que lo convierte en `errorResult`.
-	 *
-	 * `opts` es una `SubtaskDecision` (objeto con nombre) y no un booleano
-	 * suelto para que la llamada diga QUÉ decide el flag: `{ allowSubtask: true }`
-	 * se lee en el sitio, un `true` pelado repartido por diez tools no.
-	 */
-	async function requireTaskExists(taskId: string, opts: SubtaskDecision = {}): Promise<void> {
-		// Caché corta (`taskCache`, ver `existence-cache.ts`): si `taskId` se
-		// acaba de resolver con un listado en esta MISMA sesión (list_tasks,
-		// get_task, mutate_tasks), no repetimos el `GET /api/tasks?id=` — el TTL
-		// es de pocos segundos justo para no confiar en un "existe" viejo.
-		const cached = taskCache.get(taskId);
-		if (cached !== undefined) {
-			assertTaskUsable(cached, taskId, opts);
-			return;
-		}
-		const task = await findTaskById(config, taskId);
-		if (task) taskCache.set(task);
-		assertTaskUsable(task, taskId, opts);
-	}
-
-	/**
-	 * Fino wrapper de `mutateTask` que invalida `taskCache` DESPUÉS de encolar —
-	 * cualquier mutación LOCAL (encolada desde ESTE proceso) sobre `input.taskId`
-	 * la saca de la caché de existencia, para no servir un "existe" de antes de
-	 * esa mutación en la próxima `requireTaskExists` sobre el mismo id. `delete`
-	 * sobre un id que nunca estuvo cacheado (p. ej. un `listId`/`sectionId`, que
-	 * viaja en el mismo campo `taskId` de `MutateTaskInput` — ver su JSDoc en
-	 * `lumbre-client.ts`) es un no-op inofensivo, así que este wrapper reemplaza
-	 * TODAS las llamadas a `mutateTask` de las tools de tarea/lista/sección de
-	 * aquí abajo, no solo las que de verdad tocan una tarea cacheada.
-	 */
-	async function mutateTaskInvalidating(input: Parameters<typeof mutateTask>[1]): Promise<void> {
-		await mutateTask(config, input);
-		taskCache.invalidate(input.taskId);
-	}
+	//
+	// `requireTaskExists`/`mutateTaskInvalidating` (comprobación de existencia y
+	// wrapper de `mutateTask` que invalida la caché, ver su JSDoc completo en
+	// `tools/task-existence.ts`) se extrajeron ahí porque `tools/attachments.ts`
+	// TAMBIÉN las necesita (`add_attachment`) — ya no son closures de esta
+	// función, reciben `ctx` explícito.
 
 	const completeTaskTool = server.registerTool(
 		'complete_task',
@@ -1460,8 +1197,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: true });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.taskId,
 					kind: 'complete',
 					payload: { done: input.done ?? true }
@@ -1491,8 +1228,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: true });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.taskId,
 					kind: 'cancel',
 					payload: { cancelled: input.cancelled ?? true }
@@ -1553,8 +1290,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				// `tags`/`time` son cinco de los accidentales PERMITIDOS en una subtarea
 				// por `docs/18-que-es-una-tarea.md` §2.5 — ver el JSDoc de
 				// `assertTaskUsable` para el camino de servidor que lo respalda.
-				await requireTaskExists(input.taskId, { allowSubtask: true });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.taskId,
 					kind: 'update',
 					payload: {
@@ -1596,8 +1333,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				// guard de `parentId` de `task-ops.unscheduleTask` entró en la app
 				// en `a745235a`. Mismo valor que la tabla de `mutate_tasks`
 				// (`TASK_TARGET_ALLOW_SUBTASK`, entrada `reschedule`).
-				await requireTaskExists(input.taskId, { allowSubtask: true });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.taskId,
 					kind: 'reschedule',
 					payload: { date: input.date }
@@ -1626,8 +1363,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: true });
-				await mutateTaskInvalidating({ taskId: input.taskId, kind: 'delete', payload: {} });
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, { taskId: input.taskId, kind: 'delete', payload: {} });
 				return textResult(
 					`Encolado en Lumbre el borrado de la tarea ${input.taskId} (se aplicará al sincronizar).`
 				);
@@ -1659,8 +1396,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.taskId, { allowSubtask: false });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: false });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.taskId,
 					kind: 'setSection',
 					payload: { section: input.section }
@@ -1694,7 +1431,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await mutateTaskInvalidating({
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.sectionId,
 					kind: 'removeSection',
 					payload: { sectionId: input.sectionId }
@@ -1747,8 +1484,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 				// materializador (`task-ops`/`inbound-materialize.ts`) descarta la
 				// mutación en silencio de todas formas, comportamiento YA documentado
 				// arriba y sin cambios por este fix.
-				await requireTaskExists(input.taskId, { allowSubtask: true });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.taskId,
 					kind: 'addSubtask',
 					payload: { subtasks: input.subtasks }
@@ -1778,8 +1515,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 		},
 		async (input) => {
 			try {
-				await requireTaskExists(input.subtaskId, { allowSubtask: true });
-				await mutateTaskInvalidating({
+				await requireTaskExists(ctx, input.subtaskId, { allowSubtask: true });
+				await mutateTaskInvalidating(ctx, {
 					taskId: input.subtaskId,
 					kind: 'complete',
 					payload: { done: input.done ?? true }
