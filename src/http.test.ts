@@ -1,5 +1,5 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readdir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -470,5 +470,125 @@ describe('ruta desconocida', () => {
 	it('404 texto plano', async () => {
 		const res = await fetch(`${baseUrl}/no-existe`);
 		expect(res.status).toBe(404);
+	});
+});
+
+describe('POST /mcp — huella de notas SEGREGADA por cuenta (createAccountNotesSeenStore, notes.ts)', () => {
+	/**
+	 * Bug que esta feature cierra: `handleMcpRequest` (`http.ts`) llamaba a
+	 * `createServer` sin `notesSeenStore`, así que caía en `fileNotesSeenStore`
+	 * — UN fichero (`notes-seen.json`) compartido por CUALQUIER token que
+	 * hablara con este relé (ver `deploy/compose.yml`). Estos tests corren
+	 * contra el server HTTP real (mismo patrón que el describe de la caché de
+	 * existencia más arriba: dos `fetch` de verdad, no un `McpServer` in-memory
+	 * — un test así SÍ cruza dos llamadas reales a `createServer`, que es
+	 * donde vivía el bug) y comprueban el fichero en disco bajo un
+	 * `XDG_STATE_HOME` temporal propio de este bloque.
+	 */
+	let stateDir: string;
+	const originalFetch = globalThis.fetch;
+	const TASK_ID = '55555555-5555-5555-5555-555555555555';
+
+	beforeEach(async () => {
+		stateDir = await mkdtemp(join(tmpdir(), 'lumbre-mcp-http-notes-test-'));
+		process.env.XDG_STATE_HOME = stateDir;
+	});
+
+	afterEach(async () => {
+		delete process.env.XDG_STATE_HOME;
+		vi.unstubAllGlobals();
+	});
+
+	function taskWithNote(notesUpdatedAt: string) {
+		return {
+			id: TASK_ID,
+			content: 'tarea con nota (http, huella por cuenta)',
+			notes: 'una nota cualquiera para probar la huella por cuenta',
+			notesUpdatedAt,
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: new Date().toISOString(),
+			parentId: null
+		};
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	function stubUpstreamFetch(notesUpdatedAt: string): ReturnType<typeof vi.fn> {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.startsWith(baseUrl)) return originalFetch(url, init); // el propio server HTTP local
+			if (u.includes('/api/tasks')) return jsonResponse([taskWithNote(notesUpdatedAt)]);
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		return fetchSpy;
+	}
+
+	async function listTasksAuto(token: string, id: number): Promise<Response> {
+		return fetch(`${baseUrl}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: `Bearer ${token}` },
+			body: JSON.stringify({
+				jsonrpc: '2.0',
+				id,
+				method: 'tools/call',
+				params: { name: 'list_tasks', arguments: { scope: 'all' } }
+			})
+		});
+	}
+
+	async function accountFiles(): Promise<string[]> {
+		const dir = join(stateDir, 'lumbre-mcp');
+		const names = await readdir(dir).catch(() => [] as string[]);
+		return names.filter((n) => n.startsWith('notes-seen-') && n !== 'notes-seen.json');
+	}
+
+	it('dos cuentas (tokens) distintas: un fichero de huella POR CUENTA, ninguno compartido', async () => {
+		stubUpstreamFetch('2026-07-20T00:00:00.000Z');
+		const resA = await listTasksAuto('token-cuenta-http-a', 301);
+		expect(resA.status).toBe(200);
+		const resB = await listTasksAuto('token-cuenta-http-b', 302);
+		expect(resB.status).toBe(200);
+
+		expect(await accountFiles()).toHaveLength(2);
+	});
+
+	it('el nombre de los ficheros de cuenta no contiene el token en claro', async () => {
+		stubUpstreamFetch('2026-07-20T00:00:00.000Z');
+		const token = 'token-http-con-forma-reconocible-abc123';
+		const res = await listTasksAuto(token, 303);
+		expect(res.status).toBe(200);
+
+		const dir = join(stateDir, 'lumbre-mcp');
+		const names = await readdir(dir);
+		for (const name of names) expect(name).not.toContain(token);
+	});
+
+	it('la MISMA cuenta reutiliza su fichero entre dos peticiones HTTP distintas (no crea uno nuevo cada vez)', async () => {
+		stubUpstreamFetch('2026-07-20T00:00:00.000Z');
+		const token = 'token-http-reuso';
+
+		await listTasksAuto(token, 304);
+		const afterFirst = await accountFiles();
+		expect(afterFirst).toHaveLength(1);
+
+		await listTasksAuto(token, 305); // segunda petición HTTP, mismo token
+		const afterSecond = await accountFiles();
+		expect(afterSecond).toEqual(afterFirst); // sigue siendo el MISMO fichero
+	});
+
+	it('el conector stdio local sigue usando `notes-seen.json` (sin sufijo) — no lo toca este transporte', async () => {
+		stubUpstreamFetch('2026-07-20T00:00:00.000Z');
+		await listTasksAuto('token-cuenta-http-c', 306);
+
+		const dir = join(stateDir, 'lumbre-mcp');
+		const names = await readdir(dir);
+		expect(names).not.toContain('notes-seen.json'); // el transporte HTTP nunca escribe el fichero sin sufijo
 	});
 });

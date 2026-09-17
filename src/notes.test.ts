@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import type { LumbreTask } from './lumbre-client.js';
 import {
 	computeAutoNotesRender,
 	computeNotesSinceRender,
+	createAccountNotesSeenStore,
 	decideAutoNoteRender,
 	decideNotesSinceRender,
 	DEFAULT_NOTES_RECENT_HOURS,
@@ -754,5 +755,145 @@ describe('notas en dos fases (perf, 2026-08-25) — fase 1 sin texto (`notes: nu
 		const output = formatTaskList(tasks, 'today', { notesMode: 'auto', autoRender });
 		expect(output).toContain('notas:');
 		expect(output).toContain('✎55');
+	});
+});
+
+/**
+ * `createAccountNotesSeenStore` (transporte HTTP, más de una cuenta por
+ * proceso relé — ver el JSDoc en `notes.ts` y `http.ts`). Motivo: con el
+ * fichero único de `fileNotesSeenStore`, dos credenciales distintas
+ * compartían huella Y cap de 2.000 entradas; este bloque prueba que el
+ * fichero por cuenta (`notes-seen-<id>.json`) las aísla de verdad.
+ */
+describe('createAccountNotesSeenStore — huella por CUENTA (transporte HTTP)', () => {
+	it('dos cuentas distintas no comparten huella: cada una ve solo lo que ELLA guardó', async () => {
+		const storeA = createAccountNotesSeenStore('token-cuenta-a');
+		const storeB = createAccountNotesSeenStore('token-cuenta-b');
+
+		await recordNotesSeen(
+			[{ taskId: 'task-a', notes: 'nota de A', notesUpdatedAt: '2026-07-20T00:00:00.000Z' }],
+			storeA
+		);
+		await recordNotesSeen(
+			[{ taskId: 'task-b', notes: 'nota de B', notesUpdatedAt: '2026-07-20T00:00:00.000Z' }],
+			storeB
+		);
+
+		const stateA = await storeA.load();
+		const stateB = await storeB.load();
+		expect(stateA['task-a']).toBeDefined();
+		expect(stateA['task-b']).toBeUndefined();
+		expect(stateB['task-b']).toBeDefined();
+		expect(stateB['task-a']).toBeUndefined();
+	});
+
+	it('el cap de entradas es POR CUENTA: saturar el fichero de una NO expulsa entradas de la otra', async () => {
+		const storeA = createAccountNotesSeenStore('token-cuenta-cap-a');
+		const storeB = createAccountNotesSeenStore('token-cuenta-cap-b');
+
+		await recordNotesSeen([{ taskId: 'b-1', notes: 'nota', notesUpdatedAt: '2026-07-20T00:00:00.000Z' }], storeB);
+
+		// Cap deliberadamente bajo (1) sobre el fichero de A, vía `touchNotesSeen`
+		// directo — `recordNotesSeen` usa el cap real (2.000), inviable de saturar
+		// en un test.
+		let stateA: NotesSeenState = await storeA.load();
+		stateA = touchNotesSeen(stateA, 'a-1', 4, '2026-07-20T00:00:00.000Z', 1);
+		stateA = touchNotesSeen(stateA, 'a-2', 4, '2026-07-21T00:00:00.000Z', 1);
+		await storeA.save(stateA);
+
+		expect(Object.keys(await storeA.load())).toEqual(['a-2']); // 'a-1' podada, pero SOLO en el fichero de A
+		const finalB = await storeB.load();
+		expect(finalB['b-1']).toBeDefined(); // el fichero de B ni se ha tocado
+	});
+
+	it('el nombre del fichero en disco NO contiene la credencial, ni en el nombre ni en el contenido', async () => {
+		const token = 'super-secreto-de-la-cuenta-xyz-0123456789';
+		const store = createAccountNotesSeenStore(token);
+		await store.save(touchNotesSeen({}, 't-1', 4, '2026-07-20T00:00:00.000Z'));
+
+		const dir = join(stateDir, 'lumbre-mcp');
+		const names = await readdir(dir);
+		const accountFiles = names.filter((n) => n.startsWith('notes-seen-') && n !== 'notes-seen.json');
+		expect(accountFiles.length).toBeGreaterThan(0);
+		for (const name of accountFiles) {
+			expect(name).not.toContain(token);
+			const content = await readFile(join(dir, name), 'utf8');
+			expect(content).not.toContain(token);
+		}
+	});
+
+	it('la MISMA cuenta reutiliza su fichero entre llamadas distintas a la factory (una por petición HTTP)', async () => {
+		const token = 'token-reuso-entre-peticiones';
+		const first = createAccountNotesSeenStore(token);
+		await recordNotesSeen([{ taskId: 't-1', notes: 'nota', notesUpdatedAt: '2026-07-20T00:00:00.000Z' }], first);
+
+		// Una instancia NUEVA del store (así la crea `handleMcpRequest` en cada
+		// POST — ver `http.ts`), mismo token: debe ver lo que la anterior guardó.
+		const second = createAccountNotesSeenStore(token);
+		const state = await second.load();
+		expect(state['t-1']).toBeDefined();
+	});
+
+	it('stdio (`fileNotesSeenStore`) sigue escribiendo en `notes-seen.json`, sin sufijo, aunque haya cuentas HTTP activas', async () => {
+		await recordNotesSeen([{ taskId: 'stdio-1', notes: 'nota', notesUpdatedAt: '2026-07-20T00:00:00.000Z' }]);
+		const accountStore = createAccountNotesSeenStore('token-cualquiera');
+		await recordNotesSeen(
+			[{ taskId: 'acc-1', notes: 'nota', notesUpdatedAt: '2026-07-20T00:00:00.000Z' }],
+			accountStore
+		);
+
+		const dir = join(stateDir, 'lumbre-mcp');
+		const names = await readdir(dir);
+		expect(names).toContain('notes-seen.json');
+
+		const stdioState = await loadNotesSeenState();
+		expect(stdioState['stdio-1']).toBeDefined();
+		expect(stdioState['acc-1']).toBeUndefined();
+	});
+});
+
+describe('createAccountNotesSeenStore — limpieza best-effort de cuentas viejas', () => {
+	it('borra un fichero de cuenta con más de 30 días de mtime, conserva uno reciente y NUNCA toca el fichero sin sufijo', async () => {
+		const dir = join(stateDir, 'lumbre-mcp');
+		await mkdir(dir, { recursive: true });
+
+		const oldStore = createAccountNotesSeenStore('token-cuenta-vieja');
+		const recentStore = createAccountNotesSeenStore('token-cuenta-reciente');
+		await oldStore.save(touchNotesSeen({}, 'entrada-vieja', 4, '2026-07-01T00:00:00.000Z'));
+		await recentStore.save(touchNotesSeen({}, 'entrada-reciente', 4, '2026-07-01T00:00:00.000Z'));
+		await saveNotesSeenState(touchNotesSeen({}, 'entrada-stdio', 4, '2026-07-01T00:00:00.000Z'));
+
+		const accountFiles = (await readdir(dir)).filter((n) => n.startsWith('notes-seen-') && n !== 'notes-seen.json');
+		expect(accountFiles).toHaveLength(2);
+
+		// Identifica qué fichero es cuál por su contenido (el nombre no lo dice
+		// a propósito, ver el test de arriba).
+		let oldFileName: string | undefined;
+		for (const name of accountFiles) {
+			const content = await readFile(join(dir, name), 'utf8');
+			if (content.includes('entrada-vieja')) oldFileName = name;
+		}
+		expect(oldFileName).toBeDefined();
+
+		// Retrasa el `mtime` del fichero viejo a 40 días atrás; el reciente se
+		// queda con el `mtime` de `save` (recién escrito).
+		const fortyDaysAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+		await utimes(join(dir, oldFileName as string), fortyDaysAgo, fortyDaysAgo);
+
+		// Un `save` cualquiera dispara la poda (ver JSDoc de
+		// `pruneStaleAccountFiles`) — se usa el store reciente para no tocar el
+		// viejo directamente.
+		await recentStore.save(touchNotesSeen(await recentStore.load(), 'entrada-reciente-2', 4, '2026-07-02T00:00:00.000Z'));
+
+		const namesAfter = await readdir(dir);
+		expect(namesAfter).not.toContain(oldFileName);
+		expect(namesAfter).toContain('notes-seen.json'); // el fichero sin sufijo NUNCA se borra
+		const recentFiles = namesAfter.filter((n) => n.startsWith('notes-seen-') && n !== 'notes-seen.json');
+		expect(recentFiles).toHaveLength(1); // el reciente sigue ahí
+	});
+
+	it('un directorio SIN ningún fichero de cuenta no revienta la poda (best-effort)', async () => {
+		const store = createAccountNotesSeenStore('token-cuenta-sola');
+		await expect(store.save(touchNotesSeen({}, 'x', 1, '2026-07-01T00:00:00.000Z'))).resolves.toBeUndefined();
 	});
 });

@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { LumbreTask } from './lumbre-client.js';
@@ -305,25 +305,33 @@ function stateDir(): string {
 	return join(base, 'lumbre-mcp');
 }
 
+/** Nombre del fichero de huellas ÚNICO (stdio, un solo usuario por proceso) —
+ *  SIN sufijo, a diferencia de los ficheros POR CUENTA del transporte HTTP
+ *  (`notes-seen-<id>.json`, ver `createAccountNotesSeenStore`). */
+const DEFAULT_STATE_FILENAME = 'notes-seen.json';
+
 function stateFile(): string {
-	return join(stateDir(), 'notes-seen.json');
+	return join(stateDir(), DEFAULT_STATE_FILENAME);
 }
 
 /**
- * Lee el fichero de huellas. Tolerante a TODO (fichero ausente, permisos,
- * JSON corrupto, no es un objeto): en cualquier caso devuelve `{}` en vez de
- * lanzar — la capa 1 (`@done`/`#done`) de `decideAutoNoteRender` sigue
- * funcionando igual sin huella, y la capa 2 degrada a "todo marcador" (nunca a
- * "todo íntegro", que sería el error caro — ver el hueco conocido). Las
- * entradas del fichero pueden estar en formato VIEJO (`{h,n}`, de una versión
- * anterior del MCP) — este loader las devuelve tal cual (`unknown` por
- * entrada); es `readSeenEntry`, en el punto de uso, quien las reconoce como
- * "no válidas" y las trata como no vistas. NUNCA debe poder romper una
- * llamada a `list_tasks`/`get_task`.
+ * Lee `filename` (dentro de `stateDir()`). Tolerante a TODO (fichero
+ * ausente, permisos, JSON corrupto, no es un objeto): en cualquier caso
+ * devuelve `{}` en vez de lanzar — la capa 1 (`@done`/`#done`) de
+ * `decideAutoNoteRender` sigue funcionando igual sin huella, y la capa 2
+ * degrada a "todo marcador" (nunca a "todo íntegro", que sería el error caro
+ * — ver el hueco conocido). Las entradas del fichero pueden estar en formato
+ * VIEJO (`{h,n}`, de una versión anterior del MCP) — este loader las
+ * devuelve tal cual (`unknown` por entrada); es `readSeenEntry`, en el punto
+ * de uso, quien las reconoce como "no válidas" y las trata como no vistas.
+ * NUNCA debe poder romper una llamada a `list_tasks`/`get_task`.
+ *
+ * Compartida por el fichero único de stdio (`loadNotesSeenState`) y por cada
+ * fichero de cuenta del transporte HTTP (`createAccountNotesSeenStore`).
  */
-export async function loadNotesSeenState(): Promise<NotesSeenState> {
+async function readStateFile(filename: string): Promise<NotesSeenState> {
 	try {
-		const raw = await readFile(stateFile(), 'utf8');
+		const raw = await readFile(join(stateDir(), filename), 'utf8');
 		const parsed: unknown = JSON.parse(raw);
 		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
 			return parsed as NotesSeenState;
@@ -335,24 +343,40 @@ export async function loadNotesSeenState(): Promise<NotesSeenState> {
 }
 
 /**
- * Escribe el fichero de huellas de forma atómica (temporal único +
- * `rename`), y NUNCA lanza (el llamante no necesita `try/catch`): si el
- * directorio no se puede crear, o la escritura o el rename fallan (disco
- * lleno, permisos…), la llamada simplemente no persiste nada esta vez — el
- * listado ya se ha devuelto con la mejor decisión posible, perder la huella
- * de esta pasada es aceptable (peor caso: la próxima vez esa nota vuelve a
- * salir como si no se hubiera visto).
+ * Escribe `state` en `filename` (dentro de `stateDir()`) de forma atómica
+ * (temporal único + `rename`), y NUNCA lanza (el llamante no necesita
+ * `try/catch`): si el directorio no se puede crear, o la escritura o el
+ * rename fallan (disco lleno, permisos…), la llamada simplemente no persiste
+ * nada esta vez — el listado ya se ha devuelto con la mejor decisión
+ * posible, perder la huella de esta pasada es aceptable (peor caso: la
+ * próxima vez esa nota vuelve a salir como si no se hubiera visto).
+ *
+ * Compartida por el fichero único de stdio (`saveNotesSeenState`) y por cada
+ * fichero de cuenta del transporte HTTP.
  */
-export async function saveNotesSeenState(state: NotesSeenState): Promise<void> {
+async function writeStateFileAtomic(filename: string, state: NotesSeenState): Promise<void> {
 	try {
 		const dir = stateDir();
 		await mkdir(dir, { recursive: true });
-		const tmpPath = join(dir, `.notes-seen.${process.pid}.${randomUUID()}.tmp`);
+		const tmpPath = join(dir, `.${filename}.${process.pid}.${randomUUID()}.tmp`);
 		await writeFile(tmpPath, JSON.stringify(state));
-		await rename(tmpPath, stateFile());
+		await rename(tmpPath, join(dir, filename));
 	} catch {
 		// Best-effort — ver JSDoc de arriba.
 	}
+}
+
+/** Lee el fichero de huellas ÚNICO (stdio, `notes-seen.json`, sin sufijo) —
+ *  ver `readStateFile` para las garantías de tolerancia a fallos. */
+export async function loadNotesSeenState(): Promise<NotesSeenState> {
+	return readStateFile(DEFAULT_STATE_FILENAME);
+}
+
+/** Escribe el fichero de huellas ÚNICO (stdio, `notes-seen.json`, sin
+ *  sufijo) de forma atómica — ver `writeStateFileAtomic` para las
+ *  garantías. */
+export async function saveNotesSeenState(state: NotesSeenState): Promise<void> {
+	await writeStateFileAtomic(DEFAULT_STATE_FILENAME, state);
 }
 
 /** Implementación por defecto de `NotesSeenStore`: el fichero de huellas en
@@ -363,6 +387,110 @@ export const fileNotesSeenStore: NotesSeenStore = {
 	load: loadNotesSeenState,
 	save: saveNotesSeenState
 };
+
+// ── Huella por CUENTA (transporte HTTP, más de un usuario por proceso) ─────
+
+/** 16 primeros hex del SHA-256 de la credencial — longitud fija, suficiente
+ *  para separar cuentas en el nombre del fichero de huella sin que ese
+ *  nombre filtre la credencial (ver el JSDoc de `createAccountNotesSeenStore`).
+ *  No necesita ser criptográficamente irreversible frente a quien YA tiene
+ *  la credencial: la garantía que importa es que un fichero en disco (logs,
+ *  backups, un `ls` de alguien con acceso al volumen sin la credencial) no
+ *  la revele. */
+const ACCOUNT_ID_LENGTH = 16;
+
+function accountId(token: string): string {
+	return createHash('sha256').update(token, 'utf8').digest('hex').slice(0, ACCOUNT_ID_LENGTH);
+}
+
+function accountFileName(token: string): string {
+	return `notes-seen-${accountId(token)}.json`;
+}
+
+/** Reconoce el nombre de un fichero de huella POR CUENTA
+ *  (`notes-seen-<16 hex>.json`) — usado solo por `pruneStaleAccountFiles`
+ *  para no tocar `notes-seen.json` (el fichero único de stdio, SIN sufijo,
+ *  no matchea este patrón) ni ningún otro fichero del mismo directorio (p.
+ *  ej. el store OAuth de `oauth.ts`). */
+const ACCOUNT_FILE_PATTERN = /^notes-seen-[0-9a-f]{16}\.json$/;
+
+/** Ventana de limpieza de `pruneStaleAccountFiles` — una cuenta que lleva un
+ *  mes sin usar el transporte HTTP (token rotado, dispositivo retirado…) ya
+ *  no necesita su huella; por debajo de esta ventana se conserva aunque el
+ *  cap de `MAX_STATE_ENTRIES` de su fichero nunca se llegue a tocar. */
+const ACCOUNT_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Poda best-effort de ficheros de huella POR CUENTA con más de
+ * `ACCOUNT_FILE_MAX_AGE_MS` sin escribirse (`mtime`) — se dispara al final
+ * de cada `save` de `createAccountNotesSeenStore` (no hay temporizador de
+ * fondo: un relé HTTP con tráfico real ya escribe a menudo, así que no hace
+ * falta uno). NUNCA borra `notes-seen.json` (el fichero sin sufijo, ver
+ * `ACCOUNT_FILE_PATTERN`) ni lanza si falla (directorio ilegible,
+ * `stat`/`unlink` con permisos raros…): como el resto de este fichero, la
+ * limpieza es un extra, no una garantía — en el peor caso, el fichero de una
+ * cuenta abandonada se queda ahí un poco más.
+ */
+async function pruneStaleAccountFiles(nowMs: number): Promise<void> {
+	try {
+		const dir = stateDir();
+		const names = await readdir(dir);
+		for (const name of names) {
+			if (!ACCOUNT_FILE_PATTERN.test(name)) continue;
+			const filePath = join(dir, name);
+			try {
+				const info = await stat(filePath);
+				if (nowMs - info.mtimeMs > ACCOUNT_FILE_MAX_AGE_MS) await unlink(filePath);
+			} catch {
+				// Un fichero que desaparece/no se puede leer entre el `readdir` y
+				// aquí (otra poda concurrente, permisos) simplemente se salta.
+			}
+		}
+	} catch {
+		// Best-effort — ver JSDoc de arriba (p. ej. directorio aún no creado).
+	}
+}
+
+/**
+ * `NotesSeenStore` de fichero, UNO POR CUENTA — usado por el transporte HTTP
+ * (`http.ts`), donde un solo proceso relé sirve credenciales de MÁS de un
+ * usuario a la vez (ver `deploy/compose.yml`): con el fichero único de
+ * `fileNotesSeenStore`, dos cuentas comparten huella Y cap de 2.000
+ * entradas, así que una nota "vista" por una cuenta sale como marcador para
+ * OTRA que nunca la vio, y el tráfico de una puede expulsar las entradas de
+ * la otra al llegar al cap.
+ *
+ * El nombre en disco es `notes-seen-<id>.json`, con `<id>` los 16 primeros
+ * hex del SHA-256 de `token` (`accountFileName`) — la credencial NUNCA
+ * aparece en el nombre ni en el contenido (mismas entradas `{u, n}` de
+ * siempre, sin nada nuevo que la identifique). El cap sigue siendo 2.000
+ * entradas POR FICHERO (`touchNotesSeen`, sin cambios) — ahora aislado por
+ * cuenta en vez de compartido entre todas.
+ *
+ * El transporte stdio local (`index.ts`, `main()`) sigue usando
+ * `fileNotesSeenStore` (el fichero sin sufijo de siempre): una sola máquina,
+ * un solo usuario por proceso, no hay nada que separar.
+ *
+ * No es una huella NULA (que nunca suprimiera nada, un store en memoria que
+ * se tira al morir la petición): eso se probó y se midió el precio en
+ * `http.ts` antes de esta feature — en un `list_tasks` de 31 tareas con
+ * nota, con huella 3.340 bytes, sin huella 33.224 — ~29,9 KB de más por
+ * llamada. Separar por cuenta conserva ese ahorro (cada cuenta sigue
+ * teniendo SU huella persistente) sin el problema de mezclar cuentas.
+ *
+ * Cada `save` dispara, de paso, `pruneStaleAccountFiles` — best-effort, ver
+ * su JSDoc.
+ */
+export function createAccountNotesSeenStore(token: string): NotesSeenStore {
+	const filename = accountFileName(token);
+	return {
+		load: () => readStateFile(filename),
+		save: async (state) => {
+			await writeStateFileAtomic(filename, state);
+			await pruneStaleAccountFiles(Date.now());
+		}
+	};
+}
 
 /**
  * Marca `taskId` como visto CON `notesUpdatedAt` (la marca de la nota que se

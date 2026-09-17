@@ -181,8 +181,11 @@ presentar esa hipótesis como un fallo observado.
   —la marca de última edición de la nota que expone la API, derivada del HLC
   de su celda CRDT— es POSTERIOR a la última vez que este MCP la mostró
   —huella local best-effort en
-  `${XDG_STATE_HOME:-~/.local/state}/lumbre-mcp/notes-seen.json`, comparación
-  EXACTA, sin ventana—, o si se tocó dentro de `notesRecentHours`, default 24h,
+  `${XDG_STATE_HOME:-~/.local/state}/lumbre-mcp/notes-seen.json` (conector
+  stdio local; el transporte HTTP remoto usa un fichero POR CUENTA,
+  `notes-seen-<id>.json`, `<id>` derivado del token y nunca la credencial en
+  sí — dos cuentas nunca comparten huella), comparación EXACTA, sin ventana—,
+  o si se tocó dentro de `notesRecentHours`, default 24h,
   cuando aún no hay huella —bootstrap, solo la 1ª vez que el MCP ve esa
   tarea—) o como marcador `✎N ↻DDmmm` con su tamaño en chars Y la fecha de la
   última edición (p. ej. `✎573 ↻24jul`) — NUNCA un texto recortado a medias
