@@ -8,6 +8,7 @@ import {
 	excludeIngestForBrokenListPromises,
 	filterPhase2AfterPhase1,
 	findTaskById,
+	getAttachment,
 	findTasksByIds,
 	getListLinks,
 	linkListNote,
@@ -1287,5 +1288,59 @@ describe('deleteAttachment', () => {
 	it('200 sin {ok:true}: error de contrato, no falso positivo', async () => {
 		mockDeleteResponse({ ok: false });
 		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/no confirmó el borrado/);
+	});
+});
+
+// ── getAttachment (GET /api/attachments/:id) ────────────────────────────────
+
+describe('getAttachment — tope de descarga', () => {
+	const ATTACHMENT_ID = '33333333-3333-4333-8333-333333333333';
+
+	/** Responde con un stream que va soltando `chunks` trozos de 1 MiB, y
+	 *  cuenta cuántos llegó a pedir el lector: así se ve si la descarga se
+	 *  cortó o se la tragó entera. */
+	function streamedResponse(chunks: number, declareLength: boolean): { fetchSpy: ReturnType<typeof vi.fn>; served: () => number } {
+		let served = 0;
+		const megabyte = new Uint8Array(1024 * 1024);
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (served >= chunks) {
+					controller.close();
+					return;
+				}
+				served += 1;
+				controller.enqueue(megabyte);
+			}
+		});
+		const headers: Record<string, string> = { 'content-type': 'application/pdf' };
+		if (declareLength) headers['content-length'] = String(chunks * 1024 * 1024);
+		const fetchSpy = vi.fn().mockResolvedValue(new Response(body, { status: 200, headers }));
+		vi.stubGlobal('fetch', fetchSpy);
+		return { fetchSpy, served: () => served };
+	}
+
+	it('un adjunto normal se descarga entero', async () => {
+		const { served } = streamedResponse(2, true);
+		const downloaded = await getAttachment(config, ATTACHMENT_ID);
+		expect(downloaded.contentType).toBe('application/pdf');
+		expect(downloaded.bytes).toHaveLength(2 * 1024 * 1024);
+		expect(served()).toBe(2);
+	});
+
+	it('con content-length por encima de 25 MiB ni se lee el cuerpo', async () => {
+		const { served } = streamedResponse(26, true);
+		await expect(getAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/supera el tope de 25 MiB/);
+		// 1 y no 0: `ReadableStream` adelanta un `pull` al construir la
+		// `Response`, antes de que nadie lea. Lo que importa es que se corta
+		// ahí y no se materializan los 26 MiB.
+		expect(served()).toBeLessThanOrEqual(1);
+	});
+
+	it('sin content-length, el stream se corta al pasarse (no se materializan 26 MiB)', async () => {
+		const { served } = streamedResponse(26, false);
+		await expect(getAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/supera el tope de 25 MiB/);
+		// 25 MiB entran; el trozo 26 es el que dispara el corte y ahí se
+		// cancela el stream, sin pedir nada más.
+		expect(served()).toBe(26);
 	});
 });

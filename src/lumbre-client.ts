@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+// El tope de bajada es el MISMO que el de subida y vive en un solo sitio
+// (`attachments.ts`), que no importa nada de aquí: no hay ciclo.
+import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 
 /**
  * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
@@ -785,8 +788,51 @@ export async function getAttachment(config: LumbreConfig, id: string): Promise<D
 	}
 	return {
 		contentType: res.headers.get('content-type') ?? 'application/octet-stream',
-		bytes: Buffer.from(await res.arrayBuffer())
+		bytes: await readBoundedBody(res, id)
 	};
+}
+
+/**
+ * Lee el cuerpo de la descarga con el tope de `MAX_ATTACHMENT_BYTES` (25 MiB,
+ * el mismo límite AUTORITATIVO del servidor al SUBIR, ver `attachments.ts`):
+ * si nada puede subir más de 25 MiB, nada legítimo puede bajar más.
+ *
+ * Hasta ahora era un `res.arrayBuffer()` a pelo, sin tope: el tamaño de lo que
+ * se materializa en memoria lo decidía el otro lado de la conexión. Con este
+ * conector corriendo en un VPS compartido (`http.ts`), una respuesta enorme
+ * —una Lumbre comprometida, un proxy intermedio, un `LUMBRE_BASE_URL` mal
+ * puesto apuntando a cualquier otra cosa— se convertía en memoria del proceso.
+ *
+ * Dos comprobaciones, como en el resto del repo (`readBoundedJson` del
+ * backchannel): el `content-length` declarado ANTES de leer nada, y la cuenta
+ * real mientras llega, porque esa cabecera puede faltar o mentir. Al pasarse
+ * se CANCELA el stream: no se sigue descargando algo que ya se ha descartado.
+ */
+async function readBoundedBody(res: Response, id: string): Promise<Buffer> {
+	const tooLarge = (): LumbreApiError =>
+		new LumbreApiError(
+			`El adjunto ${id} supera el tope de ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MiB y no se ha descargado.`
+		);
+	const declared = Number(res.headers.get('content-length'));
+	if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES) {
+		await res.body?.cancel().catch(() => undefined);
+		throw tooLarge();
+	}
+	if (!res.body) return Buffer.alloc(0);
+	const reader = res.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		size += value.byteLength;
+		if (size > MAX_ATTACHMENT_BYTES) {
+			await reader.cancel().catch(() => undefined);
+			throw tooLarge();
+		}
+		chunks.push(value);
+	}
+	return Buffer.concat(chunks);
 }
 
 /**
