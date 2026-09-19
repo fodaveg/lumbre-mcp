@@ -785,7 +785,11 @@ describe('get_list_links — registro y contrato HTTP', () => {
 
 		const invalid = await client.callTool({ name: 'get_list_links', arguments: { listId: 'no-es-uuid' } });
 		expect(invalid.isError).toBe(true);
-		expect(((invalid as { content: { text: string }[] }).content[0]).text).toMatch(/Invalid uuid/);
+		// Mensaje de zod 4 para `.guid()` (chore/zod4-vitest5): "Invalid GUID",
+		// no "Invalid uuid" (zod 3) — validación IDÉNTICA (`.guid()` es el
+		// permisivo de zod 4, mismo patrón que el `.uuid()` de zod 3, ver
+		// `tools/lists.ts`), solo cambia el texto del mensaje.
+		expect(((invalid as { content: { text: string }[] }).content[0]).text).toMatch(/Invalid GUID/);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 });
@@ -1347,6 +1351,39 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(resultText(enOrganize)).toContain(
 			'[0] complete: la op "complete" no existe en organize; está en mutate_tasks'
 		);
+	});
+
+	// Regresión zod 4 (chore/zod4-vitest5): `formatOpShapeError` lee
+	// `issue.code === 'unrecognized_keys'` e `issue.keys` de un `ZodError` —
+	// zod 4 sigue emitiendo esa forma para `.strict()` (comprobado aparte),
+	// pero este test cierra el camino END-TO-END: una op con un campo QUE NO
+	// LE APLICA (pasa el schema EXPUESTO, que es `.passthrough()`, y la
+	// rechaza el ESTRICTO por campo ajeno) debe seguir dando el mensaje
+	// legible de siempre, no un volcado crudo de Zod.
+	it('una op con un campo ajeno a ESA op (no de otra tool): mensaje "campo(s) que no aplican a"', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'add_task', text: 'sí viaja' },
+					// `complete` no tiene `bogusField` — campo ajeno a ESTA op, no una
+					// op de la otra tool (ese caso ya lo cubre el test de arriba).
+					{ op: 'complete', taskId: '11111111-1111-1111-1111-111111111111', bogusField: 'x' }
+				]
+			}
+		});
+
+		const text = resultText(result);
+		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain('[1] complete: complete: campo(s) que no aplican a "complete": bogusField');
+		// Solo la op válida llega a /api/batch — la de forma inválida nunca toca red.
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
 	});
 
 	it('organize: create_list + set_list_notes viajan juntos; un servidor aún sin ese kind lo informa como fallo parcial', async () => {

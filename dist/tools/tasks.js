@@ -75,7 +75,7 @@ export function registerTaskTools(server, ctx) {
                 'date, el cliente la coloca en "hoy" al materializarla.'),
             listId: z
                 .string()
-                .uuid()
+                .guid()
                 .optional()
                 .describe('Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
                 'de list_tasks. Si se omite, se usa `list` por nombre (se crea si no existe).'),
@@ -332,7 +332,7 @@ export function registerTaskTools(server, ctx) {
             'obtener el id de una subtarea. `includeArchived` permite recuperarla si está archivada. ' +
             'Error si el taskId no existe.',
         inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+            taskId: z.string().guid().describe('Id de la tarea (ver list_tasks)'),
             includeArchived: z
                 .boolean()
                 .optional()

@@ -50,7 +50,7 @@ export const mutateBrlStrictOpSchema = z.discriminatedUnion('op', [
         .object({
         op: z.literal('update'),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-        entryId: z.string().uuid(),
+        entryId: z.string().guid(),
         text: z.string().min(1).max(2000),
         kind: z.enum(['note', 'thought']).optional()
     })
@@ -59,7 +59,7 @@ export const mutateBrlStrictOpSchema = z.discriminatedUnion('op', [
         .object({
         op: z.literal('delete'),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-        entryId: z.string().uuid()
+        entryId: z.string().guid()
     })
         .strict()
 ]);
@@ -72,7 +72,7 @@ export const mutateBrlOpSchema = z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
         .describe(BRL_DATE),
-    entryId: z.string().uuid().optional().describe('Id de la entrada (ver list_brl_entries)'),
+    entryId: z.string().guid().optional().describe('Id de la entrada (ver list_brl_entries)'),
     // `text`: sin describe propio — mismo criterio que `mutateTasksOpSchema`,
     // el contrato por-op (obligatorio en add/update, ajeno a delete) ya vive
     // en la description de `ops`.

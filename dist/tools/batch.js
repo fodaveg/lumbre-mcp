@@ -71,7 +71,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
         op: z.literal('add_task'),
         text: z.string().min(1).max(2000),
         list: z.string().max(200).optional(),
-        listId: z.string().uuid().optional(),
+        listId: z.string().guid().optional(),
         section: z.string().max(200).optional(),
         priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -86,21 +86,21 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
     z
         .object({
         op: z.literal('complete'),
-        taskId: z.string().uuid(),
+        taskId: z.string().guid(),
         done: z.boolean().optional()
     })
         .strict(),
     z
         .object({
         op: z.literal('cancel'),
-        taskId: z.string().uuid(),
+        taskId: z.string().guid(),
         cancelled: z.boolean().optional()
     })
         .strict(),
     z
         .object({
         op: z.literal('update'),
-        taskId: z.string().uuid(),
+        taskId: z.string().guid(),
         content: z.string().min(1).max(2000).optional(),
         notes: z.string().max(10000).optional(),
         tags: z.array(tagSchema).optional(),
@@ -111,28 +111,28 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
     z
         .object({
         op: z.literal('reschedule'),
-        taskId: z.string().uuid(),
+        taskId: z.string().guid(),
         date: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
     })
         .strict(),
     z
         .object({
         op: z.literal('set_section'),
-        taskId: z.string().uuid(),
+        taskId: z.string().guid(),
         section: z.string().max(200).nullable()
     })
         .strict(),
     z
         .object({
         op: z.literal('add_subtask'),
-        taskId: z.string().uuid(),
+        taskId: z.string().guid(),
         subtasks: z.array(z.string()).min(1).max(50)
     })
         .strict(),
     z
         .object({
         op: z.literal('complete_subtask'),
-        subtaskId: z.string().uuid(),
+        subtaskId: z.string().guid(),
         done: z.boolean().optional()
     })
         .strict()
@@ -143,13 +143,13 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
     z
         .object({
         op: z.literal('delete'),
-        taskId: z.string().uuid()
+        taskId: z.string().guid()
     })
         .strict(),
     z
         .object({
         op: z.literal('remove_section'),
-        sectionId: z.string().uuid()
+        sectionId: z.string().guid()
     })
         .strict(),
     z
@@ -158,33 +158,33 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
         name: z.string().min(1).max(200),
         color: z.string().max(20).optional(),
         icon: z.string().max(16).optional(),
-        listId: z.string().uuid().optional()
+        listId: z.string().guid().optional()
     })
         .strict(),
     z
         .object({
         op: z.literal('nest_list'),
-        listId: z.string().uuid(),
-        parentId: z.union([z.string().uuid(), z.null()])
+        listId: z.string().guid(),
+        parentId: z.union([z.string().guid(), z.null()])
     })
         .strict(),
     z
         .object({
         op: z.literal('rename_list'),
-        listId: z.string().uuid(),
+        listId: z.string().guid(),
         name: z.string().min(1).max(200)
     })
         .strict(),
     z
         .object({
         op: z.literal('remove_list'),
-        listId: z.string().uuid()
+        listId: z.string().guid()
     })
         .strict(),
     z
         .object({
         op: z.literal('set_list_notes'),
-        listId: z.string().uuid(),
+        listId: z.string().guid(),
         notes: z.string().max(10000).nullable(),
         revive: z.boolean().optional()
     })
@@ -192,8 +192,8 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
     z
         .object({
         op: z.literal('move_to_list'),
-        taskId: z.string().uuid(),
-        listId: z.union([z.string().uuid(), z.null()]).optional(),
+        taskId: z.string().guid(),
+        listId: z.union([z.string().guid(), z.null()]).optional(),
         list: z.string().max(200).optional()
     })
         .strict()
@@ -216,9 +216,9 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 export const mutateTasksOpSchema = z
     .object({
     op: z.string().describe('Operación — las 8 de esta tool, con su contrato, en la description de `ops`'),
-    taskId: z.string().uuid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
-    subtaskId: z.string().uuid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
-    listId: z.string().uuid().optional().describe('Id del proyecto o área destino de un add_task'),
+    taskId: z.string().guid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
+    subtaskId: z.string().guid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
+    listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
     // `text`/`content`/`deadline`: sin describe propio — el nombre del campo
     // ya lo dice todo (texto de la tarea nueva o su nuevo texto, fecha
     // límite) y no hay semántica extra (null, default, autocreación…) que
@@ -256,13 +256,13 @@ export const mutateTasksOpSchema = z
 export const organizeOpSchema = z
     .object({
     op: z.string().describe('Operación — las 8 de esta tool, con su contrato, en la description de `ops`'),
-    taskId: z.string().uuid().optional().describe('Id de la tarea a borrar o mover — ver list_tasks/get_task'),
-    sectionId: z.string().uuid().optional().describe('Id de la sección — ver el campo sectionId de una tarea que viva en ella'),
+    taskId: z.string().guid().optional().describe('Id de la tarea a borrar o mover — ver list_tasks/get_task'),
+    sectionId: z.string().guid().optional().describe('Id de la sección — ver el campo sectionId de una tarea que viva en ella'),
     listId: z
-        .union([z.string().uuid(), z.null()])
+        .union([z.string().guid(), z.null()])
         .optional()
         .describe('Id del proyecto o área: destino, objetivo, o uno que generes tú para encadenar con create_list'),
-    parentId: z.union([z.string().uuid(), z.null()]).optional().describe('Id del proyecto o área padre, o null para desanidar'),
+    parentId: z.union([z.string().guid(), z.null()]).optional().describe('Id del proyecto o área padre, o null para desanidar'),
     // `name`/`icon`: sin describe propio — su semántica (nombre del proyecto
     // o área, emoji del proyecto) ya la dice el nombre del campo.
     name: z.string().min(1).max(200).optional(),

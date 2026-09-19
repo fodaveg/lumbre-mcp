@@ -104,7 +104,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					),
 				listId: z
 					.string()
-					.uuid()
+					.guid()
 					.optional()
 					.describe(
 						'Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
@@ -418,7 +418,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 				'Error si el taskId no existe.',
 
 			inputSchema: {
-				taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
+				taskId: z.string().guid().describe('Id de la tarea (ver list_tasks)'),
 				includeArchived: z
 					.boolean()
 					.optional()

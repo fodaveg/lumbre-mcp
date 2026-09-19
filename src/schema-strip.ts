@@ -11,13 +11,50 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
  */
 
 /**
- * Borra `$schema` de `value`, recursivamente (arrays y objetos anidados) — la
- * conversión zod→JSON Schema del SDK mete
- * `"$schema":"http://json-schema.org/draft-07/schema#"` en el `inputSchema`
- * de CADA tool (una vez por tool, no una vez global): 1.071 chars en las 21
- * tools de hoy, que ni la API de Anthropic ni ningún cliente MCP leen (el
- * `$schema` de JSON Schema es metadata de qué DIALECTO usar para validar el
- * documento; aquí lo fija el propio SDK al generar, no hace falta que viaje).
+ * Límite que zod 4 (`zod/v4-mini`, ver más abajo) mete SOLO por ser
+ * `z.number().int()`, sin que nadie haya pedido un tope — `Number.MAX_SAFE_INTEGER`.
+ * Ninguna tool de este repo pone un `maximum` de negocio que coincida con este
+ * valor exacto (el único entero con tope explícito es `days`, ≤14), así que
+ * borrarlo siempre que aparezca es seguro.
+ */
+const ZOD4_DEFAULT_INT_MAXIMUM = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Borra de `value`, recursivamente (arrays y objetos anidados), tres cosas
+ * que mete la conversión zod→JSON Schema del SDK pero que ni la API de
+ * Anthropic ni ningún cliente MCP necesitan — normaliza el `tools/list` que
+ * sale por el wire para que no dependa de qué versión de zod lo generó (tarea
+ * `chore/zod4-vitest5`, subida de zod 3→4):
+ *
+ * 1. `$schema` — `"http://json-schema.org/draft-07/schema#"` en el
+ *    `inputSchema` de CADA tool (una vez por tool, no una vez global): 1.071
+ *    chars en las 21 tools de julio de 2026. Es metadata de qué DIALECTO usar
+ *    para validar el documento; aquí lo fija el propio SDK al generar, no
+ *    hace falta que viaje.
+ * 2. El `pattern` que acompaña a `format: "uuid"` — zod 4 usa su
+ *    `toJSONSchema` nativo (`zod/v4-mini`, ver `zod-json-schema-compat.js`
+ *    del SDK) para las tools en vez de la `zod-to-json-schema` de zod 3, y
+ *    ese conversor añade el `pattern` completo de la validación aunque el
+ *    campo ya declare `format: "uuid"` (redundante: el `format` ya dice qué
+ *    es). zod 3 nunca lo emitía.
+ * 3. `maximum: Number.MAX_SAFE_INTEGER` en un entero (`ZOD4_DEFAULT_INT_MAXIMUM`,
+ *    arriba) — mismo conversor nativo, mismo motivo: un tope que nadie pidió.
+ *
+ * Además RECONSTRUYE dos cosas que el conversor nativo de zod 4 omite o
+ * representa distinto frente al de zod 3, para que el `inputSchema` publicado
+ * no cambie de forma por la subida de versión:
+ *
+ * 4. `additionalProperties: false` en cualquier objeto (`type: "object"` con
+ *    `properties`) que no lo traiga ya — es el default con el que zod 3
+ *    publicaba un `z.object()` normal (ni `.strict()` ni `.passthrough()`);
+ *    zod 4 simplemente no pone la clave, que en JSON Schema equivale a
+ *    permitir cualquier propiedad extra — un contrato más laxo que el que
+ *    veía el modelo antes de esta subida.
+ * 5. `additionalProperties: {}` (el `.passthrough()` de zod 4: "cualquier
+ *    valor vale") se reescribe a `additionalProperties: true` — MISMO
+ *    significado en JSON Schema, pero es la forma que emitía zod 3 para
+ *    `.passthrough()` (`mutate_tasks`/`organize`).
+ *
  * Muta `value` in-place (no clona) — el llamante ya tiene una copia efímera
  * del mensaje JSON-RPC que va a mandar, no hay nada más que la referencie.
  */
@@ -27,8 +64,30 @@ export function stripSchemaRecursively(value: unknown): void {
 		return;
 	}
 	if (value && typeof value === 'object') {
-		delete (value as Record<string, unknown>).$schema;
-		for (const v of Object.values(value as Record<string, unknown>)) stripSchemaRecursively(v);
+		const obj = value as Record<string, unknown>;
+		delete obj.$schema;
+		if (obj.format === 'uuid') delete obj.pattern;
+		if (obj.maximum === ZOD4_DEFAULT_INT_MAXIMUM) delete obj.maximum;
+		const properties = obj.properties;
+		const hasNonEmptyProperties =
+			properties !== null && typeof properties === 'object' && Object.keys(properties).length > 0;
+		if (obj.type === 'object' && hasNonEmptyProperties) {
+			// Un `inputSchema: {}` SIN campos (`list_lists`/`refresh_sync`) no pasa
+			// por el conversor de zod — el SDK lo sirve directo desde su propia
+			// constante `EMPTY_OBJECT_JSON_SCHEMA`, IGUAL en zod 3 y zod 4, y esa
+			// constante nunca trajo `additionalProperties`; solo se reconstruye
+			// aquí para un objeto con campos de verdad.
+			if (!('additionalProperties' in obj)) {
+				obj.additionalProperties = false;
+			} else if (
+				typeof obj.additionalProperties === 'object' &&
+				obj.additionalProperties !== null &&
+				Object.keys(obj.additionalProperties as Record<string, unknown>).length === 0
+			) {
+				obj.additionalProperties = true;
+			}
+		}
+		for (const v of Object.values(obj)) stripSchemaRecursively(v);
 	}
 }
 

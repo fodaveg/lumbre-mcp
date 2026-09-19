@@ -69,7 +69,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 			inputSchema: {
 				attachment_id: z
 					.string()
-					.uuid()
+					.guid()
 					.describe('Id del adjunto (ver el campo `attachments` de list_tasks)')
 			}
 		},
@@ -108,7 +108,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 				'1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
 				'sacar un nombre). Ver README para el detalle de mimes/límites y el conector local dedicado.',
 			inputSchema: {
-				taskId: z.string().uuid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
+				taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
 				file_path: z
 					.string()
 					.min(1)
@@ -202,12 +202,12 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 			inputSchema: {
 				attachment_id: z
 					.string()
-					.uuid()
+					.guid()
 					.describe('Id del adjunto que se va a eliminar (ver get_task/list_tasks)')
 			},
 			outputSchema: {
 				deleted: z.literal(true),
-				attachment_id: z.string().uuid()
+				attachment_id: z.string().guid()
 			}
 		},
 		async (input) => {

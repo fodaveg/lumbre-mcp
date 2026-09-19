@@ -16,7 +16,7 @@ function isValidObsidianDeepLink(raw) {
     }
 }
 const listNoteTargetInputSchema = {
-    listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)'),
+    listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)'),
     url: z
         .string()
         .trim()
@@ -50,7 +50,7 @@ export function registerListTools(server, ctx) {
         description: 'Lee los vínculos configurados para UN proyecto o área por su listId (incluye URL y metadata; puede ser ' +
             'Obsidian obsidian://). No abre ni lee el contenido de los destinos. Respuesta vacía si no tiene vínculos.',
         inputSchema: {
-            listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
+            listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
         }
     }, async (input) => {
         try {
@@ -67,7 +67,7 @@ export function registerListTools(server, ctx) {
             'ÍNTEGRA y verbatim — útil antes de reescribirla con mutate_tasks({op:"set_list_notes"}), que la ' +
             'reemplaza entera. Error si el listId no existe.',
         inputSchema: {
-            listId: z.string().uuid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
+            listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
         }
     }, async (input) => {
         try {
