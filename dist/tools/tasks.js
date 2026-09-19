@@ -155,7 +155,7 @@ export function registerTaskTools(server, ctx) {
                 '"✎N ↻fecha" con su tamaño y la fecha de la última edición — GARANTÍA: nunca un ' +
                 'recorte a medias. "none": sin notas. "preview": recorte legado a ~240 chars, ' +
                 'colapsado a una línea. "full": todas íntegras y verbatim para TODO el lote ' +
-                '(equivale a fullNotes:true) — útil si vas a reeditar con update_task (que ' +
+                '(equivale a fullNotes:true) — útil si vas a reeditar con la op update (que ' +
                 'REEMPLAZA la nota entera). Para una sola tarea concreta, mejor get_task. Se ignora ' +
                 'si mandas `notesSince`.'),
             fullNotes: z

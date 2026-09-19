@@ -402,7 +402,7 @@ de lote, que ya las cubrían entero:
   `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
   `set_list_notes`, `move_to_list`.
 
-Por qué se partió así: baja el coste fijo de `tools/list` (de 26.757 a 21.345
+Por qué se partió así: baja el coste fijo de `tools/list` (de 26.756 a 21.346
 caracteres, -20%) y, sobre todo, deja la frontera de "puede borrar / no puede
 borrar" en el SCHEMA. A un subagente al que solo se le da `mutate_tasks` no le
 hace falta una regla en prosa que le prohíba borrar: la op `delete` no existe

@@ -33,7 +33,7 @@ const scope = 'lumbre:mcp';
 
 // Techo de bytes de `tools/list` para las 16 tools reales — MISMA fuente que
 // `src/index.test.ts` ("techo de bytes de las 16 tools", `CHAR_CEILING`):
-// medido 21.345 tras retirar las nueve tools sueltas de mutación individual y
+// medido 21.346 tras retirar las nueve tools sueltas de mutación individual y
 // partir el lote en `mutate_tasks`/`organize` (2026-09-19, tarea 6f62c877);
 // antes, 26.757 con 24 tools, 27.110 al añadir `get_list` (2026-09-16, tarea
 // 827a7878), 26.489 con

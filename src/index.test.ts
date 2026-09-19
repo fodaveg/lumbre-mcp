@@ -265,7 +265,7 @@ describe('tools/list — superficie completa', () => {
 		// `mutate_tasks` (8 ops sobre una tarea) y `organize` (8 ops de
 		// borrado/reorganización). `mutate_tasks` baja de 4.873 a 3.518 porque
 		// su schema EXPUESTO ya solo declara los campos de SUS ops, y
-		// `organize` cuesta 2.509 nuevos: 16 tools, 21.345 caracteres = -5.411
+		// `organize` cuesta 2.509 nuevos: 16 tools, 21.346 caracteres = -5.410
 		// sobre los 26.756 medidos por este mismo camino antes del cambio
 		// (-20,2%). Techo = medido + ~5% de holgura, no el valor exacto, para
 		// no tener que tocar este test por variaciones triviales de formato
