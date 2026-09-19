@@ -1,5 +1,13 @@
 # Fase 2 — mutar tareas existentes
 
+> **Aviso de vigencia (2026-09-19, tarea 6f62c877)**: este documento nombra
+> las TOOLS sueltas de entonces (`complete_task`, `update_task`,
+> `reschedule_task`, `delete_task`, `set_section`, `remove_section`,
+> `add_subtask`, `complete_subtask`, `cancel_task`). Ya no existen: son ops de
+> `mutate_tasks` (las que operan sobre una tarea) y de `organize` (`delete` y
+> `remove_section`). El diseño de la capa de mutaciones no cambió — solo quién
+> las expone. Contrato vivo, tool por tool y op por op: `README.md`.
+
 > **YA IMPLEMENTADA** (rama `feat/mcp-fase2`): `inbound_mutations` (schema +
 > migración `0023`), `src/lib/server/repos/mutations.ts`,
 > `POST /api/mutations` + `GET /api/inbound-mutations`, drenaje en

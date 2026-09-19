@@ -28,6 +28,12 @@ codex mcp login lumbre
 En claude.ai web o móvil, añade un conector personalizado con esa misma URL. No
 añadas un bearer ni un token en el path.
 
+Los clientes cachean `tools/list` al conectar: cuando cambia la superficie del
+MCP (la última vez, el 2026-09-19, al retirar las nueve tools sueltas de
+mutación y partir el lote en `mutate_tasks`/`organize`), una sesión ya abierta
+de claude.ai o de Claude Code sigue viendo las tools viejas hasta que
+reconectes el conector o abras una sesión nueva.
+
 ## Instalar la skill opcional
 
 La skill pública multimodo vive en `skills/lumbre/`. No es necesaria para usar
@@ -199,7 +205,7 @@ presentar esa hipótesis como un fallo observado.
   `'preview'` es el recorte legado a ~240 chars colapsado a una línea, `'full'`
   las deja íntegras y sin colapsar saltos de línea para TODO el lote
   (`fullNotes: true` sigue siendo su alias) — útil si vas a reeditar una nota
-  con `update_task` (que la REEMPLAZA entera) y el lote ya está acotado. Para
+  con `mutate_tasks({op:"update"})` (que la REEMPLAZA entera) y el lote ya está acotado. Para
   una sola tarea concreta, mejor `get_task` (también íntegra siempre, y
   también registra la huella). `notesSince` (`"YYYY-MM-DD"` o ISO completo)
   es una consulta de precisión APARTE, SIN estado y con exclusividad de
@@ -274,7 +280,7 @@ presentar esa hipótesis como un fallo observado.
   archivada. Si
   tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/
   pendiente — es la ÚNICA forma de obtener el id de una subtarea (`list_tasks`
-  nunca las lista), necesario para `complete_subtask`. Da error si el `taskId`
+  nunca las lista), necesario para la op `complete_subtask`. Da error si el `taskId`
   no existe entre las tareas visibles del usuario para ese alcance.
 - `read_attachment({ attachment_id })` — descarga los BYTES de un adjunto de
   una tarea (vía `GET /api/attachments/:id`, sácalo del campo `attachments`
@@ -383,65 +389,98 @@ viejo — y una referencia rota era **indistinguible** de una viva. Desde
 
 ## Qué hace (Fase 2 — mutar una tarea existente)
 
-Igual de asíncrono/eventual que `add_task`: cada tool encola una mutación
-(`POST /api/mutations`) que se aplica la próxima vez que un dispositivo tuyo
-sincronice; **ninguna da confirmación inmediata** de que se aplicó de verdad
-(usa `list_tasks` después para comprobarlo). Todas necesitan el `taskId` de la
-tarea — resuélvelo antes con `list_tasks`. Diseño completo en `PHASE2.md`
-(ya implementado; el documento se conserva como referencia del porqué).
+**Desde el 2026-09-19 no hay una tool por operación**: las nueve sueltas
+(`complete_task`, `cancel_task`, `update_task`, `reschedule_task`,
+`delete_task`, `set_section`, `remove_section`, `add_subtask`,
+`complete_subtask`) se retiraron y su contenido son **ops** de las dos tools
+de lote, que ya las cubrían entero:
+
+- **`mutate_tasks`** — todo lo que opera sobre UNA TAREA: `add_task`,
+  `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`,
+  `complete_subtask`.
+- **`organize`** — lo destructivo y la reorganización: `delete`,
+  `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
+  `set_list_notes`, `move_to_list`.
+
+Por qué se partió así: baja el coste fijo de `tools/list` (de 26.757 a 21.345
+caracteres, -20%) y, sobre todo, deja la frontera de "puede borrar / no puede
+borrar" en el SCHEMA. A un subagente al que solo se le da `mutate_tasks` no le
+hace falta una regla en prosa que le prohíba borrar: la op `delete` no existe
+en su tool. Una op mandada a la tool equivocada se rechaza por posición con el
+puntero a la suya («la op "delete" no existe en mutate_tasks; está en
+organize»), sin tumbar el resto del lote.
+
+Igual de asíncrono/eventual que `add_task`: cada op encola una mutación que se
+aplica la próxima vez que un dispositivo tuyo sincronice; **ninguna da
+confirmación inmediata** de que se aplicó de verdad (usa `list_tasks` después
+para comprobarlo). Las que mutan una tarea necesitan su `taskId` — resuélvelo
+antes con `list_tasks`. Diseño completo en `PHASE2.md` (ya implementado; el
+documento se conserva como referencia del porqué, y nombra las tools sueltas
+de entonces).
 
 Todas VALIDAN antes de encolar que el `taskId` EXISTE entre las tareas
-visibles del usuario (una llamada extra a `GET /api/tasks`) y dan error si no
-— la EXISTENCIA sí se puede comprobar en el acto, a diferencia de si la
-mutación llegó a APLICARSE de verdad, que sigue siendo asíncrono. Antes de
-este chequeo, un `taskId` mal transcrito se encolaba igual y la mutación se
-perdía en silencio al drenar (`/api/mutations` no valida pertenencia
-server-side, ver ese endpoint).
+visibles del usuario (una llamada extra a `GET /api/tasks`) y lo informan como
+fallo de ESA op si no — la EXISTENCIA sí se puede comprobar en el acto, a
+diferencia de si la mutación llegó a APLICARSE de verdad, que sigue siendo
+asíncrono. Antes de este chequeo, un `taskId` mal transcrito se encolaba igual
+y la mutación se perdía en silencio al drenar (`/api/mutations` no valida
+pertenencia server-side, ver ese endpoint).
 
-- `complete_task({ taskId, done? })` — marca hecha (`done` default `true`) o
-  la desmarca (`done: false`).
-- `cancel_task({ taskId, cancelled? })` — cancela la tarea (`cancelled`
-  default `true`): equivalente a completarla, pero marcada como "no se hizo
-  ni se hará" (distinto de `complete_task`). `cancelled: false` la restaura.
-- `update_task({ taskId, content?, notes?, tags?, priority?, time? })` — edita
-  texto, notas, tags propios, prioridad u hora; solo toca los campos que envíes.
-  `tags: []` quita todos los tags propios; omitirlo los conserva. `priority` es
-  `'p1'..'p4'` (`p4` = quitar la prioridad). **Acepta también el id de una
-  SUBTAREA**: los cinco campos son accidentales PERMITIDOS en una subtarea
-  (`docs/18-que-es-una-tarea.md` §2.5 del repo principal).
-- `reschedule_task({ taskId, date })` — mueve la tarea a otro día
-  (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con `date: null`.
-  **Acepta también el id de una SUBTAREA**, con fecha o con `date: null`:
-  `date` es un accidental permitido en subtarea (§2.5). Ojo al efecto, que no
-  es el mismo que en una tarea de primer nivel: una subtarea con `date: null`
-  se queda SIN fecha en la checklist de su padre, no cae a la Bandeja. Para
-  mandar a la Bandeja lo que la contiene, opera sobre la tarea PADRE.
-- `delete_task({ taskId })` — borra (soft-delete) la tarea. **Acción
-  delicada**: sin confirmación inmediata ni deshacer desde la tool; confírmalo
-  con el usuario antes de llamarla.
-- `add_subtask({ taskId, subtasks })` — añade una o más subtareas (checklist,
-  #17) a `taskId`. Anidamiento de UN nivel: si `taskId` ya es una subtarea, se
-  descarta en silencio (no hay forma de confirmarlo desde la tool; comprueba
-  con `list_tasks`). Para crear una tarea CON subtareas de una vez, usa
-  `add_task` con `subtasks` en el payload.
-- `complete_subtask({ subtaskId, done? })` — marca hecha (`done` default
-  `true`) o desmarca (`done: false`) una SUBTAREA existente, por su id (ver
-  `get_task` de su tarea padre). Mismo mecanismo que `complete_task`: no
-  cascada nada sobre la tarea padre.
-- `remove_section({ sectionId })` — borra (tombstone) una sección/heading
-  dentro de un proyecto o área. Sus tareas NUNCA se borran:
-  solo pierden la sección (quedan sueltas, "sin sección", dentro de la MISMA
-  residencia). Sin `list_sections` todavía: resuelve el `sectionId` desde el campo
-  `sectionId` de una tarea que ya viva ahí (`list_tasks`/`get_task`).
+Contrato de cada op (la forma exacta, campo a campo, está en «Ejecutar varias
+operaciones a la vez» más abajo):
+
+- `{ op: "complete", taskId, done? }` (`mutate_tasks`) — marca hecha (`done`
+  default `true`) o la desmarca (`done: false`).
+- `{ op: "cancel", taskId, cancelled? }` (`mutate_tasks`) — cancela la tarea
+  (`cancelled` default `true`): equivalente a completarla, pero marcada como
+  "no se hizo ni se hará" (distinto de `complete`). `cancelled: false` la
+  restaura.
+- `{ op: "update", taskId, content?, notes?, tags?, priority?, time? }`
+  (`mutate_tasks`) — edita texto, notas, tags propios, prioridad u hora; solo
+  toca los campos que envíes. `tags: []` quita todos los tags propios;
+  omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
+  prioridad). **Acepta también el id de una SUBTAREA**: los cinco campos son
+  accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
+  del repo principal).
+- `{ op: "reschedule", taskId, date }` (`mutate_tasks`) — mueve la tarea a
+  otro día (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con
+  `date: null`. **Acepta también el id de una SUBTAREA**, con fecha o con
+  `date: null`: `date` es un accidental permitido en subtarea (§2.5). Ojo al
+  efecto, que no es el mismo que en una tarea de primer nivel: una subtarea
+  con `date: null` se queda SIN fecha en la checklist de su padre, no cae a la
+  Bandeja. Para mandar a la Bandeja lo que la contiene, opera sobre la tarea
+  PADRE.
+- `{ op: "set_section", taskId, section }` (`mutate_tasks`) — mueve la tarea a
+  una sección dentro de SU proyecto o área (se crea si no existe), o la saca
+  con `section: null`. NO aplica a subtareas.
+- `{ op: "add_subtask", taskId, subtasks }` (`mutate_tasks`) — añade una o más
+  subtareas (checklist, #17) a `taskId`. Anidamiento de UN nivel: si `taskId`
+  ya es una subtarea, se descarta en silencio (no hay forma de confirmarlo
+  desde la tool; comprueba con `list_tasks`). Para crear una tarea CON
+  subtareas de una vez, usa `add_task` con `subtasks` en el payload.
+- `{ op: "complete_subtask", subtaskId, done? }` (`mutate_tasks`) — marca
+  hecha (`done` default `true`) o desmarca (`done: false`) una SUBTAREA
+  existente, por su id (ver `get_task` de su tarea padre). Mismo mecanismo que
+  `complete`: no cascada nada sobre la tarea padre.
+- `{ op: "delete", taskId }` (**`organize`**) — borra (soft-delete) la tarea.
+  **Acción delicada**: sin confirmación inmediata ni deshacer desde la tool;
+  confírmalo con el usuario antes de llamarla.
+- `{ op: "remove_section", sectionId }` (**`organize`**) — borra (tombstone)
+  una sección/heading dentro de un proyecto o área. Sus tareas NUNCA se
+  borran: solo pierden la sección (quedan sueltas, "sin sección", dentro de la
+  MISMA residencia). Sin `list_sections` todavía: resuelve el `sectionId`
+  desde el campo `sectionId` de una tarea que ya viva ahí
+  (`list_tasks`/`get_task`).
 
 ### Gestión de proyectos y áreas (paridad UI↔MCP)
 
 Sin tool suelta desde el 2026-08-27 (podadas `create_list`/`nest_list`/
 `rename_list`/`remove_list`/`move_to_list`: cero o casi cero uso real medido
-—19 llamadas/mes en total, 12 de ellas `move_to_list`— y `mutate_tasks` ya
-las cubría entero, ver "Ejecutar varias operaciones a la vez" más abajo).
-Mueve una tarea a otro proyecto o área, y crea/anida/renombra/borra contenedores con
-`mutate_tasks({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
+—19 llamadas/mes en total, 12 de ellas `move_to_list`— y el lote ya
+las cubría entero). Desde el 2026-09-19 viven en **`organize`**, la tool de
+reorganización y borrado. Mueve una tarea a otro proyecto o área, y
+crea/anida/renombra/borra contenedores con
+`organize({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
 "rename_list"|"remove_list"|"set_list_notes", ... }] })` — un solo elemento en `ops` para una
 operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
 
@@ -469,7 +508,7 @@ operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
   proyecto o área. `notes: null` o `""` la borra; `revive: true` explícito restaura una
   nota borrada previamente. Requiere un servidor compatible con el
   `kind: "setListNotes"` (Lumbre desde `8a46be41`). Un servidor anterior
-  rechazará la operación y `mutate_tasks` la informará como fallo parcial.
+  rechazará la operación y `organize` la informará como fallo parcial.
   El payload que recibe es
   `{ type: "mutate", taskId: listId, kind: "setListNotes", payload: { notes,
   revive? } }`.
@@ -512,63 +551,74 @@ Fase 2.
   `list_brl_entries` de la que sale el id. Éxito PARCIAL igual que
   `mutate_tasks`: una op inválida no bloquea las demás.
 
-### Ejecutar varias operaciones a la vez (`mutate_tasks`)
+### Ejecutar varias operaciones a la vez (`mutate_tasks` y `organize`)
 
-Vía PREFERENTE en cuanto haya más de una operación seguida (crear y/o
-mutar): resuelve TODAS las existencias de tarea del lote en una sola
-comprobación y las encola en una sola petición (`ops`, máx. 200), en vez de
-una tool call por operación. La mayoría de las tools individuales de arriba
-SIGUEN existiendo para una operación suelta — excepto las 6 ops de proyecto/área
-(`create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list`), sin
-tool suelta desde el 2026-08-27, y la nueva `set_list_notes`, disponible solo
-en `mutate_tasks`. Éxito
+Las DOS tools de lote comparten motor, formato y tope: `ops` (máx. 200),
+resuelven TODAS las existencias de tarea del lote en una sola comprobación y
+las encolan en una sola petición, en vez de una tool call por operación. Desde
+el 2026-09-19 **no hay tools individuales de mutación**: `mutate_tasks` es la
+vía ÚNICA para mutar una tarea (con un solo elemento en `ops` para una
+operación suelta) y `organize` lo es para borrar y reorganizar. Éxito
 PARCIAL: una op inválida (`taskId` inexistente, subtarea donde no aplica,
-forma equivocada para esa `op`) no impide las demás — el resultado detalla,
-por posición 0-indexada en `ops`, qué falló y por qué, y el `id` de cada una
-que sí se encoló (el de un `create_list` es su `listId`; el de un `add_task`,
-su `taskId` nuevo).
+forma equivocada para esa `op`, u op de la OTRA tool) no impide las demás — el
+resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y el
+`id` de cada una que sí se encoló (el de un `create_list` es su `listId`; el
+de un `add_task`, su `taskId` nuevo).
 
-Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`, con el mismo
-significado que la tool individual equivalente cuando existe: `op:"add_task"`
-= `add_task`, `op:"complete"` = `complete_task`, `op:"cancel"` =
-`cancel_task`, `op:"update"` = `update_task`, `op:"reschedule"` =
-`reschedule_task`, `op:"delete"` = `delete_task`, `op:"set_section"` =
-`set_section`, `op:"add_subtask"` = `add_subtask`, `op:"complete_subtask"` =
-`complete_subtask`, `op:"remove_section"` = `remove_section`. Las 6 restantes
-(`op:"move_to_list"`, `op:"create_list"`, `op:"nest_list"`,
-`op:"rename_list"`, `op:"remove_list"`, `op:"set_list_notes"`) gestionan proyectos y áreas
-(paridad UI↔MCP) y ya NO tienen tool suelta equivalente — ver esa sección más
-arriba para el detalle campo a campo de cada una. El schema que expone la
-tool es deliberadamente laxo (los campos que usan las 16 ops, todos
-opcionales); el contrato real por-op (`*` = obligatorio) es:
+Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
+16 ops entre las dos tools:
+
+| tool | ops |
+| --- | --- |
+| `mutate_tasks` (una tarea) | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask` |
+| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list` |
+
+`move_to_list` está en `organize`, y no con las ops de tarea, porque se
+encadena con `create_list` por el `listId` generado en el mismo lote (ver
+"Encadenar dentro del MISMO lote"). Las seis ops de proyecto y área no tienen
+tool suelta desde el 2026-08-27 — el detalle campo a campo de cada una está en
+"Gestión de proyectos y áreas", más arriba.
+
+El schema que exponen las tools es deliberadamente laxo (los campos que usan
+SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
+# mutate_tasks
 add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
 update: taskId*, ≥1 de [content, notes, tags, priority, time]
 reschedule: taskId*, date*
-delete: taskId*
 set_section: taskId*, section*
-move_to_list: taskId*, uno de [listId, list]
 add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
+
+# organize
+delete: taskId*
 remove_section: sectionId*
 create_list: name* [color, icon, listId]
 nest_list: listId*, parentId*
 rename_list: listId*, name*
 remove_list: listId*
 set_list_notes: listId*, notes* [revive]
+move_to_list: taskId*, uno de [listId, list]
 ```
 
 Un elemento que no encaja en la forma de SU `op` (campo obligatorio ausente,
 o un campo válido en general pero ajeno a esa op — p. ej.
-`{ op: "complete", date: "2026-01-01" }`) se rechaza igual que antes, solo
-que ahora entra en el mismo informe de éxito parcial que un `taskId`
-inexistente, en vez de tumbar la llamada entera.
+`{ op: "complete", date: "2026-01-01" }`) se rechaza dentro del informe de
+éxito parcial, junto a un `taskId` inexistente, en vez de tumbar la llamada
+entera.
+
+**Una op mandada a la tool equivocada** entra por ese mismo camino, con el
+puntero a la suya: `mutate_tasks({ ops: [{ op: "delete", taskId }] })`
+contesta «la op "delete" no existe en mutate_tasks; está en organize — mándala
+en una llamada a organize», y el resto del lote viaja igual. Es la frontera
+que hace MECÁNICA la prohibición de borrar en un subagente al que solo se le
+da `mutate_tasks` (ver `skills/lumbre/assets/subagents/contracts.json`).
 
 **Qué ops aceptan el id de una SUBTAREA** (mismo criterio, MISMOS valores,
-que las tools individuales). Quién lo decide: `docs/18-que-es-una-tarea.md`
+que tenían las tools individuales). Quién lo decide: `docs/18-que-es-una-tarea.md`
 §2.5 del repo principal, no este conector — una op vale sobre una subtarea si
 los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 
@@ -587,32 +637,38 @@ entra en el mismo informe de éxito PARCIAL que un `taskId` inexistente,
 conservando el índice original, y el resto del lote viaja igual.
 
 **Encadenar dentro del MISMO lote**: la única op que crea algo cuyo id
-puedas necesitar referenciar EN OTRA op del mismo `mutate_tasks` es
-`create_list` — dale tú mismo un `listId` (uuid v4) al crearla y úsalo en el
-`move_to_list`/`nest_list` que la targetee, en vez de esperar a la respuesta
-(el id de un `add_task` lo asigna el servidor y solo se conoce DESPUÉS, no se
-puede referenciar dentro de la misma llamada). Un `add_task` con `listId` del
-`create_list` del mismo lote TAMBIÉN funciona (fix del incidente 071553, 3 sep
-2026): el servidor materializa TODAS las altas antes que TODAS las mutaciones,
-sin mirar el orden de `ops` — una garantía DELIBERADA, en la dirección
-contraria, para que crear una tarea y mutarla en el mismo lote funcione. Esa
-misma garantía deja sin cubrir justo la pareja opuesta, `create_list` seguido
-de un alta que depende de él: el proyecto aún no existe cuando se materializan las
-altas. El cliente MCP lo detecta y manda las mutaciones (incluido el
-`create_list`) en una petición y las altas dependientes en otra — una petición
-de más SOLO en ese caso, transparente para quien escribe `ops`; la pareja
-alta→mutación (crear una tarea y tocarla en el mismo lote) ya era inexpresable
-antes de este fix y sigue siéndolo: un `add_task` no lleva id de cliente (su id
-lo asigna el servidor y solo se conoce en la respuesta) y las 9 ops que
-targetean una tarea comprueban su existencia contra el servidor ANTES de
-mandar el batch, así que una mutación sobre una tarea recién creada en el
-mismo lote ya se descartaba. Si el `create_list` falla, las altas que
-dependían de él no se mandan y aparecen en el informe como un fallo más,
-citando la op que lo causó. El encadenado es SIEMPRE por `listId` (el uuid
-que tú le diste al `create_list`), nunca por `list` (nombre): la detección
-de la dependencia solo mira `listId` a propósito, así que un `add_task` con
-`list: "Trabajo"` apuntando al NOMBRE de un proyecto que se crea en el mismo
-lote no encadena — usa el `listId`.
+puedas necesitar referenciar EN OTRA op del mismo lote es `create_list` —
+dale tú mismo un `listId` (uuid v4) al crearla y úsalo en el
+`move_to_list`/`nest_list`/`set_list_notes` que la targetee, en vez de esperar
+a la respuesta. Las cuatro son ops de `organize`, así que ese encadenado sigue
+cabiendo en UNA sola llamada. El id de un `add_task` no se puede encadenar en
+ninguna forma: lo asigna el servidor y solo se conoce DESPUÉS.
+
+**Un lote MIXTO ya no cabe en una llamada** (cambió el 2026-09-19): antes se
+podía mandar `create_list` + `add_task` con ese `listId` prometido dentro del
+mismo `mutate_tasks`, y el cliente partía la petición en dos fases para que el
+proyecto existiera antes de las altas (fix del incidente 071553, 3 sep 2026:
+el servidor materializa TODAS las altas antes que TODAS las mutaciones, sin
+mirar el orden de `ops`). Ahora `create_list` vive en `organize` y `add_task`
+en `mutate_tasks`, así que hay dos caminos, los dos de una sola llamada cada
+uno:
+
+1. `organize({ ops: [{ op: "create_list", name, listId }] })` y después
+   `mutate_tasks({ ops: [{ op: "add_task", text, listId }, …] })`.
+2. O directamente `add_task` con `list` por NOMBRE: si el proyecto no existe,
+   se crea al materializar el alta.
+
+La pareja alta→mutación (crear una tarea y tocarla en el mismo lote) sigue
+siendo inexpresable, como siempre: un `add_task` no lleva id de cliente y las
+9 ops que targetean una tarea comprueban su existencia contra el servidor
+ANTES de mandar el batch. El encadenado dentro de `organize` es SIEMPRE por
+`listId` (el uuid que tú le diste al `create_list`), nunca por `list`
+(nombre): la detección de la dependencia solo mira `listId` a propósito.
+
+**Sesiones abiertas**: claude.ai y Claude Code cachean `tools/list` al
+conectar, así que una sesión que ya estuviera abierta seguirá viendo las tools
+viejas — reconecta el conector (o abre una sesión nueva) para ver
+`organize` y el `mutate_tasks` acotado.
 
 ## Compilar
 
@@ -849,10 +905,10 @@ stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
 registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
-de las 24 tools de siempre — así no duplicas la superficie de `tools/list` en
-el contexto de cada sesión (pesa ~27 KB de JSON; dos copias son el doble, y el
+de las 16 tools de siempre — así no duplicas la superficie de `tools/list` en
+el contexto de cada sesión (pesa ~21 KB de JSON; dos copias son el doble, y el
 modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 24, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 16, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js
