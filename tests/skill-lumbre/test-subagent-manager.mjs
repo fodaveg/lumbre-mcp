@@ -101,6 +101,8 @@ assert.match(taggerPrompt, /Conserva byte a byte el resto del contenido/i);
 assert.match(taggerPrompt, /éxito parcial/i);
 assert.match(taggerPrompt, /refresh_sync una sola vez[\s\S]*relee una segunda vez/i);
 assert.match(taggerPrompt, /mutate_tasks solo puede contener operaciones update con taskId y content/i);
+assert.ok(!taggerContract.allowedOperations.includes("organize"));
+assert.ok(!taggerContract.allowedOperations.includes("update_task"));
 assert.match(taggerPrompt, /@not-done es una señal humana/i);
 
 const readerContract = definitions.contracts.agents.find((agent) => agent.name === "lumbre-reader");
@@ -119,24 +121,21 @@ assert.match(renderInstructions(definitions.contracts, readerContract), /estrict
 const dailyContract = definitions.contracts.agents.find(
   (agent) => agent.name === "lumbre-daily-operator",
 );
-for (const forbiddenOperation of [
-  "delete_task",
-  "remove_section",
-  "move_to_list",
-  "create_list",
-  "rename_list",
-  "remove_list",
-]) {
+// `organize` es la tool que borra y reorganiza (lumbre-mcp, 2026-09-19): la
+// frontera del daily operator ya no es una regla en prosa, es que esa tool no
+// está en su allowlist y sus ops no existen en `mutate_tasks`. Las nueve tools
+// sueltas de antes (`delete_task`, `remove_section`…) ya no existen en el MCP.
+for (const forbiddenOperation of ["organize", "delete_task", "remove_section", "move_to_list"]) {
   assert.ok(
     !dailyContract.allowedOperations.includes(forbiddenOperation),
     `daily operator unexpectedly allows ${forbiddenOperation}`,
   );
 }
 const dailyPrompt = renderInstructions(definitions.contracts, dailyContract);
-assert.ok(!dailyContract.allowedOperations.includes("mutate_tasks"));
+assert.ok(dailyContract.allowedOperations.includes("mutate_tasks"));
 assert.match(dailyPrompt, /Borrar tareas, proyectos, áreas, secciones, adjuntos/i);
 assert.match(dailyPrompt, /mover tareas entre ellos; triar o reorganizar backlogs/i);
-assert.match(dailyPrompt, /No uses mutate_tasks/i);
+assert.match(dailyPrompt, /esas ops no existen en mutate_tasks, viven en organize/i);
 assert.match(dailyPrompt, /refresh_sync una vez y relee una segunda vez/i);
 assert.match(dailyPrompt, /@acked, @wip, @done o @not-done/i);
 

@@ -24,18 +24,18 @@
         "refresh_sync",
         "get_task",
         "list_tasks",
-        "update_task",
         "mutate_tasks"
       ],
       "operationLimits": [
-        "update_task solo puede enviar taskId y content.",
+        "mutate_tasks es la única vía de escritura: no existe una tool suelta por operación.",
         "mutate_tasks solo puede contener operaciones update con taskId y content; agrupa dos o más tareas en una única llamada.",
         "Solo puede establecer @acked, @wip o @done. @not-done es una señal humana: puede retirarla al reabrir, pero nunca crearla.",
         "No completa ni cancela el checkbox nativo de la tarea."
       ],
       "forbiddenCapabilities": [
         "Crear o duplicar tareas.",
-        "Borrar, completar, cancelar, fechar, priorizar, mover o reorganizar tareas, proyectos, áreas o secciones.",
+        "Borrar o reorganizar cualquier cosa: esas operaciones viven en organize, que no forma parte de tus tools, y sus ops no existen en mutate_tasks.",
+        "Completar, cancelar, fechar, priorizar o mover tareas, proyectos, áreas o secciones.",
         "Modificar notes, adjuntos, subtareas o cualquier campo distinto de content.",
         "Tocar código, repositorios, documentación u otros gestores."
       ],
@@ -43,7 +43,7 @@
         "Resuelve cada id con get_task antes de escribir. Si el usuario dio texto en lugar de ids, localiza candidatos con list_tasks y confirma el elegido con get_task.",
         "Parte exclusivamente del content íntegro devuelto por get_task. No copies el texto de display de list_tasks ni intentes limpiarlo con una regex aproximada.",
         "Retira @acked, @wip, @done y, solo al reabrir feedback humano, @not-done; añade al final un único tag objetivo en minúsculas. Conserva byte a byte el resto del contenido y los tags ortogonales.",
-        "Para una tarea usa update_task. Para dos o más usa una sola llamada mutate_tasks con operaciones update que solo contengan taskId y content.",
+        "Escribe siempre con mutate_tasks, una o varias tareas: operaciones update que solo contengan taskId y content, agrupadas en una única llamada.",
         "Inspecciona cada resultado del lote. Verifica cada tarea por get_task; si queda antigua, haz un refresh_sync compartido y una última relectura de las afectadas.",
         "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; conserva @wip y explica el motivo."
       ]
@@ -92,22 +92,18 @@
         "list_tasks",
         "get_task",
         "add_task",
-        "update_task",
-        "complete_task",
-        "cancel_task",
-        "reschedule_task",
-        "add_subtask",
-        "complete_subtask",
+        "mutate_tasks",
         "get_list"
       ],
       "operationLimits": [
+        "mutate_tasks es tu única vía de mutación y solo admite operaciones sobre una tarea: add_task, complete, cancel, update, reschedule, set_section, add_subtask y complete_subtask.",
         "Antes de editar una tarea existente, recupérala con get_task; en updates parciales envía solo los campos solicitados.",
         "No inventes fechas, prioridades, recurrencias, proyecto, área, sección ni contenido. Si falta una decisión material, devuelve la duda al coordinador.",
         "Crear tareas nuevas no activa tags de desarrollo salvo que el coordinador haya elegido expresamente ese flujo, en cuyo caso debe usar lumbre-tagger por separado.",
         "get_list es solo lectura: sirve para leer la nota o el estado de un proyecto o área antes de crear o fechar una tarea; su nota no se reescribe desde este agente."
       ],
       "forbiddenCapabilities": [
-        "Borrar tareas, proyectos, áreas, secciones, adjuntos o entradas de registro.",
+        "Borrar tareas, proyectos, áreas, secciones, adjuntos o entradas de registro: ninguna de esas ops existe en las tools que tienes.",
         "Crear, renombrar, anidar, mover o eliminar proyectos, áreas y secciones; mover tareas entre ellos; triar o reorganizar backlogs.",
         "Añadir, retirar o modificar @acked, @wip, @done o @not-done.",
         "Operar releases, repositorios, documentación o herramientas externas."
@@ -115,7 +111,7 @@
       "workflow": [
         "Resuelve ids existentes con get_task. Si el encargo usa texto, lista de forma acotada, desambigua y confirma cada id con get_task antes de escribir.",
         "Traduce la petición a propiedades nativas: fecha, prioridad, recurrencia, checklist, completar o cancelar. No conviertas estados cotidianos en tags de desarrollo.",
-        "Usa solo las tools individuales permitidas. No uses mutate_tasks: su superficie incluye operaciones de borrado y reorganización que rebasan este agente.",
+        "Escribe siempre con mutate_tasks, agrupando el lote en una sola llamada. No puedes borrar ni reorganizar: esas ops no existen en mutate_tasks, viven en organize, que no está entre tus tools; si mandas una, la llamada te la devuelve rechazada por posición.",
         "Verifica solo los campos solicitados con get_task; ante estado antiguo, ejecuta refresh_sync una vez y relee una segunda vez."
       ]
     }
