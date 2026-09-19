@@ -110,6 +110,9 @@ assert.deepEqual(readerContract.allowedOperations, [
   "list_tasks",
   "get_task",
   "read_attachment",
+  "get_list",
+  "get_list_links",
+  "list_brl_entries",
 ]);
 assert.match(renderInstructions(definitions.contracts, readerContract), /estrictamente read-only/i);
 
@@ -131,8 +134,8 @@ for (const forbiddenOperation of [
 }
 const dailyPrompt = renderInstructions(definitions.contracts, dailyContract);
 assert.ok(!dailyContract.allowedOperations.includes("mutate_tasks"));
-assert.match(dailyPrompt, /Borrar tareas, listas, secciones, adjuntos/i);
-assert.match(dailyPrompt, /mover tareas entre ellas; triar o reorganizar backlogs/i);
+assert.match(dailyPrompt, /Borrar tareas, proyectos, áreas, secciones, adjuntos/i);
+assert.match(dailyPrompt, /mover tareas entre ellos; triar o reorganizar backlogs/i);
 assert.match(dailyPrompt, /No uses mutate_tasks/i);
 assert.match(dailyPrompt, /refresh_sync una vez y relee una segunda vez/i);
 assert.match(dailyPrompt, /@acked, @wip, @done o @not-done/i);

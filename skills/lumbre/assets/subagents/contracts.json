@@ -58,12 +58,16 @@
         "list_lists",
         "list_tasks",
         "get_task",
-        "read_attachment"
+        "read_attachment",
+        "get_list",
+        "get_list_links",
+        "list_brl_entries"
       ],
       "operationLimits": [
         "Acota listados por scope, proyecto, área, sección o ids cuando sea posible.",
         "Usa get_task para ids explícitos y para recuperar notas o propiedades íntegras que cambien la respuesta.",
-        "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio."
+        "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio.",
+        "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; list_brl_entries lee el registro (BRL) de un día, que no son tareas."
       ],
       "forbiddenCapabilities": [
         "Invocar cualquier tool u operación que cree, edite, complete, cancele, mueva, reorganice o borre datos.",
@@ -93,12 +97,14 @@
         "cancel_task",
         "reschedule_task",
         "add_subtask",
-        "complete_subtask"
+        "complete_subtask",
+        "get_list"
       ],
       "operationLimits": [
         "Antes de editar una tarea existente, recupérala con get_task; en updates parciales envía solo los campos solicitados.",
         "No inventes fechas, prioridades, recurrencias, proyecto, área, sección ni contenido. Si falta una decisión material, devuelve la duda al coordinador.",
-        "Crear tareas nuevas no activa tags de desarrollo salvo que el coordinador haya elegido expresamente ese flujo, en cuyo caso debe usar lumbre-tagger por separado."
+        "Crear tareas nuevas no activa tags de desarrollo salvo que el coordinador haya elegido expresamente ese flujo, en cuyo caso debe usar lumbre-tagger por separado.",
+        "get_list es solo lectura: sirve para leer la nota o el estado de un proyecto o área antes de crear o fechar una tarea; su nota no se reescribe desde este agente."
       ],
       "forbiddenCapabilities": [
         "Borrar tareas, proyectos, áreas, secciones, adjuntos o entradas de registro.",
