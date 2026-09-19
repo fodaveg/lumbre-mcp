@@ -128,6 +128,22 @@ contrato que debe exigir el instalador.
 - A partir del forward-test se aclaró que refresh, registro de contradicciones,
   `MAPEO_CAPTURA` y retirada de copias no autorizan mutaciones implícitas.
 
+**Nota (2026-09-19).** El commit histórico que ancla el piloto capturado
+(`candidateParentSha` en `tests/skill-lumbre/evidence/forward-pilot-evidence.json`,
+`0957116153550efcbf1f42c57d2f4b98a402229e`) ya no existe en ningún sitio: lo capturó Codex
+el 30 ago en una rama que reescribió antes de integrarse como `2a83efc`, y no está ni en el
+reflog ni en objetos colgantes de este repo ni en GitHub. Codex no está disponible para
+recapturarlo. `tests/skill-lumbre/validate.sh` (en `full` y `--preflight`) ahora comprueba
+si ese commit resuelve con `git cat-file -e`; si no resuelve, imprime un aviso en stderr y
+omite los tres pasos que dependen de él (`verify-forward-pilot.mjs --integrity-only`,
+`test-forward-pilot-verifier.mjs`, `run-forward-pilot.mjs --check-candidate`), sin cambiar
+el exit code de los pasos restantes — el piloto es evidencia informativa post-publicación,
+no un gate (ver `docs/lumbre-skill-optimization.md`). Con el flag `--require-pilot`, esa
+misma ausencia hace fallar `validate.sh` con exit 1, para cuando se quiera exigir el piloto
+tras recapturarlo. Pendiente: recapturar el piloto con `run-forward-pilot.mjs` sobre un HEAD
+vivo cuando Codex esté disponible, y entonces `evidence/forward-pilot-evidence.json` y su
+`.envelope.txt` se regeneran contra ese nuevo commit.
+
 La evaluación confirmó también que las contradicciones de `@acked`, revisión y definición
 de «entrega» siguen abiertas. Eso es el resultado esperado de esta fase de unión; resolverlas
 corresponde a la optimización y sus pruebas de comportamiento.
