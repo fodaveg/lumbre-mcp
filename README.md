@@ -696,9 +696,14 @@ git pull
 
 sin `npm install` ni `npm run build` de por medio. Si en vez de apuntar la
 config al `dist/` del clon lo instalaste global, actualiza con `npm i -g .`
-después del `git pull` para que se recoja el `dist/` nuevo. Aviso: quien
+después del `git pull` para que se recoja el `dist/` nuevo. Por eso quien
 toque `src/` tiene que recompilar (`npm run build`) y commitear `dist/` en
-el MISMO commit, porque de momento nada lo vigila automáticamente.
+el MISMO commit: si no, una máquina que solo hace `git pull` sigue corriendo
+el código viejo sin enterarse. Eso ya no depende de acordarse —
+`src/dist-al-dia.test.ts` (corre con `npm test`) compila `src/` en un
+temporal con la misma configuración y lo compara fichero a fichero con
+`dist/`; si no coinciden, falla nombrando las rutas que sobran, faltan o
+difieren.
 
 ## Conector stdio local (compatibilidad y adjuntos)
 
