@@ -23,6 +23,8 @@ import type { NotesMode } from './notes.js';
 let tools: Tool[];
 let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
+let organizeOpSchema: z.ZodTypeAny;
+let organizeStrictOpSchema: z.ZodTypeAny;
 let mutateBrlOpSchema: z.ZodTypeAny;
 let mutateBrlStrictOpSchema: z.ZodTypeAny;
 let effectiveNotesMode: (input: { notes?: NotesMode; fullNotes?: boolean }) => NotesMode;
@@ -41,6 +43,8 @@ beforeAll(async () => {
 	const indexModule = await import('./index.js');
 	mutateTasksOpSchema = indexModule.mutateTasksOpSchema;
 	mutateTasksStrictOpSchema = indexModule.mutateTasksStrictOpSchema;
+	organizeOpSchema = indexModule.organizeOpSchema;
+	organizeStrictOpSchema = indexModule.organizeStrictOpSchema;
 	mutateBrlOpSchema = indexModule.mutateBrlOpSchema;
 	mutateBrlStrictOpSchema = indexModule.mutateBrlStrictOpSchema;
 	effectiveNotesMode = indexModule.effectiveNotesMode;
@@ -96,28 +100,21 @@ describe('tools/list — superficie completa', () => {
 		'read_attachment',
 		'add_attachment',
 		'delete_attachment',
-		'complete_task',
-		'cancel_task',
-		'update_task',
-		'reschedule_task',
-		'delete_task',
-		'set_section',
-		'remove_section',
-		'add_subtask',
-		'complete_subtask',
 		'mutate_tasks',
+		'organize',
 		'list_brl_entries',
 		'mutate_brl'
 	];
 
-	it('sigue exponiendo las 24 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 16 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27; ' +
-		'añadida get_list el 2026-09-16, tarea 827a7878)', () => {
-		expect(tools).toHaveLength(24);
+		'añadida get_list el 2026-09-16, tarea 827a7878; retiradas las nueve sueltas de mutación ' +
+		'individual y partido el lote en mutate_tasks/organize el 2026-09-19, tarea 6f62c877)', () => {
+		expect(tools).toHaveLength(16);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
-	it('ninguna tool trae `title` (tarea d: quitados de las 23 registraciones)', () => {
+	it('ninguna tool trae `title` (tarea d: quitados de todas las registraciones)', () => {
 		for (const tool of tools) {
 			expect(tool).not.toHaveProperty('title');
 		}
@@ -172,7 +169,7 @@ describe('tools/list — superficie completa', () => {
 		expect(output.required).toEqual(expect.arrayContaining(['deleted', 'attachment_id']));
 	});
 
-	it('techo de bytes de las 24 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 16 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -261,10 +258,19 @@ describe('tools/list — superficie completa', () => {
 		// corto y la GARANTÍA "nunca un texto recortado a medias" sigue
 		// visible (el puntero dice "en ese campo", no `.describe()`: quien lee
 		// el listado es un modelo, no ve el código). 24 tools, 26.757
-		// caracteres = -353 sobre los 27.110 de arriba. Techo = medido + ~4,6% de holgura, no el valor exacto, para
+		// caracteres = -353 sobre los 27.110 de arriba.
+		// Re-medido el 2026-09-19 (tarea 6f62c877, la fusión): las nueve tools
+		// sueltas de mutación individual se RETIRAN (-6.557 caracteres, medido
+		// tool a tool sobre el `tools/list` real) y el lote se parte en dos,
+		// `mutate_tasks` (8 ops sobre una tarea) y `organize` (8 ops de
+		// borrado/reorganización). `mutate_tasks` baja de 4.873 a 3.518 porque
+		// su schema EXPUESTO ya solo declara los campos de SUS ops, y
+		// `organize` cuesta 2.509 nuevos: 16 tools, 21.345 caracteres = -5.411
+		// sobre los 26.756 medidos por este mismo camino antes del cambio
+		// (-20,2%). Techo = medido + ~5% de holgura, no el valor exacto, para
 		// no tener que tocar este test por variaciones triviales de formato
 		// JSON.
-		const CHAR_CEILING = 28000;
+		const CHAR_CEILING = 22400;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -294,16 +300,58 @@ describe('tools/list — superficie completa', () => {
 		expect(opsSchema?.items?.properties?.time?.pattern).toBe(addTaskSchema.properties?.time?.pattern);
 	});
 
-	it('`mutate_tasks` sigue siendo, con diferencia, la tool con más superficie', () => {
-		const mutateTasks = tools.find((t) => t.name === 'mutate_tasks');
-		expect(mutateTasks).toBeDefined();
-		// No es una aserción de tamaño exacto (ver el test de arriba para el
-		// techo global) — solo confirma que `ops` sigue siendo un array con un
-		// `op` enum de las 16 operaciones (el aplanado no perdió ninguna).
-		const opsSchema = (mutateTasks!.inputSchema as { properties?: Record<string, unknown> }).properties?.ops as
-			| { items?: { properties?: { op?: { enum?: string[] } } } }
-			| undefined;
-		expect(opsSchema?.items?.properties?.op?.enum).toHaveLength(16);
+	/**
+	 * El contrato por-op ya no vive en el tipo expuesto (`op` es un `string`
+	 * a propósito, para que una op de la OTRA tool llegue al handler y reciba
+	 * el puntero en vez de tumbar la llamada entera — ver el JSDoc de
+	 * `src/tools/batch.ts`): vive en la `description` de `ops`. Así que lo que
+	 * se vigila aquí es que esa tabla siga NOMBRANDO las 8 ops de cada tool —
+	 * si alguien añade una op y no la documenta, el modelo no puede llamarla.
+	 */
+	it('`mutate_tasks` y `organize` documentan sus 8 ops cada una en la description de `ops`', () => {
+		const opsDescription = (name: string) => {
+			const tool = tools.find((t) => t.name === name);
+			expect(tool).toBeDefined();
+			const ops = (tool!.inputSchema as { properties?: Record<string, unknown> }).properties?.ops as
+				| { description?: string; items?: { properties?: { op?: { type?: string } } } }
+				| undefined;
+			expect(ops?.items?.properties?.op?.type).toBe('string');
+			return ops?.description ?? '';
+		};
+
+		const mutateTasksOps = opsDescription('mutate_tasks');
+		for (const op of [
+			'add_task',
+			'complete',
+			'cancel',
+			'update',
+			'reschedule',
+			'set_section',
+			'add_subtask',
+			'complete_subtask'
+		]) {
+			expect(mutateTasksOps).toContain(`${op}:`);
+		}
+		// Y NO las de la otra: es la frontera que hace mecánica la prohibición
+		// de borrar para un subagente al que solo se le da `mutate_tasks`.
+		for (const op of ['delete:', 'remove_list:', 'move_to_list:']) {
+			expect(mutateTasksOps).not.toContain(op);
+		}
+
+		const organizeOps = opsDescription('organize');
+		for (const op of [
+			'delete',
+			'remove_section',
+			'create_list',
+			'nest_list',
+			'rename_list',
+			'remove_list',
+			'set_list_notes',
+			'move_to_list'
+		]) {
+			expect(organizeOps).toContain(`${op}:`);
+		}
+		expect(tools.find((t) => t.name === 'organize')!.description).toMatch(/^Reorganiza y borra:/);
 	});
 
 	it('`mutate_brl` expone las 3 ops (add/update/delete)', () => {
@@ -412,8 +460,8 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		const fetchSpy = vi.fn(async (url: string | URL) => {
 			const value = String(url);
 			if (value.includes('includeArchived=true')) return jsonResponse([archivedTask]);
-			if (value.includes('/api/tasks?id=')) return jsonResponse([]);
-			if (value.includes('/api/mutations')) throw new Error('no debe mutar una archivada por caché');
+			if (value.includes('/api/tasks?ids=')) return jsonResponse([]);
+			if (value.includes('/api/batch')) throw new Error('no debe mutar una archivada por caché');
 			throw new Error(`fetch no mockeado: ${value}`);
 		});
 		vi.stubGlobal('fetch', fetchSpy);
@@ -423,15 +471,22 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 			name: 'get_task',
 			arguments: { taskId: TASK_ID, includeArchived: true }
 		});
+		// La mutación va por `mutate_tasks` desde que `complete_task` no existe
+		// (2026-09-19): resuelve la existencia con `?ids=` contra el servidor —
+		// que NO devuelve la archivada — y la op entra en el informe de éxito
+		// parcial sin llegar a `/api/batch`.
 		const mutation = await client.callTool({
-			name: 'complete_task',
-			arguments: { taskId: TASK_ID }
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'complete', taskId: TASK_ID }] }
 		});
 
-		expect(mutation.isError).toBe(true);
+		const mutationText = (mutation as { content: { type: string; text?: string }[] }).content[0];
+		expect(mutationText.type === 'text' ? mutationText.text : '').toContain(
+			'0/1 operación(es) encoladas.'
+		);
 		expect(fetchSpy.mock.calls.map((call) => String(call[0]))).toEqual([
 			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`,
-			`https://lumbre.test/api/tasks?id=${TASK_ID}`
+			`https://lumbre.test/api/tasks?ids=${TASK_ID}`
 		]);
 	});
 
@@ -833,13 +888,15 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 	});
 });
 
-describe('mutate_tasks — las 16 `op` siguen aceptándose (esquema estricto interno)', () => {
+describe('mutate_tasks/organize — las 16 `op` siguen aceptándose (esquemas estrictos internos)', () => {
 	/** Un caso por op: el payload VÁLIDO mínimo/representativo, y variantes
 	 *  INVÁLIDAS por campo que falta y por campo que sobra (ajeno a esa op,
 	 *  pero válido en general — p. ej. `date` en `complete`) — mismo criterio
 	 *  que exige la tarea: el rechazo de campos ajenos DEBE seguir pasando,
-	 *  solo que ahora vive en `mutateTasksStrictOpSchema` (interno), no en el
-	 *  schema EXPUESTO (`mutateTasksOpSchema`, deliberadamente laxo). */
+	 *  solo que vive en el schema ESTRICTO (interno) de la tool a la que
+	 *  pertenece esa op, no en el EXPUESTO (deliberadamente laxo). Desde el
+	 *  reparto en dos tools (2026-09-19) cada caso se valida contra el par de
+	 *  schemas de SU tool — ver `ORGANIZE_OPS` debajo del array. */
 	const cases: {
 		op: string;
 		valid: Record<string, unknown>;
@@ -992,6 +1049,22 @@ describe('mutate_tasks — las 16 `op` siguen aceptándose (esquema estricto int
 		}
 	];
 
+	/** Las 8 ops que viven en `organize`; el resto, en `mutate_tasks` (mapa
+	 *  `TASK_OP_TOOL` de `tools/shared.ts` — aquí se repite a propósito: si el
+	 *  reparto cambia en el código sin que nadie lo decida, estos tests caen). */
+	const ORGANIZE_OPS = new Set([
+		'delete',
+		'remove_section',
+		'create_list',
+		'nest_list',
+		'rename_list',
+		'remove_list',
+		'set_list_notes',
+		'move_to_list'
+	]);
+	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
+	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
+
 	it('cubre las 16 operaciones (guardarraíl del propio test)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
@@ -1016,51 +1089,67 @@ describe('mutate_tasks — las 16 `op` siguen aceptándose (esquema estricto int
 	});
 
 	for (const { op, valid, missingField, extraField } of cases) {
-		describe(`op: ${op}`, () => {
+		describe(`op: ${op} (${ORGANIZE_OPS.has(op) ? 'organize' : 'mutate_tasks'})`, () => {
 			it('caso VÁLIDO: pasa el schema EXPUESTO (tools/list) y el ESTRICTO (handler)', () => {
-				expect(mutateTasksOpSchema.safeParse(valid).success).toBe(true);
-				expect(mutateTasksStrictOpSchema.safeParse(valid).success).toBe(true);
+				expect(exposedSchemaFor(op).safeParse(valid).success).toBe(true);
+				expect(strictSchemaFor(op).safeParse(valid).success).toBe(true);
 			});
 
 			it(`caso INVÁLIDO (falta \`${missingField}\`): el schema ESTRICTO lo rechaza`, () => {
 				const { [missingField]: _omitted, ...withoutField } = valid;
-				const result = mutateTasksStrictOpSchema.safeParse(withoutField);
+				const result = strictSchemaFor(op).safeParse(withoutField);
 				expect(result.success).toBe(false);
 			});
 
 			it('caso INVÁLIDO (campo ajeno a esta op): el schema ESTRICTO lo rechaza', () => {
-				const result = mutateTasksStrictOpSchema.safeParse(extraField);
+				const result = strictSchemaFor(op).safeParse(extraField);
 				expect(result.success).toBe(false);
+			});
+
+			it('op mandada a la OTRA tool: su schema ESTRICTO la rechaza (discriminador inválido)', () => {
+				const otherSchema = ORGANIZE_OPS.has(op) ? mutateTasksStrictOpSchema : organizeStrictOpSchema;
+				expect(otherSchema.safeParse(valid).success).toBe(false);
 			});
 		});
 	}
 
-	it('update con notes:null pasa el schema expuesto pero el estricto lo rechaza', () => {
+	it('update con notes:null: lo rechazan LOS DOS schemas de mutate_tasks', () => {
+		// Desde el reparto, `notes` en `mutate_tasks` ya no es nullable en el
+		// schema EXPUESTO (solo `organize`/`set_list_notes` borra notas con
+		// null), así que este caso se corta antes incluso que en el estricto.
 		const invalidUpdate = {
 			op: 'update',
 			taskId: '11111111-1111-1111-1111-111111111111',
 			notes: null
 		};
-		expect(mutateTasksOpSchema.safeParse(invalidUpdate).success).toBe(true);
+		expect(mutateTasksOpSchema.safeParse(invalidUpdate).success).toBe(false);
 		expect(mutateTasksStrictOpSchema.safeParse(invalidUpdate).success).toBe(false);
 	});
 
-	it('op desconocida: ambos schemas la rechazan', () => {
+	it('op desconocida: el EXPUESTO la deja pasar (`op` es string) y el ESTRICTO la rechaza', () => {
+		// `op` expuesto es `string` a propósito: así una op desconocida —o de la
+		// otra tool— llega al handler y sale en el informe de éxito parcial con
+		// un motivo concreto, en vez de tumbar la llamada entera en el framework.
 		const bogus = { op: 'not_a_real_op', taskId: '11111111-1111-1111-1111-111111111111' };
-		expect(mutateTasksOpSchema.safeParse(bogus).success).toBe(false);
+		expect(mutateTasksOpSchema.safeParse(bogus).success).toBe(true);
 		expect(mutateTasksStrictOpSchema.safeParse(bogus).success).toBe(false);
+		expect(organizeOpSchema.safeParse(bogus).success).toBe(true);
+		expect(organizeStrictOpSchema.safeParse(bogus).success).toBe(false);
 	});
 
-	it('campo con nombre desconocido (typo): el schema EXPUESTO ya lo rechaza (`.strict()`)', () => {
-		const result = mutateTasksOpSchema.safeParse({
+	it('campo con nombre desconocido (typo): lo caza el ESTRICTO, por-op, sin tumbar el lote', () => {
+		const element = {
 			op: 'complete',
 			taskId: '11111111-1111-1111-1111-111111111111',
 			// `donee` no es ninguno de los campos conocidos — typo real de
-			// `done`, no un campo válido en otra op (ver el test de arriba para
-			// ESE caso, que el schema EXPUESTO SÍ deja pasar a propósito).
+			// `done`. El EXPUESTO es `.passthrough()` desde 2026-09-19 (antes
+			// `.strict()`): deja pasar el campo para que el ESTRICTO lo reporte
+			// como fallo de ESA op, en vez de que el framework rechace la
+			// llamada entera.
 			donee: true
-		});
-		expect(result.success).toBe(false);
+		};
+		expect(mutateTasksOpSchema.safeParse(element).success).toBe(true);
+		expect(mutateTasksStrictOpSchema.safeParse(element).success).toBe(false);
 	});
 
 	it('add_task/update aceptan tags válidos y conservan `[]` como valor explícito', () => {
@@ -1082,7 +1171,7 @@ describe('mutate_tasks — las 16 `op` siguen aceptándose (esquema estricto int
 	});
 });
 
-describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lote (incidente 071553)', () => {
+describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre las dos tools', () => {
 	const LIST_ID = 'a0b1c2d3-e4f5-4678-9abc-def012345678';
 	const EXISTING_LIST_ID = 'b1c2d3e4-f5a6-4789-9abc-def012345678';
 
@@ -1163,26 +1252,49 @@ describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lot
 		expect(batchCalls(fetchSpy)).toHaveLength(1);
 	});
 
-	it('create_list + N add_task con ese listId: DOS peticiones (mutate primero, ingest después) e informe con índices ORIGINALES', async () => {
+	/**
+	 * El encadenado intra-lote que SÍ sigue cabiendo en una llamada desde el
+	 * reparto en dos tools (2026-09-19): `create_list` + una op que targetee
+	 * ESA lista por el `listId` que le diste tú (uuid v4), las dos en
+	 * `organize`. El cruce `create_list` + `add_task` (el del incidente
+	 * 071553) ya no es expresable en una sola llamada — `add_task` vive en
+	 * `mutate_tasks` —, así que son dos llamadas o un `add_task` con `list`
+	 * por NOMBRE (que crea la lista si no existe); el reparto en fases que lo
+	 * resolvía sigue probado, unidad a unidad, en `lumbre-client.test.ts`
+	 * (`planBatchPhases`/`filterPhase2AfterPhase1`/
+	 * `excludeIngestForBrokenListPromises`).
+	 */
+	it('organize: create_list + move_to_list con el listId prometido viajan juntos, en UNA petición', async () => {
+		const TASK_ID = 'c2d3e4f5-a6b7-4890-9abc-def012345678';
 		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
 			const value = String(url);
+			if (value.includes('/api/tasks?ids=')) {
+				return jsonResponse([
+					{
+						id: TASK_ID,
+						content: 'tarea a mover',
+						notes: null,
+						done: false,
+						priority: null,
+						date: null,
+						deadline: null,
+						list: null,
+						createdAt: '2026-09-19T00:00:00.000Z',
+						parentId: null
+					}
+				]);
+			}
 			if (!value.endsWith('/api/batch')) throw new Error(`fetch no mockeado: ${value}`);
 			const body = JSON.parse(String(init?.body)) as { ops: unknown[] };
-			const isMutatePhase = (body.ops[0] as { type: string }).type === 'mutate';
-			if (isMutatePhase) {
-				expect(body.ops).toHaveLength(1);
-				return jsonResponse({
-					ok: true,
-					results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID }]
-				});
-			}
-			expect(body.ops).toHaveLength(2);
-			expect(body.ops.every((op) => (op as { type: string }).type === 'ingest')).toBe(true);
+			expect(body.ops).toEqual([
+				{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'Trabajo' } },
+				{ type: 'mutate', taskId: TASK_ID, kind: 'moveToList', payload: { listId: LIST_ID } }
+			]);
 			return jsonResponse({
 				ok: true,
 				results: [
-					{ index: 0, type: 'ingest', ok: true, id: 'nueva-1' },
-					{ index: 1, type: 'ingest', ok: true, id: 'nueva-2' }
+					{ index: 0, type: 'mutate', ok: true, id: LIST_ID },
+					{ index: 1, type: 'mutate', ok: true }
 				]
 			});
 		});
@@ -1190,26 +1302,54 @@ describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lot
 		const client = await buildClient();
 
 		const result = await client.callTool({
-			name: 'mutate_tasks',
+			name: 'organize',
 			arguments: {
 				ops: [
 					{ op: 'create_list', name: 'Trabajo', listId: LIST_ID },
-					{ op: 'add_task', text: 'tarea 1', listId: LIST_ID },
-					{ op: 'add_task', text: 'tarea 2', listId: LIST_ID }
+					{ op: 'move_to_list', taskId: TASK_ID, listId: LIST_ID }
 				]
 			}
 		});
 
 		expect(result.isError).not.toBe(true);
-		expect(batchCalls(fetchSpy)).toHaveLength(2);
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
 		const text = resultText(result);
-		expect(text).toContain('3/3 operación(es) encoladas.');
+		expect(text).toContain('2/2 operación(es) encoladas.');
 		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
-		expect(text).toContain('[1] add_task: id nueva-1');
-		expect(text).toContain('[2] add_task: id nueva-2');
 	});
 
-	it('create_list + set_list_notes viajan juntos; un servidor aún sin ese kind lo informa como fallo parcial', async () => {
+	it('una op de la OTRA tool se rechaza por posición, con el puntero a su tool (y el resto del lote viaja)', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const enMutateTasks = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'add_task', text: 'sí viaja' },
+					{ op: 'delete', taskId: 'd4e5f6a7-b8c9-4012-9abc-def012345678' }
+				]
+			}
+		});
+		const mutateText = resultText(enMutateTasks);
+		expect(mutateText).toContain('1/2 operación(es) encoladas.');
+		expect(mutateText).toContain(
+			'[1] delete: la op "delete" no existe en mutate_tasks; está en organize'
+		);
+
+		const enOrganize = await client.callTool({
+			name: 'organize',
+			arguments: { ops: [{ op: 'complete', taskId: 'd4e5f6a7-b8c9-4012-9abc-def012345678' }] }
+		});
+		expect(resultText(enOrganize)).toContain(
+			'[0] complete: la op "complete" no existe en organize; está en mutate_tasks'
+		);
+	});
+
+	it('organize: create_list + set_list_notes viajan juntos; un servidor aún sin ese kind lo informa como fallo parcial', async () => {
 		// Backend simulado: este test acredita el cableado MCP y que una respuesta
 		// de error no se presenta como éxito; no acredita la materialización CRDT.
 		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
@@ -1236,7 +1376,7 @@ describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lot
 		const client = await buildClient();
 
 		const result = await client.callTool({
-			name: 'mutate_tasks',
+			name: 'organize',
 			arguments: {
 				ops: [
 					{ op: 'create_list', name: 'Trabajo', listId: LIST_ID },
@@ -1252,82 +1392,30 @@ describe('mutate_tasks — reparto en dos fases cuando hay dependencia intra-lot
 		expect(text).toContain('[1] set_list_notes: kind de mutación desconocido: setListNotes');
 	});
 
-	it('create_list FALLA en fase 1: las altas dependientes NO viajan en ninguna petición y salen como fallo', async () => {
-		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
-			const value = String(url);
-			if (!value.endsWith('/api/batch')) throw new Error(`fetch no mockeado: ${value}`);
-			const body = JSON.parse(String(init?.body)) as { ops: unknown[] };
-			// Solo debe llegar la fase 1 (mutate): si llegara una segunda petición
-			// con las altas huérfanas, este mock la aceptaría igual (`ok:true`) y
-			// el test de abajo (UNA sola llamada) la delataría.
-			expect((body.ops[0] as { type: string }).type).toBe('mutate');
-			return jsonResponse({
-				ok: true,
-				results: [{ index: 0, type: 'mutate', ok: false, error: 'ya existe una lista con ese nombre' }]
-			});
-		});
-		vi.stubGlobal('fetch', fetchSpy);
-		const client = await buildClient();
-
-		const result = await client.callTool({
-			name: 'mutate_tasks',
-			arguments: {
-				ops: [
-					{ op: 'create_list', name: 'Trabajo', listId: LIST_ID },
-					{ op: 'add_task', text: 'tarea 1', listId: LIST_ID },
-					{ op: 'add_task', text: 'tarea 2', listId: LIST_ID }
-				]
-			}
-		});
-
-		expect(result.isError).not.toBe(true);
-		expect(batchCalls(fetchSpy)).toHaveLength(1);
-		const text = resultText(result);
-		expect(text).toContain('0/3 operación(es) encoladas.');
-		expect(text).toContain('[0] create_list: ya existe una lista con ese nombre');
-		expect(text).toMatch(/\[1] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
-		expect(text).toMatch(/\[2] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
-	});
-
-	/**
-	 * El agujero 🔴 de la revisión (reproduce el incidente 071553 ENTERO y lo
-	 * reporta como éxito): un `create_list` con FORMA inválida (sin `name`,
-	 * `mutateTasksStrictOpSchema` es `.strict()` y lo rechaza) nunca llega a
-	 * `batchOps` — `planBatchPhases` solo ve lo que sobrevivió al filtro, así
-	 * que sin este fix no encontraba ninguna dependencia y el `add_task` con
-	 * ese `listId` viajaba SOLO, en la única petición, con la lista todavía
-	 * inexistente: exactamente el síntoma del incidente, solo que disparado
-	 * por un `create_list` mal formado en vez de uno bien formado que aún no
-	 * se ha mandado.
-	 */
-	it('create_list SIN `name` (forma inválida): el add_task dependiente NO viaja en NINGUNA petición', async () => {
+	it('organize: un create_list con FORMA inválida no tumba el lote, sale por posición', async () => {
+		// Antes este caso probaba además que el `add_task` que dependía de ese
+		// `create_list` no viajaba huérfano (incidente 071553). Ese cruce ya no
+		// cabe en una llamada —`add_task` está en `mutate_tasks`—, así que aquí
+		// se conserva lo que SÍ sigue siendo observable desde la tool: el
+		// rechazo por forma, por posición, sin tocar red.
 		const fetchSpy = vi.fn(async (url: string | URL) => {
-			// Si el alta huérfana llegara a mandarse, este mock la aceptaría
-			// (`ok:true`) igual que el servidor real — el test de abajo (CERO
-			// llamadas a /api/batch) es el que la delataría.
 			const value = String(url);
 			if (!value.endsWith('/api/batch')) throw new Error(`fetch no mockeado: ${value}`);
-			return jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 'huerfana' }] });
+			return jsonResponse({ ok: true, results: [] });
 		});
 		vi.stubGlobal('fetch', fetchSpy);
 		const client = await buildClient();
 
 		const result = await client.callTool({
-			name: 'mutate_tasks',
-			arguments: {
-				ops: [
-					{ op: 'create_list', listId: LIST_ID }, // sin `name`: forma inválida
-					{ op: 'add_task', text: 'tarea huérfana', listId: LIST_ID }
-				]
-			}
+			name: 'organize',
+			arguments: { ops: [{ op: 'create_list', listId: LIST_ID }] } // sin `name`
 		});
 
 		expect(result.isError).not.toBe(true);
 		expect(batchCalls(fetchSpy)).toHaveLength(0);
 		const text = resultText(result);
-		expect(text).toContain('0/2 operación(es) encoladas.');
+		expect(text).toContain('0/1 operación(es) encoladas.');
 		expect(text).toContain('[0] create_list:');
-		expect(text).toMatch(/\[1] add_task:.*no se pudo crear en este lote.*op \[0\].*no se ha creado/);
 	});
 });
 
@@ -1473,6 +1561,13 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 	 * `now` inyectado directo); aquí lo que importa es que `requireTaskExists`
 	 * REALMENTE evita/repite el `GET /api/tasks?id=` en el flujo completo de
 	 * una tool call, y que una mutación real la invalida.
+	 *
+	 * Quién la consulta cambió el 2026-09-19: las nueve tools sueltas de
+	 * mutación eran las llamantes naturales de `requireTaskExists` y ya no
+	 * existen, así que la tool que lo ejercita aquí es `add_attachment`
+	 * (`content_base64`, sin tocar disco). La INVALIDACIÓN por mutación local
+	 * la hace ahora `mutate_tasks` al final del lote (`runOpsBatch` en
+	 * `tools/batch.ts`), y es lo que comprueba el tercer test.
 	 */
 	const TASK_ID = '11111111-1111-1111-1111-111111111111';
 
@@ -1525,13 +1620,36 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		vi.unstubAllGlobals();
 	});
 
-	it('un hit dentro del TTL evita el segundo GET de existencia', async () => {
-		const fetchSpy = vi.fn(async (url: string | URL) => {
+	/** `add_attachment` por la vía `content_base64`: pasa por
+	 *  `requireTaskExists` y sube por `POST /api/attachments`, sin tocar
+	 *  disco. */
+	function attachArgs() {
+		return {
+			taskId: TASK_ID,
+			content_base64: Buffer.from('hola').toString('base64'),
+			filename: 'nota.txt'
+		};
+	}
+
+	/** Mock compartido: existencia por `?id=`, alta de adjunto, y el
+	 *  `?ids=` + `/api/batch` que usa `mutate_tasks`. */
+	function taskFetch() {
+		return vi.fn(async (url: string | URL) => {
 			const u = String(url);
 			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
-			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			if (u.includes('/api/tasks?ids=')) return jsonResponse([lumbreTask()]);
+			if (u.includes('/api/attachments')) {
+				return jsonResponse({ id: 'att-1', filename: 'nota.txt', mime: 'text/plain', size: 4 });
+			}
+			if (u.includes('/api/batch')) {
+				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true }] });
+			}
 			throw new Error(`fetch no mockeado en este test: ${u}`);
 		});
+	}
+
+	it('un hit dentro del TTL evita el segundo GET de existencia', async () => {
+		const fetchSpy = taskFetch();
 		vi.stubGlobal('fetch', fetchSpy);
 
 		const client = await buildClient();
@@ -1539,8 +1657,8 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } });
 		expect(countExistenceGets(fetchSpy)).toBe(1);
 
-		// complete_task → requireTaskExists reutiliza el hit: SIN GET nuevo.
-		const result = await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		// add_attachment → requireTaskExists reutiliza el hit: SIN GET nuevo.
+		const result = await client.callTool({ name: 'add_attachment', arguments: attachArgs() });
 		expect(result.isError).not.toBe(true);
 		expect(countExistenceGets(fetchSpy)).toBe(1);
 	});
@@ -1548,12 +1666,7 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 	it('tras expirar el TTL, requireTaskExists vuelve a pedir', async () => {
 		const { EXISTENCE_CACHE_TTL_MS } = await import('./existence-cache.js');
 		let now = 1_000_000;
-		const fetchSpy = vi.fn(async (url: string | URL) => {
-			const u = String(url);
-			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
-			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
-			throw new Error(`fetch no mockeado en este test: ${u}`);
-		});
+		const fetchSpy = taskFetch();
 		vi.stubGlobal('fetch', fetchSpy);
 
 		const client = await buildClient({ now: () => now });
@@ -1561,28 +1674,29 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		expect(countExistenceGets(fetchSpy)).toBe(1);
 
 		now += EXISTENCE_CACHE_TTL_MS; // justo al TTL: ya expiró (ver TaskExistenceCache.get)
-		await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		await client.callTool({ name: 'add_attachment', arguments: attachArgs() });
 		expect(countExistenceGets(fetchSpy)).toBe(2);
 	});
 
 	it('una mutación LOCAL sobre el id invalida la caché — la siguiente vuelve a pedir', async () => {
-		const fetchSpy = vi.fn(async (url: string | URL) => {
-			const u = String(url);
-			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
-			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
-			throw new Error(`fetch no mockeado en este test: ${u}`);
-		});
+		const fetchSpy = taskFetch();
 		vi.stubGlobal('fetch', fetchSpy);
 
 		const client = await buildClient();
 		await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } });
 		expect(countExistenceGets(fetchSpy)).toBe(1);
 
-		await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		await client.callTool({ name: 'add_attachment', arguments: attachArgs() });
 		expect(countExistenceGets(fetchSpy)).toBe(1); // hit — sin GET nuevo
 
-		// complete_task mutó localmente el mismo id → invalida `taskCache`.
-		await client.callTool({ name: 'cancel_task', arguments: { taskId: TASK_ID } });
+		// El lote mutó localmente el mismo id → invalida `taskCache` (su
+		// existencia la resolvió por `?ids=`, que no cuenta como GET de
+		// existencia individual).
+		await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'complete', taskId: TASK_ID }] }
+		});
+		await client.callTool({ name: 'add_attachment', arguments: attachArgs() });
 		expect(countExistenceGets(fetchSpy)).toBe(2);
 	});
 
@@ -1595,7 +1709,7 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 		vi.stubGlobal('fetch', fetchSpy);
 
 		const client = await buildClient();
-		const result = await client.callTool({ name: 'complete_task', arguments: { taskId: TASK_ID } });
+		const result = await client.callTool({ name: 'add_attachment', arguments: attachArgs() });
 		expect(result.isError).toBe(true);
 		// La propiedad que importa no es el TEXTO del mensaje (eso se reescribe),
 		// es que sea un error y que nombre el taskId pedido: es lo que lo hace accionable.
@@ -1604,19 +1718,23 @@ describe('caché corta de existencia (M1: requireTaskExists / taskCache)', () =>
 });
 
 /**
- * CABLEADO de la tool individual `reschedule_task` sobre una SUBTAREA — el
- * `assertTaskUsable` puro ya se prueba en `lumbre-client.test.ts`, pero esa
- * prueba no ve con qué `allowSubtask` la llama `index.ts`, que es justo donde
- * vivía la restricción retirada el 2026-09-04. Aquí se llama la tool DE VERDAD
- * (servidor real + `fetch` mockeado) y se comprueba que la mutación llega a
- * `POST /api/mutations`.
+ * CABLEADO de la op `reschedule` sobre una SUBTAREA — el `assertTaskUsable`
+ * puro ya se prueba en `lumbre-client.test.ts`, pero esa prueba no ve con qué
+ * `allowSubtask` la llama el servidor, que es justo donde vivía la
+ * restricción retirada el 2026-09-04. Aquí se llama la tool DE VERDAD
+ * (servidor real + `fetch` mockeado) y se comprueba que la mutación llega al
+ * servidor.
  *
- * Qué se retiró: `reschedule_task` aceptaba un `subtaskId` solo CON fecha
- * porque el `task-ops.unscheduleTask` de la app no tenía guard de `parentId`.
- * Lo tiene desde `a745235a` (desplegado), así que `date: null` sobre una
+ * Qué se retiró: `reschedule` aceptaba un `subtaskId` solo CON fecha porque
+ * el `task-ops.unscheduleTask` de la app no tenía guard de `parentId`. Lo
+ * tiene desde `a745235a` (desplegado), así que `date: null` sobre una
  * subtarea ya es legal y solo le limpia fecha y hora.
+ *
+ * Desde el 2026-09-19 la vía es `mutate_tasks({ops:[{op:'reschedule'…}]})`:
+ * la tool suelta ya no existe, así que la existencia se resuelve con `?ids=`
+ * y la mutación viaja en `POST /api/batch`.
  */
-describe('reschedule_task sobre una SUBTAREA (cableado real de la tool)', () => {
+describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 	const SUB_ID = '44444444-4444-4444-4444-444444444444';
 	const PARENT_ID = '55555555-5555-5555-5555-555555555555';
 
@@ -1640,11 +1758,15 @@ describe('reschedule_task sobre una SUBTAREA (cableado real de la tool)', () => 
 		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 	}
 
-	/** Payloads de los `POST /api/mutations` que llegaron al servidor. */
+	/** Ops de los `POST /api/batch` que llegaron al servidor, aplanadas: es
+	 *  donde viaja hoy lo que antes iba una a una por `/api/mutations`. */
 	function mutationBodies(fetchSpy: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
 		return fetchSpy.mock.calls
-			.filter((call) => String(call[0]).includes('/api/mutations'))
-			.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
+			.filter((call) => String(call[0]).includes('/api/batch'))
+			.flatMap((call) => {
+				const body = JSON.parse(String((call[1] as RequestInit).body)) as { ops: Record<string, unknown>[] };
+				return body.ops;
+			});
 	}
 
 	async function buildClientWith(fetchSpy: ReturnType<typeof vi.fn>) {
@@ -1664,10 +1786,17 @@ describe('reschedule_task sobre una SUBTAREA (cableado real de la tool)', () => 
 	function subtaskFetch() {
 		return vi.fn(async (url: string | URL) => {
 			const u = String(url);
-			if (u.includes('/api/tasks?id=')) return jsonResponse([subtaskRow()]);
-			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			if (u.includes('/api/tasks?ids=')) return jsonResponse([subtaskRow()]);
+			if (u.includes('/api/batch')) {
+				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true }] });
+			}
 			throw new Error(`fetch no mockeado en este test: ${u}`);
 		});
+	}
+
+	function resultText(result: unknown): string {
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		return first.type === 'text' ? (first.text ?? '') : '';
 	}
 
 	afterEach(() => {
@@ -1678,12 +1807,12 @@ describe('reschedule_task sobre una SUBTAREA (cableado real de la tool)', () => 
 		const fetchSpy = subtaskFetch();
 		const client = await buildClientWith(fetchSpy);
 		const result = await client.callTool({
-			name: 'reschedule_task',
-			arguments: { taskId: SUB_ID, date: '2026-01-01' }
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'reschedule', taskId: SUB_ID, date: '2026-01-01' }] }
 		});
-		expect(result.isError).not.toBe(true);
+		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
 		expect(mutationBodies(fetchSpy)).toEqual([
-			{ taskId: SUB_ID, kind: 'reschedule', payload: { date: '2026-01-01' } }
+			{ type: 'mutate', taskId: SUB_ID, kind: 'reschedule', payload: { date: '2026-01-01' } }
 		]);
 	});
 
@@ -1691,33 +1820,29 @@ describe('reschedule_task sobre una SUBTAREA (cableado real de la tool)', () => 
 		const fetchSpy = subtaskFetch();
 		const client = await buildClientWith(fetchSpy);
 		const result = await client.callTool({
-			name: 'reschedule_task',
-			arguments: { taskId: SUB_ID, date: null }
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'reschedule', taskId: SUB_ID, date: null }] }
 		});
-		expect(result.isError).not.toBe(true);
+		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
 		// La propiedad que importa: la mutación VIAJA. Antes se cortaba aquí y
-		// nunca se hacía este POST.
+		// nunca se mandaba.
 		expect(mutationBodies(fetchSpy)).toEqual([
-			{ taskId: SUB_ID, kind: 'reschedule', payload: { date: null } }
+			{ type: 'mutate', taskId: SUB_ID, kind: 'reschedule', payload: { date: null } }
 		]);
 	});
 
 	it('CONTROL — move_to_list sobre la MISMA subtarea sigue rechazándose (residencia, §2.5)', async () => {
 		// Que `reschedule` se abriera no puede haber abierto las otras dos: si
-		// este control cae, la apertura fue más ancha de lo pedido.
-		const fetchSpy = vi.fn(async (url: string | URL) => {
-			const u = String(url);
-			if (u.includes('/api/lists')) return jsonResponse([]);
-			if (u.includes('/api/tasks?id=')) return jsonResponse([subtaskRow()]);
-			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
-			throw new Error(`fetch no mockeado en este test: ${u}`);
-		});
+		// este control cae, la apertura fue más ancha de lo pedido. Vive en
+		// `organize` desde el reparto, así que se pide por ahí.
+		const fetchSpy = subtaskFetch();
 		const client = await buildClientWith(fetchSpy);
 		const result = await client.callTool({
-			name: 'move_to_list',
-			arguments: { taskId: SUB_ID, listId: PARENT_ID }
+			name: 'organize',
+			arguments: { ops: [{ op: 'move_to_list', taskId: SUB_ID, listId: PARENT_ID }] }
 		});
-		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain('0/1 operación(es) encoladas.');
+		expect(resultText(result)).toContain('SUBTAREA');
 		expect(mutationBodies(fetchSpy)).toEqual([]);
 	});
 });
@@ -2212,8 +2337,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 24 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(24);
+	it('sin `toolset` (default): las 16 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(16);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -2224,8 +2349,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 24, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(24);
+	it('`toolset: "all"` (explícito): las 16, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(16);
 	});
 });
 

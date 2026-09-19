@@ -125,7 +125,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		expect(body.result.serverInfo.name).toBe('lumbre-mcp');
 	});
 
-	it('tools/list responde con las 24 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
+	it('tools/list responde con las 16 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, {
 			method: 'POST',
 			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
@@ -133,14 +133,16 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: Array<{ name: string; inputSchema: unknown }> } };
-		expect(body.result.tools).toHaveLength(24);
+		expect(body.result.tools).toHaveLength(16);
 		expect(JSON.stringify(body.result.tools)).not.toMatch(/\$schema/);
 		// Mismo techo que `index.test.ts` (medido allí sobre transporte
 		// in-memory) — aquí se confirma que el mismo `stripToolsListSchema`
 		// aplicado sobre `StreamableHTTPServerTransport` da el mismo resultado
 		// que sobre stdio/in-memory, no un tamaño distinto por transporte.
-		// Subido a 24 tools/28.500 al añadir `get_list` (tarea 827a7878) — ver `index.test.ts`.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(28500);
+		// Bajado a 16 tools/22.400 al retirar las nueve tools sueltas de
+		// mutación individual y partir el lote en `mutate_tasks`/`organize`
+		// (tarea 6f62c877, 2026-09-19) — ver `index.test.ts`.
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(22400);
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {
@@ -217,11 +219,24 @@ describe('POST /mcp — la caché de existencia SOBREVIVE entre peticiones HTTP 
 			const u = String(url);
 			if (u.startsWith(baseUrl)) return originalFetch(url, init); // el propio server HTTP local
 			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask()]);
-			if (u.includes('/api/mutations')) return jsonResponse({ ok: true });
+			if (u.includes('/api/attachments')) {
+				return jsonResponse({ id: 'att-http', filename: 'nota.txt', mime: 'text/plain', size: 4 });
+			}
 			throw new Error(`fetch no mockeado en este test: ${u}`);
 		});
 		vi.stubGlobal('fetch', fetchSpy);
 		return fetchSpy;
+	}
+
+	/** La tool que consulta `taskCache` desde el reparto del 2026-09-19 (las
+	 *  nueve sueltas de mutación ya no existen): `add_attachment` por
+	 *  `content_base64`, que pasa por `requireTaskExists` sin tocar disco. */
+	function attachArgs() {
+		return {
+			taskId: TASK_ID,
+			content_base64: Buffer.from('hola').toString('base64'),
+			filename: 'nota.txt'
+		};
 	}
 
 	async function toolCall(
@@ -252,10 +267,10 @@ describe('POST /mcp — la caché de existencia SOBREVIVE entre peticiones HTTP 
 		expect(first.isError).not.toBe(true);
 		expect(countExistenceGets(fetchSpy)).toBe(1);
 
-		// complete_task, PETICIÓN HTTP DISTINTA, mismo token: si `createServer`
+		// add_attachment, PETICIÓN HTTP DISTINTA, mismo token: si `createServer`
 		// instanciara la caché por petición (el bug de 26 ago), esto repetiría
 		// el GET. Con el registro por token, reutiliza el hit.
-		const second = await toolCall(token, 102, 'complete_task', { taskId: TASK_ID });
+		const second = await toolCall(token, 102, 'add_attachment', attachArgs());
 		expect(second.isError).not.toBe(true);
 		expect(countExistenceGets(fetchSpy)).toBe(1);
 	});
@@ -269,7 +284,7 @@ describe('POST /mcp — la caché de existencia SOBREVIVE entre peticiones HTTP 
 
 		// Mismo taskId, TOKEN DISTINTO: no debe heredar el hit del token anterior
 		// — dos credenciales no comparten (ni invalidan) la caché de la otra.
-		const second = await toolCall('tok-cache-b', 202, 'complete_task', { taskId: TASK_ID });
+		const second = await toolCall('tok-cache-b', 202, 'add_attachment', attachArgs());
 		expect(second.isError).not.toBe(true);
 		expect(countExistenceGets(fetchSpy)).toBe(2);
 	});
@@ -388,7 +403,7 @@ describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)'
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: unknown[] } };
-		expect(body.result.tools).toHaveLength(24);
+		expect(body.result.tools).toHaveLength(16);
 	});
 
 	it('si vienen las dos formas, gana la cabecera', async () => {

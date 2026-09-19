@@ -86,21 +86,21 @@ describe('assertTaskUsable', () => {
 	 * comportamiento en producción.
 	 */
 	const ACCEPT_SUBTASK = [
-		'complete_task',
-		'cancel_task',
-		'delete_task',
+		'complete',
+		'cancel',
+		'delete',
 		'complete_subtask',
 		'add_subtask',
-		'update_task',
-		'reschedule_task'
+		'update',
+		'reschedule'
 	];
 	const REJECT_SUBTASK = ['set_section', 'move_to_list'];
 
-	it.each(ACCEPT_SUBTASK)('%s: acepta un subtaskId (no escribe residencia)', () => {
+	it.each(ACCEPT_SUBTASK)('op %s: acepta un subtaskId (no escribe residencia)', () => {
 		expect(() => assertTaskUsable(subtask(), 'sub-1', { allowSubtask: true })).not.toThrow();
 	});
 
-	it.each(REJECT_SUBTASK)('%s: RECHAZA un subtaskId (evita corromper la residencia)', () => {
+	it.each(REJECT_SUBTASK)('op %s: RECHAZA un subtaskId (evita corromper la residencia)', () => {
 		expect(() => assertTaskUsable(subtask(), 'sub-1', { allowSubtask: false })).toThrow(subtaskNotAllowedError('sub-1').message);
 	});
 
@@ -109,26 +109,36 @@ describe('assertTaskUsable', () => {
 		expect(subtaskNotAllowedError('x').message).toMatch(/complete_subtask/);
 	});
 
-	it('subtaskNotAllowedError NO afirma que editar una subtarea esté prohibido — update_task sí vale', () => {
+	it('subtaskNotAllowedError NO afirma que editar una subtarea esté prohibido — la op update sí vale', () => {
 		// Regresión del texto viejo («es de residencia/agenda/edición»): desde
-		// que `update_task` acepta un `subtaskId`, decir "edición" mandaba al
+		// que la op `update` acepta un `subtaskId`, decir "edición" mandaba al
 		// modelo a rendirse en un caso que funciona. El mensaje debe nombrar el
-		// motivo REAL (lista/sección) y apuntar a update_task como vía viva.
+		// motivo REAL (lista/sección) y apuntar a `update` como vía viva.
 		const message = subtaskNotAllowedError('x').message;
-		expect(message).toMatch(/update_task/);
+		expect(message).toMatch(/ops update/);
 		expect(message).not.toMatch(/residencia\/agenda\/edición/);
 		expect(message).toMatch(/lista ni sección/i);
 	});
 
-	it('subtaskNotAllowedError NO condiciona reschedule_task a llevar fecha — date:null también vale', () => {
+	it('subtaskNotAllowedError nombra OPS, no las nueve tools sueltas que ya no existen', () => {
+		// Retiradas el 2026-09-19 (tarea 6f62c877): citarlas mandaba al modelo a
+		// llamar algo que no está en `tools/list`. El mensaje nombra las ops y
+		// su tool (`mutate_tasks`/`organize`).
+		const message = subtaskNotAllowedError('x').message;
+		expect(message).not.toMatch(/update_task|reschedule_task|complete_task|cancel_task|delete_task/);
+		expect(message).toMatch(/mutate_tasks/);
+		expect(message).toMatch(/organize/);
+	});
+
+	it('subtaskNotAllowedError NO condiciona la op reschedule a llevar fecha — date:null también vale', () => {
 		// Regresión del texto que acompañaba al refinamiento condicional
 		// («reschedule_task con una fecha»): desde que el guard de `parentId`
 		// está en `task-ops.unscheduleTask` (app, a745235a), desagendar una
 		// subtarea es legal y decir lo contrario manda al modelo a operar sobre
 		// el padre, que es OTRA tarea.
 		const message = subtaskNotAllowedError('x').message;
-		expect(message).not.toMatch(/reschedule_task con una fecha/);
-		expect(message).toMatch(/reschedule_task/);
+		expect(message).not.toMatch(/reschedule.{0,4} con una fecha/);
+		expect(message).toMatch(/reschedule/);
 		expect(message).toMatch(/date:null/);
 	});
 

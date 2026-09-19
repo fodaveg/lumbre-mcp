@@ -643,9 +643,11 @@ export function listNotFoundError(listId: string): Error {
  *
  * Solo lo ven ya las ops que siguen CERRADAS a una subtarea, así que el texto
  * nombra el motivo REAL de cada una (residencia) en vez del viejo «es de
- * residencia/agenda/edición»: desde que `update_task`/`op:"update"` aceptan un
- * `subtaskId`, decir «edición» era falso y empujaba al modelo a rendirse en un
- * caso que sí funciona.
+ * residencia/agenda/edición»: desde que `op:"update"` acepta un `subtaskId`,
+ * decir «edición» era falso y empujaba al modelo a rendirse en un caso que sí
+ * funciona. Nombra OPS, no tools (2026-09-19): las nueve tools sueltas de
+ * mutación individual ya no existen y citarlas mandaba al modelo a llamar
+ * algo que no está en `tools/list`.
  */
 export function subtaskNotAllowedError(taskId: string): Error {
 	return new Error(
@@ -653,10 +655,10 @@ export function subtaskNotAllowedError(taskId: string): Error {
 			'lista ni sección propias — vive en la checklist de su padre (docs/18-que-es-una-tarea.md ' +
 			'§2.5, prohibidos en subtarea: `somedayListId`, `sectionId`). Eso deja fuera move_to_list y ' +
 			'set_section. Si querías cambiar de lista o de sección lo que la contiene, resuelve el id de ' +
-			'la tarea PADRE con list_tasks y opera sobre él. Sobre la SUBTAREA sí valen update_task ' +
-			'(texto, notas, prioridad, hora), reschedule_task (darle fecha o quitársela con date:null), ' +
-			'complete_task/complete_subtask, cancel_task, delete_task y add_subtask. No se ha encolado ' +
-			'ninguna mutación.'
+			'la tarea PADRE con list_tasks y opera sobre él. Sobre la SUBTAREA sí valen las ops update ' +
+			'(texto, notas, prioridad, hora), reschedule (darle fecha o quitársela con date:null), ' +
+			'complete/complete_subtask, cancel y add_subtask de mutate_tasks, y delete de organize. No ' +
+			'se ha encolado ninguna mutación.'
 	);
 }
 
@@ -691,17 +693,19 @@ export function subtaskNotAllowedError(taskId: string): Error {
  * `moveTaskToList` es no-op sobre una subtarea, `reconcileTaskInvariants`
  * solo repara primer nivel) — no aquí.
  *
- * La política, tool por tool (ver cada `requireTaskExists(...)` en
- * `index.ts`, y `TASK_TARGET_ALLOW_SUBTASK` para el gemelo de `mutate_tasks`):
- *  - `allowSubtask: true` — `complete_task`, `cancel_task`, `delete_task`,
+ * La política, op por op (`TASK_TARGET_ALLOW_SUBTASK`, más abajo, es la tabla
+ * viva; desde el 2026-09-19 no hay tools sueltas de mutación, solo ops de
+ * `mutate_tasks`/`organize`, y `add_attachment` es la única tool que sigue
+ * llamando a `requireTaskExists` por su cuenta):
+ *  - `allowSubtask: true` — `complete`, `cancel`, `delete`,
  *    `complete_subtask`, `add_subtask` (no tocan residencia) y, desde
- *    2026-09-04, `update_task`: sus cinco campos son accidentales PERMITIDOS
+ *    2026-09-04, `update`: sus cinco campos son accidentales PERMITIDOS
  *    en subtarea (§2.5) y su camino en el servidor está medido como
  *    subtask-safe — `inbound-materialize.ts` case `'update'` solo escribe
  *    celdas (`editTaskContent`/`setTaskNotes`/`setTaskPriority`) y, para
  *    `time` sin día, llama a `moveTask` con `date !== null`, la rama que NO
- *    escribe `somedayListId`. También `reschedule_task`/`op:"reschedule"`,
- *    SIN condición sobre el payload desde 2026-09-04 (ver más abajo).
+ *    escribe `somedayListId`. También `reschedule`, SIN condición sobre el
+ *    payload desde 2026-09-04 (ver más abajo).
  *    `get_task` ni siquiera pasa por aquí, pero acepta un `subtaskId` igual.
  *  - `allowSubtask: false` (default) — `set_section` y `move_to_list`
  *    (escriben `sectionId`/`somedayListId`, PROHIBIDOS en subtarea por §2.5);
@@ -1250,13 +1254,14 @@ export async function runBatch(config: LumbreConfig, ops: BatchOp[]): Promise<Ba
 }
 
 /**
- * Una operación de la tool `mutate_tasks` (`index.ts`): discriminada por
- * `op`, un espejo — MISMOS campos, mismo significado — de la tool individual
- * correspondiente (`add_task`, `complete_task` → `op:'complete'`,
- * `cancel_task` → `op:'cancel'`, etc.). Separado en un tipo TS plano (sin
+ * Una operación de las tools de lote `mutate_tasks`/`organize`
+ * (`tools/batch.ts`): discriminada por `op`, con las MISMAS 16 variantes de
+ * siempre — el reparto en dos tools (2026-09-19) no cambió ninguna forma, solo
+ * quién las acepta (`TASK_OP_TOOL` en `tools/shared.ts`). Separado en un tipo
+ * TS plano (sin
  * zod) para poder testear `buildBatchFromOps` sin depender del SDK de MCP —
- * el zod `discriminatedUnion` de `index.ts` produce valores estructuralmente
- * iguales a este tipo.
+ * los zod `discriminatedUnion` de `tools/batch.ts` producen valores
+ * estructuralmente iguales a este tipo.
  */
 export type MutateTasksOp =
 	| ({ op: 'add_task' } & AddTaskInput)
@@ -1309,13 +1314,12 @@ export type MutateTasksOp =
 /**
  * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
  * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
- * matriz de `requireTaskExists` en `index.ts` (ver el JSDoc de
+ * matriz que aplica `requireTaskExists` (ver el JSDoc de
  * `assertTaskUsable` para el porqué completo). Las ops de PROYECTO/ÁREA/SECCIÓN
  * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
  * `set_list_notes`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
- * existencia (mismo criterio que sus tools individuales, que tampoco llaman
- * `requireTaskExists`). La PRESENCIA de una clave es la señal de "esta op
+ * existencia. La PRESENCIA de una clave es la señal de "esta op
  * necesita comprobación de existencia" (ver `collectExistenceCheckIds`/
  * `buildBatchFromOps`).
  *
@@ -1398,10 +1402,10 @@ function localValidationError(op: MutateTasksOp): string | null {
 	return null;
 }
 
-/** `MutateTasksOp` → `BatchOp` — MISMA traducción, campo a campo, que cada
- *  tool individual construye para su `mutateTask`/`addTask` (ver `index.ts`:
- *  `complete_task`, `update_task`, `create_list`… — cada rama de este
- *  `switch` es su equivalente). `create_list` usa el `listId` PRE-GENERADO
+/** `MutateTasksOp` → `BatchOp` — MISMA traducción, campo a campo, que
+ *  construían las tools individuales para su `mutateTask`/`addTask` antes de
+ *  retirarse (2026-09-19): cada rama de este `switch` es el equivalente de
+ *  una de ellas. `create_list` usa el `listId` PRE-GENERADO
  *  por el llamante si vino (encadenado intra-lote), o genera uno con
  *  `randomUUID()` si no — ver el JSDoc de `MutateTasksOp['create_list']`. */
 function translateOp(op: MutateTasksOp): BatchOp {

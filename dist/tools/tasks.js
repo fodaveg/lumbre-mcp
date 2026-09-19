@@ -1,10 +1,9 @@
 import { z } from 'zod';
-import { addTask, findTaskById, findTasksByIds, listTasks, priorityToLevel, taskNotFoundError } from '../lumbre-client.js';
+import { addTask, findTaskById, findTasksByIds, listTasks, taskNotFoundError } from '../lumbre-client.js';
 import { formatTaskFull, formatTaskList } from '../format.js';
 import { resolveRefs } from '../refs.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, hasNotes, parseNotesSince, recordNotesSeen } from '../notes.js';
-import { requireTaskExists, mutateTaskInvalidating } from './task-existence.js';
-import { ASYNC_NOTE, errorResult, recurrenceSchema, tagSchema, textResult } from './shared.js';
+import { errorResult, recurrenceSchema, tagSchema, textResult } from './shared.js';
 /**
  * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
  * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
@@ -53,13 +52,13 @@ export function refTexts(tasks, notesMode, autoRender) {
     return texts;
 }
 /**
- * Familia «tareas individuales»: `add_task`/`list_tasks`/`get_task` y las
- * nueve de Fase 2 (`complete_task`/`cancel_task`/`update_task`/
- * `reschedule_task`/`delete_task`/`set_section`/`remove_section`/
- * `add_subtask`/`complete_subtask`, ver PHASE2.md). Extraída de `index.ts`
- * tal cual (tarea de partir el servidor en `src/tools/` por familia,
- * 2026-09-17): cero cambios de comportamiento, solo `config`/`taskCache`/
- * `notesSeenStore` explícitos por `ctx` en vez de closure.
+ * Familia «tareas individuales»: `add_task` (alta suelta), `list_tasks` y
+ * `get_task`. Las nueve tools de Fase 2 que vivían aquí
+ * (`complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
+ * `delete_task`/`set_section`/`remove_section`/`add_subtask`/
+ * `complete_subtask`, ver PHASE2.md) se retiraron el 2026-09-19: son ops de
+ * `mutate_tasks`/`organize` (ver el comentario al final de esta función y el
+ * JSDoc de `src/tools/batch.ts`).
  */
 export function registerTaskTools(server, ctx) {
     const addTaskTool = server.registerTool('add_task', {
@@ -364,289 +363,36 @@ export function registerTaskTools(server, ctx) {
             return errorResult(err);
         }
     });
-    // ── Fase 2: mutar una tarea existente (ver PHASE2.md) ──────────────────────
-    const completeTaskTool = server.registerTool('complete_task', {
-        description: `Marca una tarea (o SUBTAREA, aunque para eso es más claro complete_subtask) como hecha, o ` +
-            `la desmarca con done:false. ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
-            done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
-        }
-    }, async (input) => {
-        try {
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.taskId,
-                kind: 'complete',
-                payload: { done: input.done ?? true }
-            });
-            return textResult(`Encolado en Lumbre: ${input.done === false ? 'desmarcar' : 'completar'} la tarea ${input.taskId} ` +
-                '(se aplicará al sincronizar).');
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const cancelTaskTool = server.registerTool('cancel_task', {
-        description: `Cancela una tarea existente ("no se hizo ni se hará", distinto de completarla); sale ` +
-            `igual de pendientes/rollover. Dispara con "cancela"/"descarta" (sin borrarla). ` +
-            `cancelled:false la restaura. ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
-            cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
-        }
-    }, async (input) => {
-        try {
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.taskId,
-                kind: 'cancel',
-                payload: { cancelled: input.cancelled ?? true }
-            });
-            return textResult(`Encolado en Lumbre: ${input.cancelled === false ? 'restaurar' : 'cancelar'} la tarea ${input.taskId} ` +
-                '(se aplicará al sincronizar).');
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const updateTaskTool = server.registerTool('update_task', {
-        description: `Edita texto, notas, tags propios, prioridad u hora de una tarea existente, o de una ` +
-            `SUBTAREA suya (los cinco campos valen igual en una subtarea). Los campos que omitas ` +
-            `no cambian; \`notes\` REEMPLAZA las anteriores enteras. ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
-            content: z.string().min(1).max(2000).optional().describe('Nuevo texto/título de la tarea'),
-            notes: z
-                .string()
-                .max(10000)
-                .optional()
-                .describe('Nuevas notas/descripción (reemplaza las anteriores por completo)'),
-            tags: z
-                .array(tagSchema)
-                .optional()
-                .describe('Reemplazo completo de tags propios; [] los quita'),
-            priority: z
-                .enum(['p1', 'p2', 'p3', 'p4'])
-                .optional()
-                .describe('p1 = más urgente … p3; p4 = quitar la prioridad'),
-            time: z
-                .union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
-                .optional()
-                .describe('Hora "HH:MM" (24h); si la tarea no tiene día se agenda hoy. null la quita')
-        }
-    }, async (input) => {
-        if (input.content === undefined &&
-            input.notes === undefined &&
-            input.tags === undefined &&
-            input.priority === undefined &&
-            input.time === undefined) {
-            return errorResult(new Error('Indica al menos un campo a cambiar (content, notes, tags, priority o time).'));
-        }
-        try {
-            // `allowSubtask: true` (2026-09-04): `content`/`notes`/`priority`/
-            // `tags`/`time` son cinco de los accidentales PERMITIDOS en una subtarea
-            // por `docs/18-que-es-una-tarea.md` §2.5 — ver el JSDoc de
-            // `assertTaskUsable` para el camino de servidor que lo respalda.
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.taskId,
-                kind: 'update',
-                payload: {
-                    ...(input.content !== undefined ? { content: input.content } : {}),
-                    ...(input.notes !== undefined ? { notes: input.notes } : {}),
-                    ...(input.tags !== undefined ? { tags: input.tags } : {}),
-                    ...(input.priority !== undefined ? { priority: priorityToLevel(input.priority) } : {}),
-                    ...(input.time !== undefined ? { time: input.time } : {})
-                }
-            });
-            return textResult(`Encolada en Lumbre la edición de la tarea ${input.taskId} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const rescheduleTaskTool = server.registerTool('reschedule_task', {
-        description: `Mueve una tarea existente a otro día, o a "Algún día"/Bandeja de entrada con date:null. ` +
-            `Acepta también el id de una SUBTAREA (una subtarea con date:null se queda sin fecha en ` +
-            `la checklist de su padre; no cae a la Bandeja). ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
-            date: z
-                .union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
-                .describe('Día destino, YYYY-MM-DD, o null para mandarla a "Algún día"/Bandeja de entrada')
-        }
-    }, async (input) => {
-        try {
-            // `allowSubtask: true` SIN condición sobre el payload (2026-09-04):
-            // `date` es un accidental permitido en subtarea (docs/18 §2.5) y
-            // desagendar una ya no la saca de la checklist de su padre — el
-            // guard de `parentId` de `task-ops.unscheduleTask` entró en la app
-            // en `a745235a`. Mismo valor que la tabla de `mutate_tasks`
-            // (`TASK_TARGET_ALLOW_SUBTASK`, entrada `reschedule`).
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.taskId,
-                kind: 'reschedule',
-                payload: { date: input.date }
-            });
-            return textResult(`Encolado en Lumbre el cambio de fecha de la tarea ${input.taskId} a ` +
-                `${input.date ?? '"Algún día"'} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const deleteTaskTool = server.registerTool('delete_task', {
-        description: `Borra (soft-delete) una tarea existente, o una SUBTAREA suya (borra solo esa). ACCIÓN ` +
-            `DELICADA: sin confirmación inmediata ni deshacer — confírmalo con el usuario antes de ` +
-            `llamarla. ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (o subtarea) a borrar (ver list_tasks/get_task)')
-        }
-    }, async (input) => {
-        try {
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, { taskId: input.taskId, kind: 'delete', payload: {} });
-            return textResult(`Encolado en Lumbre el borrado de la tarea ${input.taskId} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const setSectionTool = server.registerTool('set_section', {
-        description: 'Mueve una tarea existente a una sección dentro de SU proyecto o área (se crea si no existe), o ' +
-            'la saca con section:null. Se ignora si la tarea no tiene residencia propia. NO aplica a ' +
-            'subtareas. ' + ASYNC_NOTE,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea (ver list_tasks)'),
-            section: z
-                .string()
-                .max(200)
-                .nullable()
-                .describe('Nombre de la sección destino dentro del proyecto o área de la tarea (se crea si no existe). ' +
-                'null = quitarla de su sección actual.')
-        }
-    }, async (input) => {
-        try {
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: false });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.taskId,
-                kind: 'setSection',
-                payload: { section: input.section }
-            });
-            return textResult(`Encolado en Lumbre: mover la tarea ${input.taskId} a la sección ` +
-                `${input.section === null ? '(ninguna)' : `"${input.section}"`} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const removeSectionTool = server.registerTool('remove_section', {
-        description: 'Borra una sección dentro de un proyecto o área; sus tareas no se borran, solo quedan sueltas ' +
-            'en el MISMO contenedor. Resuelve `sectionId` desde una tarea que viva ahí ' +
-            '(list_tasks/get_task); si no existe, se ignora. ' + ASYNC_NOTE,
-        inputSchema: {
-            sectionId: z
-                .string()
-                .uuid()
-                .describe('Id de la sección a borrar (ver el campo `sectionId` de una tarea que viva en ella, en list_tasks/get_task)')
-        }
-    }, async (input) => {
-        try {
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.sectionId,
-                kind: 'removeSection',
-                payload: { sectionId: input.sectionId }
-            });
-            return textResult(`Encolado en Lumbre el borrado de la sección ${input.sectionId} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
+    // ── Fase 2 (mutar una tarea existente, ver PHASE2.md): YA NO VIVE AQUÍ ────
+    //
+    // Las nueve tools sueltas de mutación individual (`complete_task`,
+    // `cancel_task`, `update_task`, `reschedule_task`, `delete_task`,
+    // `set_section`, `remove_section`, `add_subtask`, `complete_subtask`) se
+    // retiraron el 2026-09-19 (tarea 6f62c877, decisión de David del 17 sep):
+    // son las ops del mismo nombre de `mutate_tasks` (`complete`, `cancel`,
+    // `update`, `reschedule`, `set_section`, `add_subtask`,
+    // `complete_subtask`) y de `organize` (`delete`, `remove_section`), que ya
+    // las cubrían entero con la MISMA validación de existencia y el mismo
+    // payload (`translateOp` en `lumbre-client.ts`). Lo que compra la poda:
+    // -6.5k caracteres de `tools/list` y una frontera MECÁNICA entre mutar una
+    // tarea y borrar/reorganizar, que es lo que separa lo que puede hacer un
+    // subagente portable de lo que no (ver `src/tools/batch.ts`).
+    //
+    // Esta familia se queda con las tres que NO son mutación por-tarea:
+    // `add_task` (alta suelta, la entrada más usada del MCP), `list_tasks` y
+    // `get_task`.
     // ── Gestión de proyectos y áreas (paridad UI↔MCP, docs/20-contrato-lista.md) ──
     //
     // `create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list` NO
     // tienen tool suelta desde el 2026-08-27 (podadas: 3.506 bytes de
     // `tools/list`, 5 tools por 19 llamadas/mes de uso real medido sobre un
-    // mes de transcripts): son las ops del mismo nombre en `mutate_tasks`
-    // (`mutateTasksOpSchema`/`mutateTasksStrictOpSchema`/`translateOp`), que ya
-    // las implementaba entero — `create_list.listId` es incluso un
-    // SUPERCONJUNTO (encadenar dentro del mismo lote, cosa que la tool suelta
-    // no tenía). Identidad = el id, no el nombre (`rename_list` no la
-    // cambia). `remove_list` nunca pierde tareas (se reasignan) ni permite
-    // borrar la última lista viva ni la Bandeja de entrada canónica (§5
-    // "Prohibidos" del contrato). Detalle completo del contrato de lista en
-    // `docs/20-contrato-lista.md`.
-    const addSubtaskTool = server.registerTool('add_subtask', {
-        description: `Añade subtareas (checklist) a una tarea existente. Un solo nivel: si \`taskId\` ya ` +
-            `es subtarea, se descarta en silencio. Para crearlas junto con la tarea, usa add_task ` +
-            `con \`subtasks\`. ${ASYNC_NOTE}`,
-        inputSchema: {
-            taskId: z.string().uuid().describe('Id de la tarea PADRE (ver list_tasks)'),
-            subtasks: z
-                .array(z.string())
-                .min(1)
-                .max(50)
-                .describe('Textos de las subtareas a añadir, en orden (cada uno se recorta a 500 caracteres)')
-        }
-    }, async (input) => {
-        try {
-            // `allowSubtask: true` (no relaja nada nuevo): si `taskId` YA es una
-            // subtarea, esto solo evita adelantar el rechazo aquí — el
-            // materializador (`task-ops`/`inbound-materialize.ts`) descarta la
-            // mutación en silencio de todas formas, comportamiento YA documentado
-            // arriba y sin cambios por este fix.
-            await requireTaskExists(ctx, input.taskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.taskId,
-                kind: 'addSubtask',
-                payload: { subtasks: input.subtasks }
-            });
-            return textResult(`Encolado en Lumbre: ${input.subtasks.length} subtarea(s) para la tarea ${input.taskId} ` +
-                '(se aplicará al sincronizar).');
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    const completeSubtaskTool = server.registerTool('complete_subtask', {
-        description: `Marca hecha (o desmarca con done:false) una SUBTAREA por su id — mismo mecanismo que ` +
-            `complete_task, sin cascada sobre la tarea padre. Resuelve \`subtaskId\` con ` +
-            `get_task(taskId) de su padre. ${ASYNC_NOTE}`,
-        inputSchema: {
-            subtaskId: z.string().uuid().describe('Id de la subtarea (ver get_task de su tarea padre)'),
-            done: z.boolean().optional().describe('true = completar (default); false = desmarcar')
-        }
-    }, async (input) => {
-        try {
-            await requireTaskExists(ctx, input.subtaskId, { allowSubtask: true });
-            await mutateTaskInvalidating(ctx, {
-                taskId: input.subtaskId,
-                kind: 'complete',
-                payload: { done: input.done ?? true }
-            });
-            return textResult(`Encolado en Lumbre: ${input.done === false ? 'desmarcar' : 'completar'} la subtarea ` +
-                `${input.subtaskId} (se aplicará al sincronizar).`);
-        }
-        catch (err) {
-            return errorResult(err);
-        }
-    });
-    return {
-        addTaskTool,
-        listTasksTool,
-        getTaskTool,
-        completeTaskTool,
-        cancelTaskTool,
-        updateTaskTool,
-        rescheduleTaskTool,
-        deleteTaskTool,
-        setSectionTool,
-        removeSectionTool,
-        addSubtaskTool,
-        completeSubtaskTool
-    };
+    // mes de transcripts); desde el 2026-09-19 son ops de `organize`
+    // (`organizeOpSchema`/`organizeStrictOpSchema`/`translateOp`), junto con
+    // `remove_section` y `delete`. Identidad = el id, no el nombre
+    // (`rename_list` no la cambia). `remove_list` nunca pierde tareas (se
+    // reasignan) ni permite borrar la última lista viva ni la Bandeja de
+    // entrada canónica (§5 "Prohibidos" del contrato). Detalle completo del
+    // contrato de lista en `docs/20-contrato-lista.md`.
+    return { addTaskTool, listTasksTool, getTaskTool };
 }
 //# sourceMappingURL=tasks.js.map

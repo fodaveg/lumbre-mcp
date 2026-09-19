@@ -15,7 +15,12 @@ import { registerBatchTool } from './tools/batch.js';
 // `index.js` (guardarraíl de superficie expuesta, ver su JSDoc).
 export { mutateBrlOpSchema, mutateBrlStrictOpSchema } from './tools/brl.js';
 export { effectiveNotesMode, effectiveScopeLabel, refTexts } from './tools/tasks.js';
-export { mutateTasksOpSchema, mutateTasksStrictOpSchema } from './tools/batch.js';
+export {
+	mutateTasksOpSchema,
+	mutateTasksStrictOpSchema,
+	organizeOpSchema,
+	organizeStrictOpSchema
+} from './tools/batch.js';
 import { fileNotesSeenStore, type NotesSeenStore } from './notes.js';
 import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-cache.js';
 
@@ -31,17 +36,21 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * adjunto ya está enlazado cuando la tool responde (ver su JSDoc, más abajo).
  * `delete_attachment` retira un adjunto existente por id mediante
  * `DELETE /api/attachments/:id`; es destructiva y no ofrece deshacer.
- * Fase 2: `complete_task`/`cancel_task`/`update_task`/`reschedule_task`/
- * `delete_task`/`set_section`/`add_subtask`/`complete_subtask`/
- * `remove_section` (mutan una tarea EXISTENTE vía `/api/mutations` — ver
- * PHASE2.md; `remove_section` es la excepción, muta una SECCIÓN). La gestión
- * de listas de "Algún día" (crear/anidar/renombrar/borrar una lista, mover
- * una tarea a otra lista — paridad UI↔MCP, `docs/20-contrato-lista.md`) YA NO
- * tiene tool suelta (podadas el 2026-08-27, medido: 3.506 bytes de
- * `tools/list` por 19 llamadas/mes de uso real): son las ops
- * `create_list`/`nest_list`/`rename_list`/`remove_list`/`move_to_list` de
- * `mutate_tasks`, que ya las cubría entera — `create_list.listId` es incluso
- * un SUPERCONJUNTO (encadenar dentro del mismo lote, cosa que la tool suelta
+ * Fase 2 (mutar una tarea EXISTENTE vía `/api/mutations`, ver PHASE2.md): ya
+ * NO tiene tool suelta por operación — las nueve (`complete_task`/
+ * `cancel_task`/`update_task`/`reschedule_task`/`delete_task`/`set_section`/
+ * `add_subtask`/`complete_subtask`/`remove_section`) se retiraron el
+ * 2026-09-19 (tarea 6f62c877) y son ops de las DOS tools de lote:
+ * `mutate_tasks` (opera sobre UNA tarea: `complete`, `cancel`, `update`,
+ * `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, más el alta
+ * `add_task`) y `organize` (reorganiza y BORRA: `delete`, `remove_section`,
+ * `create_list`, `nest_list`, `rename_list`, `remove_list`,
+ * `set_list_notes`, `move_to_list`). La gestión de listas de "Algún día"
+ * (crear/anidar/renombrar/borrar una lista, mover una tarea a otra lista —
+ * paridad UI↔MCP, `docs/20-contrato-lista.md`) perdió su tool suelta antes,
+ * el 2026-08-27 (medido: 3.506 bytes de `tools/list` por 19 llamadas/mes de
+ * uso real), y hoy vive en `organize` — `create_list.listId` es incluso un
+ * SUPERCONJUNTO (encadenar dentro del mismo lote, cosa que la tool suelta
  * no tenía). `list_lists` (fix b00303b5) lee TODAS las listas vivas con su
  * recuento vía `GET /api/tasks?includeLists=1` — a diferencia de
  * `list_tasks({list})`, SÍ distingue una lista que existe pero está vacía de
@@ -50,7 +59,7 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * `notes.ts`), nunca la nota entera. `get_list({ listId })` devuelve el
  * detalle de UN proyecto/área (tipo, padre, estado, recuento) con su nota
  * ÍNTEGRA y verbatim — pensada para leerla antes de reescribirla con
- * `mutate_tasks({op:"set_list_notes"})`, que la REEMPLAZA entera.
+ * `organize({op:"set_list_notes"})`, que la REEMPLAZA entera.
  * `list_brl_entries`/`mutate_brl` (BRL, add-on experimental): leen y mutan el
  * REGISTRO del día —entradas `-` (nota) y `=` (pensamiento)—, que NO son
  * tareas y no salen en `list_tasks`; ver el bloque «BRL» más abajo (los tres
@@ -59,7 +68,7 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * usan el token personal de email-to-task de Lumbre (Ajustes → email
  * entrante), NUNCA hardcodeado — ver README.md.
  *
- * Todas las tools de Fase 2 necesitan el `taskId` de antemano: lo normal es
+ * Todas las ops de Fase 2 necesitan el `taskId` de antemano: lo normal es
  * llamar primero a `list_tasks` para resolverlo por contenido/fecha. Igual
  * `read_attachment` necesita el `attachment_id` que trae `list_tasks` en el
  * campo `attachments` de cada tarea. TODAS validan que el `taskId` EXISTE
@@ -81,8 +90,8 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * chars (ya no es el default), `'full'` las deja íntegras para TODO el lote
  * (`fullNotes: true` sigue siendo su alias). `get_task(taskId)` devuelve una
  * única tarea completa (notas verbatim + `createdAt` + lista/sección) —
- * pensado para reeditar una nota con `update_task` (que la REEMPLAZA entera)
- * sin destruir lo que un marcador/preview no traía.
+ * pensado para reeditar una nota con `mutate_tasks({op:"update"})` (que la
+ * REEMPLAZA entera) sin destruir lo que un marcador/preview no traía.
  *
  * `list_tasks`/`get_task` resuelven además, EN VIVO, las referencias
  * `[[task:ID|Etiqueta]]`/`[[list:ID|Etiqueta]]` que traiga el texto o las notas
@@ -151,14 +160,14 @@ export interface CreateServerOptions {
 	 * conector stdio LOCAL dedicado a adjuntos (ver README, "Transporte HTTP
 	 * remoto"): con `'attachments'`, solo `add_attachment`/`read_attachment`/
 	 * `delete_attachment`; con cualquier otro valor (incluido `undefined`, el
-	 * default), las 24 de siempre. Existe para que David pueda tener el
-	 * conector remoto (24 tools) Y un conector local de adjuntos a la vez sin
-	 * duplicar las 24 en el contexto de cada sesión (`tools/list` ya pesa ~26
-	 * KB de JSON; dos
+	 * default), las 16 de siempre. Existe para que David pueda tener el
+	 * conector remoto (16 tools) Y un conector local de adjuntos a la vez sin
+	 * duplicar las 16 en el contexto de cada sesión (`tools/list` pesa ~20 KB
+	 * de JSON; dos
 	 * copias son dos veces ese coste, y el modelo encima tendría que acertar
 	 * cuál de los dos `add_task`/`list_tasks` usar). `main()` la lee de
 	 * `LUMBRE_MCP_TOOLSET` (env); `http.ts` NUNCA la pasa — el conector
-	 * remoto sigue exponiendo las 24 siempre, pase lo que pase con la env del
+	 * remoto sigue exponiendo las 16 siempre, pase lo que pase con la env del
 	 * proceso que lo arrancó.
 	 */
 	toolset?: 'all' | 'attachments';
@@ -169,14 +178,14 @@ export interface CreateServerOptions {
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
- * transporte remoto). Registra las 24 de siempre salvo que
+ * transporte remoto). Registra las 16 de siempre salvo que
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
  * quedan `add_attachment`/`read_attachment`/`delete_attachment` — las demás
  * se registran igual
- * (para no bifurcar cada una de las 21 llamadas a `registerTool` con un
+ * (para no bifurcar cada una de las 13 llamadas a `registerTool` con un
  * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
  * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
- * estado intermedio de "24 registradas".
+ * estado intermedio de "16 registradas".
  *
  * `taskCache`/`brlCache` (cachés cortas de existencia, ver
  * `existence-cache.ts`) salen del registro de MÓDULO indexado por
@@ -206,38 +215,26 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	// necesita a cuál (`requireTaskExists`/`mutateTaskInvalidating` viven en
 	// `tools/task-existence.ts`, no en `tools/tasks.ts`, precisamente para que
 	// `tools/attachments.ts` pueda usarlas sin importar de `tools/tasks.ts`).
-	// Es el orden en que un cliente MCP VE las 24 tools en `tools/list`, y eso
+	// Es el orden en que un cliente MCP VE las 16 tools en `tools/list`, y eso
 	// influye en cuál prueba antes un modelo: tareas individuales encabeza
 	// (ya empieza por alta/listado/lectura, lo más usado), luego el lote,
 	// listas y proyectos, adjuntos, BRL, y `sync` AL FINAL — `refresh_sync`
 	// casi nunca hace falta tras una escritura de este MCP (ver su JSDoc en
-	// `tools/sync.ts`), así que no debe encabezar el listado. Los 24 nombres y
-	// cada description/schema son BYTE A BYTE los mismos (ver el test de la
-	// lista de nombres, que compara por conjunto — usa `.sort()` — no por
-	// posición); el orden expuesto en `tools/list` no está bajo test en
-	// ningún sitio de este repo, así que este comentario es la única fuente
-	// de verdad de POR QUÉ es este orden y no otro.
+	// `tools/sync.ts`), así que no debe encabezar el listado. El orden
+	// expuesto en `tools/list` no está bajo test en ningún sitio de este repo
+	// (el test de nombres compara por conjunto, con `.sort()`), así que este
+	// comentario es la única fuente de verdad de POR QUÉ es este orden y no
+	// otro.
 
 	// Familia «tareas individuales» (`src/tools/tasks.ts`): add_task/
-	// list_tasks/get_task + las nueve de Fase 2 (PHASE2.md).
-	const {
-		addTaskTool,
-		listTasksTool,
-		getTaskTool,
-		completeTaskTool,
-		cancelTaskTool,
-		updateTaskTool,
-		rescheduleTaskTool,
-		deleteTaskTool,
-		setSectionTool,
-		removeSectionTool,
-		addSubtaskTool,
-		completeSubtaskTool
-	} = registerTaskTools(server, ctx);
+	// list_tasks/get_task (las nueve de Fase 2 son ops del lote desde el
+	// 2026-09-19 — ver `src/tools/batch.ts`).
+	const { addTaskTool, listTasksTool, getTaskTool } = registerTaskTools(server, ctx);
 
 	// Familia «lote de tareas» (`src/tools/batch.ts`, `plan-batch.md`): N
-	// operaciones de golpe — planifica fases y valida por-op.
-	const { mutateTasksTool } = registerBatchTool(server, ctx);
+	// operaciones de golpe — planifica fases y valida por-op. `mutate_tasks`
+	// opera sobre UNA tarea; `organize` reorganiza y borra.
+	const { mutateTasksTool, organizeTool } = registerBatchTool(server, ctx);
 
 	// Familia «listas y proyectos» (`src/tools/lists.ts`, paridad UI↔MCP,
 	// `docs/20-contrato-lista.md`).
@@ -260,12 +257,12 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	const { refreshSyncTool } = registerSyncTools(server, ctx);
 
 	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
-	// retira las 21 tools que NO son `add_attachment`/`read_attachment`/
+	// retira las 13 tools que NO son `add_attachment`/`read_attachment`/
 	// `delete_attachment` — TODAS se registraron arriba igual (para no bifurcar
-	// cada una de las 21 llamadas a `registerTool` con un `if`), así que aquí
+	// cada una de las 13 llamadas a `registerTool` con un `if`), así que aquí
 	// solo se deshace lo
 	// que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
-	// cliente llega a ver el `tools/list` de 24 en el intermedio.
+	// cliente llega a ver el `tools/list` de 16 en el intermedio.
 	if (toolset === 'attachments') {
 		for (const tool of [
 			addTaskTool,
@@ -277,18 +274,10 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 			linkListNoteTool,
 			unlinkListNoteTool,
 			getTaskTool,
-			completeTaskTool,
-			cancelTaskTool,
-			updateTaskTool,
-			rescheduleTaskTool,
-			deleteTaskTool,
-			setSectionTool,
-			removeSectionTool,
-			addSubtaskTool,
-			completeSubtaskTool,
 			listBrlEntriesTool,
 			mutateBrlTool,
-			mutateTasksTool
+			mutateTasksTool,
+			organizeTool
 		]) {
 			tool.remove();
 		}
@@ -308,7 +297,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
  * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
  * `read_attachment`/`delete_attachment`, pensado para un SEGUNDO conector
- * stdio local dedicado (David enchufa a la vez el remoto de las 24 tools y
+ * stdio local dedicado (David enchufa a la vez el remoto de las 16 tools y
  * este, sin duplicar superficie — ver README). Cualquier otro valor (incluido
  * no ponerla) cae
  * al default `'all'` de `createServer` — nunca falla por un valor raro, un

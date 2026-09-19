@@ -1,4 +1,4 @@
-import { assertTaskUsable, findTaskById, mutateTask } from '../lumbre-client.js';
+import { assertTaskUsable, findTaskById } from '../lumbre-client.js';
 /**
  * Comprueba que `taskId` EXISTE antes de encolar cualquier mutación sobre él,
  * y (SELECTIVAMENTE, ver `allowSubtask`) que no sea una subtarea si la tool
@@ -44,18 +44,9 @@ export async function requireTaskExists(ctx, taskId, opts = {}) {
         ctx.taskCache.set(task);
     assertTaskUsable(task, taskId, opts);
 }
-/**
- * Fino wrapper de `mutateTask` que invalida `taskCache` DESPUÉS de encolar —
- * cualquier mutación LOCAL (encolada desde ESTE proceso) sobre `input.taskId`
- * la saca de la caché de existencia, para no servir un "existe" de antes de
- * esa mutación en la próxima `requireTaskExists` sobre el mismo id. `delete`
- * sobre un id que nunca estuvo cacheado (p. ej. un `listId`/`sectionId`, que
- * viaja en el mismo campo `taskId` de `MutateTaskInput` — ver su JSDoc en
- * `lumbre-client.ts`) es un no-op inofensivo, así que este wrapper reemplaza
- * TODAS las llamadas a `mutateTask` de las tools de tarea/lista/sección.
- */
-export async function mutateTaskInvalidating(ctx, input) {
-    await mutateTask(ctx.config, input);
-    ctx.taskCache.invalidate(input.taskId);
-}
+// `mutateTaskInvalidating` (wrapper de `mutateTask` que invalidaba
+// `taskCache` tras encolar) se retiró el 2026-09-19 con las nueve tools
+// sueltas de Fase 2, sus únicas llamantes: `mutate_tasks`/`organize` encolan
+// por `runBatch` e invalidan la caché ellas mismas al final del lote (ver
+// `runOpsBatch` en `tools/batch.ts`).
 //# sourceMappingURL=task-existence.js.map
