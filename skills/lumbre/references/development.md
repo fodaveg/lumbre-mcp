@@ -14,7 +14,12 @@ La máquina de estados pública es:
 - empezar o delegar implementación → `@wip`;
 - parte del agente revisada y verificada → `@done`;
 - devolución humana → `@not-done`;
-- reabrir una devolución → `@acked` si queda pendiente o `@wip` si se corrige ya.
+- reabrir una devolución → `@acked` si queda pendiente o `@wip` si se corrige ya;
+- cerrar el lote o el turno con trabajo sin terminar → de vuelta a `@acked` con el
+  motivo escrito, según «Cierre: ninguna tarea se queda en `@wip`».
+
+`@wip` es un estado de tránsito, no de reposo: solo vale mientras el trabajo está
+realmente en curso. Ninguna tarea termina un lote, una entrega o un turno en `@wip`.
 
 **Dónde se escribe el estado:** como marca `@estado` al final del `content` de la
 tarea (`… texto de la tarea @wip`), con una op `update` que lleve solo `taskId` y
@@ -49,6 +54,38 @@ mediante las superficies nativas.
 - Si el inicio escribe `@wip`, verifica esa escritura antes de delegar.
 - Límites como dos tareas, seis horas o lotes de tres a seis son perfiles opcionales.
   Un presupuesto explícito del usuario prevalece.
+
+## Cierre: ninguna tarea se queda en `@wip`
+
+Al cerrar un lote, al entregar y al terminar el turno, toda tarea en `@wip` sale de
+`@wip` por una de estas dos vías, y no hay una tercera:
+
+- **`@done`**: el trabajo del agente está terminado y verificado según el criterio
+  vigente.
+- **`@acked`**: no se terminó. Devuélvela a `@acked` y escribe el motivo: qué queda
+  pendiente, por qué se paró y cuál es el siguiente paso concreto.
+
+El motivo va en la entrega y también en la nota de la tarea. Es la excepción expresa
+a la regla de checkpoints de arriba: un `@wip` que no se cierra deja constancia en
+Lumbre, porque el usuario lee la tarea, no el historial de la conversación. Detectar
+el trabajo a medias es obligación de quien lo dejó, nunca del usuario.
+
+Antes de declarar cerrado un lote o de anunciar una entrega, haz el barrido y
+enséñalo: lista las tareas del lote por su `#tag`, comprueba su estado real en Lumbre
+(no de memoria ni del plan) y confirma que ninguna sigue en `@wip`. Mientras quede
+una sin resolver, no anuncies el lote cerrado, no lo des por entregado y no pases al
+siguiente.
+
+Matices:
+
+- Si el trabajo sigue vivo y lo continúas en el mismo turno, no hay cierre: mantén
+  `@wip` y termínalo. Parar el turno con la tarea en `@wip` sí es un cierre.
+- Una tarea bloqueada por un tercero, por una decisión del usuario o por falta de
+  datos también vuelve a `@acked`, con el bloqueo nombrado como motivo.
+- La tarea devuelta conserva su `#tag` de lote, su nota y su evidencia. No se borra
+  el trabajo hecho ni se reescribe para que parezca no empezada.
+- Terminar en `@done` exige la verificación que pida el criterio vigente. Ante la
+  duda entre `@done` sin verificar y `@acked` con motivo, es `@acked`.
 
 ## Evidencia
 

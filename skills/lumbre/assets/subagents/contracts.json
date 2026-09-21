@@ -45,7 +45,7 @@
         "Retira @acked, @wip, @done y, solo al reabrir feedback humano, @not-done; añade al final un único tag objetivo en minúsculas. Conserva byte a byte el resto del contenido y los tags ortogonales.",
         "Escribe siempre con mutate_tasks, una o varias tareas: operaciones update que solo contengan taskId y content, agrupadas en una única llamada.",
         "Inspecciona cada resultado del lote. Verifica cada tarea por get_task; si queda antigua, haz un refresh_sync compartido y una última relectura de las afectadas.",
-        "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; conserva @wip y explica el motivo."
+        "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; explica el motivo. Conserva @wip solo mientras el trabajo siga en curso: si el encargo cierra el lote o el turno, escribe @acked y devuelve el motivo, porque ninguna tarea puede quedarse en @wip al cerrar."
       ]
     },
     {
