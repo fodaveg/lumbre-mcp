@@ -174,6 +174,31 @@ invariant(
   "all development states must retain their documented handling",
 );
 invariant(
+  "WIP_IS_A_TRANSIT_STATE",
+  hasAll(section(development, "Estado de agente").replace(/\s+/g, " "), [
+    /`@wip` es un estado de tr[aá]nsito/i,
+    /Ninguna tarea termina un lote, una entrega o un turno en `@wip`/i,
+  ]),
+  "@wip must stay a transit state that no batch, handoff or turn can end on",
+);
+const developmentClose = section(development, "Cierre: ninguna tarea se queda en `@wip`")
+  .replace(/\s+/g, " ");
+invariant(
+  "CLOSING_LEAVES_NO_UNEXPLAINED_WIP",
+  developmentClose !== "" &&
+    hasAll(developmentClose, [
+      /toda tarea en `@wip` sale de `@wip`/i,
+      /no hay una tercera/i,
+      /`@done`/,
+      /`@acked`/,
+      /escribe el motivo/i,
+      /nota de la tarea/i,
+      /barrido/i,
+      /estado real en Lumbre/i,
+    ]),
+  "closing a batch must force every @wip task to @done or back to @acked with a written reason, verified by sweeping the batch tag",
+);
+invariant(
   "RELEASE_AUTHORITY_DOES_NOT_EXPAND_MUTATION",
   hasAll(release.replace(/\s+/g, " "), [/no autoriza por s[ií] misma ninguna mutaci[oó]n adicional/i, /autoridad requerida/i, /mismo candidato/i]),
   "release workflow must preserve authority and candidate identity",
