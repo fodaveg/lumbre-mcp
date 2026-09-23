@@ -119,7 +119,8 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			notes: z.string().max(10000).optional(),
 			tags: z.array(tagSchema).optional(),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
-			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional()
+			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional(),
+			recurrence: z.union([recurrenceSchema, z.null()]).optional()
 		})
 		.strict(),
 	z
@@ -257,7 +258,7 @@ export const mutateTasksOpSchema = z
 			.describe('24h; null la quita'),
 		// `recurrence`: sin describe propio — `recurrenceSchema` ya documenta
 		// `freq`/`interval` campo a campo (compartido con `add_task`).
-		recurrence: recurrenceSchema.optional(),
+		recurrence: z.union([recurrenceSchema, z.null()]).optional(),
 		subtasks: z.array(z.string()).optional().describe('Textos de las subtareas, en orden'),
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
 		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
@@ -355,6 +356,19 @@ async function runOpsBatch(
 	const idsToCheck = collectExistenceCheckIds(validated);
 	const existing: Map<string, LumbreTask> =
 		idsToCheck.length > 0 ? await findTasksByIds(ctx.config, idsToCheck) : new Map();
+	// `update` con `recurrence: null` es la única op que la app aplica sobre una
+	// tarea ARCHIVADA (apagar una semilla que sigue generando, ver
+	// `clearArchivedSeedRecurrence` en el repo principal). Solo para esos ids,
+	// y solo si la búsqueda normal no los vio, se repite incluyendo archivadas.
+	const archivedSeedIds = validated
+		.filter((op) => op.op === 'update' && op.recurrence === null && !existing.has(op.taskId))
+		.map((op) => (op as { taskId: string }).taskId);
+	if (archivedSeedIds.length > 0) {
+		const archived = await findTasksByIds(ctx.config, [...new Set(archivedSeedIds)], {
+			includeArchived: true
+		});
+		for (const [id, task] of archived) existing.set(id, task);
+	}
 	ctx.taskCache.setAll(existing.values());
 	const built = buildBatchFromOps(validated, existing);
 	// `create_list` no tiene validación local NI de existencia hoy (no
@@ -483,7 +497,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
 							'priority, date, deadline, time, recurrence, subtasks, notes, tags] · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
-							'priority, time] · reschedule: taskId*, date* · set_section: taskId*, section* · ' +
+							'priority, time, recurrence (null la apaga, también en una semilla archivada)] · ' +
+							'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
 							'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done]'
 					)
 			}

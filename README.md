@@ -435,11 +435,16 @@ operaciones a la vez» más abajo):
   (`cancelled` default `true`): equivalente a completarla, pero marcada como
   "no se hizo ni se hará" (distinto de `complete`). `cancelled: false` la
   restaura.
-- `{ op: "update", taskId, content?, notes?, tags?, priority?, time? }`
-  (`mutate_tasks`) — edita texto, notas, tags propios, prioridad u hora; solo
-  toca los campos que envíes. `tags: []` quita todos los tags propios;
-  omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
-  prioridad). **Acepta también el id de una SUBTAREA**: los cinco campos son
+- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence? }`
+  (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora o regla de
+  repetición; solo toca los campos que envíes. `tags: []` quita todos los tags
+  propios; omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
+  prioridad). `recurrence: null` apaga la regla, y es la ÚNICA op que vale
+  sobre una tarea ARCHIVADA: una semilla archivada sigue generando
+  ocurrencias, y así se para (la app le quita `recurrence` y le conserva
+  `seriesId`, para no retirar del hábito los días que cumplió). Para esa op el
+  conector repite la comprobación de existencia con `includeArchived`.
+  **Acepta también el id de una SUBTAREA**: los cinco primeros campos son
   accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
   del repo principal).
 - `{ op: "reschedule", taskId, date }` (`mutate_tasks`) — mueve la tarea a
@@ -587,7 +592,7 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
-update: taskId*, ≥1 de [content, notes, tags, priority, time]
+update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (null la apaga, también en una semilla archivada)]
 reschedule: taskId*, date*
 set_section: taskId*, section*
 add_subtask: taskId*, subtasks*

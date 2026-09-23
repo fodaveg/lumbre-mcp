@@ -740,8 +740,9 @@ function localValidationError(op) {
             op.notes === undefined &&
             op.tags === undefined &&
             op.priority === undefined &&
-            op.time === undefined) {
-            return 'update: indica al menos un campo a cambiar (content, notes, tags, priority o time).';
+            op.time === undefined &&
+            op.recurrence === undefined) {
+            return 'update: indica al menos un campo a cambiar (content, notes, tags, priority, time o recurrence).';
         }
     }
     if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
@@ -785,7 +786,8 @@ function translateOp(op) {
                     ...(op.notes !== undefined ? { notes: op.notes } : {}),
                     ...(op.tags !== undefined ? { tags: op.tags } : {}),
                     ...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
-                    ...(op.time !== undefined ? { time: op.time } : {})
+                    ...(op.time !== undefined ? { time: op.time } : {}),
+                    ...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {})
                 }
             };
         case 'reschedule':

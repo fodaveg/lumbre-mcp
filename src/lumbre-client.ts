@@ -1275,6 +1275,9 @@ export type MutateTasksOp =
 			tags?: string[];
 			priority?: 'p1' | 'p2' | 'p3' | 'p4';
 			time?: string | null;
+			/** `null` apaga la regla, también en una semilla ARCHIVADA (la app lo
+			 *  resuelve antes de su guard de tarea viva). */
+			recurrence?: IngestRecurrence | null;
 	  }
 	| { op: 'reschedule'; taskId: string; date: string | null }
 	| { op: 'delete'; taskId: string }
@@ -1391,9 +1394,10 @@ function localValidationError(op: MutateTasksOp): string | null {
 			op.notes === undefined &&
 			op.tags === undefined &&
 			op.priority === undefined &&
-			op.time === undefined
+			op.time === undefined &&
+			op.recurrence === undefined
 		) {
-			return 'update: indica al menos un campo a cambiar (content, notes, tags, priority o time).';
+			return 'update: indica al menos un campo a cambiar (content, notes, tags, priority, time o recurrence).';
 		}
 	}
 	if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
@@ -1438,7 +1442,8 @@ function translateOp(op: MutateTasksOp): BatchOp {
 					...(op.notes !== undefined ? { notes: op.notes } : {}),
 					...(op.tags !== undefined ? { tags: op.tags } : {}),
 					...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
-					...(op.time !== undefined ? { time: op.time } : {})
+					...(op.time !== undefined ? { time: op.time } : {}),
+					...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {})
 				}
 			};
 		case 'reschedule':

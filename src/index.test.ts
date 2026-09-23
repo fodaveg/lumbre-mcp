@@ -1240,6 +1240,35 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(resultText(result)).toContain('2/2 operación(es) encoladas.');
 	});
 
+	it('update con recurrence:null viaja tal cual a /api/batch (apaga la regla, también de una semilla archivada)', async () => {
+		const taskId = '11111111-1111-1111-1111-111111111111';
+		// La semilla está ARCHIVADA: la búsqueda normal no la ve y la segunda,
+		// con `includeArchived`, sí.
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?') && u.includes('includeArchived=true')) {
+				return jsonResponse([{ id: taskId, content: 'Ducha', archivedAt: '2026-09-09T18:19:11.922Z' }]);
+			}
+			if (u.includes('/api/tasks?')) return jsonResponse([]);
+			return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: taskId }] });
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'update', taskId, recurrence: null }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toMatchObject({ taskId, kind: 'update', payload: { recurrence: null } });
+	});
+
 	it('add_task con listId de una lista YA EXISTENTE (sin create_list en el lote): NO parte el lote', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(
 			jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] })
