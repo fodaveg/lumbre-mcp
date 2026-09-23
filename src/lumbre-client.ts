@@ -1722,6 +1722,52 @@ export function mergeRecurrencePatch(
 	return { rule };
 }
 
+/** Campos de `update` distintos de `recurrence` (ver CX7 en `buildBatchFromOps`). */
+const UPDATE_EXTRA_FIELDS = ['content', 'notes', 'tags', 'priority', 'time'] as const;
+
+/** Id de la semilla si `task` es una OCURRENCIA de una serie (su `seriesId`
+ *  apunta a otra fila); `null` si es la semilla o no es de ninguna serie.
+ *  Mismo criterio que `isSeriesOccurrence` en el repo principal. */
+function seriesSeedIdOf(task: LumbreTask | undefined): string | null {
+	const seriesId = task?.seriesId;
+	return seriesId && seriesId !== task.id ? seriesId : null;
+}
+
+/**
+ * Regla contra la que fusionar un parche parcial de `recurrence` sobre
+ * `taskId` (CX6): la de su SEMILLA si es una ocurrencia y la semilla está en
+ * `existing`, la de la propia fila en otro caso. Sin semilla legible (borrada)
+ * se usa la de la fila: la app no escribe una regla nueva en una serie sin
+ * semilla viva, así que el resultado no puede pisar nada.
+ */
+function currentSeriesRule(
+	existing: Map<string, LumbreTask>,
+	taskId: string
+): IngestRecurrence | null | undefined {
+	const row = existing.get(taskId);
+	const seedId = seriesSeedIdOf(row);
+	const seed = seedId === null ? undefined : existing.get(seedId);
+	return seed !== undefined ? seed.recurrence : row?.recurrence;
+}
+
+/**
+ * Ids de SEMILLA que `mutate_tasks` debe leer (con archivadas incluidas) antes
+ * de `buildBatchFromOps` (CX6): los de las ocurrencias con un parche parcial
+ * de `recurrence` cuya semilla no está ya en `existing`. Deduplicados.
+ */
+export function collectSeriesSeedIds(
+	ops: MutateTasksOp[],
+	existing: Map<string, LumbreTask>
+): string[] {
+	const ids = new Set<string>();
+	for (const op of ops) {
+		if (op.op !== 'update' || op.recurrence === undefined || op.recurrence === null) continue;
+		const seedId = seriesSeedIdOf(existing.get(op.taskId));
+		if (seedId !== null && !existing.has(seedId)) ids.add(seedId);
+	}
+	return [...ids];
+}
+
 /**
  * Núcleo PURO (sin red) de `mutate_tasks`: valida localmente cada op
  * (`localValidationError`) y, si targetea una tarea, comprueba su existencia
@@ -1758,12 +1804,32 @@ export function buildBatchFromOps(
 				return;
 			}
 		}
+		// CX7: sobre una tarea ARCHIVADA la app solo aplica el apagado de la
+		// regla (`clearArchivedSeedRecurrence`, antes de su guard de tarea
+		// viva); el resto de campos del mismo `update` nunca se aplicaba y el
+		// informe los daba por hechos. Se rechaza la op entera, nombrando los
+		// campos, para que el modelo los mande aparte si la desarchiva.
+		if (op.op === 'update' && op.recurrence === null) {
+			const target = existing.get(op.taskId);
+			const extra = UPDATE_EXTRA_FIELDS.filter((field) => op[field] !== undefined);
+			if (target?.archivedAt && extra.length > 0) {
+				skipped.push({
+					index,
+					error:
+						`update: la tarea ${op.taskId} está archivada y sobre ella solo se aplica ` +
+						`recurrence:null; manda recurrence:null a solas (sobran: ${extra.join(', ')}).`
+				});
+				return;
+			}
+		}
 		// La app SUSTITUYE la regla entera en un `update`; el modelo manda un
-		// cambio parcial. Se fusiona aquí con la regla que acaba de leerse en la
-		// comprobación de existencia, para que un campo no enviado (`streak`,
-		// `byWeekday`…) no se pierda por omisión.
+		// cambio parcial. Se fusiona aquí con la regla VIGENTE, para que un
+		// campo no enviado (`streak`, `byWeekday`…) no se pierda por omisión.
+		// La vigente es la de la SEMILLA (CX6): la app escribe la regla de una
+		// ocurrencia en toda su serie (`setSeriesRuleFromOccurrence`), y una
+		// ocurrencia CERRADA conserva la copia de la regla que tenía al cerrarse.
 		if (op.op === 'update' && op.recurrence !== undefined && op.recurrence !== null) {
-			const merged = mergeRecurrencePatch(op.recurrence, existing.get(op.taskId)?.recurrence);
+			const merged = mergeRecurrencePatch(op.recurrence, currentSeriesRule(existing, op.taskId));
 			if ('error' in merged) {
 				skipped.push({ index, error: `update: ${merged.error}` });
 				return;

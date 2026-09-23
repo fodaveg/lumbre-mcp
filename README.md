@@ -480,7 +480,10 @@ operaciones a la vez» más abajo):
   fusiona con la regla vigente (la lee en la misma comprobación de
   existencia) y manda la regla entera, porque la app la sustituye completa.
   Así `{ interval: 2 }` sobre un hábito semanal de lunes y jueves conserva
-  `byWeekday` y `streak`. Para quitar un campo: `null` en `byWeekday`,
+  `byWeekday` y `streak`. Desde una OCURRENCIA la regla vigente es la de su
+  SEMILLA (la app la escribe en toda la serie, y una ocurrencia cerrada guarda
+  la copia de la regla que tenía al cerrarse): el conector lee la semilla,
+  archivadas incluidas, y fusiona contra ella. Para quitar un campo: `null` en `byWeekday`,
   `until` o `count`, `streak: false` o `mode: "calendar"`. Sobre una tarea
   sin regla, el cambio tiene que traer `freq`. Hasta el 2026-09-23 el esquema
   solo tenía `freq` e `interval`, y retocar la regla de un hábito le quitaba
@@ -488,7 +491,9 @@ operaciones a la vez» más abajo):
   sobre una tarea ARCHIVADA: una semilla archivada sigue generando
   ocurrencias, y así se para (la app le quita `recurrence` y le conserva
   `seriesId`, para no retirar del hábito los días que cumplió). Para esa op el
-  conector repite la comprobación de existencia con `includeArchived`.
+  conector repite la comprobación de existencia con `includeArchived`. Sobre
+  una archivada, `recurrence: null` va A SOLAS: con otros campos la op se
+  rechaza entera, porque la app solo aplicaría el apagado.
   **Acepta también el id de una SUBTAREA**: los cinco primeros campos son
   accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
   del repo principal).

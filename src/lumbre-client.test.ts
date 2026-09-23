@@ -5,6 +5,7 @@ import {
 	ATTACHMENT_CONTENT_TYPE_HEADER,
 	buildBatchFromOps,
 	collectExistenceCheckIds,
+	collectSeriesSeedIds,
 	deleteAttachment,
 	excludeIngestForBrokenListPromises,
 	filterPhase2AfterPhase1,
@@ -720,6 +721,43 @@ describe('collectExistenceCheckIds', () => {
 	});
 });
 
+describe('collectSeriesSeedIds (CX6)', () => {
+	const row = (id: string, seriesId: string | null): LumbreTask => ({
+		id,
+		content: id,
+		notes: null,
+		done: false,
+		priority: null,
+		date: null,
+		deadline: null,
+		list: null,
+		createdAt: new Date().toISOString(),
+		parentId: null,
+		seriesId
+	});
+
+	it('pide solo las semillas de ocurrencias con parche parcial que aún no están leídas', () => {
+		const existing = new Map([
+			['o1', row('o1', 's1')],
+			['o2', row('o2', 's2')],
+			['o3', row('o3', 's1')],
+			['s2', row('s2', 's2')],
+			['seed', row('seed', 'seed')],
+			['t1', row('t1', null)]
+		]);
+		const ops: MutateTasksOp[] = [
+			{ op: 'update', taskId: 'o1', recurrence: { interval: 2 } },
+			{ op: 'update', taskId: 'o3', recurrence: { interval: 3 } }, // misma semilla: una vez
+			{ op: 'update', taskId: 'o2', recurrence: { interval: 2 } }, // semilla ya leída
+			{ op: 'update', taskId: 'seed', recurrence: { interval: 2 } }, // es la semilla
+			{ op: 'update', taskId: 't1', recurrence: { freq: 'daily' } }, // sin serie
+			{ op: 'update', taskId: 'o1', recurrence: null }, // apagar: no fusiona
+			{ op: 'update', taskId: 'o1', content: 'x' } // sin regla
+		];
+		expect(collectSeriesSeedIds(ops, existing)).toEqual(['s1']);
+	});
+});
+
 describe('buildBatchFromOps', () => {
 	function topLevel(id: string, overrides: Partial<LumbreTask> = {}): LumbreTask {
 		return {
@@ -771,6 +809,77 @@ describe('buildBatchFromOps', () => {
 		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['t1', topLevel('t1', { recurrence: null })]]));
 		expect(batchOps).toEqual([]);
 		expect(skipped).toEqual([{ index: 0, error: expect.stringMatching(/^update: la tarea no repite/) }]);
+	});
+
+	it('CX6: parche parcial desde una ocurrencia CERRADA con regla vieja se fusiona contra la regla de la SEMILLA', () => {
+		// La serie pasó de lunes (0) a jueves (3): la semilla (archivada) ya dice
+		// jueves, pero la ocurrencia cerrada conserva su copia vieja de lunes. La
+		// app escribe la regla fusionada en TODA la serie, así que fusionar contra
+		// la copia de la ocurrencia devolvería la serie a los lunes.
+		const seed = topLevel('s1', {
+			seriesId: 's1',
+			archivedAt: '2026-09-20T10:00:00.000Z',
+			recurrence: { freq: 'weekly', interval: 1, byWeekday: [3] }
+		});
+		const closed = topLevel('o1', {
+			seriesId: 's1',
+			done: true,
+			recurrence: { freq: 'weekly', interval: 1, byWeekday: [0] }
+		});
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 'o1', recurrence: { interval: 2 } }];
+		const { batchOps, skipped } = buildBatchFromOps(
+			ops,
+			new Map([
+				['o1', closed],
+				['s1', seed]
+			])
+		);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: 'o1',
+				kind: 'update',
+				payload: { recurrence: { freq: 'weekly', interval: 2, byWeekday: [3] } }
+			}
+		]);
+	});
+
+	it('CX6: ocurrencia sin semilla legible (borrada) fusiona contra su propia regla, como antes', () => {
+		const orphan = topLevel('o1', {
+			seriesId: 's-borrada',
+			recurrence: { freq: 'weekly', interval: 1, byWeekday: [0] }
+		});
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 'o1', recurrence: { interval: 2 } }];
+		const { batchOps } = buildBatchFromOps(ops, new Map([['o1', orphan]]));
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: 'o1',
+				kind: 'update',
+				payload: { recurrence: { freq: 'weekly', interval: 2, byWeekday: [0] } }
+			}
+		]);
+	});
+
+	it('CX7: recurrence:null sobre una tarea ARCHIVADA con otros campos se rechaza con el motivo', () => {
+		const archived = topLevel('s1', { seriesId: 's1', archivedAt: '2026-09-20T10:00:00.000Z' });
+		const ops: MutateTasksOp[] = [
+			{ op: 'update', taskId: 's1', recurrence: null, content: 'otro título', priority: 'p1' }
+		];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', archived]]));
+		expect(batchOps).toEqual([]);
+		expect(skipped).toEqual([
+			{ index: 0, error: expect.stringMatching(/^update: .*archivada.*content, priority/) }
+		]);
+	});
+
+	it('CX7: recurrence:null a solas sobre una tarea ARCHIVADA sigue viajando', () => {
+		const archived = topLevel('s1', { seriesId: 's1', archivedAt: '2026-09-20T10:00:00.000Z' });
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 's1', recurrence: null }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', archived]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 's1', kind: 'update', payload: { recurrence: null } }]);
 	});
 
 	it('update.recurrence:null sigue viajando tal cual (apagar la serie)', () => {

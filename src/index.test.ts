@@ -451,6 +451,63 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		);
 	});
 
+	it('CX6: parche parcial desde una ocurrencia lee su semilla ARCHIVADA y fusiona contra su regla', async () => {
+		const base = {
+			notes: null,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: '2026-08-27T00:00:00.000Z',
+			parentId: null
+		};
+		const occurrence = {
+			...base,
+			id: TASK_ID,
+			content: 'ocurrencia cerrada',
+			done: true,
+			seriesId: REFERENCED_ID,
+			recurrence: { freq: 'weekly', interval: 1, byWeekday: [0] }
+		};
+		const seed = {
+			...base,
+			id: REFERENCED_ID,
+			content: 'semilla',
+			done: true,
+			archivedAt: '2026-09-20T10:00:00.000Z',
+			seriesId: REFERENCED_ID,
+			recurrence: { freq: 'weekly', interval: 1, byWeekday: [3] }
+		};
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const value = String(url);
+			if (value.includes(`ids=${REFERENCED_ID}&includeArchived=true`)) return jsonResponse([seed]);
+			if (value.includes(`ids=${TASK_ID}`)) return jsonResponse([occurrence]);
+			if (value.endsWith('/api/batch')) {
+				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true }] });
+			}
+			throw new Error(`fetch no mockeado: ${value}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'update', taskId: TASK_ID, recurrence: { interval: 2 } }] }
+		});
+
+		const batch = fetchSpy.mock.calls.find((call) => String(call[0]).endsWith('/api/batch'));
+		expect(batch).toBeDefined();
+		const init = (batch as unknown as [string, RequestInit])[1];
+		expect(JSON.parse(String(init.body)).ops).toEqual([
+			{
+				type: 'mutate',
+				taskId: TASK_ID,
+				kind: 'update',
+				payload: { recurrence: { freq: 'weekly', interval: 2, byWeekday: [3] } }
+			}
+		]);
+	});
+
 	it('leer una archivada no la cuela en la caché que autoriza mutaciones', async () => {
 		const archivedTask = {
 			id: TASK_ID,

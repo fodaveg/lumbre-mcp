@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { buildBatchFromOps, collectExistenceCheckIds, excludeIngestForBrokenListPromises, filterPhase2AfterPhase1, findTasksByIds, planBatchPhases, runBatch } from '../lumbre-client.js';
+import { buildBatchFromOps, collectExistenceCheckIds, collectSeriesSeedIds, excludeIngestForBrokenListPromises, filterPhase2AfterPhase1, findTasksByIds, planBatchPhases, runBatch } from '../lumbre-client.js';
 import { errorResult, exposedRecurrenceSchema, formatOpShapeError, formatOutcomeReport, OUTCOME_NOTE, recurrencePatchSchema, recurrenceSchema, tagSchema, textResult } from './shared.js';
 /**
  * DOS tools de lote sobre las MISMAS 16 ops de siempre, repartidas por lo que
@@ -349,7 +349,15 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
             existing.set(id, task);
     }
     ctx.taskCache.setAll(existing.values());
-    const built = buildBatchFromOps(validated, existing);
+    // CX6: un parche parcial de `recurrence` desde una ocurrencia se fusiona
+    // contra la regla de su SEMILLA, que puede estar archivada. Solo se leen
+    // para la fusión: no son objetivo de ninguna op, así que no entran en la
+    // caché de existencia.
+    const seedIds = collectSeriesSeedIds(validated, existing);
+    const seeds = seedIds.length > 0
+        ? await findTasksByIds(ctx.config, seedIds, { includeArchived: true })
+        : new Map();
+    const built = buildBatchFromOps(validated, seeds.size > 0 ? new Map([...seeds, ...existing]) : existing);
     // `create_list` no tiene validación local NI de existencia hoy (no
     // targetea una tarea), así que en la práctica nunca cae aquí — pero si
     // algún día la tuviera, un descarte de `create_list` en `built.skipped`
