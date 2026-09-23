@@ -25,12 +25,22 @@ independiente.
   sección; mueve primero y reasigna después si debe conservarla.
 - Las subtareas son checklist de un nivel, no tareas residentes equivalentes.
 - Completar significa «hecha» y cancelar «no se hará»; no confundas los resultados.
+  Una cancelada se lee `[-]`/«cancelada», nunca como hecha.
+- Un cambio de `recurrence` en `update` es parcial: conserva lo no enviado. Para quitar
+  un campo, `null` (`byWeekday`, `until`, `count`) o `streak: false`. Una serie se
+  apaga o se cambia en su SEMILLA (`semilla` en el listado; una ocurrencia muestra
+  `serie:<id de la semilla>`).
 - Antes de borrar, conoce los efectos y confirma el objetivo. Si se elimina una
   sección, verifica que sus tareas se conserven cuando ese sea el contrato.
 
 ## Consistencia
 
 Salvo la subida de adjuntos, una escritura puede aceptarse antes de materializarse.
+`mutate_tasks`, `organize` y `mutate_brl` distinguen «encoladas» (aceptadas) de lo que
+la app hizo con cada una: aplicada, sin efecto, sin objetivo, fallida al aplicar, en
+cuarentena o sin confirmar. Solo «aplicada» cuenta como hecho; cualquier otra es un
+resultado que se informa, no un éxito. Lee también los `avisos de la app`: dicen cuándo
+una tarea acabó en otro sitio del pedido.
 Espera la respuesta, lee el resultado de cada operación y relee por id o filtro acotado
 comparando los campos objetivo y los que debían preservarse. Si aún aparece el estado
 anterior, ejecuta `refresh_sync` y relee una segunda vez; solo después declara la

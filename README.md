@@ -29,7 +29,8 @@ En claude.ai web o móvil, añade un conector personalizado con esa misma URL. N
 añadas un bearer ni un token en el path.
 
 Los clientes cachean `tools/list` al conectar: cuando cambia la superficie del
-MCP (la última vez, el 2026-09-19, al retirar las nueve tools sueltas de
+MCP (la última vez, el 2026-09-23, al ampliar el esquema de `recurrence`; antes,
+el 2026-09-19, al retirar las nueve tools sueltas de
 mutación y partir el lote en `mutate_tasks`/`organize`), una sesión ya abierta
 de claude.ai o de Claude Code sigue viendo las tools viejas hasta que
 reconectes el conector o abras una sesión nueva.
@@ -149,12 +150,20 @@ presentar esa hipótesis como un fallo observado.
 ## Qué hace (Fase 1 — crear/leer)
 
 - `add_task` — añade una tarea nueva a Lumbre (vía `POST /api/ingest`, el
-  mismo endpoint que usa email-to-task/Atajos de iOS). Se encola y se
-  materializa en el planificador la próxima vez que un dispositivo tuyo
-  sincronice; no es instantáneo si no hay ningún dispositivo online. Acepta
-  `list` (nombre, se crea como proyecto si no existe) o `listId` (id ESTABLE del proyecto o área,
-  preferente sobre `list`, inmune a renames — sácalo de `list_tasks`).
-  `tags` fija sus tags propios; `[]` declara explícitamente que nace sin tags.
+  mismo endpoint que usa email-to-task/Atajos de iOS). La app la encola y la
+  materializa en el servidor en la misma petición; tus dispositivos la reciben
+  al sincronizar. La respuesta reenvía los avisos de la app (`notices`), por
+  ejemplo si el proyecto pedido estaba borrado y la tarea fue a la Bandeja.
+  Acepta `list` (nombre, se crea como proyecto si no existe) o `listId` (id
+  ESTABLE del proyecto o área, preferente sobre `list`, inmune a renames —
+  sácalo de `list_tasks`). `tags` fija sus tags propios; `[]` declara
+  explícitamente que nace sin tags. `recurrence` admite la regla completa de
+  la app: `freq*` (`daily|weekly|monthly|yearly`), `interval`, `mode`
+  (`calendar` por defecto o `afterCompletion`, que cuenta desde que la
+  completas), `byWeekday` (solo semanal, `0` = lunes … `6` = domingo),
+  `until` (último día, inclusive), `count` (máximo de ocurrencias) y `streak`
+  (`true` = hábito). Un campo desconocido es un error, no se descarta en
+  silencio.
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
   por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
   fecha), `overdue` o `all`; puede incluir completadas con `includeDone`.
@@ -383,9 +392,16 @@ viejo — y una referencia rota era **indistinguible** de una viva. Desde
   una petición por referencia. Si esa llamada falla, la referencia sale como
   `sin resolver` (nunca como rota) y el listado se devuelve igual.
 - La cabecera del listado resume lo que hay (`refs: 2 vivas · 1 con nota ✎ …`).
-- Límite conocido: la API no expone `cancelledAt`, así que una tarea CANCELADA
-  llega como `done: true` y se lee «hecha». El render ya sabe pintar
-  `→tarea[cancelada]` en cuanto `GET /api/tasks` exponga ese campo.
+- Una tarea CANCELADA viaja con `done: true`, igual que una hecha; la distingue
+  `cancelledAt`, y se pinta `→tarea[cancelada]`.
+
+**Cancelada, regla y serie** (desde el 2026-09-23). `list_tasks` pinta una
+cancelada como `[-]` con la marca `cancelada` (antes salía `[x]`, como hecha)
+y, solo en las tareas de una serie, la regla (`↻semanal L,J, hábito`) y su
+papel: `semilla` si es la semilla, o `serie:<id de la semilla>` si es una
+ocurrencia. `get_task` añade el estado con la fecha de cancelación, la regla
+entera (`- repetición:`) y la línea `- serie:`. Apagar o cambiar una serie se
+hace sobre la SEMILLA; el id que sale en `serie:` es el suyo.
 
 ## Qué hace (Fase 2 — mutar una tarea existente)
 
@@ -410,19 +426,40 @@ en su tool. Una op mandada a la tool equivocada se rechaza por posición con el
 puntero a la suya («la op "delete" no existe en mutate_tasks; está en
 organize»), sin tumbar el resto del lote.
 
-Igual de asíncrono/eventual que `add_task`: cada op encola una mutación que se
-aplica la próxima vez que un dispositivo tuyo sincronice; **ninguna da
-confirmación inmediata** de que se aplicó de verdad (usa `list_tasks` después
-para comprobarlo). Las que mutan una tarea necesitan su `taskId` — resuélvelo
+**El informe dice qué hizo la app con cada op** (desde el 2026-09-23). La app
+encola el lote y lo materializa en el servidor en la misma petición, y
+devuelve por op `materialization`: aplicada, sin efecto (ya estaba así, o el
+objetivo no admite el cambio), fallida al aplicar (queda reabierta para un
+drenaje posterior) o en cuarentena (la retuvo el cortacircuitos de borrado
+masivo). El informe lo cuenta así:
+
+```
+Lumbre: 3/3 operación(es) encoladas.
+Resultado en la app: 1 aplicadas, 1 sin efecto, 1 fallidas al aplicar.
+sin aplicar:
+  [1] complete: sin efecto: la app no cambió nada (ya estaba así, o el objetivo no admite el cambio)
+  [2] update: falló al aplicarse; la app la reintentará en un drenaje posterior
+avisos de la app:
+  - …
+```
+
+«encoladas» sigue contando las que la app aceptó; lo que se aplicó es la
+segunda línea. Los `notices` del lote (por ejemplo, «la lista destino estaba
+borrada y la tarea fue a la Bandeja») salen en `avisos de la app`. Contra un
+servidor que aún no manda `materialization`, cada op sale «sin confirmar»,
+nunca «aplicada». `mutate_brl` informa igual con el `outcome` de
+`/api/mutations` (que añade `sin objetivo` para un id que la app no
+encuentra). Antes de esta fecha las tres tools respondían solo «encoladas» y
+un no-op o un fallo del drenaje se leía como éxito. Tus dispositivos ven el
+cambio cuando sincronizan. Las que mutan una tarea necesitan su `taskId` — resuélvelo
 antes con `list_tasks`. Diseño completo en `PHASE2.md` (ya implementado; el
 documento se conserva como referencia del porqué, y nombra las tools sueltas
 de entonces).
 
 Todas VALIDAN antes de encolar que el `taskId` EXISTE entre las tareas
 visibles del usuario (una llamada extra a `GET /api/tasks`) y lo informan como
-fallo de ESA op si no — la EXISTENCIA sí se puede comprobar en el acto, a
-diferencia de si la mutación llegó a APLICARSE de verdad, que sigue siendo
-asíncrono. Antes de este chequeo, un `taskId` mal transcrito se encolaba igual
+fallo de ESA op si no, sin llegar a encolarla (si se APLICÓ lo dice después
+`materialization`, ver arriba). Antes de este chequeo, un `taskId` mal transcrito se encolaba igual
 y la mutación se perdía en silencio al drenar (`/api/mutations` no valida
 pertenencia server-side, ver ese endpoint).
 
@@ -439,7 +476,15 @@ operaciones a la vez» más abajo):
   (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora o regla de
   repetición; solo toca los campos que envíes. `tags: []` quita todos los tags
   propios; omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
-  prioridad). `recurrence: null` apaga la regla, y es la ÚNICA op que vale
+  prioridad). `recurrence` es un cambio PARCIAL de la regla: el conector lo
+  fusiona con la regla vigente (la lee en la misma comprobación de
+  existencia) y manda la regla entera, porque la app la sustituye completa.
+  Así `{ interval: 2 }` sobre un hábito semanal de lunes y jueves conserva
+  `byWeekday` y `streak`. Para quitar un campo: `null` en `byWeekday`,
+  `until` o `count`, `streak: false` o `mode: "calendar"`. Sobre una tarea
+  sin regla, el cambio tiene que traer `freq`. Hasta el 2026-09-23 el esquema
+  solo tenía `freq` e `interval`, y retocar la regla de un hábito le quitaba
+  la marca de hábito. `recurrence: null` apaga la regla, y es la ÚNICA op que vale
   sobre una tarea ARCHIVADA: una semilla archivada sigue generando
   ocurrencias, y así se para (la app le quita `recurrence` y le conserva
   `seriesId`, para no retirar del hábito los días que cumplió). Para esa op el
@@ -468,7 +513,7 @@ operaciones a la vez» más abajo):
   existente, por su id (ver `get_task` de su tarea padre). Mismo mecanismo que
   `complete`: no cascada nada sobre la tarea padre.
 - `{ op: "delete", taskId }` (**`organize`**) — borra (soft-delete) la tarea.
-  **Acción delicada**: sin confirmación inmediata ni deshacer desde la tool;
+  **Acción delicada**: sin deshacer desde la tool;
   confírmalo con el usuario antes de llamarla.
 - `{ op: "remove_section", sectionId }` (**`organize`**) — borra (tombstone)
   una sección/heading dentro de un proyecto o área. Sus tareas NUNCA se
@@ -487,7 +532,7 @@ reorganización y borrado. Mueve una tarea a otro proyecto o área, y
 crea/anida/renombra/borra contenedores con
 `organize({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
 "rename_list"|"remove_list"|"set_list_notes", ... }] })` — un solo elemento en `ops` para una
-operación suelta. Mismo criterio async/eventual que el resto de Fase 2.
+operación suelta. Mismo informe por op que el resto de Fase 2.
 
 - `move_to_list`: `taskId*`, uno de [`listId`, `list`]. `listId` (id ESTABLE,
   ver la leyenda de proyectos y áreas al principio de `list_tasks`) es preferente sobre
@@ -524,7 +569,7 @@ El BRL es el diario del día, y **no son tareas**: una entrada es un apunte de l
 que pasó (`-` nota) o una reflexión (`=` pensamiento). No se completan, no se
 reprograman y no salen en `list_tasks`. Requiere que el add-on esté encendido en
 la cuenta (Ajustes de Lumbre); apagado, las dos tools fallan con un error
-explícito y no se encola nada. Mismo criterio async/eventual que el resto de la
+explícito y no se encola nada. Mismo informe por op que el resto de la
 Fase 2.
 
 - `list_brl_entries({ date })` — entradas de ese día con su **id** y su hora
@@ -592,7 +637,7 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
-update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (null la apaga, también en una semilla archivada)]
+update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada)]
 reschedule: taskId*, date*
 set_section: taskId*, section*
 add_subtask: taskId*, subtasks*
