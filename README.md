@@ -413,7 +413,7 @@ de lote, que ya las cubrían entero:
 
 - **`mutate_tasks`** — todo lo que opera sobre UNA TAREA: `add_task`,
   `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`,
-  `complete_subtask`.
+  `complete_subtask` y `restore` (sacar de la Papelera, desde el 2026-09-24).
 - **`organize`** — lo destructivo y la reorganización: `delete`,
   `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
   `set_list_notes`, `move_to_list`.
@@ -470,8 +470,15 @@ operaciones a la vez» más abajo):
   default `true`) o la desmarca (`done: false`).
 - `{ op: "cancel", taskId, cancelled? }` (`mutate_tasks`) — cancela la tarea
   (`cancelled` default `true`): equivalente a completarla, pero marcada como
-  "no se hizo ni se hará" (distinto de `complete`). `cancelled: false` la
-  restaura.
+  "no se hizo ni se hará" (distinto de `complete`). `cancelled: false` le
+  quita la cancelación.
+- `{ op: "restore", taskId }` (`mutate_tasks`) — saca de la Papelera una
+  tarea BORRADA (le quita el tombstone que puso `delete`). Es la única op cuyo
+  objetivo no es una tarea viva, así que el conector NO comprueba antes que
+  exista (ninguna búsqueda devuelve una tarea borrada): viaja tal cual y
+  decide la app. El informe dice «aplicada» si volvió, o «sin efecto» con el
+  aviso de la app si ya no había nada que restaurar (la fila se purgó
+  definitivamente).
 - `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence? }`
   (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora o regla de
   repetición; solo toca los campos que envíes. `tags: []` quita todos los tags
@@ -621,11 +628,11 @@ resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y 
 de un `add_task`, su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
-16 ops entre las dos tools:
+17 ops entre las dos tools:
 
 | tool | ops |
 | --- | --- |
-| `mutate_tasks` (una tarea) | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask` |
+| `mutate_tasks` (una tarea) | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore` |
 | `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
@@ -647,6 +654,7 @@ reschedule: taskId*, date*
 set_section: taskId*, section*
 add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
+restore: taskId* (tarea borrada; sin comprobación de existencia en el cliente)
 
 # organize
 delete: taskId*

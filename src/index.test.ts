@@ -957,7 +957,7 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 	});
 });
 
-describe('mutate_tasks/organize — las 16 `op` siguen aceptándose (esquemas estrictos internos)', () => {
+describe('mutate_tasks/organize — las 17 `op` siguen aceptándose (esquemas estrictos internos)', () => {
 	/** Un caso por op: el payload VÁLIDO mínimo/representativo, y variantes
 	 *  INVÁLIDAS por campo que falta y por campo que sobra (ajeno a esa op,
 	 *  pero válido en general — p. ej. `date` en `complete`) — mismo criterio
@@ -989,6 +989,12 @@ describe('mutate_tasks/organize — las 16 `op` siguen aceptándose (esquemas es
 			valid: { op: 'cancel', taskId: '11111111-1111-1111-1111-111111111111' },
 			missingField: 'taskId',
 			extraField: { op: 'cancel', taskId: '11111111-1111-1111-1111-111111111111', done: true }
+		},
+		{
+			op: 'restore',
+			valid: { op: 'restore', taskId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'taskId',
+			extraField: { op: 'restore', taskId: '11111111-1111-1111-1111-111111111111', done: true }
 		},
 		{
 			op: 'update',
@@ -1134,12 +1140,13 @@ describe('mutate_tasks/organize — las 16 `op` siguen aceptándose (esquemas es
 	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
 	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
 
-	it('cubre las 16 operaciones (guardarraíl del propio test)', () => {
+	it('cubre las 17 operaciones (guardarraíl del propio test; `restore` desde el 2026-09-24)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
 				'complete',
 				'cancel',
+				'restore',
 				'update',
 				'reschedule',
 				'delete',
@@ -1332,6 +1339,76 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
 		};
 		expect(body.ops[0]).toMatchObject({ taskId, kind: 'update', payload: { recurrence: null } });
+	});
+
+	it('restore sobre una tarea BORRADA: no la rechaza el cliente, viaja como kind:restore y lo decide el servidor', async () => {
+		const taskId = '33333333-3333-4333-8333-333333333333';
+		// La tarea está en la Papelera: ninguna búsqueda de tareas la devuelve.
+		// Si el cliente comprobara existencia, la op moriría aquí sin viajar.
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			if (String(url).includes('/api/tasks')) return jsonResponse([]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: taskId, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'restore', taskId }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { type: string; taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops).toEqual([{ type: 'mutate', taskId, kind: 'restore', payload: {} }]);
+		const text = resultText(result);
+		expect(text).toContain('1/1 operación(es) encoladas.');
+		expect(text).not.toMatch(/fallaron/);
+	});
+
+	it('restore de una tarea ya PURGADA: el informe dice «sin efecto» y reenvía el aviso restore-purged', async () => {
+		const taskId = '44444444-4444-4444-8444-444444444444';
+		const purged = 'Esa tarea ya no se podía restaurar: se había purgado definitivamente.';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: taskId, materialization: 'noop' }],
+					notices: [purged]
+				})
+			)
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({ name: 'mutate_tasks', arguments: { ops: [{ op: 'restore', taskId }] } })
+		);
+
+		expect(text).toMatch(/\[0\] restore: sin efecto/);
+		expect(text).toContain(`avisos de la app:\n  - ${purged}`);
+	});
+
+	it('restore NO existe en organize: puntero a mutate_tasks, sin tocar red', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'organize',
+				arguments: { ops: [{ op: 'restore', taskId: '33333333-3333-4333-8333-333333333333' }] }
+			})
+		);
+
+		expect(text).toContain('la op "restore" no existe en organize; está en mutate_tasks');
+		expect(batchCalls(fetchSpy)).toHaveLength(0);
 	});
 
 	it('add_task con listId de una lista YA EXISTENTE (sin create_list en el lote): NO parte el lote', async () => {

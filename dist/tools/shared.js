@@ -90,6 +90,7 @@ export const TASK_OP_TOOL = {
     add_task: 'mutate_tasks',
     complete: 'mutate_tasks',
     cancel: 'mutate_tasks',
+    restore: 'mutate_tasks',
     update: 'mutate_tasks',
     reschedule: 'mutate_tasks',
     set_section: 'mutate_tasks',

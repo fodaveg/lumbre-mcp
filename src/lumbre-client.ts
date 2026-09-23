@@ -1068,6 +1068,7 @@ export type MutationKind =
 	| 'setSection'
 	| 'moveToList'
 	| 'cancel'
+	| 'restore'
 	| 'addSubtask'
 	| 'removeSection'
 	| 'createList'
@@ -1103,6 +1104,9 @@ export interface RescheduleMutationPayload {
 	date: string | null;
 }
 export type DeleteMutationPayload = Record<string, never>;
+/** Quita el tombstone de la tarea `MutateTaskInput.taskId` (la saca de la
+ *  Papelera). Sin campos: `restore` del servidor valida el payload como `{}`. */
+export type RestoreMutationPayload = Record<string, never>;
 /** `section: "<nombre>"` mueve la tarea a esa sección (se crea si no existe)
  *  dentro de SU PROPIA lista/proyecto (resuelta client-side, no viaja aquí);
  *  `section: null` la saca de su sección. Espejo, para tareas existentes, del
@@ -1207,6 +1211,7 @@ export interface MutateTaskInput {
 		| UpdateMutationPayload
 		| RescheduleMutationPayload
 		| DeleteMutationPayload
+		| RestoreMutationPayload
 		| SetSectionMutationPayload
 		| MoveToListMutationPayload
 		| CancelMutationPayload
@@ -1378,9 +1383,10 @@ export async function runBatch(config: LumbreConfig, ops: BatchOp[]): Promise<Ba
 
 /**
  * Una operación de las tools de lote `mutate_tasks`/`organize`
- * (`tools/batch.ts`): discriminada por `op`, con las MISMAS 16 variantes de
+ * (`tools/batch.ts`): discriminada por `op`, con las 16 variantes de
  * siempre — el reparto en dos tools (2026-09-19) no cambió ninguna forma, solo
- * quién las acepta (`TASK_OP_TOOL` en `tools/shared.ts`). Separado en un tipo
+ * quién las acepta (`TASK_OP_TOOL` en `tools/shared.ts`), más `restore`
+ * (2026-09-24, sacar de la Papelera). Separado en un tipo
  * TS plano (sin
  * zod) para poder testear `buildBatchFromOps` sin depender del SDK de MCP —
  * los zod `discriminatedUnion` de `tools/batch.ts` producen valores
@@ -1390,6 +1396,11 @@ export type MutateTasksOp =
 	| ({ op: 'add_task' } & AddTaskInput)
 	| { op: 'complete'; taskId: string; done?: boolean }
 	| { op: 'cancel'; taskId: string; cancelled?: boolean }
+	/** Saca de la Papelera una tarea borrada (quita su tombstone). Su objetivo
+	 *  NO es una tarea viva, así que no entra en la comprobación de existencia
+	 *  (ver `TASK_TARGET_ALLOW_SUBTASK`): decide el servidor, `applied` o `noop`
+	 *  con el aviso `restore-purged` si el GC ya purgó la fila. */
+	| { op: 'restore'; taskId: string }
 	| {
 			op: 'update';
 			taskId: string;
@@ -1461,6 +1472,11 @@ export type MutateTasksOp =
  * `set_section` y `move_to_list` siguen en `false` porque escriben
  * `sectionId`/`somedayListId`, PROHIBIDOS. El porqué completo, con el camino
  * de servidor medido de cada una, en el JSDoc de `assertTaskUsable`.
+ *
+ * `restore` targetea una tarea y aun así NO está aquí, a propósito: su
+ * objetivo es una tarea BORRADA, que `findTasksByIds` nunca devuelve, así que
+ * la comprobación de existencia la rechazaría siempre. Viaja sin comprobar y
+ * el servidor decide (`applied`, o `noop` + aviso `restore-purged`).
  *
  * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
  * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
@@ -1556,6 +1572,8 @@ function translateOp(op: MutateTasksOp): BatchOp {
 				kind: 'cancel',
 				payload: { cancelled: op.cancelled ?? true }
 			};
+		case 'restore':
+			return { type: 'mutate', taskId: op.taskId, kind: 'restore', payload: {} };
 		case 'update':
 			return {
 				type: 'mutate',

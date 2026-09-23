@@ -7,7 +7,8 @@ import { errorResult, exposedRecurrenceSchema, formatOpShapeError, formatOutcome
  *
  * - `mutate_tasks`: solo opera sobre UNA tarea — `add_task`, `complete`,
  *   `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`,
- *   `complete_subtask`.
+ *   `complete_subtask`, y desde el 2026-09-24 `restore` (sacar de la
+ *   Papelera: no destruye nada, así que no va a `organize`).
  * - `organize`: lo DESTRUCTIVO y la reorganización — `delete`,
  *   `remove_section`, `create_list`, `nest_list`, `rename_list`,
  *   `remove_list`, `set_list_notes` y `move_to_list` (esta va aquí, y no con
@@ -95,6 +96,15 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
         op: z.literal('cancel'),
         taskId: z.string().guid(),
         cancelled: z.boolean().optional()
+    })
+        .strict(),
+    // `restore` (2026-09-24): saca de la Papelera. Solo `taskId`; la tarea está
+    // BORRADA, así que el motor no le pide existencia previa (ver
+    // `TASK_TARGET_ALLOW_SUBTASK` en `lumbre-client.ts`) y decide el servidor.
+    z
+        .object({
+        op: z.literal('restore'),
+        taskId: z.string().guid()
     })
         .strict(),
     z
@@ -216,7 +226,7 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
  */
 export const mutateTasksOpSchema = z
     .object({
-    op: z.string().describe('Operación — las 8 de esta tool, con su contrato, en la description de `ops`'),
+    op: z.string().describe('Operación — las 9 de esta tool, con su contrato, en la description de `ops`'),
     taskId: z.string().guid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
     subtaskId: z.string().guid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
     listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
@@ -246,7 +256,7 @@ export const mutateTasksOpSchema = z
     recurrence: z.union([exposedRecurrenceSchema, z.null()]).optional(),
     subtasks: z.array(z.string()).optional().describe('Textos de las subtareas, en orden'),
     done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
-    cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
+    cancelled: z.boolean().optional().describe('true = cancelar (default); false = quitar la cancelación')
 })
     .passthrough();
 /**
@@ -481,7 +491,7 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
 export function registerBatchTool(server, ctx) {
     const mutateTasksTool = server.registerTool('mutate_tasks', {
         description: `Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
-            `set_section, add_subtask, complete_subtask. Vía ÚNICA para mutar una tarea (no hay tool ` +
+            `set_section, add_subtask, complete_subtask, restore (saca de la Papelera). Vía ÚNICA para mutar una tarea (no hay tool ` +
             `suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
             `UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
             `inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
@@ -498,7 +508,8 @@ export function registerBatchTool(server, ctx) {
                 'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
                 'en una semilla archivada)] · ' +
                 'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
-                'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done]')
+                'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
+                'restore: taskId* (tarea borrada; sin efecto si ya se purgó)')
         }
     }, async (input) => {
         try {

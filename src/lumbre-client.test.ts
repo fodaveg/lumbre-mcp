@@ -719,6 +719,10 @@ describe('collectExistenceCheckIds', () => {
 	it('lote vacío → []', () => {
 		expect(collectExistenceCheckIds([])).toEqual([]);
 	});
+
+	it('restore NO pide existencia: su tarea está borrada y la búsqueda nunca la vería', () => {
+		expect(collectExistenceCheckIds([{ op: 'restore', taskId: 't-borrada' }])).toEqual([]);
+	});
 });
 
 describe('collectSeriesSeedIds (CX6)', () => {
@@ -784,6 +788,14 @@ describe('buildBatchFromOps', () => {
 		expect(batchOps).toEqual([
 			{ type: 'mutate', taskId: 't1', kind: 'complete', payload: { done: true } }
 		]);
+	});
+
+	it('restore sobre un id que NO está en `existing` viaja igual, como kind:restore sin payload', () => {
+		const ops: MutateTasksOp[] = [{ op: 'restore', taskId: 't-borrada' }];
+		const { batchOps, originalIndexes, skipped } = buildBatchFromOps(ops, new Map());
+		expect(skipped).toEqual([]);
+		expect(originalIndexes).toEqual([0]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 't-borrada', kind: 'restore', payload: {} }]);
 	});
 
 	it('MC3: update.recurrence parcial sobre un hábito viaja FUSIONADO con la regla vigente', () => {

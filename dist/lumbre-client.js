@@ -706,6 +706,11 @@ export async function runBatch(config, ops) {
  * `sectionId`/`somedayListId`, PROHIBIDOS. El porqué completo, con el camino
  * de servidor medido de cada una, en el JSDoc de `assertTaskUsable`.
  *
+ * `restore` targetea una tarea y aun así NO está aquí, a propósito: su
+ * objetivo es una tarea BORRADA, que `findTasksByIds` nunca devuelve, así que
+ * la comprobación de existencia la rechazaría siempre. Viaja sin comprobar y
+ * el servidor decide (`applied`, o `noop` + aviso `restore-purged`).
+ *
  * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
  * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
  * `collectExistenceCheckIds` (solo por la PRESENCIA de la clave: qué ops
@@ -798,6 +803,8 @@ function translateOp(op) {
                 kind: 'cancel',
                 payload: { cancelled: op.cancelled ?? true }
             };
+        case 'restore':
+            return { type: 'mutate', taskId: op.taskId, kind: 'restore', payload: {} };
         case 'update':
             return {
                 type: 'mutate',
