@@ -16,6 +16,13 @@ La máquina de estados pública es:
 - devolución humana → `@not-done`;
 - reabrir una devolución → `@acked` si queda pendiente o `@wip` si se corrige ya.
 
+**Dónde se escribe el estado:** como marca `@estado` al final del `content` de la
+tarea (`… texto de la tarea @wip`), con una op `update` que lleve solo `taskId` y
+`content`. Nunca en el campo `tags` de `mutate_tasks`: eso crea una etiqueta `#wip`,
+que no es un estado. Parte del `content` íntegro de `get_task`, no del texto de
+`list_tasks`, y después verifica con `get_task` que el contenido acaba en la marca y que
+`tags propios` no la lleva. El mecánico de esto es `lumbre-tagger`.
+
 Mantén un solo estado de esa familia al transicionar y conserva tags ortogonales de
 lote o backlog. El checkbox y la aceptación humana son independientes. El despliegue
 también lo es, salvo que las reglas del proyecto lo incluyan expresamente en `@done`.
