@@ -206,3 +206,78 @@ describe('formato de tareas archivadas', () => {
 		expect(formatTaskFull(task({ archivedAt: null }))).toContain('- archivada: no');
 	});
 });
+
+/**
+ * MC4 del audit de paridad (23 sep 2026): la API manda `cancelledAt`,
+ * `recurrence` y `seriesId` desde el 26 jul y el MCP no los pintaba — una
+ * cancelada salía `[x]` como hecha y no había forma de distinguir una semilla
+ * de sus ocurrencias.
+ */
+describe('cancelada, regla y serie (MC4)', () => {
+	const SEED = '33333333-3333-4333-8333-333333333333';
+
+	it('una cancelada (done:true + cancelledAt) sale `[-]` y «cancelada», no `[x]`', () => {
+		const output = formatTaskList(
+			[task({ id: 'c', content: 'Cancelada', done: true, cancelledAt: '2026-09-20T10:00:00.000Z' })],
+			'all',
+			{ notesMode: 'none' }
+		);
+		expect(output).toContain('- [-] Cancelada (cancelada)');
+		expect(output).not.toContain('[x] Cancelada');
+	});
+
+	it('una hecha de verdad sigue saliendo `[x]` (control)', () => {
+		const output = formatTaskList([task({ id: 'h', content: 'Hecha', done: true, cancelledAt: null })], 'all', {
+			notesMode: 'none'
+		});
+		expect(output).toContain('- [x] Hecha');
+	});
+
+	it('el listado pinta la regla y marca la semilla; una ocurrencia cita el seriesId de su semilla', () => {
+		const rule = { freq: 'weekly' as const, interval: 1, byWeekday: [0, 3], streak: true };
+		const output = formatTaskList(
+			[
+				task({ id: SEED, content: 'Correr', recurrence: rule, seriesId: SEED }),
+				task({ id: 'occ', content: 'Correr hoy', recurrence: rule, seriesId: SEED })
+			],
+			'all',
+			{ notesMode: 'none' }
+		);
+		expect(output).toContain('Correr (↻semanal L,J, hábito, semilla)');
+		expect(output).toContain(`Correr hoy (↻semanal L,J, hábito, serie:${SEED})`);
+	});
+
+	it('una tarea sin serie no gasta ni un carácter más en su línea', () => {
+		const output = formatTaskList([task({ id: 'n', content: 'Normal', recurrence: null, seriesId: null })], 'all', {
+			notesMode: 'none'
+		});
+		expect(output).toContain('- [ ] Normal  · id: n');
+	});
+
+	it('get_task: estado cancelada con fecha, regla completa y papel en la serie', () => {
+		const full = formatTaskFull(
+			task({
+				id: 'occ',
+				done: true,
+				cancelledAt: '2026-09-20T10:00:00.000Z',
+				recurrence: {
+					freq: 'monthly',
+					interval: 2,
+					mode: 'afterCompletion',
+					until: '2026-12-31',
+					count: 5
+				},
+				seriesId: SEED
+			})
+		);
+		expect(full).toContain('- estado: cancelada (2026-09-20T10:00:00.000Z)');
+		expect(full).toContain('- repetición: cada 2 meses tras completar hasta 2026-12-31 5 veces');
+		expect(full).toContain(`- serie: ocurrencia; semilla ${SEED}`);
+	});
+
+	it('get_task: «no repite» solo si la API dice null; sin la clave no afirma nada', () => {
+		expect(formatTaskFull(task({ recurrence: null }))).toContain('- repetición: (no repite)');
+		expect(formatTaskFull(task())).not.toContain('- repetición:');
+		expect(formatTaskFull(task({ id: SEED, seriesId: SEED }))).toContain('- serie: semilla de su serie');
+	});
+});

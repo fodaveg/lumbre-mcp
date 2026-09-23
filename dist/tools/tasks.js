@@ -3,7 +3,7 @@ import { addTask, findTaskById, findTasksByIds, listTasks, taskNotFoundError } f
 import { formatTaskFull, formatTaskList } from '../format.js';
 import { resolveRefs } from '../refs.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, hasNotes, parseNotesSince, recordNotesSeen } from '../notes.js';
-import { errorResult, recurrenceSchema, tagSchema, textResult } from './shared.js';
+import { errorResult, formatOutcomeReport, recurrenceSchema, tagSchema, textResult } from './shared.js';
 /**
  * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
  * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
@@ -63,7 +63,8 @@ export function refTexts(tasks, notesMode, autoRender) {
 export function registerTaskTools(server, ctx) {
     const addTaskTool = server.registerTool('add_task', {
         description: 'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
-            '"recuérdame", "añade a mi proyecto/área". Se encola y se materializa al sincronizar. ' +
+            '"recuérdame", "añade a mi proyecto/área". La respuesta trae los avisos de la app (p. ej. si la ' +
+            'colocó en otro sitio). ' +
             '`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
         inputSchema: {
             text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
@@ -103,8 +104,12 @@ export function registerTaskTools(server, ctx) {
         }
     }, async (input) => {
         try {
-            await addTask(ctx.config, input);
-            return textResult(`Tarea añadida a Lumbre: “${input.text}”.`);
+            const { notices } = await addTask(ctx.config, input);
+            // Los `notices` de `/api/ingest` cuentan los desvíos que aplicó la app
+            // (MC1 del audit de paridad, 23 sep 2026: antes se tiraban y el modelo
+            // daba por buena una tarea que había acabado en la Bandeja).
+            const noticeBlock = formatOutcomeReport([], notices);
+            return textResult(`Tarea añadida a Lumbre: “${input.text}”.${noticeBlock !== '' ? `\n${noticeBlock}` : ''}`);
         }
         catch (err) {
             return errorResult(err);

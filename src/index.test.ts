@@ -270,7 +270,15 @@ describe('tools/list — superficie completa', () => {
 		// (-20,2%). Techo = medido + ~5% de holgura, no el valor exacto, para
 		// no tener que tocar este test por variaciones triviales de formato
 		// JSON.
-		const CHAR_CEILING = 22400;
+		// Re-medido el 2026-09-23 (lote E del audit de paridad): la regla de
+		// repetición pasa de `freq`+`interval` a la forma completa de la app
+		// (`mode`, `byWeekday`, `until`, `count`, `streak`, con `null` para
+		// quitar en `update`) en `add_task` y `mutate_tasks`, y `ASYNC_NOTE`
+		// se sustituye por `OUTCOME_NOTE`. 16 tools, 22.280 caracteres = +934
+		// sobre los 21.346 de arriba (`mutate_tasks` 3.518 → 4.059, `add_task`
+		// 2.789). Es superficie nueva que la app ya aceptaba y el MCP recortaba
+		// en silencio (MC3). Techo = medido + ~5%.
+		const CHAR_CEILING = 23400;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -1482,6 +1490,232 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		const text = resultText(result);
 		expect(text).toContain('0/1 operación(es) encoladas.');
 		expect(text).toContain('[0] create_list:');
+	});
+});
+
+/**
+ * Lote E del audit de paridad del MCP (23 sep 2026), con el cableado real de
+ * las tools: MC1 (el informe cuenta lo que la app HIZO, no solo lo que
+ * encoló, y reenvía sus avisos) y MC3 (la regla de repetición viaja entera y
+ * un cambio parcial no borra lo no enviado).
+ */
+describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
+	const TASK_ID = '22222222-2222-4222-8222-222222222222';
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'outcome-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function resultText(result: unknown): string {
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		return first.type === 'text' ? (first.text ?? '') : '';
+	}
+
+	function bodyOf(fetchSpy: ReturnType<typeof vi.fn>, suffix: string): Record<string, unknown> {
+		const call = fetchSpy.mock.calls.find((c) => String(c[0]).endsWith(suffix));
+		if (!call) throw new Error(`no hubo petición a ${suffix}`);
+		return JSON.parse(String((call[1] as RequestInit).body)) as Record<string, unknown>;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('mutate_tasks: cuenta aplicadas / sin efecto / fallidas por op y reenvía los notices', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				ok: true,
+				results: [
+					{ index: 0, type: 'ingest', ok: true, id: 't1', materialization: 'applied' },
+					{ index: 1, type: 'ingest', ok: true, id: 't2', materialization: 'noop' },
+					{ index: 2, type: 'ingest', ok: true, id: 't3', materialization: 'failed' }
+				],
+				notices: ['La lista «Viejo» estaba borrada; la tarea fue a la Bandeja.']
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: {
+					ops: [
+						{ op: 'add_task', text: 'a' },
+						{ op: 'add_task', text: 'b' },
+						{ op: 'add_task', text: 'c' }
+					]
+				}
+			})
+		);
+
+		expect(text).toContain('Resultado en la app: 1 aplicadas, 1 sin efecto, 1 fallidas al aplicar.');
+		expect(text).toMatch(/\[1\] add_task: sin efecto/);
+		expect(text).toMatch(/\[2\] add_task: falló al aplicarse/);
+		expect(text).toContain('avisos de la app:\n  - La lista «Viejo» estaba borrada; la tarea fue a la Bandeja.');
+		// La frase vieja prometía lo contrario de lo que ahora hace el informe.
+		expect(text).not.toMatch(/sin confirmación inmediata/);
+	});
+
+	it('mutate_tasks: un servidor sin `materialization` deja la op «sin confirmar», nunca «aplicada»', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] }))
+		);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({ name: 'mutate_tasks', arguments: { ops: [{ op: 'add_task', text: 'a' }] } })
+		);
+		expect(text).toContain('Resultado en la app: 0 aplicadas, 1 sin confirmar.');
+	});
+
+	it('organize: una op en cuarentena se informa como tal', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string | URL) => {
+				if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, content: 'x', done: false }]);
+				return jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'quarantined' }]
+				});
+			})
+		);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'delete', taskId: TASK_ID }] } })
+		);
+		expect(text).toContain('en cuarentena');
+		expect(text).toMatch(/\[0\] delete: retenida en cuarentena/);
+	});
+
+	it('add_task (tool): reenvía los notices de /api/ingest', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: true, notices: ['Fue a la Bandeja'] })));
+		const client = await buildClient();
+		const text = resultText(await client.callTool({ name: 'add_task', arguments: { text: 'a', list: 'X' } }));
+		expect(text).toContain('Tarea añadida a Lumbre');
+		expect(text).toContain('avisos de la app:\n  - Fue a la Bandeja');
+	});
+
+	it('add_task (tool): la regla completa llega entera a /api/ingest (antes Zod borraba byWeekday/streak…)', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const recurrence = {
+			mode: 'calendar',
+			freq: 'weekly',
+			interval: 1,
+			byWeekday: [0, 3],
+			until: '2026-12-31',
+			count: 20,
+			streak: true
+		};
+		const result = await client.callTool({ name: 'add_task', arguments: { text: 'Correr', recurrence } });
+		expect(result.isError).not.toBe(true);
+		expect(bodyOf(fetchSpy, '/api/ingest').recurrence).toEqual(recurrence);
+	});
+
+	it('add_task (tool): un campo de regla desconocido falla en voz alta en vez de desaparecer', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_task',
+			arguments: { text: 'x', recurrence: { freq: 'weekly', weekdays: [0] } }
+		});
+		expect(result.isError).toBe(true);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('mutate_tasks update: cambiar el intervalo de un HÁBITO conserva streak y byWeekday', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) {
+				return jsonResponse([
+					{
+						id: TASK_ID,
+						content: 'Correr',
+						done: false,
+						recurrence: { freq: 'weekly', interval: 1, byWeekday: [0, 3], streak: true },
+						seriesId: TASK_ID
+					}
+				]);
+			}
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'update', taskId: TASK_ID, recurrence: { interval: 2 } }] }
+			})
+		);
+		expect(text).toContain('Resultado en la app: 1 aplicadas.');
+		const ops = bodyOf(fetchSpy, '/api/batch').ops as { payload: Record<string, unknown> }[];
+		expect(ops[0].payload).toEqual({
+			recurrence: { freq: 'weekly', interval: 2, byWeekday: [0, 3], streak: true }
+		});
+	});
+
+	it('mutate_tasks update: un campo de regla desconocido se rechaza en ESA op, sin tumbar el lote', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, content: 'x', done: false }]);
+			return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID }] });
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'update', taskId: TASK_ID, recurrence: { habit: true } },
+					{ op: 'complete', taskId: TASK_ID }
+				]
+			}
+		});
+		const text = resultText(result);
+		expect(result.isError).not.toBe(true);
+		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toMatch(/\[0\] update: .*habit/);
+	});
+
+	it('mutate_brl: un outcome not-found se informa, no se cuenta como aplicado', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string | URL) => {
+				if (String(url).includes('/api/mutations')) {
+					return jsonResponse({ ok: true, outcome: 'not-found', outcomes: ['not-found'] });
+				}
+				throw new Error(`fetch no mockeado: ${String(url)}`);
+			})
+		);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_brl',
+				arguments: { ops: [{ op: 'add', date: '2026-09-23', text: 'Apunte' }] }
+			})
+		);
+		expect(text).toContain('Resultado en la app: 0 aplicadas, 1 sin objetivo.');
+		expect(text).toMatch(/\[0\] add: sin efecto: la app no encontró el objetivo/);
 	});
 });
 

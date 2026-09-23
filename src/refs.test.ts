@@ -240,11 +240,16 @@ describe('renderRefs — una referencia resuelta enseña el estado REAL', () => 
 		);
 	});
 
-	it('CANCELADA: se distingue de "hecha" (en cuanto la API exponga `cancelled`)', () => {
-		const resolution = resolutionOf([task({ done: true, cancelled: true })]);
+	it('CANCELADA: se distingue de "hecha" por `cancelledAt`, aunque viaje con done:true', () => {
+		const resolution = resolutionOf([task({ done: true, cancelledAt: '2026-09-20T10:00:00.000Z' })]);
 		expect(renderRefs(`[[task:${ID_A}|x]]`, resolution)).toBe(
 			`→tarea[cancelada] "Título ACTUAL" id:${ID_A}`
 		);
+	});
+
+	it('HECHA: done:true con cancelledAt null sigue siendo «hecha» (control del caso anterior)', () => {
+		const resolution = resolutionOf([task({ done: true, cancelledAt: null })]);
+		expect(renderRefs(`[[task:${ID_A}|x]]`, resolution)).toBe(`→tarea[hecha] "Título ACTUAL" id:${ID_A}`);
 	});
 
 	it('ROTA: se DECLARA rota con su id, sin la etiqueta caducada (el caso peligroso)', () => {

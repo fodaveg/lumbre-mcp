@@ -8,12 +8,25 @@ import {
 	findTasksByIds,
 	planBatchPhases,
 	runBatch,
+	type BatchResponse,
 	type BatchResultItem,
 	type BrokenListPromise,
 	type LumbreTask,
 	type MutateTasksOp
 } from '../lumbre-client.js';
-import { ASYNC_NOTE, errorResult, formatOpShapeError, recurrenceSchema, tagSchema, textResult, type ToolCtx } from './shared.js';
+import {
+	errorResult,
+	exposedRecurrenceSchema,
+	formatOpShapeError,
+	formatOutcomeReport,
+	OUTCOME_NOTE,
+	recurrencePatchSchema,
+	recurrenceSchema,
+	tagSchema,
+	textResult,
+	type OpOutcomeEntry,
+	type ToolCtx
+} from './shared.js';
 
 /**
  * DOS tools de lote sobre las MISMAS 16 ops de siempre, repartidas por lo que
@@ -120,7 +133,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			tags: z.array(tagSchema).optional(),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
 			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional(),
-			recurrence: z.union([recurrenceSchema, z.null()]).optional()
+			recurrence: z.union([recurrencePatchSchema, z.null()]).optional()
 		})
 		.strict(),
 	z
@@ -256,9 +269,10 @@ export const mutateTasksOpSchema = z
 			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
 			.optional()
 			.describe('24h; null la quita'),
-		// `recurrence`: sin describe propio — `recurrenceSchema` ya documenta
-		// `freq`/`interval` campo a campo (compartido con `add_task`).
-		recurrence: z.union([recurrenceSchema, z.null()]).optional(),
+		// `recurrence`: un solo campo para las dos ops que lo usan (`add_task`
+		// crea con la regla entera, `update` manda un cambio parcial); la
+		// forma exacta de cada una la impone su schema estricto (ver `shared.ts`).
+		recurrence: z.union([exposedRecurrenceSchema, z.null()]).optional(),
 		subtasks: z.array(z.string()).optional().describe('Textos de las subtareas, en orden'),
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
 		cancelled: z.boolean().optional().describe('true = cancelar (default); false = restaurar')
@@ -395,22 +409,29 @@ async function runOpsBatch(
 	const plan = planBatchPhases(preFiltered.batchOps, preFiltered.originalIndexes);
 	let results: BatchResultItem[];
 	let resultOriginalIndexes: number[];
+	// Avisos de la app de todas las peticiones del lote (una o dos, según las
+	// fases), sin repetir: cada drenaje ya los deduplica por dentro.
+	const notices: string[] = [];
+	const EMPTY: BatchResponse = { results: [], notices: [] };
 	const phaseFailures: { index: number; error: string }[] = [];
 	if (!plan.split) {
 		const phase = plan.phases[0];
-		results = phase.ops.length > 0 ? await runBatch(ctx.config, phase.ops) : [];
+		const response = phase.ops.length > 0 ? await runBatch(ctx.config, phase.ops) : EMPTY;
+		results = response.results;
+		notices.push(...response.notices);
 		resultOriginalIndexes = phase.originalIndexes;
 	} else {
 		const [mutatePhase] = plan.phases;
-		const phase1Results = mutatePhase.ops.length > 0 ? await runBatch(ctx.config, mutatePhase.ops) : [];
+		const phase1 = mutatePhase.ops.length > 0 ? await runBatch(ctx.config, mutatePhase.ops) : EMPTY;
 		// Con el resultado REAL de la fase 1 ya se sabe qué `create_list` salió
 		// `ok`: las altas que dependían de uno que falló NO se mandan (nunca
 		// huérfanas con fecha de hoy) y entran en el informe como un fallo más,
 		// citando la op `create_list` causante.
-		const phase2 = filterPhase2AfterPhase1(plan, phase1Results);
+		const phase2 = filterPhase2AfterPhase1(plan, phase1.results);
 		phaseFailures.push(...phase2.skipped);
-		const phase2Results = phase2.ops.length > 0 ? await runBatch(ctx.config, phase2.ops) : [];
-		results = [...phase1Results, ...phase2Results];
+		const phase2Response = phase2.ops.length > 0 ? await runBatch(ctx.config, phase2.ops) : EMPTY;
+		results = [...phase1.results, ...phase2Response.results];
+		notices.push(...phase1.notices, ...phase2Response.notices.filter((n) => !phase1.notices.includes(n)));
 		resultOriginalIndexes = [...mutatePhase.originalIndexes, ...phase2.originalIndexes];
 	}
 	// Cualquier op 'mutate' del lote pudo tocar una tarea que ya estuviera en
@@ -442,11 +463,19 @@ async function runOpsBatch(
 		...preFiltered.skipped,
 		...phaseFailures
 	];
+	// `op` se lee del elemento CRUDO (`rawOps`), no de `validated` (que no
+	// tiene entrada para los descartados por forma).
+	const opNameAt = (index: number) => String(rawOps[index].op);
 	const succeededWithId: { index: number; id: string }[] = [];
+	// Resultado REAL de cada op aceptada (MC1 del audit de paridad): `ok` solo
+	// dice «validada y encolada»; si se aplicó lo dice `materialization`. Un
+	// servidor que no lo manda deja la op «sin confirmar», nunca «aplicada».
+	const outcomes: OpOutcomeEntry[] = [];
 	results.forEach((r, i) => {
 		const index = resultOriginalIndexes[i];
 		if (r.ok) {
 			if (r.id !== undefined) succeededWithId.push({ index, id: r.id });
+			outcomes.push({ index, op: opNameAt(index), outcome: r.materialization ?? 'unconfirmed' });
 		} else {
 			failures.push({ index, error: r.error ?? 'error desconocido' });
 		}
@@ -455,17 +484,15 @@ async function runOpsBatch(
 	failures.sort((a, b) => a.index - b.index);
 	succeededWithId.sort((a, b) => a.index - b.index);
 
-	// `op` se lee del elemento CRUDO (`rawOps`), no de `validated` (que no
-	// tiene entrada para los descartados por forma).
-	const opNameAt = (index: number) => String(rawOps[index].op);
 	const failureLines = failures.map((f) => `  [${f.index}] ${opNameAt(f.index)}: ${f.error}`);
 	const idLines = succeededWithId.map((s) => `  [${s.index}] ${opNameAt(s.index)}: id ${s.id}`);
 	let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) encoladas.`;
+	const outcomeReport = formatOutcomeReport(outcomes, notices);
+	if (outcomeReport !== '') summary += `\n${outcomeReport}`;
 	if (idLines.length > 0) summary += `\nids asignados:\n${idLines.join('\n')}`;
 	if (failureLines.length > 0) {
 		summary += `\n${failureLines.length} fallaron:\n${failureLines.join('\n')}`;
 	}
-	summary += `\n\n${ASYNC_NOTE}`;
 	return summary;
 }
 
@@ -486,7 +513,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 				`suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
 				`UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
 				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
-				`cada add_task encolada. ${ASYNC_NOTE}`,
+				`cada add_task encolada. ${OUTCOME_NOTE}`,
 			inputSchema: {
 				ops: z
 					.array(mutateTasksOpSchema)
@@ -497,7 +524,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
 							'priority, date, deadline, time, recurrence, subtasks, notes, tags] · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
-							'priority, time, recurrence (null la apaga, también en una semilla archivada)] · ' +
+							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
+							'en una semilla archivada)] · ' +
 							'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
 							'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done]'
 					)
@@ -522,7 +550,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 				`remove_list, set_list_notes, move_to_list. Vía ÚNICA para proyectos, áreas y secciones, y ` +
 				`la única que borra. ACCIONES DELICADAS: sin deshacer — confirma con el usuario antes de ` +
 				`borrar. Mismo lote y mismo éxito PARCIAL que mutate_tasks, con el listId de cada ` +
-				`create_list; para encadenar en el MISMO lote, dale tú ese listId (uuid v4). ${ASYNC_NOTE}`,
+				`create_list; para encadenar en el MISMO lote, dale tú ese listId (uuid v4). ${OUTCOME_NOTE}`,
 			inputSchema: {
 				ops: z
 					.array(organizeOpSchema)

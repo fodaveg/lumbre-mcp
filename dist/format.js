@@ -5,6 +5,72 @@ import { formatTags } from './tag-format.js';
 function priorityLabel(priority) {
     return priority ? `p${priority}` : '';
 }
+/** Casilla de estado del listado: `[-]` cancelada, `[x]` hecha, `[ ]`
+ *  pendiente. La cancelada se mira PRIMERO porque también viaja con
+ *  `done: true` (MC4 del audit de paridad, 23 sep 2026: antes salía `[x]`). */
+function stateBox(t) {
+    if (t.cancelledAt)
+        return '[-]';
+    return t.done ? '[x]' : '[ ]';
+}
+/** Estado en palabras para `get_task`, con la fecha de cancelación. */
+function stateLabel(t) {
+    if (t.cancelledAt)
+        return `cancelada (${t.cancelledAt})`;
+    return t.done ? 'hecha' : 'pendiente';
+}
+const FREQ_LABEL = {
+    daily: 'diaria',
+    weekly: 'semanal',
+    monthly: 'mensual',
+    yearly: 'anual'
+};
+const FREQ_UNIT_PLURAL = {
+    daily: 'días',
+    weekly: 'semanas',
+    monthly: 'meses',
+    yearly: 'años'
+};
+/** 0 = lunes … 6 = domingo, las mismas iniciales que la app. */
+const WEEKDAY_LETTER = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
+/**
+ * Regla de repetición en palabras cortas («semanal L,J hasta 2026-12-31,
+ * hábito»). La usan el listado y `get_task` (MC4 del audit de paridad): sin
+ * ella el modelo no podía saber qué repite ni qué es un hábito, y un cambio
+ * parcial de la regla (`update.recurrence`) exige conocer la vigente.
+ */
+export function formatRecurrence(r) {
+    const interval = r.interval ?? 1;
+    const parts = [interval > 1 ? `cada ${interval} ${FREQ_UNIT_PLURAL[r.freq]}` : FREQ_LABEL[r.freq]];
+    if (r.byWeekday && r.byWeekday.length > 0) {
+        parts.push(r.byWeekday.map((d) => WEEKDAY_LETTER[d] ?? String(d)).join(','));
+    }
+    if (r.mode === 'afterCompletion')
+        parts.push('tras completar');
+    if (r.until)
+        parts.push(`hasta ${r.until}`);
+    if (r.count !== undefined)
+        parts.push(`${r.count} veces`);
+    let label = parts.join(' ');
+    if (r.streak)
+        label += ', hábito';
+    return label;
+}
+/**
+ * Metadatos de serie para el listado: la regla (`↻…`) y a qué serie
+ * pertenece. `semilla` cuando `seriesId === id` (su id ya está en la línea);
+ * en una ocurrencia, el `seriesId` entero, porque es el id de la SEMILLA y es
+ * sobre ella donde se apaga o se cambia la serie. Nada si la tarea no es de
+ * ninguna serie, para no alargar la línea en el caso normal.
+ */
+function seriesMetadata(t) {
+    const out = [];
+    if (t.recurrence)
+        out.push(`↻${formatRecurrence(t.recurrence)}`);
+    if (t.seriesId)
+        out.push(t.seriesId === t.id ? 'semilla' : `serie:${t.seriesId}`);
+    return out;
+}
 /** Longitud máxima de las notas mostradas por tarea antes de truncar con "…"
  *  — SOLO en `notesMode: 'preview'` (legado); `'auto'` (default) nunca trunca
  *  a medias, ver `buildNotesLine`/`decideAutoNoteRender` en `notes.ts`. */
@@ -120,8 +186,10 @@ function duplicateTitleKeys(tasks) {
  *  más nueva entre dos tareas con el mismo título; en el caso normal (título
  *  único en el lote) no aporta nada y solo alarga la línea. */
 function formatTask(t, opts, isDuplicateTitle) {
-    const box = t.done ? '[x]' : '[ ]';
+    const box = stateBox(t);
     const metadata = formatTags(t.tags, t.effectiveTags);
+    if (t.cancelledAt)
+        metadata.push('cancelada');
     const prio = priorityLabel(t.priority);
     if (prio)
         metadata.push(prio);
@@ -137,6 +205,7 @@ function formatTask(t, opts, isDuplicateTitle) {
         metadata.push(t.time);
     if (t.deadline)
         metadata.push(`⚑${t.deadline}`);
+    metadata.push(...seriesMetadata(t));
     if (t.archivedAt)
         metadata.push(`archivada:${t.archivedAt.slice(0, 10)}`);
     // `createdAt` recortado a minuto (sin segundos/ms): SOLO si hay otra tarea
@@ -191,7 +260,7 @@ export function formatTaskFull(t, refs) {
         `- contenido: ${renderRefs(t.content, refs)}`,
         `- tags propios: ${t.tags && t.tags.length > 0 ? t.tags.map((tag) => `#${tag}`).join(', ') : '(ninguno)'}`,
         `- tags efectivos: ${t.effectiveTags && t.effectiveTags.length > 0 ? t.effectiveTags.map((tag) => `#${tag}`).join(', ') : '(ninguno)'}`,
-        `- estado: ${t.done ? 'hecha' : 'pendiente'}`,
+        `- estado: ${stateLabel(t)}`,
         `- archivada: ${t.archivedAt ?? 'no'}`,
         `- prioridad: ${priorityLabel(t.priority) || '(ninguna)'}`,
         // Mismo criterio que en `formatTask`: la hora se pega a la fecha, no
@@ -205,6 +274,14 @@ export function formatTaskFull(t, refs) {
         `- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
         `- creada: ${t.createdAt}`
     ];
+    // Regla y serie (MC4 del audit de paridad). `recurrence` ausente = servidor
+    // que no la manda: no se pinta nada antes que afirmar «no repite».
+    if (t.recurrence !== undefined) {
+        lines.push(`- repetición: ${t.recurrence ? formatRecurrence(t.recurrence) : '(no repite)'}`);
+    }
+    if (t.seriesId) {
+        lines.push(`- serie: ${t.seriesId === t.id ? 'semilla de su serie' : `ocurrencia; semilla ${t.seriesId}`}`);
+    }
     if (t.notes && t.notes.trim() !== '') {
         lines.push(`- notas:\n${notesFull(renderRefs(t.notes, refs))}`);
     }

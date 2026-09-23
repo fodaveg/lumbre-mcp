@@ -11,9 +11,10 @@ import type { ToolCtx } from './shared.js';
  * EXISTENCIA aquí, un id mal transcrito (typo real que mordió a David el
  * 2026-07-17: `9c184fe4-2103-…` en vez de `9c184fe4-ddb2-4103-…`) se
  * encolaba igual y el MCP contestaba "Encolado…" tan tranquilo, perdiendo la
- * mutación sin avisar. La EXISTENCIA sí se puede comprobar en el acto (a
- * diferencia de si la mutación llegó a APLICARSE, que sigue siendo asíncrono
- * — ver `ASYNC_NOTE`), así que sí merece la pena gastar la llamada extra a
+ * mutación sin avisar. La EXISTENCIA se comprueba ANTES de encolar, que es
+ * más barato que descubrirlo después (desde el 23 sep 2026 el informe de la
+ * tool también dice si la op se APLICÓ, ver `OUTCOME_NOTE`), así que sí
+ * merece la pena gastar la llamada extra a
  * `GET /api/tasks?id=` (vía `findTaskById`) antes de encolar.
  *
  * Fino wrapper de red sobre `assertTaskUsable` (`lumbre-client.ts`, función

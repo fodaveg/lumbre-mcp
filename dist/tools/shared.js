@@ -11,23 +11,69 @@ export function errorResult(err) {
     return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
 }
 /**
- * Aviso compartido en `mutate_tasks`/`organize`/`mutate_brl` (desde la fusión
- * de las tools sueltas de Fase 2, 2026-09-19, ya solo tres usos: sus ops
- * heredan el aviso de la tool que las encola): la app de Lumbre es
- * ASÍNCRONA/eventual (igual que `add_task`) — cada
- * mutación se encola y se aplica la próxima vez que un dispositivo del
- * usuario sincronice, no al instante, y ninguna tool da confirmación
- * inmediata de que se aplicó de verdad (usa `list_tasks` más tarde para
- * comprobarlo). Versión CORTA a propósito, y recortada de nuevo el
- * 2026-09-17 (quitado "(como add_task)", que no es uno de los tres hechos que
- * esta frase tiene que dar: se encola, se aplica al sincronizar, sin
- * confirmación inmediata) — el detalle completo (por qué es eventual, el
- * rebote del WebSocket, etc.) vive una única vez en `README.md` ("Qué hace —
- * Fase 2"). Compartida por `tools/tasks.ts`, `tools/brl.ts` y `tools/batch.ts`
- * (tarea de partir `index.ts` en `src/tools/`, 2026-09-17) — antes vivía
- * aquí, en `index.ts`, como una única constante de módulo.
+ * Frase compartida por las descriptions de `mutate_tasks`/`organize`/
+ * `mutate_brl`: qué dice el informe que devuelven.
+ *
+ * Sustituye el 23 sep 2026 a `ASYNC_NOTE` («se encola y se aplica al
+ * sincronizar, sin confirmación inmediata»), que era falsa desde que la app
+ * drena en el servidor en la misma petición y devuelve el resultado por op
+ * (`materialization` en `/api/batch`, `outcome` en `/api/mutations`). MC1 y
+ * MC9 del audit de paridad. Versión CORTA a propósito: se paga en
+ * `tools/list` tres veces.
  */
-export const ASYNC_NOTE = 'Asíncrono: se encola y se aplica al sincronizar, sin confirmación inmediata.';
+export const OUTCOME_NOTE = 'El informe dice por op si la app la aplicó, no tuvo efecto o falló.';
+/** Nombre corto para el recuento, en el orden en que se pinta. */
+const OUTCOME_COUNT_LABEL = {
+    applied: 'aplicadas',
+    noop: 'sin efecto',
+    'not-found': 'sin objetivo',
+    failed: 'fallidas al aplicar',
+    quarantined: 'en cuarentena',
+    queued: 'pendientes de aplicar',
+    unconfirmed: 'sin confirmar'
+};
+/** Qué significa cada estado que NO es `applied`, para la línea por op. */
+const OUTCOME_DETAIL = {
+    noop: 'sin efecto: la app no cambió nada (ya estaba así, o el objetivo no admite el cambio)',
+    'not-found': 'sin efecto: la app no encontró el objetivo (inexistente, borrado o archivado)',
+    failed: 'falló al aplicarse; la app la reintentará en un drenaje posterior',
+    quarantined: 'retenida en cuarentena por la app para revisión; no se ha aplicado',
+    queued: 'aceptada pero sin aplicar (cuarentena o fallo al drenar); relee antes de darla por hecha',
+    unconfirmed: 'encolada; este servidor no dice si se aplicó, relee para comprobarlo'
+};
+/**
+ * Bloque del informe con el resultado REAL de las ops aceptadas y los avisos
+ * de la app (MC1 del audit de paridad, 23 sep 2026: hasta entonces los tres
+ * informes decían «encoladas» y el modelo leía un no-op o un fallo del
+ * drenaje como éxito). Compartido por `mutate_tasks`/`organize`
+ * (`tools/batch.ts`) y `mutate_brl` (`tools/brl.ts`).
+ *
+ * Forma: una línea de recuento («aplicadas» siempre, el resto solo si hay),
+ * una línea por op que NO se aplicó con su índice, y los avisos. Vacío si no
+ * hay ninguna op aceptada ni avisos.
+ */
+export function formatOutcomeReport(entries, notices) {
+    const lines = [];
+    if (entries.length > 0) {
+        const counts = new Map();
+        for (const e of entries)
+            counts.set(e.outcome, (counts.get(e.outcome) ?? 0) + 1);
+        const parts = Object.keys(OUTCOME_COUNT_LABEL)
+            .filter((o) => o === 'applied' || (counts.get(o) ?? 0) > 0)
+            .map((o) => `${counts.get(o) ?? 0} ${OUTCOME_COUNT_LABEL[o]}`);
+        lines.push(`Resultado en la app: ${parts.join(', ')}.`);
+        const notApplied = entries
+            .filter((e) => e.outcome !== 'applied')
+            .sort((a, b) => a.index - b.index)
+            .map((e) => `  [${e.index}] ${e.op}: ${OUTCOME_DETAIL[e.outcome]}`);
+        if (notApplied.length > 0)
+            lines.push(`sin aplicar:\n${notApplied.join('\n')}`);
+    }
+    if (notices.length > 0) {
+        lines.push(`avisos de la app:\n${notices.map((n) => `  - ${n}`).join('\n')}`);
+    }
+    return lines.join('\n');
+}
 /**
  * Mapa op → tool que la implementa, con las 16 ops de tarea repartidas entre
  * las DOS tools de lote (2026-09-19, tarea 6f62c877): `mutate_tasks` opera
@@ -92,15 +138,54 @@ function formatZodOpShapeError(op, error) {
     });
     return `${op}: ${parts.join('; ')}`;
 }
-/** Recurrencia simple (freq + interval), como la celda "Repetir" del quick-add
- *  de Lumbre — compartida por `add_task` (`tools/tasks.ts`) y `mutate_tasks`
- *  (`tools/batch.ts`, misma forma que la op `add_task`). */
-export const recurrenceSchema = z
-    .object({
-    freq: z.enum(['daily', 'weekly', 'monthly', 'yearly']).describe('Frecuencia de la repetición'),
-    interval: z.number().int().positive().optional().describe('Cada cuántas unidades (default 1)')
-})
-    .describe('Recurrencia simple (freq + interval), como la celda "Repetir" del quick-add de Lumbre');
+/**
+ * Campos de una regla de repetición, la forma COMPLETA que acepta la app
+ * (`Recurrence` de `$lib/recurrence` en el repo principal, normalizada por
+ * `normalizeRecurrence`). Hasta el 23 sep 2026 aquí solo había `freq` e
+ * `interval` y Zod borraba el resto sin avisar (MC3 del audit de paridad).
+ * `.describe()` solo donde el nombre no basta: cada carácter se paga en
+ * `tools/list`, y este esquema aparece en `add_task` y en `mutate_tasks`.
+ */
+const recurrenceFields = {
+    mode: z.enum(['calendar', 'afterCompletion']).optional().describe('afterCompletion: cuenta desde que la completas'),
+    freq: z.enum(['daily', 'weekly', 'monthly', 'yearly']),
+    interval: z.number().int().positive().optional().describe('Cada cuántas unidades (default 1)'),
+    byWeekday: z.array(z.number().int().min(0).max(6)).min(1).optional().describe('Solo weekly: 0=lunes … 6=domingo'),
+    until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Último día, inclusive'),
+    count: z.number().int().positive().optional().describe('Máximo de ocurrencias'),
+    streak: z.boolean().optional().describe('true = hábito (cuenta racha)')
+};
+/**
+ * Regla ENTERA, para CREAR (`add_task` de `tools/tasks.ts` y la op `add_task`
+ * de `mutate_tasks`). `.strict()`: un campo que la app no conoce falla en voz
+ * alta en vez de desaparecer, que es justo lo que ocultaba MC3.
+ */
+export const recurrenceSchema = z.object(recurrenceFields).strict();
+/**
+ * Campos de un cambio PARCIAL de regla (op `update` de `mutate_tasks`): todo
+ * opcional, y `null` quita `byWeekday`/`until`/`count`. La fusión con la
+ * regla vigente la hace `mergeRecurrencePatch` (`lumbre-client.ts`).
+ */
+const recurrencePatchFields = {
+    ...recurrenceFields,
+    freq: recurrenceFields.freq.optional(),
+    byWeekday: z.union([recurrenceFields.byWeekday.unwrap(), z.null()]).optional(),
+    until: z.union([recurrenceFields.until.unwrap(), z.null()]).optional(),
+    count: z.union([recurrenceFields.count.unwrap(), z.null()]).optional()
+};
+/** Cambio parcial ESTRICTO, para el schema interno de la op `update`. */
+export const recurrencePatchSchema = z.object(recurrencePatchFields).strict();
+/**
+ * Versión que EXPONE `mutate_tasks` (un solo campo `recurrence` para sus dos
+ * ops, `add_task` y `update`): laxa, con `freq` opcional y `.passthrough()`,
+ * para que un fallo de forma no tumbe el lote entero en el framework y llegue
+ * al schema estricto de su op, que lo reporta por posición (ver la cabecera
+ * de `tools/batch.ts`).
+ */
+export const exposedRecurrenceSchema = z
+    .object(recurrencePatchFields)
+    .passthrough()
+    .describe('Al crear, freq obligatorio. En update solo cambia lo enviado; null quita byWeekday/until/count');
 /** Forma de un tag propio — compartida por `tools/tasks.ts` (`add_task`) y
  *  `tools/batch.ts` (`mutateTasksOpSchema.tags`, ops `add_task`/`update`). */
 export const tagSchema = z.string().regex(/^[\p{L}\p{N}_][\p{L}\p{N}_-]*$/u);

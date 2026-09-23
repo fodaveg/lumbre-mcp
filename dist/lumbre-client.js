@@ -68,7 +68,16 @@ async function request(config, path, init = {}) {
     }
     return body;
 }
-/** `POST /api/ingest`: encola una tarea nueva (el cliente de Lumbre la materializa al sincronizar). */
+/** `notices` de una respuesta de la app: solo las cadenas, `[]` si no hay o
+ *  si la forma no encaja (un servidor anterior no manda la clave). */
+function readNotices(body) {
+    const raw = body.notices;
+    return Array.isArray(raw) ? raw.filter((n) => typeof n === 'string') : [];
+}
+/** `POST /api/ingest`: crea una tarea. La app la encola y la materializa en
+ *  el servidor en la misma petición; los dispositivos la reciben al
+ *  sincronizar. Devuelve los `notices` para que la tool se los cuente al
+ *  modelo (MC1 del audit de paridad: antes se tiraban). */
 export async function addTask(config, input) {
     const body = await request(config, '/api/ingest', {
         method: 'POST',
@@ -78,6 +87,7 @@ export async function addTask(config, input) {
     if (!body || typeof body !== 'object' || body.ok !== true) {
         throw new LumbreApiError('Lumbre no confirmó la ingesta (respuesta inesperada).');
     }
+    return { notices: readNotices(body) };
 }
 /** `GET /api/tasks`: lee las tareas del usuario dueño del token. */
 export async function listTasks(config, input) {
@@ -599,10 +609,12 @@ export async function refreshSync(config) {
         throw new LumbreApiError('Lumbre no confirmó el flush del sync (respuesta inesperada).');
     }
 }
+const MUTATION_OUTCOMES = ['applied', 'noop', 'not-found', 'queued'];
 /**
- * `POST /api/mutations`: encola una mutación sobre una tarea EXISTENTE (el
- * cliente de Lumbre la aplica al sincronizar — no es instantáneo). Espejo de
- * `addTask`.
+ * `POST /api/mutations`: encola UNA mutación y la app la drena en el servidor
+ * en la misma petición. Devuelve el `outcome` real y los `notices` (MC1 del
+ * audit de paridad: hasta el 23 sep 2026 se miraba solo `ok`, que significa
+ * «validada y encolada», y un `not-found` salía como éxito).
  */
 export async function mutateTask(config, input) {
     const body = await request(config, '/api/mutations', {
@@ -613,6 +625,13 @@ export async function mutateTask(config, input) {
     if (!body || typeof body !== 'object' || body.ok !== true) {
         throw new LumbreApiError('Lumbre no confirmó la mutación (respuesta inesperada).');
     }
+    const outcome = body.outcome;
+    return {
+        ...(typeof outcome === 'string' && MUTATION_OUTCOMES.includes(outcome)
+            ? { outcome: outcome }
+            : {}),
+        notices: readNotices(body)
+    };
 }
 /**
  * `GET /api/brl/:date?format=json`: entradas del registro de un día CON SU ID.
@@ -645,6 +664,9 @@ export function priorityToLevel(p) {
  * `mutateTask`, pero para un LOTE entero en vez de una operación suelta — es
  * la vía PREFERENTE para `mutate_tasks` (`index.ts`) cuando hay varias
  * operaciones seguidas: 1 petición + 1 drenaje en vez de N.
+ *
+ * Devuelve también los `notices` (MC1 del audit de paridad, 23 sep 2026:
+ * hasta entonces se devolvía solo `results` y los avisos se perdían).
  */
 export async function runBatch(config, ops) {
     const body = await request(config, '/api/batch', {
@@ -658,7 +680,7 @@ export async function runBatch(config, ops) {
         !Array.isArray(body.results)) {
         throw new LumbreApiError('Lumbre no confirmó el batch (respuesta inesperada).');
     }
-    return body.results;
+    return { results: body.results, notices: readNotices(body) };
 }
 /**
  * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
@@ -787,6 +809,8 @@ function translateOp(op) {
                     ...(op.tags !== undefined ? { tags: op.tags } : {}),
                     ...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
                     ...(op.time !== undefined ? { time: op.time } : {}),
+                    // Ya fusionada con la regla vigente en `buildBatchFromOps`
+                    // (`mergeRecurrencePatch`), así que aquí es una regla entera o `null`.
                     ...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {})
                 }
             };
@@ -872,6 +896,56 @@ function translateOp(op) {
     }
 }
 /**
+ * Fusiona el cambio PARCIAL de regla que pide el modelo con la regla VIGENTE
+ * de la tarea y devuelve la regla ENTERA que hay que mandar (la app la
+ * sustituye completa: `setTaskRecurrence` no fusiona). Pura, sin red.
+ *
+ * Por qué existe (MC3 del audit de paridad, 23 sep 2026): mandar solo lo que
+ * el modelo cambió borraba el resto, y sin `streak` la app desengancha el
+ * hábito. Ahora un campo no enviado se conserva; se quita solo si el parche lo
+ * pide de forma explícita (`null` en `byWeekday`/`until`/`count`,
+ * `streak: false`, `mode: 'calendar'`).
+ *
+ * `current` distingue dos ausencias: `null` = la tarea no tiene regla (el
+ * parche tiene que traer `freq`, y se usa tal cual) y `undefined` = no se sabe
+ * (servidor anterior a exponer `recurrence`): ahí solo se acepta un parche con
+ * `freq`, sabiendo que lo no enviado no se puede conservar.
+ *
+ * `byWeekday` se descarta si la regla resultante no es semanal de calendario:
+ * la app lo ignora en ese caso, y dejarlo haría creer que sigue vigente.
+ */
+export function mergeRecurrencePatch(patch, current) {
+    const base = current ?? {};
+    const merged = { ...base, ...patch };
+    const freq = merged.freq;
+    if (freq === undefined) {
+        return {
+            error: current === undefined
+                ? 'no se pudo leer la regla actual de la tarea; manda la regla completa, con freq.'
+                : 'la tarea no repite; para ponerle regla indica al menos freq.'
+        };
+    }
+    const rule = { freq };
+    if (merged.mode === 'afterCompletion')
+        rule.mode = 'afterCompletion';
+    if (merged.interval !== undefined)
+        rule.interval = merged.interval;
+    if (merged.byWeekday !== undefined &&
+        merged.byWeekday !== null &&
+        merged.byWeekday.length > 0 &&
+        freq === 'weekly' &&
+        rule.mode !== 'afterCompletion') {
+        rule.byWeekday = merged.byWeekday;
+    }
+    if (merged.until !== undefined && merged.until !== null)
+        rule.until = merged.until;
+    if (merged.count !== undefined && merged.count !== null)
+        rule.count = merged.count;
+    if (merged.streak === true)
+        rule.streak = true;
+    return { rule };
+}
+/**
  * Núcleo PURO (sin red) de `mutate_tasks`: valida localmente cada op
  * (`localValidationError`) y, si targetea una tarea, comprueba su existencia
  * contra `existing` (`assertTaskUsable`, con el `allowSubtask` que le toque —
@@ -903,6 +977,20 @@ export function buildBatchFromOps(ops, existing) {
                 skipped.push({ index, error: err instanceof Error ? err.message : String(err) });
                 return;
             }
+        }
+        // La app SUSTITUYE la regla entera en un `update`; el modelo manda un
+        // cambio parcial. Se fusiona aquí con la regla que acaba de leerse en la
+        // comprobación de existencia, para que un campo no enviado (`streak`,
+        // `byWeekday`…) no se pierda por omisión.
+        if (op.op === 'update' && op.recurrence !== undefined && op.recurrence !== null) {
+            const merged = mergeRecurrencePatch(op.recurrence, existing.get(op.taskId)?.recurrence);
+            if ('error' in merged) {
+                skipped.push({ index, error: `update: ${merged.error}` });
+                return;
+            }
+            batchOps.push(translateOp({ ...op, recurrence: merged.rule }));
+            originalIndexes.push(index);
+            return;
         }
         batchOps.push(translateOp(op));
         originalIndexes.push(index);

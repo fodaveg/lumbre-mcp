@@ -150,11 +150,10 @@ export async function resolveRefs(config, texts, opts = {}) {
     return resolution;
 }
 /** Estado de una tarea de un vistazo, con el mismo vocabulario que el resto del
- *  MCP. `cancelled` solo llega si la API lo expone (ver el JSDoc de
- *  `LumbreTask.cancelled`); mientras no lo haga, una tarea cancelada viaja como
- *  `done: true` y se lee «hecha». */
+ *  MCP. Una cancelada viaja también con `done: true`, así que `cancelledAt` se
+ *  mira primero (ver el JSDoc de `LumbreTask.cancelledAt`). */
 function taskStateLabel(t) {
-    if (t.cancelled)
+    if (t.cancelledAt)
         return 'cancelada';
     return t.done ? 'hecha' : 'pendiente';
 }

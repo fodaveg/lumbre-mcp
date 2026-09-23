@@ -1,8 +1,16 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { LumbreApiError, listBrlEntries, mutateTask } from '../lumbre-client.js';
-import { ASYNC_NOTE, errorResult, formatOpShapeError, textResult, type ToolCtx } from './shared.js';
+import { LumbreApiError, listBrlEntries, mutateTask, type MutateTaskResult } from '../lumbre-client.js';
+import {
+	errorResult,
+	formatOpShapeError,
+	formatOutcomeReport,
+	OUTCOME_NOTE,
+	textResult,
+	type OpOutcomeEntry,
+	type ToolCtx
+} from './shared.js';
 
 /**
  * Las cuatro tools de BRL (`list_brl_entries` + los tres verbos) son el espejo,
@@ -178,7 +186,7 @@ export function registerBrlTools(server: McpServer, ctx: ToolCtx) {
 				`llamada. Contrato por-op en la description de \`ops\`. Éxito PARCIAL: una op inválida no ` +
 				`bloquea las demás — el resultado detalla qué falló por posición y el \`id\` de cada \`add\` ` +
 				`encolado. La op \`delete\` es DELICADA: sin deshacer — confírmala con el usuario antes. ` +
-				`${ASYNC_NOTE}`,
+				`${OUTCOME_NOTE}`,
 			inputSchema: {
 				ops: z
 					.array(mutateBrlOpSchema)
@@ -194,6 +202,16 @@ export function registerBrlTools(server: McpServer, ctx: ToolCtx) {
 		async (input) => {
 			const rawOps = input.ops as Record<string, unknown>[];
 			const results: { index: number; ok: boolean; id?: string; error?: string }[] = [];
+			// Resultado REAL de cada op aceptada y avisos de la app (MC1 del audit
+			// de paridad, 23 sep 2026): `/api/mutations` devuelve `outcome`, y hasta
+			// entonces se tiraba — un `not-found` salía como éxito.
+			const outcomes: OpOutcomeEntry[] = [];
+			const notices: string[] = [];
+			const record = (index: number, id: string, res: MutateTaskResult) => {
+				results.push({ index, ok: true, id });
+				outcomes.push({ index, op: String(rawOps[index].op), outcome: res.outcome ?? 'unconfirmed' });
+				for (const n of res.notices) if (!notices.includes(n)) notices.push(n);
+			};
 			for (let i = 0; i < rawOps.length; i++) {
 				const raw = rawOps[i];
 				const parsed = mutateBrlStrictOpSchema.safeParse(raw);
@@ -208,7 +226,7 @@ export function registerBrlTools(server: McpServer, ctx: ToolCtx) {
 						// creación si el lote se reabre tras un fallo, ver `createBrlEntry`
 						// en el repo principal).
 						const entryId = randomUUID();
-						await mutateTask(ctx.config, {
+						const res = await mutateTask(ctx.config, {
 							taskId: entryId,
 							kind: 'createBrlEntry',
 							payload: {
@@ -217,21 +235,21 @@ export function registerBrlTools(server: McpServer, ctx: ToolCtx) {
 								...(op.time !== undefined ? { time: op.time } : {})
 							}
 						});
-						results.push({ index: i, ok: true, id: entryId });
+						record(i, entryId, res);
 					} else if (op.op === 'update') {
 						await requireBrlEntryExists(op.date, op.entryId);
-						await mutateTask(ctx.config, {
+						const res = await mutateTask(ctx.config, {
 							taskId: op.entryId,
 							kind: 'updateBrlEntry',
 							payload: { entry: `${op.kind === 'thought' ? '=' : '-'} ${op.text}` }
 						});
 						ctx.brlCache.invalidate(op.date, op.entryId);
-						results.push({ index: i, ok: true, id: op.entryId });
+						record(i, op.entryId, res);
 					} else {
 						await requireBrlEntryExists(op.date, op.entryId);
-						await mutateTask(ctx.config, { taskId: op.entryId, kind: 'removeBrlEntry', payload: {} });
+						const res = await mutateTask(ctx.config, { taskId: op.entryId, kind: 'removeBrlEntry', payload: {} });
 						ctx.brlCache.invalidate(op.date, op.entryId);
-						results.push({ index: i, ok: true, id: op.entryId });
+						record(i, op.entryId, res);
 					}
 				} catch (err) {
 					results.push({
@@ -250,9 +268,10 @@ export function registerBrlTools(server: McpServer, ctx: ToolCtx) {
 				.filter((r) => !r.ok)
 				.map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: ${r.error}`);
 			let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) encoladas.`;
+			const outcomeReport = formatOutcomeReport(outcomes, notices);
+			if (outcomeReport !== '') summary += `\n${outcomeReport}`;
 			if (idLines.length > 0) summary += `\nids asignados:\n${idLines.join('\n')}`;
 			if (failureLines.length > 0) summary += `\n${failureLines.length} fallaron:\n${failureLines.join('\n')}`;
-			summary += `\n\n${ASYNC_NOTE}`;
 			return textResult(summary);
 		}
 	);

@@ -36,10 +36,54 @@ export interface LumbreConfig {
 	authMode?: 'token' | 'oauth';
 }
 
-/** Recurrencia mínima que acepta `/api/ingest` (mismo shape que `InboundRecurrence`). */
+/** Frecuencia de una regla de repetición (`Freq` de `$lib/recurrence` en el
+ *  repo principal). */
+export type RecurrenceFreq = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+/**
+ * Regla de repetición COMPLETA, la misma forma que `Recurrence` de
+ * `$lib/recurrence` en el repo principal: es lo que aceptan `/api/ingest` y el
+ * `update` de `/api/batch` (los dos pasan por `normalizeRecurrence`) y lo que
+ * devuelve `GET /api/tasks` en `recurrence`, ya parseada.
+ *
+ * Hasta el 23 sep 2026 aquí solo había `freq` e `interval` (MC3 del audit de
+ * paridad del MCP): Zod descartaba en silencio el resto, así que «semanal
+ * lunes y jueves» se creaba en el día del ancla y retocar la regla de un
+ * hábito le quitaba `streak`, que es lo que lo hace hábito.
+ *
+ * `mode: 'afterCompletion'` viaja con `freq` como UNIDAD (la app la
+ * reescribe a su forma serializada en `normalizeRecurrence`); en ese modo la
+ * app ignora `byWeekday`, igual que en cualquier `freq` que no sea `weekly`.
+ */
 export interface IngestRecurrence {
-	freq: 'daily' | 'weekly' | 'monthly' | 'yearly';
+	mode?: 'calendar' | 'afterCompletion';
+	freq: RecurrenceFreq;
 	interval?: number;
+	/** Solo semanal: días en los que repite, 0 = lunes … 6 = domingo. */
+	byWeekday?: number[];
+	/** Último día de la serie, inclusive (`YYYY-MM-DD`). */
+	until?: string;
+	/** Número máximo de ocurrencias (>= 1). */
+	count?: number;
+	/** Hábito: la serie cuenta racha. */
+	streak?: boolean;
+}
+
+/**
+ * Cambio PARCIAL de la regla que pide `mutate_tasks` en un `update`: solo los
+ * campos enviados cambian, el resto se conserva de la regla actual (ver
+ * `mergeRecurrencePatch`). `null` en `byWeekday`/`until`/`count` quita ese
+ * campo, `streak: false` quita la marca de hábito y `mode: 'calendar'`
+ * vuelve al modo por defecto.
+ */
+export interface RecurrencePatch {
+	mode?: 'calendar' | 'afterCompletion';
+	freq?: RecurrenceFreq;
+	interval?: number;
+	byWeekday?: number[] | null;
+	until?: string | null;
+	count?: number | null;
+	streak?: boolean;
 }
 
 export interface AddTaskInput {
@@ -166,15 +210,22 @@ export interface LumbreTask {
 	/** ISO 8601 del archivado, o `null` si sigue visible. La API moderna
 	 *  siempre incluye la clave; opcional para tolerar servidores anteriores. */
 	archivedAt?: string | null;
-	/** Cancelada ("no se hizo ni se hará", `cancelledAt` en el CRDT), si la API
-	 *  lo dice. HOY NO LO DICE: `serializeTask` (`/api/tasks` en el repo
-	 *  principal) no expone `cancelledAt`, y una tarea cancelada viaja con
-	 *  `done: true` — así que se lee como "hecha". Declarado igualmente porque
-	 *  es el único campo que le falta a la resolución de referencias
-	 *  (`refs.ts`) para distinguir los TRES estados del contrato de tarea
-	 *  (docs/18): en cuanto el endpoint lo exponga, `taskStateLabel` empieza a
-	 *  pintar "cancelada" sin más cambios. Trátalo siempre como opcional. */
-	cancelled?: boolean;
+	/** ISO 8601 de la cancelación ("no se hizo ni se hará"), o `null` si no
+	 *  está cancelada. Una cancelada viaja TAMBIÉN con `done: true` (la app
+	 *  reutiliza el flag), así que este campo es lo único que la distingue de
+	 *  una hecha. `serializeTask` (`/api/tasks` en el repo principal) lo manda
+	 *  siempre desde el 26 jul 2026; hasta el 23 sep 2026 este tipo esperaba
+	 *  una clave `cancelled` que la API nunca mandó, y toda cancelada salía
+	 *  como hecha (MC4 del audit de paridad). Opcional para tolerar un
+	 *  servidor anterior. */
+	cancelledAt?: string | null;
+	/** Regla de repetición ya parseada, o `null` si la tarea no repite.
+	 *  Ausente en un servidor anterior al 26 jul 2026: trátalo como
+	 *  «desconocida», no como «sin regla» (ver `mergeRecurrencePatch`). */
+	recurrence?: IngestRecurrence | null;
+	/** Serie a la que pertenece: `=== id` en la SEMILLA, otro id en una
+	 *  ocurrencia, `null` si no es de ninguna serie. */
+	seriesId?: string | null;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;
 	/** Hora "HH:MM" (24h) de la tarea, o `null` si no tiene — `GET /api/tasks`
@@ -290,8 +341,25 @@ async function request(config: LumbreConfig, path: string, init: RequestInit = {
 	return body;
 }
 
-/** `POST /api/ingest`: encola una tarea nueva (el cliente de Lumbre la materializa al sincronizar). */
-export async function addTask(config: LumbreConfig, input: AddTaskInput): Promise<void> {
+/** `notices` de una respuesta de la app: solo las cadenas, `[]` si no hay o
+ *  si la forma no encaja (un servidor anterior no manda la clave). */
+function readNotices(body: unknown): string[] {
+	const raw = (body as { notices?: unknown }).notices;
+	return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
+}
+
+/** Lo que devuelve `addTask`: los avisos de la app sobre la tarea creada. */
+export interface AddTaskResult {
+	/** `notices` de `/api/ingest`: desvíos que la app aplicó al materializar
+	 *  (p. ej. la lista pedida no existía y la tarea fue a la Bandeja). */
+	notices: string[];
+}
+
+/** `POST /api/ingest`: crea una tarea. La app la encola y la materializa en
+ *  el servidor en la misma petición; los dispositivos la reciben al
+ *  sincronizar. Devuelve los `notices` para que la tool se los cuente al
+ *  modelo (MC1 del audit de paridad: antes se tiraban). */
+export async function addTask(config: LumbreConfig, input: AddTaskInput): Promise<AddTaskResult> {
 	const body = await request(config, '/api/ingest', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -300,6 +368,7 @@ export async function addTask(config: LumbreConfig, input: AddTaskInput): Promis
 	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
 		throw new LumbreApiError('Lumbre no confirmó la ingesta (respuesta inesperada).');
 	}
+	return { notices: readNotices(body) };
 }
 
 /** `GET /api/tasks`: lee las tareas del usuario dueño del token. */
@@ -1024,6 +1093,10 @@ export interface UpdateMutationPayload {
 	priority?: 1 | 2 | 3 | null;
 	/** Hora "HH:MM" (24h); si no hay día, se agenda hoy. `null` la quita. */
 	time?: string | null;
+	/** Regla ENTERA que sustituye a la actual (`setTaskRecurrence` de la app
+	 *  reemplaza, no fusiona: la fusión con la regla vigente la hace
+	 *  `mergeRecurrencePatch` antes de llegar aquí), o `null` para apagarla. */
+	recurrence?: IngestRecurrence | null;
 }
 export interface RescheduleMutationPayload {
 	/** `YYYY-MM-DD`, o `null` para mandar la tarea a "Algún día"/Bandeja. */
@@ -1150,11 +1223,31 @@ export interface MutateTaskInput {
 }
 
 /**
- * `POST /api/mutations`: encola una mutación sobre una tarea EXISTENTE (el
- * cliente de Lumbre la aplica al sincronizar — no es instantáneo). Espejo de
- * `addTask`.
+ * `outcome` de `POST /api/mutations` (contrato del repo principal, ver el JSDoc
+ * de esa ruta): `applied` cambió algo, `noop` se aplicó sin cambiar nada,
+ * `not-found` el objetivo no existe en el store del usuario y `queued` quedó
+ * aceptada pero sin materializar (cuarentena o fallo de ese ítem).
  */
-export async function mutateTask(config: LumbreConfig, input: MutateTaskInput): Promise<void> {
+export type MutationOutcome = 'applied' | 'noop' | 'not-found' | 'queued';
+
+const MUTATION_OUTCOMES: readonly string[] = ['applied', 'noop', 'not-found', 'queued'];
+
+/** Lo que devuelve `mutateTask`. */
+export interface MutateTaskResult {
+	/** `undefined` solo si el servidor es anterior al campo (3 sep 2026) o
+	 *  manda un valor que este cliente no conoce: la tool lo informa como
+	 *  «encolada sin confirmar», nunca como aplicada. */
+	outcome?: MutationOutcome;
+	notices: string[];
+}
+
+/**
+ * `POST /api/mutations`: encola UNA mutación y la app la drena en el servidor
+ * en la misma petición. Devuelve el `outcome` real y los `notices` (MC1 del
+ * audit de paridad: hasta el 23 sep 2026 se miraba solo `ok`, que significa
+ * «validada y encolada», y un `not-found` salía como éxito).
+ */
+export async function mutateTask(config: LumbreConfig, input: MutateTaskInput): Promise<MutateTaskResult> {
 	const body = await request(config, '/api/mutations', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -1163,6 +1256,13 @@ export async function mutateTask(config: LumbreConfig, input: MutateTaskInput): 
 	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
 		throw new LumbreApiError('Lumbre no confirmó la mutación (respuesta inesperada).');
 	}
+	const outcome = (body as { outcome?: unknown }).outcome;
+	return {
+		...(typeof outcome === 'string' && MUTATION_OUTCOMES.includes(outcome)
+			? { outcome: outcome as MutationOutcome }
+			: {}),
+		notices: readNotices(body)
+	};
 }
 
 // ── BRL (add-on experimental): registro del día ────────────────────────────
@@ -1223,9 +1323,29 @@ export type BatchOp =
 export interface BatchResultItem {
 	index: number;
 	type: 'ingest' | 'mutate' | 'unknown';
+	/** «Validada y encolada», nada más: que se APLICÓ lo dice `materialization`. */
 	ok: boolean;
 	error?: string;
 	id?: string;
+	/** Qué pasó al drenarla en el servidor, solo en las `ok` (ver
+	 *  `DrainItemStatus`). Ausente en un servidor anterior al campo. */
+	materialization?: DrainItemStatus;
+}
+
+/**
+ * Resultado del drenaje de una op de `/api/batch` (`DrainItemStatus` de
+ * `$lib/server/sync/drain-report.ts` en el repo principal): `applied` cambió
+ * algo, `noop` se aplicó sin cambiar nada, `failed` falló al aplicarse y la
+ * fila queda reabierta para un drenaje posterior, `quarantined` la retuvo el
+ * cortacircuitos de borrado masivo para revisión.
+ */
+export type DrainItemStatus = 'applied' | 'noop' | 'failed' | 'quarantined';
+
+/** Respuesta completa de `POST /api/batch`. */
+export interface BatchResponse {
+	results: BatchResultItem[];
+	/** Avisos de la app para TODO el lote (un solo drenaje, ya deduplicados). */
+	notices: string[];
 }
 
 /**
@@ -1235,8 +1355,11 @@ export interface BatchResultItem {
  * `mutateTask`, pero para un LOTE entero en vez de una operación suelta — es
  * la vía PREFERENTE para `mutate_tasks` (`index.ts`) cuando hay varias
  * operaciones seguidas: 1 petición + 1 drenaje en vez de N.
+ *
+ * Devuelve también los `notices` (MC1 del audit de paridad, 23 sep 2026:
+ * hasta entonces se devolvía solo `results` y los avisos se perdían).
  */
-export async function runBatch(config: LumbreConfig, ops: BatchOp[]): Promise<BatchResultItem[]> {
+export async function runBatch(config: LumbreConfig, ops: BatchOp[]): Promise<BatchResponse> {
 	const body = await request(config, '/api/batch', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -1250,7 +1373,7 @@ export async function runBatch(config: LumbreConfig, ops: BatchOp[]): Promise<Ba
 	) {
 		throw new LumbreApiError('Lumbre no confirmó el batch (respuesta inesperada).');
 	}
-	return (body as { results: BatchResultItem[] }).results;
+	return { results: (body as { results: BatchResultItem[] }).results, notices: readNotices(body) };
 }
 
 /**
@@ -1276,8 +1399,9 @@ export type MutateTasksOp =
 			priority?: 'p1' | 'p2' | 'p3' | 'p4';
 			time?: string | null;
 			/** `null` apaga la regla, también en una semilla ARCHIVADA (la app lo
-			 *  resuelve antes de su guard de tarea viva). */
-			recurrence?: IngestRecurrence | null;
+			 *  resuelve antes de su guard de tarea viva). Un objeto es un cambio
+			 *  PARCIAL: se fusiona con la regla actual (`mergeRecurrencePatch`). */
+			recurrence?: RecurrencePatch | null;
 	  }
 	| { op: 'reschedule'; taskId: string; date: string | null }
 	| { op: 'delete'; taskId: string }
@@ -1443,7 +1567,9 @@ function translateOp(op: MutateTasksOp): BatchOp {
 					...(op.tags !== undefined ? { tags: op.tags } : {}),
 					...(op.priority !== undefined ? { priority: priorityToLevel(op.priority) } : {}),
 					...(op.time !== undefined ? { time: op.time } : {}),
-					...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {})
+					// Ya fusionada con la regla vigente en `buildBatchFromOps`
+					// (`mergeRecurrencePatch`), así que aquí es una regla entera o `null`.
+					...(op.recurrence !== undefined ? { recurrence: op.recurrence as IngestRecurrence | null } : {})
 				}
 			};
 		case 'reschedule':
@@ -1545,6 +1671,58 @@ export interface BuildBatchResult {
 }
 
 /**
+ * Fusiona el cambio PARCIAL de regla que pide el modelo con la regla VIGENTE
+ * de la tarea y devuelve la regla ENTERA que hay que mandar (la app la
+ * sustituye completa: `setTaskRecurrence` no fusiona). Pura, sin red.
+ *
+ * Por qué existe (MC3 del audit de paridad, 23 sep 2026): mandar solo lo que
+ * el modelo cambió borraba el resto, y sin `streak` la app desengancha el
+ * hábito. Ahora un campo no enviado se conserva; se quita solo si el parche lo
+ * pide de forma explícita (`null` en `byWeekday`/`until`/`count`,
+ * `streak: false`, `mode: 'calendar'`).
+ *
+ * `current` distingue dos ausencias: `null` = la tarea no tiene regla (el
+ * parche tiene que traer `freq`, y se usa tal cual) y `undefined` = no se sabe
+ * (servidor anterior a exponer `recurrence`): ahí solo se acepta un parche con
+ * `freq`, sabiendo que lo no enviado no se puede conservar.
+ *
+ * `byWeekday` se descarta si la regla resultante no es semanal de calendario:
+ * la app lo ignora en ese caso, y dejarlo haría creer que sigue vigente.
+ */
+export function mergeRecurrencePatch(
+	patch: RecurrencePatch,
+	current: IngestRecurrence | null | undefined
+): { rule: IngestRecurrence } | { error: string } {
+	const base: RecurrencePatch = current ?? {};
+	const merged: RecurrencePatch = { ...base, ...patch };
+	const freq = merged.freq;
+	if (freq === undefined) {
+		return {
+			error:
+				current === undefined
+					? 'no se pudo leer la regla actual de la tarea; manda la regla completa, con freq.'
+					: 'la tarea no repite; para ponerle regla indica al menos freq.'
+		};
+	}
+	const rule: IngestRecurrence = { freq };
+	if (merged.mode === 'afterCompletion') rule.mode = 'afterCompletion';
+	if (merged.interval !== undefined) rule.interval = merged.interval;
+	if (
+		merged.byWeekday !== undefined &&
+		merged.byWeekday !== null &&
+		merged.byWeekday.length > 0 &&
+		freq === 'weekly' &&
+		rule.mode !== 'afterCompletion'
+	) {
+		rule.byWeekday = merged.byWeekday;
+	}
+	if (merged.until !== undefined && merged.until !== null) rule.until = merged.until;
+	if (merged.count !== undefined && merged.count !== null) rule.count = merged.count;
+	if (merged.streak === true) rule.streak = true;
+	return { rule };
+}
+
+/**
  * Núcleo PURO (sin red) de `mutate_tasks`: valida localmente cada op
  * (`localValidationError`) y, si targetea una tarea, comprueba su existencia
  * contra `existing` (`assertTaskUsable`, con el `allowSubtask` que le toque —
@@ -1579,6 +1757,20 @@ export function buildBatchFromOps(
 				skipped.push({ index, error: err instanceof Error ? err.message : String(err) });
 				return;
 			}
+		}
+		// La app SUSTITUYE la regla entera en un `update`; el modelo manda un
+		// cambio parcial. Se fusiona aquí con la regla que acaba de leerse en la
+		// comprobación de existencia, para que un campo no enviado (`streak`,
+		// `byWeekday`…) no se pierda por omisión.
+		if (op.op === 'update' && op.recurrence !== undefined && op.recurrence !== null) {
+			const merged = mergeRecurrencePatch(op.recurrence, existing.get(op.taskId)?.recurrence);
+			if ('error' in merged) {
+				skipped.push({ index, error: `update: ${merged.error}` });
+				return;
+			}
+			batchOps.push(translateOp({ ...op, recurrence: merged.rule }));
+			originalIndexes.push(index);
+			return;
 		}
 		batchOps.push(translateOp(op));
 		originalIndexes.push(index);

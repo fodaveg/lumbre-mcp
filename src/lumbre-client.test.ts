@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+	addTask,
 	assertTaskUsable,
 	ATTACHMENT_CONTENT_TYPE_HEADER,
 	buildBatchFromOps,
@@ -14,6 +15,8 @@ import {
 	linkListNote,
 	listLists,
 	listTasks,
+	mergeRecurrencePatch,
+	mutateTask,
 	planBatchPhases,
 	runBatch,
 	subtaskNotAllowedError,
@@ -22,6 +25,7 @@ import {
 	unlinkListNote,
 	type BatchOp,
 	type BatchResultItem,
+	type IngestRecurrence,
 	type LumbreConfig,
 	type LumbreTask,
 	type MutateTasksOp
@@ -590,7 +594,7 @@ describe('includeArchived — contrato GET /api/tasks', () => {
 });
 
 describe('runBatch', () => {
-	it('manda POST /api/batch con {ops} y devuelve `results` tal cual', async () => {
+	it('manda POST /api/batch con {ops} y devuelve `results` tal cual, con notices [] si no vienen', async () => {
 		const results: BatchResultItem[] = [{ index: 0, type: 'mutate', ok: true, id: 'x' }];
 		const fetchSpy = vi.fn().mockResolvedValue(
 			new Response(JSON.stringify({ ok: true, results }), {
@@ -602,7 +606,7 @@ describe('runBatch', () => {
 
 		const ops = [{ type: 'mutate' as const, taskId: 'x', kind: 'complete' as const, payload: { done: true } }];
 		const got = await runBatch(config, ops);
-		expect(got).toEqual(results);
+		expect(got).toEqual({ results, notices: [] });
 
 		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('https://lumbre.test/api/batch');
@@ -613,6 +617,88 @@ describe('runBatch', () => {
 	it('respuesta sin `results` array lanza LumbreApiError', async () => {
 		mockFetchJson({ ok: true });
 		await expect(runBatch(config, [])).rejects.toThrow(/no confirmó el batch/);
+	});
+
+	it('MC1: conserva `materialization` por op y devuelve los `notices` del lote', async () => {
+		const results: BatchResultItem[] = [
+			{ index: 0, type: 'mutate', ok: true, id: 'x', materialization: 'noop' },
+			{ index: 1, type: 'mutate', ok: true, id: 'y', materialization: 'quarantined' }
+		];
+		mockFetchJson({ ok: true, results, notices: ['La lista destino estaba borrada', 42] });
+		const got = await runBatch(config, []);
+		expect(got.results).toEqual(results);
+		// Lo que no es cadena se descarta en vez de romper el informe.
+		expect(got.notices).toEqual(['La lista destino estaba borrada']);
+	});
+});
+
+describe('addTask / mutateTask — resultado real (MC1)', () => {
+	it('addTask devuelve los notices de /api/ingest', async () => {
+		mockFetchJson({ ok: true, notices: ['Fue a la Bandeja'] });
+		await expect(addTask(config, { text: 'a' })).resolves.toEqual({ notices: ['Fue a la Bandeja'] });
+	});
+
+	it('addTask sin notices (servidor que no los manda) devuelve []', async () => {
+		mockFetchJson({ ok: true });
+		await expect(addTask(config, { text: 'a' })).resolves.toEqual({ notices: [] });
+	});
+
+	it('mutateTask devuelve el outcome y los notices de /api/mutations', async () => {
+		mockFetchJson({ ok: true, outcome: 'not-found', outcomes: ['not-found'], notices: ['n1'] });
+		await expect(
+			mutateTask(config, { taskId: 'x', kind: 'removeBrlEntry', payload: {} })
+		).resolves.toEqual({ outcome: 'not-found', notices: ['n1'] });
+	});
+
+	it('mutateTask con un outcome desconocido o ausente no lo inventa', async () => {
+		mockFetchJson({ ok: true, outcome: 'algo-nuevo' });
+		await expect(
+			mutateTask(config, { taskId: 'x', kind: 'removeBrlEntry', payload: {} })
+		).resolves.toEqual({ notices: [] });
+	});
+});
+
+describe('mergeRecurrencePatch (MC3)', () => {
+	const habit: IngestRecurrence = { freq: 'weekly', interval: 1, byWeekday: [0, 3], streak: true };
+
+	it('un campo no enviado se conserva: cambiar interval no le quita streak ni byWeekday', () => {
+		expect(mergeRecurrencePatch({ interval: 2 }, habit)).toEqual({
+			rule: { freq: 'weekly', interval: 2, byWeekday: [0, 3], streak: true }
+		});
+	});
+
+	it('null quita byWeekday/until/count y streak:false quita el hábito', () => {
+		const current: IngestRecurrence = { ...habit, until: '2026-12-31', count: 10 };
+		expect(
+			mergeRecurrencePatch({ byWeekday: null, until: null, count: null, streak: false }, current)
+		).toEqual({ rule: { freq: 'weekly', interval: 1 } });
+	});
+
+	it('byWeekday se descarta si la regla deja de ser semanal de calendario', () => {
+		expect(mergeRecurrencePatch({ freq: 'daily' }, habit)).toEqual({
+			rule: { freq: 'daily', interval: 1, streak: true }
+		});
+		expect(mergeRecurrencePatch({ mode: 'afterCompletion' }, habit)).toEqual({
+			rule: { freq: 'weekly', interval: 1, mode: 'afterCompletion', streak: true }
+		});
+	});
+
+	it('mode:calendar vuelve al modo por defecto (sin clave mode)', () => {
+		const after: IngestRecurrence = { freq: 'monthly', interval: 1, mode: 'afterCompletion' };
+		expect(mergeRecurrencePatch({ mode: 'calendar' }, after)).toEqual({ rule: { freq: 'monthly', interval: 1 } });
+	});
+
+	it('tarea sin regla: el parche necesita freq; con freq es la regla nueva', () => {
+		expect(mergeRecurrencePatch({ interval: 2 }, null)).toEqual({ error: expect.stringMatching(/no repite/) });
+		expect(mergeRecurrencePatch({ freq: 'weekly', byWeekday: [0, 3] }, null)).toEqual({
+			rule: { freq: 'weekly', byWeekday: [0, 3] }
+		});
+	});
+
+	it('regla desconocida (servidor sin `recurrence`): sin freq se rechaza en vez de adivinar', () => {
+		expect(mergeRecurrencePatch({ streak: true }, undefined)).toEqual({
+			error: expect.stringMatching(/no se pudo leer la regla actual/)
+		});
 	});
 });
 
@@ -660,6 +746,37 @@ describe('buildBatchFromOps', () => {
 		expect(batchOps).toEqual([
 			{ type: 'mutate', taskId: 't1', kind: 'complete', payload: { done: true } }
 		]);
+	});
+
+	it('MC3: update.recurrence parcial sobre un hábito viaja FUSIONADO con la regla vigente', () => {
+		const habit = topLevel('h1', {
+			recurrence: { freq: 'weekly', interval: 1, byWeekday: [0, 3], streak: true },
+			seriesId: 'h1'
+		});
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 'h1', recurrence: { interval: 2 } }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['h1', habit]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: 'h1',
+				kind: 'update',
+				payload: { recurrence: { freq: 'weekly', interval: 2, byWeekday: [0, 3], streak: true } }
+			}
+		]);
+	});
+
+	it('MC3: update.recurrence sin freq sobre una tarea que no repite se descarta con el motivo', () => {
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 't1', recurrence: { streak: true } }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['t1', topLevel('t1', { recurrence: null })]]));
+		expect(batchOps).toEqual([]);
+		expect(skipped).toEqual([{ index: 0, error: expect.stringMatching(/^update: la tarea no repite/) }]);
+	});
+
+	it('update.recurrence:null sigue viajando tal cual (apagar la serie)', () => {
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 't1', recurrence: null }];
+		const { batchOps } = buildBatchFromOps(ops, new Map([['t1', topLevel('t1')]]));
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 't1', kind: 'update', payload: { recurrence: null } }]);
 	});
 
 	it('op mutate-sobre-tarea con id INEXISTENTE se descarta (skipped), NO viaja en batchOps', () => {
