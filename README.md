@@ -157,12 +157,18 @@ presentar esa hipótesis como un fallo observado.
   Acepta `list` (nombre, se crea como proyecto si no existe) o `listId` (id
   ESTABLE del proyecto o área, preferente sobre `list`, inmune a renames —
   sácalo de `list_tasks`). `tags` fija sus tags propios; `[]` declara
-  explícitamente que nace sin tags. `recurrence` admite la regla completa de
+  explícitamente que nace sin tags. Un tag `acked`/`wip`/`done`/`not-done`
+  (case-insensitive) se RECHAZA: ese estado de desarrollo va como marca
+  `@estado` al final de `content`, nunca en `tags` (tarea 2db86c2d,
+  2026-09-24). `recurrence` admite la regla completa de
   la app: `freq*` (`daily|weekly|monthly|yearly`), `interval`, `mode`
   (`calendar` por defecto o `afterCompletion`, que cuenta desde que la
   completas), `byWeekday` (solo semanal, `0` = lunes … `6` = domingo),
   `until` (último día, inclusive), `count` (máximo de ocurrencias) y `streak`
-  (`true` = hábito). Un campo desconocido es un error, no se descarta en
+  (`true` = hábito). `subtasks` tiene tope 50 elementos de hasta 500
+  caracteres cada uno (MISMOS topes que la app aplica hoy en silencio,
+  `MAX_SUBTASKS`/`MAX_SUBTASK_LEN`; el conector los rechaza en voz alta).
+  Un campo desconocido es un error, no se descarta en
   silencio.
 - `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
   por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
@@ -493,7 +499,9 @@ operaciones a la vez» más abajo):
 - `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence?, deadline?, reminders? }`
   (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora, regla de
   repetición, fecha límite o avisos; solo toca los campos que envíes. `tags: []` quita todos los tags
-  propios; omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
+  propios (un tag `acked`/`wip`/`done`/`not-done`, case-insensitive, se RECHAZA:
+  ese estado va como marca `@estado` al final de `content`, nunca en `tags`
+  — tarea 2db86c2d, 2026-09-24); omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
   prioridad). `deadline` (`YYYY-MM-DD`, o `null` para quitarla) y `reminders`
   (offsets en minutos-antes de `time`, `[]` los quita) son MC6 (2026-09-24);
   el conector no repite el tope `MAX_REMINDER_OFFSET` de la app (puede
@@ -561,7 +569,10 @@ operaciones a la vez» más abajo):
   despliegue, omitir `date` falla server-side**; mándala mientras tanto.
   Resuelve `habitId` con `list_habits`.
 - `{ op: "add_subtask", taskId, subtasks }` (`mutate_tasks`) — añade una o más
-  subtareas (checklist, #17) a `taskId`. Anidamiento de UN nivel: si `taskId`
+  subtareas (checklist, #17) a `taskId`. `subtasks` tiene tope 50 elementos de
+  hasta 500 caracteres cada uno — MISMOS topes que la app aplica hoy en
+  silencio (`MAX_SUBTASKS`/`MAX_SUBTASK_LEN`); el conector los rechaza en voz
+  alta en vez de dejar que la app recorte sin avisar. Anidamiento de UN nivel: si `taskId`
   ya es una subtarea, el conector la rechaza ANTES de encolarla (hasta el
   2026-09-24 la app la descartaba en silencio y aun así confirmaba `applied` —
   MC2 del audit de paridad); añade la subtarea sobre la tarea PADRE. Para

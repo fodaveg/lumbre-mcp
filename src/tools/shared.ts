@@ -287,3 +287,17 @@ export const exposedRecurrenceSchema = z
 /** Forma de un tag propio — compartida por `tools/tasks.ts` (`add_task`) y
  *  `tools/batch.ts` (`mutateTasksOpSchema.tags`, ops `add_task`/`update`). */
 export const tagSchema = z.string().regex(/^[\p{L}\p{N}_][\p{L}\p{N}_-]*$/u);
+
+/** Topes de `subtasks`: MISMOS que aplica la app hoy en silencio
+ *  (`MAX_SUBTASKS`/`MAX_SUBTASK_LEN`, `$lib/ingest-structured.ts` del repo
+ *  principal, vía `normalizeSubtasks`) — un array más largo o una subtarea más
+ *  larga se RECORTA sin avisar al llegar a `/api/ingest`/`/api/mutations`. El
+ *  MCP los rechaza en voz alta en vez de dejar que el modelo crea que mandó
+ *  51 subtareas cuando la app se quedó con 50 (tarea del 2026-09-24). */
+export const MAX_SUBTASKS = 50;
+export const MAX_SUBTASK_LEN = 500;
+
+/** Forma de `subtasks` en `add_task` (tool suelta y op de `mutate_tasks`):
+ *  array opcional, tope `MAX_SUBTASKS` elementos de hasta `MAX_SUBTASK_LEN`
+ *  caracteres cada uno. */
+export const subtasksSchema = z.array(z.string().max(MAX_SUBTASK_LEN)).max(MAX_SUBTASKS);

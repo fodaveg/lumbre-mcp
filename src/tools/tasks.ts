@@ -5,6 +5,8 @@ import {
 	findTaskById,
 	findTasksByIds,
 	listTasks,
+	reservedStatusTagsError,
+	reservedStatusTagsIn,
 	taskNotFoundError,
 	type LumbreTask,
 	type TaskScope
@@ -21,7 +23,15 @@ import {
 	type AutoNotesResult,
 	type NotesMode
 } from '../notes.js';
-import { errorResult, formatOutcomeReport, recurrenceSchema, tagSchema, textResult, type ToolCtx } from './shared.js';
+import {
+	errorResult,
+	formatOutcomeReport,
+	recurrenceSchema,
+	subtasksSchema,
+	tagSchema,
+	textResult,
+	type ToolCtx
+} from './shared.js';
 
 /**
  * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
@@ -128,16 +138,23 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.optional()
 					.describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
 				recurrence: recurrenceSchema.optional(),
-				subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
+				subtasks: subtasksSchema
+					.optional()
+					.describe(`Subtareas a crear junto con la tarea (máx. 50, 500 caracteres cada una)`),
 				notes: z.string().max(10000).optional().describe('Notas/descripción larga'),
 				tags: z
 					.array(tagSchema)
 					.optional()
-					.describe('Tags propios; [] deja la tarea explícitamente sin tags')
+					.describe(
+					'Tags propios; [] deja la tarea explícitamente sin tags. acked/wip/done/not-done ' +
+						'(case-insensitive) se rechazan: ese estado va como @marca en content, no aquí'
+				)
 			}
 		},
 		async (input) => {
 			try {
+				const reserved = reservedStatusTagsIn(input.tags);
+				if (reserved.length > 0) return errorResult(new Error(reservedStatusTagsError(reserved)));
 				const { notices } = await addTask(ctx.config, input);
 				// Los `notices` de `/api/ingest` cuentan los desvíos que aplicó la app
 				// (MC1 del audit de paridad, 23 sep 2026: antes se tiraban y el modelo

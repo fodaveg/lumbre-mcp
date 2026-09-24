@@ -24,6 +24,7 @@ import {
 	OUTCOME_NOTE,
 	recurrencePatchSchema,
 	recurrenceSchema,
+	subtasksSchema,
 	tagSchema,
 	textResult,
 	type OpOutcomeEntry,
@@ -126,7 +127,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			tags: z.array(tagSchema).optional(),
 			time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
 			recurrence: recurrenceSchema.optional(),
-			subtasks: z.array(z.string()).optional(),
+			subtasks: subtasksSchema.optional(),
 			notes: z.string().max(10000).optional()
 		})
 		.strict(),
@@ -203,7 +204,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 		.object({
 			op: z.literal('add_subtask'),
 			taskId: z.string().guid(),
-			subtasks: z.array(z.string()).min(1).max(50)
+			subtasks: subtasksSchema.min(1)
 		})
 		.strict(),
 	z
@@ -328,7 +329,10 @@ export const mutateTasksOpSchema = z
 		// documentar; qué op usa cuál ya está en la description de `ops`.
 		text: z.string().min(1).max(2000).optional(),
 		content: z.string().min(1).max(2000).optional(),
-		tags: z.array(tagSchema).optional(),
+		tags: z
+			.array(tagSchema)
+			.optional()
+			.describe('add_task/update: acked/wip/done/not-done se rechazan (ese estado va como @marca en content)'),
 		list: z.string().max(200).optional().describe('Nombre del proyecto o área destino (se crea como proyecto si no existe)'),
 		section: z.string().max(200).nullable().optional().describe('Nombre de la sección, o null para quitarla'),
 		notes: z.string().max(10000).optional().describe('Notas (reemplazan las anteriores enteras)'),
@@ -356,7 +360,7 @@ export const mutateTasksOpSchema = z
 			.array(z.number().int().nonnegative())
 			.optional()
 			.describe('update: offsets en minutos-antes de time; [] los quita. PROHIBIDO sobre una subtarea'),
-		subtasks: z.array(z.string()).optional().describe('Textos de las subtareas, en orden'),
+		subtasks: subtasksSchema.optional().describe('Textos de las subtareas, en orden (máx. 50, 500 caracteres cada una)'),
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
 		cancelled: z.boolean().optional().describe('true = cancelar (default); false = quitar la cancelación'),
 		until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('set_waiting: fecha de reconsulta, estrictamente futura'),

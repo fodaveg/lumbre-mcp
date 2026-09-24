@@ -280,15 +280,17 @@ describe('tools/list — superficie completa', () => {
 		// sobre los 21.346 de arriba (`mutate_tasks` 3.518 → 4.059, `add_task`
 		// 2.789). Es superficie nueva que la app ya aceptaba y el MCP recortaba
 		// en silencio (MC3).
-		// Re-medido el 2026-09-24 (MC6, paridad UI↔MCP), sobre el HEAD real de
-		// esa fecha (dc4bfc9: 16 tools, 22.385 caracteres — ya incluía
-		// `restore`, un día después del 22.280 de arriba): `set_waiting`/
-		// `clear_waiting`/`register_habit` en `mutate_tasks`, `set_list_kind` +
-		// `listKind` de `create_list` en `organize`, y `deadline`/`reminders` en
-		// `update`. 16 tools, 23.680 caracteres = +1.295 sobre los 22.385 de
-		// dc4bfc9 (+5,8%). Añadida `list_habits` (lectura de hábitos, mismo
-		// commit): 17 tools, 24.253 caracteres = +573. Techo = medido + ~5%.
-		const CHAR_CEILING = 25500;
+		// Re-medido el 2026-09-24 (MC6, paridad UI↔MCP), en tres commits sobre
+		// el HEAD real de esa fecha (dc4bfc9: 16 tools, 22.385 caracteres — ya
+		// incluía `restore`, un día después del 22.280 de arriba): (1)
+		// `set_waiting`/`clear_waiting`/`register_habit` en `mutate_tasks`,
+		// `set_list_kind` + `listKind` de `create_list` en `organize`,
+		// `deadline`/`reminders` en `update` → 16 tools, 23.680 (+1.295,
+		// +5,8%). (2) tool nueva `list_habits` → 17 tools, 24.253 (+573).
+		// (3) topes de `subtasks` y rechazo de tags de desarrollo → 17 tools,
+		// 24.594 caracteres = +2.209 sobre los 22.385 de dc4bfc9 (+9,9%).
+		// Techo = medido + ~5%.
+		const CHAR_CEILING = 25800;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -1312,6 +1314,33 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 		).toBe(false);
 	});
 
+	it('add_task/add_subtask: `subtasks` respeta los topes de la app (MAX_SUBTASKS=50, MAX_SUBTASK_LEN=500) — la app hoy los recorta en silencio', () => {
+		const ok50 = Array.from({ length: 50 }, (_, i) => `sub ${i}`);
+		const over51 = [...ok50, 'una de más'];
+		const okLen500 = 'a'.repeat(500);
+		const overLen501 = 'a'.repeat(501);
+
+		expect(mutateTasksStrictOpSchema.safeParse({ op: 'add_task', text: 'x', subtasks: ok50 }).success).toBe(
+			true
+		);
+		expect(mutateTasksStrictOpSchema.safeParse({ op: 'add_task', text: 'x', subtasks: over51 }).success).toBe(
+			false
+		);
+		expect(
+			mutateTasksStrictOpSchema.safeParse({ op: 'add_task', text: 'x', subtasks: [okLen500] }).success
+		).toBe(true);
+		expect(
+			mutateTasksStrictOpSchema.safeParse({ op: 'add_task', text: 'x', subtasks: [overLen501] }).success
+		).toBe(false);
+
+		const taskId = '11111111-1111-1111-1111-111111111111';
+		expect(
+			mutateTasksStrictOpSchema.safeParse({ op: 'add_subtask', taskId, subtasks: [okLen500] }).success
+		).toBe(true);
+		expect(
+			mutateTasksStrictOpSchema.safeParse({ op: 'add_subtask', taskId, subtasks: [overLen501] }).success
+		).toBe(false);
+	});
 });
 
 describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre las dos tools', () => {
@@ -1926,6 +1955,31 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		const result = await client.callTool({
 			name: 'add_task',
 			arguments: { text: 'x', recurrence: { freq: 'weekly', weekdays: [0] } }
+		});
+		expect(result.isError).toBe(true);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('add_task (tool): un tag reservado (case-insensitive) se rechaza SIN llamar a la red — el estado va como @marca', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_task',
+			arguments: { text: 'x', tags: ['casa', 'WIP'] }
+		});
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toMatch(/@marca/);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('add_task (tool): más de 50 subtareas se rechaza SIN llamar a la red (tope MAX_SUBTASKS de la app)', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'add_task',
+			arguments: { text: 'x', subtasks: Array.from({ length: 51 }, (_, i) => `sub ${i}`) }
 		});
 		expect(result.isError).toBe(true);
 		expect(fetchSpy).not.toHaveBeenCalled();

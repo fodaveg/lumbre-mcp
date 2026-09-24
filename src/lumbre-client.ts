@@ -1734,12 +1734,43 @@ export function collectExistenceCheckIds(ops: MutateTasksOp[]): string[] {
 	return [...ids];
 }
 
+/** Tags de desarrollo (tarea 2db86c2d, 2026-09-24): el estado va como marca
+ *  `@estado` al final de `content` (`skills/lumbre/references/
+ *  development.md`), NUNCA como tag estructurado — un `#wip` en `tags` crea
+ *  una ETIQUETA, no un estado, y el mecánico de este flujo (`lumbre-tagger`)
+ *  lee la marca en `content`, no `tags`. Case-insensitive. */
+const RESERVED_STATUS_TAGS = ['acked', 'wip', 'done', 'not-done'];
+
+/** Tags de `tags` que colisionan con `RESERVED_STATUS_TAGS`, o `[]` si
+ *  `tags` es `undefined` o ninguno colisiona. Pura — compartida por `add_task`
+ *  (tool suelta, `tools/tasks.ts`) y las ops `add_task`/`update` de
+ *  `mutate_tasks` (`localValidationError`, más abajo). */
+export function reservedStatusTagsIn(tags: string[] | undefined): string[] {
+	if (!tags) return [];
+	return tags.filter((t) => RESERVED_STATUS_TAGS.includes(t.toLowerCase()));
+}
+
+/** Mensaje de rechazo para `reservedStatusTagsIn`, con los tags concretos que
+ *  colisionaron (preservando cómo los escribió el llamante, no la forma
+ *  normalizada). */
+export function reservedStatusTagsError(tags: string[]): string {
+	return (
+		`tags: ${tags.join(', ')} no vale${tags.length > 1 ? 'n' : ''} ahí — el estado de desarrollo va como ` +
+		'@marca al final de content, nunca en tags (crearía una etiqueta, no un estado).'
+	);
+}
+
 /** Validación local (sin red) de una op, previa a la comprobación de
  *  existencia — mismos guards que hacían `update_task`/`move_to_list`
  *  ANTES de llamar a `requireTaskExists` en `index.ts` (ver esas tools):
  *  `update` necesita al menos un campo a cambiar; `move_to_list` necesita
- *  `listId` o `list`. `null` si la op pasa (nada que reportar aquí). */
+ *  `listId` o `list`; `add_task`/`update` rechazan un tag de desarrollo en
+ *  `tags` (tarea 2db86c2d). `null` si la op pasa (nada que reportar aquí). */
 function localValidationError(op: MutateTasksOp): string | null {
+	if (op.op === 'add_task' || op.op === 'update') {
+		const reserved = reservedStatusTagsIn(op.tags);
+		if (reserved.length > 0) return `${op.op}: ${reservedStatusTagsError(reserved)}`;
+	}
 	if (op.op === 'update') {
 		if (
 			op.content === undefined &&

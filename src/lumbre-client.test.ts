@@ -1394,6 +1394,30 @@ describe('buildBatchFromOps', () => {
 		expect(skipped).toEqual([]);
 		expect(batchOps).toHaveLength(1);
 	});
+
+	it.each([
+		['add_task', { op: 'add_task', text: 'x', tags: ['WIP'] } satisfies MutateTasksOp],
+		['update', { op: 'update', taskId: 't1', tags: ['done'] } satisfies MutateTasksOp]
+	])(
+		'%s con un tag reservado (case-insensitive) en `tags`: se descarta — el estado va como @marca en content',
+		(_name, op) => {
+			const existing = new Map([['t1', topLevel('t1')]]);
+			const { batchOps, skipped } = buildBatchFromOps([op], existing);
+			expect(batchOps).toEqual([]);
+			expect(skipped[0].error).toMatch(/@marca/);
+		}
+	);
+
+	it('add_task/update con tags NO reservados: viajan igual que siempre', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const ops: MutateTasksOp[] = [
+			{ op: 'add_task', text: 'x', tags: ['casa'] },
+			{ op: 'update', taskId: 't1', tags: ['trabajo'] }
+		];
+		const { batchOps, skipped } = buildBatchFromOps(ops, existing);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toHaveLength(2);
+	});
 });
 
 // ── Reparto en dos fases (incidente 071553) — `planBatchPhases` /

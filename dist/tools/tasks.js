@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { addTask, findTaskById, findTasksByIds, listTasks, taskNotFoundError } from '../lumbre-client.js';
+import { addTask, findTaskById, findTasksByIds, listTasks, reservedStatusTagsError, reservedStatusTagsIn, taskNotFoundError } from '../lumbre-client.js';
 import { formatTaskFull, formatTaskList } from '../format.js';
 import { resolveRefs } from '../refs.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, hasNotes, parseNotesSince, recordNotesSeen } from '../notes.js';
-import { errorResult, formatOutcomeReport, recurrenceSchema, tagSchema, textResult } from './shared.js';
+import { errorResult, formatOutcomeReport, recurrenceSchema, subtasksSchema, tagSchema, textResult } from './shared.js';
 /**
  * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
  * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
@@ -95,15 +95,21 @@ export function registerTaskTools(server, ctx) {
                 .optional()
                 .describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
             recurrence: recurrenceSchema.optional(),
-            subtasks: z.array(z.string()).optional().describe('Subtareas a crear junto con la tarea'),
+            subtasks: subtasksSchema
+                .optional()
+                .describe(`Subtareas a crear junto con la tarea (máx. 50, 500 caracteres cada una)`),
             notes: z.string().max(10000).optional().describe('Notas/descripción larga'),
             tags: z
                 .array(tagSchema)
                 .optional()
-                .describe('Tags propios; [] deja la tarea explícitamente sin tags')
+                .describe('Tags propios; [] deja la tarea explícitamente sin tags. acked/wip/done/not-done ' +
+                '(case-insensitive) se rechazan: ese estado va como @marca en content, no aquí')
         }
     }, async (input) => {
         try {
+            const reserved = reservedStatusTagsIn(input.tags);
+            if (reserved.length > 0)
+                return errorResult(new Error(reservedStatusTagsError(reserved)));
             const { notices } = await addTask(ctx.config, input);
             // Los `notices` de `/api/ingest` cuentan los desvíos que aplicó la app
             // (MC1 del audit de paridad, 23 sep 2026: antes se tiraban y el modelo
