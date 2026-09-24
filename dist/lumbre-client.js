@@ -339,6 +339,38 @@ export function subtaskNotAllowedError(taskId) {
         'se ha encolado ninguna mutación.');
 }
 /**
+ * Error uniforme cuando `add_subtask` targetea una tarea que YA es una
+ * subtarea (MC2 del audit de paridad, 23 sep 2026): el anidamiento es de UN
+ * solo nivel («Naturaleza», docs/18-que-es-una-tarea.md §2.5: «subtarea →
+ * padre, nunca subcadena»), una regla DISTINTA de la de residencia que
+ * cierra `set_section`/`move_to_list` (por eso no reutiliza
+ * `subtaskNotAllowedError`, que hablaría de lista/sección sin venir a
+ * cuento). Hasta esa fecha el servidor la descartaba en SILENCIO (`break` en
+ * el case `addSubtask` de `inbound-materialize.ts`) y aun así devolvía
+ * `applied`; se corta aquí, ANTES de encolar, en vez de fiarse de ese
+ * resultado — ver `buildBatchFromOps`.
+ */
+export function nestedSubtaskNotAllowedError(taskId) {
+    return new Error(`El id ${taskId} es de una SUBTAREA: no se le pueden añadir subtareas propias — el anidamiento ` +
+        'es de UN solo nivel (docs/18-que-es-una-tarea.md §2.5, «subtarea → padre, nunca subcadena»). ' +
+        'Añade la subtarea nueva sobre la tarea PADRE (resuélvela con list_tasks/get_task). No se ha ' +
+        'encolado ninguna mutación.');
+}
+/**
+ * Error uniforme cuando `set_section` targetea una tarea que no pertenece a
+ * ningún proyecto o área (MC2 del audit de paridad, 23 sep 2026): una
+ * sección solo existe DENTRO de una lista, así que asignarla —o quitarla— no
+ * tiene destino. Hasta esa fecha el servidor la ignoraba en SILENCIO (`if
+ * (!t.somedayListId) break` en el case `setSection` de
+ * `inbound-materialize.ts`) y aun así devolvía `applied`; se corta aquí,
+ * ANTES de encolar — ver `buildBatchFromOps`.
+ */
+export function taskWithoutListNotAllowedError(taskId) {
+    return new Error(`La tarea ${taskId} no pertenece a ningún proyecto o área, así que no puede tener sección. ` +
+        'Muévela primero con move_to_list (organize) y repite set_section. No se ha encolado ninguna ' +
+        'mutación.');
+}
+/**
  * Decide si una tool puede operar sobre `task` (YA resuelto por
  * `findTaskById`, o `undefined` si no existe): lanza `taskNotFoundError` si
  * no existe, o `subtaskNotAllowedError` si es una subtarea (`parentId`
@@ -609,7 +641,7 @@ export async function refreshSync(config) {
         throw new LumbreApiError('Lumbre no confirmó el flush del sync (respuesta inesperada).');
     }
 }
-const MUTATION_OUTCOMES = ['applied', 'noop', 'not-found', 'queued'];
+const MUTATION_OUTCOMES = ['applied', 'noop', 'not-found', 'quarantined', 'queued'];
 /**
  * `POST /api/mutations`: encola UNA mutación y la app la drena en el servidor
  * en la misma petición. Devuelve el `outcome` real y los `notices` (MC1 del
@@ -1022,6 +1054,21 @@ export function buildBatchFromOps(ops, existing) {
                 skipped.push({ index, error: err instanceof Error ? err.message : String(err) });
                 return;
             }
+        }
+        // MC2 del audit de paridad (23 sep 2026): dos ramas del materializador de
+        // la app descartan la op en SILENCIO y aun así devuelven `applied`
+        // (`inbound-materialize.ts`, cases `setSection`/`addSubtask`) — se
+        // rechaza aquí, ANTES de encolar, en los dos casos que el cliente ya
+        // puede saber de antemano que no van a aplicarse (ver los JSDoc de
+        // `taskWithoutListNotAllowedError`/`nestedSubtaskNotAllowedError`). No
+        // toca la cola ni el drenaje: los sigue tratando tal como responden hoy.
+        if (op.op === 'set_section' && !existing.get(op.taskId)?.somedayListId) {
+            skipped.push({ index, error: taskWithoutListNotAllowedError(op.taskId).message });
+            return;
+        }
+        if (op.op === 'add_subtask' && existing.get(op.taskId)?.parentId) {
+            skipped.push({ index, error: nestedSubtaskNotAllowedError(op.taskId).message });
+            return;
         }
         // CX7: sobre una tarea ARCHIVADA la app solo aplica el apagado de la
         // regla (`clearArchivedSeedRecurrence`, antes de su guard de tarea

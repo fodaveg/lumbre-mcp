@@ -503,7 +503,15 @@ operaciones a la vez» más abajo):
   rechaza entera, porque la app solo aplicaría el apagado.
   **Acepta también el id de una SUBTAREA**: los cinco primeros campos son
   accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
-  del repo principal).
+  del repo principal). Si `notes` no es vacío, el informe por op avisa
+  siempre («aplicada; si la nota de esa tarea estaba borrada, tu texto se
+  escribió pero sigue oculto…», MC8 del audit de paridad): sobre una nota YA
+  BORRADA la app escribe la celda igual (cambió algo de verdad, por eso
+  `applied`) pero la lectura la sigue ocultando — una escritura de máquina
+  nunca resucita una nota borrada. El conector no puede saber de antemano si
+  ESA tarea concreta estaba en ese caso (la API nunca expone si una nota
+  vacía es "sin nota" o "borrada"), así que el aviso viaja siempre que se
+  escriben notas, sea o no el caso real; confírmalo con `get_task` si dudas.
 - `{ op: "reschedule", taskId, date }` (`mutate_tasks`) — mueve la tarea a
   otro día (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con
   `date: null`. **Acepta también el id de una SUBTAREA**, con fecha o con
@@ -514,12 +522,18 @@ operaciones a la vez» más abajo):
   PADRE.
 - `{ op: "set_section", taskId, section }` (`mutate_tasks`) — mueve la tarea a
   una sección dentro de SU proyecto o área (se crea si no existe), o la saca
-  con `section: null`. NO aplica a subtareas.
+  con `section: null`. NO aplica a subtareas. Tampoco aplica a una tarea que
+  no pertenece a ningún proyecto o área: una sección solo existe DENTRO de una
+  lista, así que el conector la rechaza ANTES de encolarla (hasta el
+  2026-09-24 la app la ignoraba en silencio y aun así confirmaba `applied` —
+  MC2 del audit de paridad). Muévela primero con `move_to_list`.
 - `{ op: "add_subtask", taskId, subtasks }` (`mutate_tasks`) — añade una o más
   subtareas (checklist, #17) a `taskId`. Anidamiento de UN nivel: si `taskId`
-  ya es una subtarea, se descarta en silencio (no hay forma de confirmarlo
-  desde la tool; comprueba con `list_tasks`). Para crear una tarea CON
-  subtareas de una vez, usa `add_task` con `subtasks` en el payload.
+  ya es una subtarea, el conector la rechaza ANTES de encolarla (hasta el
+  2026-09-24 la app la descartaba en silencio y aun así confirmaba `applied` —
+  MC2 del audit de paridad); añade la subtarea sobre la tarea PADRE. Para
+  crear una tarea CON subtareas de una vez, usa `add_task` con `subtasks` en
+  el payload.
 - `{ op: "complete_subtask", subtaskId, done? }` (`mutate_tasks`) — marca
   hecha (`done` default `true`) o desmarca (`done: false`) una SUBTAREA
   existente, por su id (ver `get_task` de su tarea padre). Mismo mecanismo que

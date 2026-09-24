@@ -20,6 +20,7 @@ import {
 	exposedRecurrenceSchema,
 	formatOpShapeError,
 	formatOutcomeReport,
+	NOTES_OVERWRITE_CAVEAT,
 	OUTCOME_NOTE,
 	recurrencePatchSchema,
 	recurrenceSchema,
@@ -28,6 +29,18 @@ import {
 	type OpOutcomeEntry,
 	type ToolCtx
 } from './shared.js';
+
+/**
+ * `true` si el elemento CRUDO es un `update` que escribe texto de notas no
+ * vacío (MC8 del audit de paridad, 24 sep 2026: ver `NOTES_OVERWRITE_CAVEAT`
+ * en `shared.ts`). `notes: ''`/`undefined` no cuenta: un borrado explícito de
+ * nota no puede taparse a sí mismo, así que el aviso no aporta nada ahí. Se
+ * lee del elemento CRUDO (no del validado ni traducido): es el mismo patrón
+ * que `opNameAt`, más abajo en `runOpsBatch`.
+ */
+function opWritesVisibleNotes(raw: Record<string, unknown>): boolean {
+	return raw.op === 'update' && typeof raw.notes === 'string' && raw.notes.length > 0;
+}
 
 /**
  * DOS tools de lote sobre las MISMAS 16 ops de siempre, repartidas por lo que
@@ -495,7 +508,13 @@ async function runOpsBatch(
 		const index = resultOriginalIndexes[i];
 		if (r.ok) {
 			if (r.id !== undefined) succeededWithId.push({ index, id: r.id });
-			outcomes.push({ index, op: opNameAt(index), outcome: r.materialization ?? 'unconfirmed' });
+			const outcome = r.materialization ?? 'unconfirmed';
+			outcomes.push({
+				index,
+				op: opNameAt(index),
+				outcome,
+				...(outcome === 'applied' && opWritesVisibleNotes(rawOps[index]) ? { caveat: NOTES_OVERWRITE_CAVEAT } : {})
+			});
 		} else {
 			failures.push({ index, error: r.error ?? 'error desconocido' });
 		}

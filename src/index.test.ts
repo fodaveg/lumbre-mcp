@@ -1719,7 +1719,7 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		expect(text).toContain('Resultado en la app: 0 aplicadas, 1 sin confirmar.');
 	});
 
-	it('organize: una op en cuarentena se informa como tal', async () => {
+	it('organize: una op en cuarentena se informa como tal, citando la causa y dónde se libera (SY6)', async () => {
 		vi.stubGlobal(
 			'fetch',
 			vi.fn(async (url: string | URL) => {
@@ -1735,7 +1735,95 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 			await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'delete', taskId: TASK_ID }] } })
 		);
 		expect(text).toContain('en cuarentena');
-		expect(text).toMatch(/\[0\] delete: retenida en cuarentena/);
+		expect(text).toMatch(/\[0\] delete: retenido por seguridad \(cuarentena por borrado masivo\); se libera en \/admin/);
+	});
+
+	/**
+	 * MC2 del audit de paridad (23 sep 2026), cableado real de la tool: el
+	 * rechazo local (`buildBatchFromOps`) corta ANTES de llegar a
+	 * `POST /api/batch` — la comprobación de existencia (`/api/tasks?ids=`) es
+	 * la ÚNICA petición del lote.
+	 */
+	it('mutate_tasks: add_subtask sobre una SUBTAREA se rechaza ANTES de encolar', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) {
+				return jsonResponse([{ id: TASK_ID, content: 'subtarea', done: false, parentId: 'padre-1' }]);
+			}
+			throw new Error(`fetch inesperado en este test: ${url}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'add_subtask', taskId: TASK_ID, subtasks: ['x'] }] }
+			})
+		);
+		expect(text).toMatch(/anidamiento es de UN solo nivel/);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/batch'))).toBe(false);
+	});
+
+	it('mutate_tasks: set_section sobre una tarea SIN lista se rechaza ANTES de encolar', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, content: 'x', done: false }]);
+			throw new Error(`fetch inesperado en este test: ${url}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'set_section', taskId: TASK_ID, section: 'Bugs' }] }
+			})
+		);
+		expect(text).toMatch(/no pertenece a ningún proyecto o área/);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/batch'))).toBe(false);
+	});
+
+	/**
+	 * MC8 del audit de paridad (23 sep 2026): sobre una nota YA BORRADA la app
+	 * escribe la celda (por eso `materialization: 'applied'`) pero la lectura
+	 * la sigue ocultando. El MCP no puede saber de antemano si ESTA tarea
+	 * estaba en ese caso (la API nunca expone `notesDeletedAt`), así que avisa
+	 * SIEMPRE que `update` escribe texto de notas no vacío.
+	 */
+	it('mutate_tasks update.notes: el informe avisa siempre del posible borrado invisible (MC8)', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, content: 'x', done: false }]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'update', taskId: TASK_ID, notes: 'nueva nota' }] }
+			})
+		);
+		expect(text).toContain('aplicadas con aviso:');
+		expect(text).toMatch(/\[0\] update: aplicada; si la nota de esa tarea estaba borrada/);
+	});
+
+	it('mutate_tasks update.notes vacío (borrado explícito): NO dispara el aviso de MC8', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, content: 'x', done: false }]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'update', taskId: TASK_ID, notes: '' }] }
+			})
+		);
+		expect(text).not.toContain('aplicadas con aviso');
 	});
 
 	it('add_task (tool): reenvía los notices de /api/ingest', async () => {

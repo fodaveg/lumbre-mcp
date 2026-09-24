@@ -22,6 +22,20 @@ export function errorResult(err) {
  * `tools/list` tres veces.
  */
 export const OUTCOME_NOTE = 'El informe dice por op si la app la aplicó, no tuvo efecto o falló.';
+/**
+ * Aviso para `update.notes` (MC8 del audit de paridad, 23 sep 2026): sobre
+ * una nota ya BORRADA (`notesDeletedAt` puesto), la app escribe la celda
+ * igual y la reporta `applied` — cambió algo de verdad — pero la lectura la
+ * sigue ocultando, porque una escritura de máquina nunca resucita una nota
+ * borrada (fix M4, `docs/22-contrato-sync.md` §4; medido: `GET /api/tasks`
+ * NUNCA expone `notesDeletedAt`, así que el MCP no puede distinguir de
+ * antemano «sin nota» de «nota borrada» y avisar solo en ese caso — se avisa
+ * SIEMPRE que `update` escribe `notes`, sea o no ese el caso real). No toca
+ * la cola ni el drenaje: la decisión de no revivir por escritura de máquina
+ * sigue vigente, solo se deja de esconder en silencio.
+ */
+export const NOTES_OVERWRITE_CAVEAT = 'aplicada; si la nota de esa tarea estaba borrada, tu texto se escribió pero sigue oculto ' +
+    '(Lumbre no resucita una nota borrada por escritura de máquina) — compruébalo con get_task.';
 /** Nombre corto para el recuento, en el orden en que se pinta. */
 const OUTCOME_COUNT_LABEL = {
     applied: 'aplicadas',
@@ -32,12 +46,19 @@ const OUTCOME_COUNT_LABEL = {
     queued: 'pendientes de aplicar',
     unconfirmed: 'sin confirmar'
 };
-/** Qué significa cada estado que NO es `applied`, para la línea por op. */
+/**
+ * Qué significa cada estado que NO es `applied`, para la línea por op.
+ *
+ * `quarantined` (24 sep 2026, commit `4e86db536` de lumbre — SY6): el texto
+ * genérico anterior («retenida... para revisión») no decía POR QUÉ ni DÓNDE
+ * se libera; el commit nombra la causa (breaker de borrado masivo) y el
+ * lugar (`/admin`), y este mensaje pasa a citarlos igual.
+ */
 const OUTCOME_DETAIL = {
     noop: 'sin efecto: la app no cambió nada (ya estaba así, o el objetivo no admite el cambio)',
     'not-found': 'sin efecto: la app no encontró el objetivo (inexistente, borrado o archivado)',
     failed: 'falló al aplicarse; la app la reintentará en un drenaje posterior',
-    quarantined: 'retenida en cuarentena por la app para revisión; no se ha aplicado',
+    quarantined: 'retenido por seguridad (cuarentena por borrado masivo); se libera en /admin',
     queued: 'aceptada pero sin aplicar (cuarentena o fallo al drenar); relee antes de darla por hecha',
     unconfirmed: 'encolada; este servidor no dice si se aplicó, relee para comprobarlo'
 };
@@ -49,8 +70,9 @@ const OUTCOME_DETAIL = {
  * (`tools/batch.ts`) y `mutate_brl` (`tools/brl.ts`).
  *
  * Forma: una línea de recuento («aplicadas» siempre, el resto solo si hay),
- * una línea por op que NO se aplicó con su índice, y los avisos. Vacío si no
- * hay ninguna op aceptada ni avisos.
+ * una línea por op que NO se aplicó con su índice, una línea por op que SÍ se
+ * aplicó pero trae `caveat` (MC8, ver `NOTES_OVERWRITE_CAVEAT`), y los
+ * avisos. Vacío si no hay ninguna op aceptada ni avisos.
  */
 export function formatOutcomeReport(entries, notices) {
     const lines = [];
@@ -68,6 +90,12 @@ export function formatOutcomeReport(entries, notices) {
             .map((e) => `  [${e.index}] ${e.op}: ${OUTCOME_DETAIL[e.outcome]}`);
         if (notApplied.length > 0)
             lines.push(`sin aplicar:\n${notApplied.join('\n')}`);
+        const appliedWithCaveat = entries
+            .filter((e) => e.outcome === 'applied' && e.caveat !== undefined)
+            .sort((a, b) => a.index - b.index)
+            .map((e) => `  [${e.index}] ${e.op}: ${e.caveat}`);
+        if (appliedWithCaveat.length > 0)
+            lines.push(`aplicadas con aviso:\n${appliedWithCaveat.join('\n')}`);
     }
     if (notices.length > 0) {
         lines.push(`avisos de la app:\n${notices.map((n) => `  - ${n}`).join('\n')}`);

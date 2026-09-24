@@ -18,10 +18,12 @@ import {
 	listTasks,
 	mergeRecurrencePatch,
 	mutateTask,
+	nestedSubtaskNotAllowedError,
 	planBatchPhases,
 	runBatch,
 	subtaskNotAllowedError,
 	taskNotFoundError,
+	taskWithoutListNotAllowedError,
 	uploadAttachment,
 	unlinkListNote,
 	type BatchOp,
@@ -657,6 +659,20 @@ describe('addTask / mutateTask — resultado real (MC1)', () => {
 			mutateTask(config, { taskId: 'x', kind: 'removeBrlEntry', payload: {} })
 		).resolves.toEqual({ notices: [] });
 	});
+
+	/**
+	 * SY6 (commit `4e86db536` de lumbre, 24 sep 2026): `/api/mutations` ganó un
+	 * quinto `outcome`, `'quarantined'` — antes de ese fix salía disfrazado de
+	 * `'queued'`. Sin este valor en `MUTATION_OUTCOMES`, `mutateTask` lo habría
+	 * tratado como "desconocido" y lo habría tirado (mismo camino que el test
+	 * de arriba), dejando la op «sin confirmar» en vez de en cuarentena.
+	 */
+	it('mutateTask reconoce el outcome `quarantined` (SY6)', async () => {
+		mockFetchJson({ ok: true, outcome: 'quarantined', outcomes: ['quarantined'] });
+		await expect(
+			mutateTask(config, { taskId: 'x', kind: 'removeBrlEntry', payload: {} })
+		).resolves.toEqual({ outcome: 'quarantined', notices: [] });
+	});
 });
 
 describe('mergeRecurrencePatch (MC3)', () => {
@@ -1003,6 +1019,60 @@ describe('buildBatchFromOps', () => {
 		).toEqual([{ index: 0, error: subtaskNotAllowedError('s1').message }]);
 		// Op que NO targetea una tarea: pasa sin estar en `existing`.
 		expect(buildBatchFromOps([{ op: 'create_list', name: 'X' }], new Map()).skipped).toEqual([]);
+	});
+
+	/**
+	 * MC2 del audit de paridad (23 sep 2026): dos ramas del materializador de
+	 * la app descartan la op en SILENCIO y aun así devuelven `applied`
+	 * (`inbound-materialize.ts`, cases `setSection`/`addSubtask`) — el cliente
+	 * ya no se fía de ese resultado y las rechaza ANTES de encolar.
+	 */
+	it('set_section sobre una tarea SIN lista (`somedayListId` ausente): se rechaza ANTES de encolar', () => {
+		const sinLista = topLevel('t1'); // somedayListId ausente
+		const ops: MutateTasksOp[] = [{ op: 'set_section', taskId: 't1', section: 'Bugs' }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['t1', sinLista]]));
+		expect(batchOps).toEqual([]);
+		expect(skipped).toEqual([{ index: 0, error: taskWithoutListNotAllowedError('t1').message }]);
+	});
+
+	it('set_section para QUITAR la sección (`section: null`) sobre una tarea SIN lista: también se rechaza', () => {
+		// La app la ignora igual en silencio (`if (!t.somedayListId) break`,
+		// sin mirar el valor de `section`) — el rechazo local es simétrico.
+		const sinLista = topLevel('t1');
+		const ops: MutateTasksOp[] = [{ op: 'set_section', taskId: 't1', section: null }];
+		const { skipped } = buildBatchFromOps(ops, new Map([['t1', sinLista]]));
+		expect(skipped).toEqual([{ index: 0, error: taskWithoutListNotAllowedError('t1').message }]);
+	});
+
+	it('CONTROL — set_section sobre una tarea CON lista: sigue viajando en batchOps', () => {
+		const conLista = topLevel('t1', { somedayListId: 'l1' });
+		const ops: MutateTasksOp[] = [{ op: 'set_section', taskId: 't1', section: 'Bugs' }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['t1', conLista]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 't1', kind: 'setSection', payload: { section: 'Bugs' } }
+		]);
+	});
+
+	it('add_subtask sobre una tarea que YA es una SUBTAREA: se rechaza ANTES de encolar (anidamiento de UN nivel)', () => {
+		// `allowSubtask: true` de `add_subtask` en `TASK_TARGET_ALLOW_SUBTASK`
+		// deja pasar el chequeo de residencia (no escribe `somedayListId`/
+		// `sectionId`) — este es un guard APARTE, por la razón real (nunca
+		// subcadena), no reutiliza `subtaskNotAllowedError`.
+		const sub = topLevel('s1', { parentId: 't1' });
+		const ops: MutateTasksOp[] = [{ op: 'add_subtask', taskId: 's1', subtasks: ['x'] }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', sub]]));
+		expect(batchOps).toEqual([]);
+		expect(skipped).toEqual([{ index: 0, error: nestedSubtaskNotAllowedError('s1').message }]);
+	});
+
+	it('CONTROL — add_subtask sobre una tarea de PRIMER NIVEL: sigue viajando en batchOps', () => {
+		const ops: MutateTasksOp[] = [{ op: 'add_subtask', taskId: 't1', subtasks: ['x'] }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['t1', topLevel('t1')]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 't1', kind: 'addSubtask', payload: { subtasks: ['x'] } }
+		]);
 	});
 
 	/**

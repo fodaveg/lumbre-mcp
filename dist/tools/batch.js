@@ -1,6 +1,17 @@
 import { z } from 'zod';
 import { buildBatchFromOps, collectExistenceCheckIds, collectSeriesSeedIds, excludeIngestForBrokenListPromises, filterPhase2AfterPhase1, findTasksByIds, planBatchPhases, runBatch } from '../lumbre-client.js';
-import { errorResult, exposedRecurrenceSchema, formatOpShapeError, formatOutcomeReport, OUTCOME_NOTE, recurrencePatchSchema, recurrenceSchema, tagSchema, textResult } from './shared.js';
+import { errorResult, exposedRecurrenceSchema, formatOpShapeError, formatOutcomeReport, NOTES_OVERWRITE_CAVEAT, OUTCOME_NOTE, recurrencePatchSchema, recurrenceSchema, tagSchema, textResult } from './shared.js';
+/**
+ * `true` si el elemento CRUDO es un `update` que escribe texto de notas no
+ * vacío (MC8 del audit de paridad, 24 sep 2026: ver `NOTES_OVERWRITE_CAVEAT`
+ * en `shared.ts`). `notes: ''`/`undefined` no cuenta: un borrado explícito de
+ * nota no puede taparse a sí mismo, así que el aviso no aporta nada ahí. Se
+ * lee del elemento CRUDO (no del validado ni traducido): es el mismo patrón
+ * que `opNameAt`, más abajo en `runOpsBatch`.
+ */
+function opWritesVisibleNotes(raw) {
+    return raw.op === 'update' && typeof raw.notes === 'string' && raw.notes.length > 0;
+}
 /**
  * DOS tools de lote sobre las MISMAS 16 ops de siempre, repartidas por lo que
  * hacen (2026-09-19, tarea 6f62c877 — decisión de David del 17 sep):
@@ -459,7 +470,13 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
         if (r.ok) {
             if (r.id !== undefined)
                 succeededWithId.push({ index, id: r.id });
-            outcomes.push({ index, op: opNameAt(index), outcome: r.materialization ?? 'unconfirmed' });
+            const outcome = r.materialization ?? 'unconfirmed';
+            outcomes.push({
+                index,
+                op: opNameAt(index),
+                outcome,
+                ...(outcome === 'applied' && opWritesVisibleNotes(rawOps[index]) ? { caveat: NOTES_OVERWRITE_CAVEAT } : {})
+            });
         }
         else {
             failures.push({ index, error: r.error ?? 'error desconocido' });
