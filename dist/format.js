@@ -205,6 +205,8 @@ function formatTask(t, opts, isDuplicateTitle) {
         metadata.push(t.time);
     if (t.deadline)
         metadata.push(`⚑${t.deadline}`);
+    if (t.waitingUntil)
+        metadata.push(`esperando:${t.waitingUntil}${t.waitingFor ? ` (${t.waitingFor})` : ''}`);
     metadata.push(...seriesMetadata(t));
     if (t.archivedAt)
         metadata.push(`archivada:${t.archivedAt.slice(0, 10)}`);
@@ -274,6 +276,11 @@ export function formatTaskFull(t, refs) {
         `- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
         `- creada: ${t.createdAt}`
     ];
+    // «Esperando» (MC6): `waitingUntil` ausente = servidor que aún no la manda
+    // (2026-09-24) — no se pinta nada antes que afirmar «no está esperando».
+    if (t.waitingUntil) {
+        lines.push(`- esperando: hasta ${t.waitingUntil}${t.waitingFor ? ` (${t.waitingFor})` : ''}`);
+    }
     // Regla y serie (MC4 del audit de paridad). `recurrence` ausente = servidor
     // que no la manda: no se pinta nada antes que afirmar «no repite».
     if (t.recurrence !== undefined) {

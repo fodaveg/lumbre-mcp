@@ -371,6 +371,21 @@ export function taskWithoutListNotAllowedError(taskId) {
         'mutación.');
 }
 /**
+ * Error uniforme cuando un `update` targetea una SUBTAREA y trae `deadline` y/o
+ * `reminders` (MC6, 2026-09-24): `docs/18-que-es-una-tarea.md` §2.5 los lista
+ * PROHIBIDOS en subtarea, junto con `somedayListId`/`sectionId`/`recurrence`
+ * — una restricción del mundo o un aviso no tiene sentido en una checklist
+ * hija de una tarea más pendiente. A diferencia de `set_section`/`add_subtask`
+ * (MC2), aquí no hay un `applied` falso medido contra el materializador real:
+ * se corta de todos modos, ANTES de encolar, por el mismo motivo que esos dos
+ * — el cliente ya sabe de antemano que el campo no aplica al objetivo.
+ */
+export function subtaskFieldsNotAllowedError(taskId, fields) {
+    return new Error(`El id ${taskId} es de una SUBTAREA: ${fields.join('/')} no aplica ahí (docs/18-que-es-una-tarea.md ` +
+        '§2.5, prohibidos en subtarea junto con somedayListId/sectionId/recurrence). Manda esos campos ' +
+        'en un update aparte sobre la tarea PADRE. No se ha encolado ninguna mutación.');
+}
+/**
  * Decide si una tool puede operar sobre `task` (YA resuelto por
  * `findTaskById`, o `undefined` si no existe): lanza `taskNotFoundError` si
  * no existe, o `subtaskNotAllowedError` si es una subtarea (`parentId`
@@ -715,7 +730,7 @@ export async function runBatch(config, ops) {
     return { results: body.results, notices: readNotices(body) };
 }
 /**
- * `allowSubtask` por `op`, SOLO para las 9 variantes cuyo target es una
+ * `allowSubtask` por `op`, SOLO para las 11 variantes cuyo target es una
  * TAREA (`taskId`/`subtaskId`) — mismo criterio, MISMOS valores, que la
  * matriz que aplica `requireTaskExists` (ver el JSDoc de
  * `assertTaskUsable` para el porqué completo). Las ops de PROYECTO/ÁREA/SECCIÓN
@@ -743,6 +758,14 @@ export async function runBatch(config, ops) {
  * la comprobación de existencia la rechazaría siempre. Viaja sin comprobar y
  * el servidor decide (`applied`, o `noop` + aviso `restore-purged`).
  *
+ * MC6 (2026-09-24): `set_waiting`/`clear_waiting` entran a `true` — «esperando»
+ * (`waitingUntil`/`waitingFor`) es un estado de tarea sin guard de `parentId`
+ * en `waiting-ops.ts` (repo principal), ni prohibido por §2.5. `register_habit`
+ * NO está aquí: su objetivo es un HÁBITO, no una tarea (mismo motivo que
+ * `restore` para la comprobación de existencia, pero aquí porque el id ni
+ * siquiera es de la tabla de tareas). `set_list_kind` tampoco: targetea un
+ * proyecto/área, como `nest_list`/`rename_list`/`remove_list`.
+ *
  * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
  * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
  * `collectExistenceCheckIds` (solo por la PRESENCIA de la clave: qué ops
@@ -761,7 +784,9 @@ const TASK_TARGET_ALLOW_SUBTASK = {
     update: true,
     reschedule: true,
     set_section: false,
-    move_to_list: false
+    move_to_list: false,
+    set_waiting: true,
+    clear_waiting: true
 };
 /** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
  *  de lista/sección/creación (ver `TASK_TARGET_ALLOW_SUBTASK`). */
@@ -800,8 +825,11 @@ function localValidationError(op) {
             op.tags === undefined &&
             op.priority === undefined &&
             op.time === undefined &&
-            op.recurrence === undefined) {
-            return 'update: indica al menos un campo a cambiar (content, notes, tags, priority, time o recurrence).';
+            op.recurrence === undefined &&
+            op.deadline === undefined &&
+            op.reminders === undefined) {
+            return ('update: indica al menos un campo a cambiar (content, notes, tags, priority, time, ' +
+                'recurrence, deadline o reminders).');
         }
     }
     if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
@@ -850,7 +878,9 @@ function translateOp(op) {
                     ...(op.time !== undefined ? { time: op.time } : {}),
                     // Ya fusionada con la regla vigente en `buildBatchFromOps`
                     // (`mergeRecurrencePatch`), así que aquí es una regla entera o `null`.
-                    ...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {})
+                    ...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {}),
+                    ...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
+                    ...(op.reminders !== undefined ? { reminders: op.reminders } : {})
                 }
             };
         case 'reschedule':
@@ -871,6 +901,15 @@ function translateOp(op) {
                 kind: 'moveToList',
                 payload: op.listId !== undefined ? { listId: op.listId } : { list: op.list }
             };
+        case 'set_waiting':
+            return {
+                type: 'mutate',
+                taskId: op.taskId,
+                kind: 'setWaiting',
+                payload: { until: op.until, ...(op.for !== undefined ? { for: op.for } : {}) }
+            };
+        case 'clear_waiting':
+            return { type: 'mutate', taskId: op.taskId, kind: 'clearWaiting', payload: {} };
         case 'add_subtask':
             return {
                 type: 'mutate',
@@ -903,7 +942,8 @@ function translateOp(op) {
                 payload: {
                     name: op.name,
                     ...(op.color !== undefined ? { color: op.color } : {}),
-                    ...(op.icon !== undefined ? { icon: op.icon } : {})
+                    ...(op.icon !== undefined ? { icon: op.icon } : {}),
+                    ...(op.listKind !== undefined ? { listKind: op.listKind } : {})
                 }
             };
         case 'nest_list':
@@ -931,6 +971,20 @@ function translateOp(op) {
                     notes: op.notes,
                     ...(op.revive !== undefined ? { revive: op.revive } : {})
                 }
+            };
+        case 'set_list_kind':
+            return {
+                type: 'mutate',
+                taskId: op.listId,
+                kind: 'setListKind',
+                payload: { listKind: op.listKind }
+            };
+        case 'register_habit':
+            return {
+                type: 'mutate',
+                taskId: op.habitId,
+                kind: 'registerHabit',
+                payload: op.date !== undefined ? { date: op.date } : {}
             };
     }
 }
@@ -985,7 +1039,7 @@ export function mergeRecurrencePatch(patch, current) {
     return { rule };
 }
 /** Campos de `update` distintos de `recurrence` (ver CX7 en `buildBatchFromOps`). */
-const UPDATE_EXTRA_FIELDS = ['content', 'notes', 'tags', 'priority', 'time'];
+const UPDATE_EXTRA_FIELDS = ['content', 'notes', 'tags', 'priority', 'time', 'deadline', 'reminders'];
 /** Id de la semilla si `task` es una OCURRENCIA de una serie (su `seriesId`
  *  apunta a otra fila); `null` si es la semilla o no es de ninguna serie.
  *  Mismo criterio que `isSeriesOccurrence` en el repo principal. */
@@ -1069,6 +1123,19 @@ export function buildBatchFromOps(ops, existing) {
         if (op.op === 'add_subtask' && existing.get(op.taskId)?.parentId) {
             skipped.push({ index, error: nestedSubtaskNotAllowedError(op.taskId).message });
             return;
+        }
+        // MC6: `deadline`/`reminders` son PROHIBIDOS en una subtarea (§2.5) —
+        // a diferencia del resto de campos de `update` (accidentales permitidos,
+        // ver `TASK_TARGET_ALLOW_SUBTASK`), estos dos no tienen camino de
+        // servidor "subtask-safe" documentado. Se rechaza aquí, ANTES de
+        // encolar, en vez de dejar que el materializador escriba una celda que
+        // el contrato de tarea prohíbe.
+        if (op.op === 'update' && (op.deadline !== undefined || op.reminders !== undefined)) {
+            if (existing.get(op.taskId)?.parentId) {
+                const fields = ['deadline', 'reminders'].filter((f) => op[f] !== undefined);
+                skipped.push({ index, error: subtaskFieldsNotAllowedError(op.taskId, fields).message });
+                return;
+            }
         }
         // CX7: sobre una tarea ARCHIVADA la app solo aplica el apagado de la
         // regla (`clearArchivedSeedRecurrence`, antes de su guard de tarea

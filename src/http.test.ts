@@ -141,8 +141,9 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// que sobre stdio/in-memory, no un tamaño distinto por transporte.
 		// Bajado a 16 tools/22.400 al retirar las nueve tools sueltas de
 		// mutación individual y partir el lote en `mutate_tasks`/`organize`
-		// (tarea 6f62c877, 2026-09-19) — ver `index.test.ts`.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(22400);
+		// (tarea 6f62c877, 2026-09-19). Re-medido el 2026-09-24 (MC6, paridad
+		// UI↔MCP): 16 tools, 23.680 caracteres — ver `index.test.ts`.
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(24900);
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {

@@ -277,8 +277,15 @@ describe('tools/list — superficie completa', () => {
 		// se sustituye por `OUTCOME_NOTE`. 16 tools, 22.280 caracteres = +934
 		// sobre los 21.346 de arriba (`mutate_tasks` 3.518 → 4.059, `add_task`
 		// 2.789). Es superficie nueva que la app ya aceptaba y el MCP recortaba
-		// en silencio (MC3). Techo = medido + ~5%.
-		const CHAR_CEILING = 23400;
+		// en silencio (MC3).
+		// Re-medido el 2026-09-24 (MC6, paridad UI↔MCP), sobre el HEAD real de
+		// esa fecha (dc4bfc9: 16 tools, 22.385 caracteres — ya incluía
+		// `restore`, un día después del 22.280 de arriba): `set_waiting`/
+		// `clear_waiting`/`register_habit` en `mutate_tasks`, `set_list_kind` +
+		// `listKind` de `create_list` en `organize`, y `deadline`/`reminders` en
+		// `update`. 16 tools, 23.680 caracteres = +1.295 sobre los 22.385 de
+		// dc4bfc9 (+5,8%). Techo = medido + ~5%.
+		const CHAR_CEILING = 24900;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -313,10 +320,10 @@ describe('tools/list — superficie completa', () => {
 	 * a propósito, para que una op de la OTRA tool llegue al handler y reciba
 	 * el puntero en vez de tumbar la llamada entera — ver el JSDoc de
 	 * `src/tools/batch.ts`): vive en la `description` de `ops`. Así que lo que
-	 * se vigila aquí es que esa tabla siga NOMBRANDO las 8 ops de cada tool —
+	 * se vigila aquí es que esa tabla siga NOMBRANDO las ops de cada tool —
 	 * si alguien añade una op y no la documenta, el modelo no puede llamarla.
 	 */
-	it('`mutate_tasks` y `organize` documentan sus 8 ops cada una en la description de `ops`', () => {
+	it('`mutate_tasks` y `organize` documentan sus ops (12+9, MC6) en la description de `ops`', () => {
 		const opsDescription = (name: string) => {
 			const tool = tools.find((t) => t.name === name);
 			expect(tool).toBeDefined();
@@ -336,13 +343,17 @@ describe('tools/list — superficie completa', () => {
 			'reschedule',
 			'set_section',
 			'add_subtask',
-			'complete_subtask'
+			'complete_subtask',
+			'restore',
+			'set_waiting',
+			'clear_waiting',
+			'register_habit'
 		]) {
 			expect(mutateTasksOps).toContain(`${op}:`);
 		}
 		// Y NO las de la otra: es la frontera que hace mecánica la prohibición
 		// de borrar para un subagente al que solo se le da `mutate_tasks`.
-		for (const op of ['delete:', 'remove_list:', 'move_to_list:']) {
+		for (const op of ['delete:', 'remove_list:', 'move_to_list:', 'set_list_kind:']) {
 			expect(mutateTasksOps).not.toContain(op);
 		}
 
@@ -355,7 +366,8 @@ describe('tools/list — superficie completa', () => {
 			'rename_list',
 			'remove_list',
 			'set_list_notes',
-			'move_to_list'
+			'move_to_list',
+			'set_list_kind'
 		]) {
 			expect(organizeOps).toContain(`${op}:`);
 		}
@@ -957,7 +969,7 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 	});
 });
 
-describe('mutate_tasks/organize — las 17 `op` siguen aceptándose (esquemas estrictos internos)', () => {
+describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas estrictos internos)', () => {
 	/** Un caso por op: el payload VÁLIDO mínimo/representativo, y variantes
 	 *  INVÁLIDAS por campo que falta y por campo que sobra (ajeno a esa op,
 	 *  pero válido en general — p. ej. `date` en `complete`) — mismo criterio
@@ -1121,12 +1133,58 @@ describe('mutate_tasks/organize — las 17 `op` siguen aceptándose (esquemas es
 				notes: 'nota',
 				name: 'ajeno'
 			}
+		},
+		// MC6 (2026-09-24, paridad UI↔MCP): las 4 ops nuevas.
+		{
+			op: 'set_waiting',
+			valid: { op: 'set_waiting', taskId: '11111111-1111-1111-1111-111111111111', until: '2099-01-01' },
+			missingField: 'until',
+			extraField: {
+				op: 'set_waiting',
+				taskId: '11111111-1111-1111-1111-111111111111',
+				until: '2099-01-01',
+				done: true
+			}
+		},
+		{
+			op: 'clear_waiting',
+			valid: { op: 'clear_waiting', taskId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'taskId',
+			extraField: {
+				op: 'clear_waiting',
+				taskId: '11111111-1111-1111-1111-111111111111',
+				until: '2099-01-01'
+			}
+		},
+		{
+			// `date` opcional a propósito (ver el JSDoc de
+			// `RegisterHabitMutationPayload`): el caso VÁLIDO no la manda.
+			op: 'register_habit',
+			valid: { op: 'register_habit', habitId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'habitId',
+			extraField: {
+				op: 'register_habit',
+				habitId: '11111111-1111-1111-1111-111111111111',
+				taskId: '22222222-2222-2222-2222-222222222222'
+			}
+		},
+		{
+			op: 'set_list_kind',
+			valid: { op: 'set_list_kind', listId: '11111111-1111-1111-1111-111111111111', listKind: 'area' },
+			missingField: 'listKind',
+			extraField: {
+				op: 'set_list_kind',
+				listId: '11111111-1111-1111-1111-111111111111',
+				listKind: 'area',
+				name: 'x'
+			}
 		}
 	];
 
-	/** Las 8 ops que viven en `organize`; el resto, en `mutate_tasks` (mapa
-	 *  `TASK_OP_TOOL` de `tools/shared.ts` — aquí se repite a propósito: si el
-	 *  reparto cambia en el código sin que nadie lo decida, estos tests caen). */
+	/** Las 9 ops que viven en `organize` (MC6 añade `set_list_kind`); el resto,
+	 *  en `mutate_tasks` (mapa `TASK_OP_TOOL` de `tools/shared.ts` — aquí se
+	 *  repite a propósito: si el reparto cambia en el código sin que nadie lo
+	 *  decida, estos tests caen). */
 	const ORGANIZE_OPS = new Set([
 		'delete',
 		'remove_section',
@@ -1135,12 +1193,13 @@ describe('mutate_tasks/organize — las 17 `op` siguen aceptándose (esquemas es
 		'rename_list',
 		'remove_list',
 		'set_list_notes',
-		'move_to_list'
+		'move_to_list',
+		'set_list_kind'
 	]);
 	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
 	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
 
-	it('cubre las 17 operaciones (guardarraíl del propio test; `restore` desde el 2026-09-24)', () => {
+	it('cubre las 21 operaciones (guardarraíl del propio test; MC6 desde el 2026-09-24)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
@@ -1159,7 +1218,11 @@ describe('mutate_tasks/organize — las 17 `op` siguen aceptándose (esquemas es
 				'nest_list',
 				'rename_list',
 				'remove_list',
-				'set_list_notes'
+				'set_list_notes',
+				'set_waiting',
+				'clear_waiting',
+				'register_habit',
+				'set_list_kind'
 			].sort()
 		);
 	});
@@ -1245,6 +1308,7 @@ describe('mutate_tasks/organize — las 17 `op` siguen aceptándose (esquemas es
 				.success
 		).toBe(false);
 	});
+
 });
 
 describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre las dos tools', () => {

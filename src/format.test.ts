@@ -281,3 +281,34 @@ describe('cancelada, regla y serie (MC4)', () => {
 		expect(formatTaskFull(task({ id: SEED, seriesId: SEED }))).toContain('- serie: semilla de su serie');
 	});
 });
+
+describe('«esperando» (MC6, waitingUntil/waitingFor) — solo se pinta si el servidor la manda', () => {
+	it('list_tasks: tag `esperando:<fecha> (for)` en la línea compacta', () => {
+		const output = formatTaskList(
+			[task({ waitingUntil: '2026-10-01', waitingFor: 'María' })],
+			'all',
+			{ notesMode: 'none' }
+		);
+		expect(output).toContain('esperando:2026-10-01 (María)');
+	});
+
+	it('list_tasks: sin `waitingFor`, el tag no lleva paréntesis', () => {
+		const output = formatTaskList([task({ waitingUntil: '2026-10-01' })], 'all', { notesMode: 'none' });
+		expect(output).toContain('esperando:2026-10-01)');
+		expect(output).not.toContain('esperando:2026-10-01 (');
+	});
+
+	it('list_tasks: sin `waitingUntil` (servidor viejo, o no está esperando), no se pinta nada', () => {
+		const output = formatTaskList([task()], 'all', { notesMode: 'none' });
+		expect(output).not.toContain('esperando:');
+	});
+
+	it('get_task: línea `- esperando: hasta <fecha> (for)`', () => {
+		const full = formatTaskFull(task({ waitingUntil: '2026-10-01', waitingFor: 'María' }));
+		expect(full).toContain('- esperando: hasta 2026-10-01 (María)');
+	});
+
+	it('get_task: `waitingUntil` ausente — sin línea, nunca "no está esperando"', () => {
+		expect(formatTaskFull(task())).not.toContain('esperando');
+	});
+});

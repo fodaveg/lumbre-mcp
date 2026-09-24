@@ -403,6 +403,13 @@ ocurrencia. `get_task` añade el estado con la fecha de cancelación, la regla
 entera (`- repetición:`) y la línea `- serie:`. Apagar o cambiar una serie se
 hace sobre la SEMILLA; el id que sale en `serie:` es el suyo.
 
+**«Esperando» (MC6, 2026-09-24)**. Si el servidor manda `waitingUntil` (aún no
+lo hace: escríbelo con `mutate_tasks({op:"set_waiting"})` y compruébalo con
+`get_task` mientras tanto), `list_tasks` añade el tag `esperando:<fecha>
+(<for>)` a la línea compacta y `get_task` la línea `- esperando: hasta
+<fecha> (<for>)`; su ausencia se tolera sin romper nada (ni siquiera se pinta,
+nunca se afirma "no está esperando").
+
 ## Qué hace (Fase 2 — mutar una tarea existente)
 
 **Desde el 2026-09-19 no hay una tool por operación**: las nueve sueltas
@@ -413,10 +420,14 @@ de lote, que ya las cubrían entero:
 
 - **`mutate_tasks`** — todo lo que opera sobre UNA TAREA: `add_task`,
   `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`,
-  `complete_subtask` y `restore` (sacar de la Papelera, desde el 2026-09-24).
+  `complete_subtask`, `restore` (sacar de la Papelera, desde el 2026-09-24) y,
+  desde MC6 (2026-09-24, paridad UI↔MCP), `set_waiting`/`clear_waiting`
+  (estado «esperando») y `register_habit` (registra una ocurrencia de hábito;
+  su objetivo NO es una tarea).
 - **`organize`** — lo destructivo y la reorganización: `delete`,
   `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
-  `set_list_notes`, `move_to_list`.
+  `set_list_notes`, `move_to_list` y, desde MC6, `set_list_kind` (tipo visible
+  de un proyecto o área existente).
 
 Por qué se partió así: baja el coste fijo de `tools/list` (de 26.756 a 21.346
 caracteres, -20%) y, sobre todo, deja la frontera de "puede borrar / no puede
@@ -479,11 +490,15 @@ operaciones a la vez» más abajo):
   decide la app. El informe dice «aplicada» si volvió, o «sin efecto» con el
   aviso de la app si ya no había nada que restaurar (la fila se purgó
   definitivamente).
-- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence? }`
-  (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora o regla de
-  repetición; solo toca los campos que envíes. `tags: []` quita todos los tags
+- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence?, deadline?, reminders? }`
+  (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora, regla de
+  repetición, fecha límite o avisos; solo toca los campos que envíes. `tags: []` quita todos los tags
   propios; omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
-  prioridad). `recurrence` es un cambio PARCIAL de la regla: el conector lo
+  prioridad). `deadline` (`YYYY-MM-DD`, o `null` para quitarla) y `reminders`
+  (offsets en minutos-antes de `time`, `[]` los quita) son MC6 (2026-09-24);
+  el conector no repite el tope `MAX_REMINDER_OFFSET` de la app (puede
+  cambiar), solo valida forma — un offset fuera de rango lo descarta la app en
+  silencio, igual que hoy. `recurrence` es un cambio PARCIAL de la regla: el conector lo
   fusiona con la regla vigente (la lee en la misma comprobación de
   existencia) y manda la regla entera, porque la app la sustituye completa.
   Así `{ interval: 2 }` sobre un hábito semanal de lunes y jueves conserva
@@ -503,7 +518,10 @@ operaciones a la vez» más abajo):
   rechaza entera, porque la app solo aplicaría el apagado.
   **Acepta también el id de una SUBTAREA**: los cinco primeros campos son
   accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
-  del repo principal). Si `notes` no es vacío, el informe por op avisa
+  del repo principal); `deadline` y `reminders` NO — están PROHIBIDOS ahí (§2.5,
+  «restricción del mundo/aviso sin sentido en una checklist») y el conector
+  rechaza la op ANTES de encolar si alguno de los dos viaja sobre un `taskId`
+  de subtarea. Si `notes` no es vacío, el informe por op avisa
   siempre («aplicada; si la nota de esa tarea estaba borrada, tu texto se
   escribió pero sigue oculto…», MC8 del audit de paridad): sobre una nota YA
   BORRADA la app escribe la celda igual (cambió algo de verdad, por eso
@@ -527,6 +545,21 @@ operaciones a la vez» más abajo):
   lista, así que el conector la rechaza ANTES de encolarla (hasta el
   2026-09-24 la app la ignoraba en silencio y aun así confirmaba `applied` —
   MC2 del audit de paridad). Muévela primero con `move_to_list`.
+- `{ op: "set_waiting", taskId, until, for? }` (`mutate_tasks`, MC6) — entra en
+  «esperando»: `until` (`YYYY-MM-DD`) es la fecha de reconsulta y la app la
+  RECHAZA si no es estrictamente futura (el conector solo valida el formato,
+  no esa regla); `for` (opcional) es texto libre de a quién o qué se espera.
+  Sale en `list_tasks`/`get_task` como `esperando:<until>` cuando el servidor
+  lo manda (aún no lo hace: campo tolerado como "desconocido" hasta entonces).
+- `{ op: "clear_waiting", taskId }` (`mutate_tasks`, MC6) — sale de
+  «esperando». Sin campos, espejo de `restore`.
+- `{ op: "register_habit", habitId, date? }` (`mutate_tasks`, MC6) — registra
+  una ocurrencia del HÁBITO `habitId` (no de una tarea: es la única op de
+  `mutate_tasks`, junto a `restore`, cuyo objetivo NO se comprueba contra
+  `GET /api/tasks` antes de encolar). `date` es OPCIONAL: la app resolverá el
+  HOY local del usuario cuando falte (pedido el 2026-09-24) — **hasta que lo
+  despliegue, omitir `date` falla server-side**; mándala mientras tanto.
+  Resuelve `habitId` con `list_habits`.
 - `{ op: "add_subtask", taskId, subtasks }` (`mutate_tasks`) — añade una o más
   subtareas (checklist, #17) a `taskId`. Anidamiento de UN nivel: si `taskId`
   ya es una subtarea, el conector la rechaza ANTES de encolarla (hasta el
@@ -557,18 +590,19 @@ las cubría entero). Desde el 2026-09-19 viven en **`organize`**, la tool de
 reorganización y borrado. Mueve una tarea a otro proyecto o área, y
 crea/anida/renombra/borra contenedores con
 `organize({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
-"rename_list"|"remove_list"|"set_list_notes", ... }] })` — un solo elemento en `ops` para una
+"rename_list"|"remove_list"|"set_list_notes"|"set_list_kind", ... }] })` — un solo elemento en `ops` para una
 operación suelta. Mismo informe por op que el resto de Fase 2.
 
 - `move_to_list`: `taskId*`, uno de [`listId`, `list`]. `listId` (id ESTABLE,
   ver la leyenda de proyectos y áreas al principio de `list_tasks`) es preferente sobre
   `list` (nombre, se crea como proyecto si no existe); `listId: null` desvincula la tarea
   de su proyecto o área actual. Conserva la fecha de la tarea y limpia su sección.
-- `create_list`: `name*` [`color`, `icon`, `listId`] — crea un proyecto nuevo;
+- `create_list`: `name*` [`color`, `icon`, `listId`, `listKind`] — crea un proyecto nuevo;
   el resultado trae el `listId` generado (o el que tú le hayas dado,
   ver "Encadenar dentro del MISMO lote" más abajo). `color` acepta uno de
   `red|amber|green|blue|violet|pink` o un hex `#rrggbb`; sin color/icono por
-  defecto.
+  defecto. `listKind` (`'area'|'project'`, MC6 2026-09-24) fija el tipo visible
+  del contenedor nuevo; sin indicarlo, el default del servidor (`'project'`).
 - `nest_list`: `listId*`, `parentId*` — fija el padre de un proyecto EXISTENTE
   (lo anida), o lo deja de primer nivel con `parentId: null` (desanidar). Un
   anidado rechazado (área como hija, ciclo, auto-anidado, o la Bandeja de entrada, que nunca
@@ -588,6 +622,9 @@ operación suelta. Mismo informe por op que el resto de Fase 2.
   El payload que recibe es
   `{ type: "mutate", taskId: listId, kind: "setListNotes", payload: { notes,
   revive? } }`.
+- `set_list_kind`: `listId*`, `listKind*` (`'area'|'project'`) — cambia el tipo
+  visible de un proyecto o área EXISTENTE (MC6, 2026-09-24); `create_list.listKind`
+  es su equivalente al crear. Identidad y tareas no cambian.
 
 ### Registro del día (BRL — add-on experimental)
 
@@ -642,12 +679,12 @@ resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y 
 de un `add_task`, su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
-17 ops entre las dos tools:
+21 ops entre las dos tools (MC6, 2026-09-24, añade las 4 últimas de cada fila):
 
 | tool | ops |
 | --- | --- |
-| `mutate_tasks` (una tarea) | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore` |
-| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list` |
+| `mutate_tasks` (una tarea, hábito o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit` |
+| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
 encadena con `create_list` por el `listId` generado en el mismo lote (ver
@@ -663,22 +700,26 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
-update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada)]
+update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders]
 reschedule: taskId*, date*
 set_section: taskId*, section*
+set_waiting: taskId*, until* (estrictamente futura) [for]
+clear_waiting: taskId*
 add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
 restore: taskId* (tarea borrada; sin comprobación de existencia en el cliente)
+register_habit: habitId* [date] (habitId, NO taskId; sin comprobación de existencia de tarea)
 
 # organize
 delete: taskId*
 remove_section: sectionId*
-create_list: name* [color, icon, listId]
+create_list: name* [color, icon, listId, listKind]
 nest_list: listId*, parentId*
 rename_list: listId*, name*
 remove_list: listId*
 set_list_notes: listId*, notes* [revive]
 move_to_list: taskId*, uno de [listId, list]
+set_list_kind: listId*, listKind*
 ```
 
 Un elemento que no encaja en la forma de SU `op` (campo obligatorio ausente,
@@ -701,13 +742,18 @@ los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 
 - **Sí**: `complete`, `cancel`, `delete`, `add_subtask`, `complete_subtask`,
   `update` (sus cinco campos —`content`, `notes`, `tags`, `priority`, `time`— son
-  accidentales permitidos) y `reschedule`, con fecha o con `date: null`
-  (`date` también lo es). Una subtarea con `date: null` se queda sin fecha en
-  la checklist de su padre; no cae a la Bandeja.
+  accidentales permitidos; `deadline`/`reminders` NO, ver abajo), `reschedule`,
+  con fecha o con `date: null` (`date` también lo es), y `set_waiting`/
+  `clear_waiting` (MC6: «esperando» no tiene guard de residencia). Una
+  subtarea con `date: null` se queda sin fecha en la checklist de su padre; no
+  cae a la Bandeja.
 - **No** (se descarta esa op, las demás del lote siguen): `set_section` y
   `move_to_list`, porque escriben `sectionId`/`somedayListId`, PROHIBIDOS en
   una subtarea (no tiene proyecto, área ni sección propios: vive en la checklist de su
-  padre). Para eso, opera sobre el id de la tarea PADRE.
+  padre); y un `update` que traiga `deadline`/`reminders` (MC6, §2.5 los lista
+  PROHIBIDOS en subtarea junto a `recurrence`) — sus OTROS campos, si trae
+  alguno permitido, se rechazan con ellos (la op entera se descarta, no solo
+  esos dos). Para eso, opera sobre el id de la tarea PADRE.
 
 El rechazo es por-op y con el motivo REAL de esa op (no un error genérico):
 entra en el mismo informe de éxito PARCIAL que un `taskId` inexistente,
@@ -737,8 +783,9 @@ uno:
 
 La pareja alta→mutación (crear una tarea y tocarla en el mismo lote) sigue
 siendo inexpresable, como siempre: un `add_task` no lleva id de cliente y las
-9 ops que targetean una tarea comprueban su existencia contra el servidor
-ANTES de mandar el batch. El encadenado dentro de `organize` es SIEMPRE por
+11 ops que targetean una tarea comprueban su existencia contra el servidor
+ANTES de mandar el batch (`register_habit` es la excepción MC6, junto con
+`restore`: su objetivo no es una tarea). El encadenado dentro de `organize` es SIEMPRE por
 `listId` (el uuid que tú le diste al `create_list`), nunca por `list`
 (nombre): la detección de la dependencia solo mira `listId` a propósito.
 

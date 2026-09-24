@@ -720,7 +720,7 @@ describe('mergeRecurrencePatch (MC3)', () => {
 });
 
 describe('collectExistenceCheckIds', () => {
-	it('recoge taskId/subtaskId SOLO de las 9 ops que targetean una tarea, deduplicados', () => {
+	it('recoge taskId/subtaskId SOLO de las 11 ops que targetean una tarea, deduplicados', () => {
 		const ops: MutateTasksOp[] = [
 			{ op: 'complete', taskId: 't1' },
 			{ op: 'cancel', taskId: 't1' }, // repetido: una sola entrada
@@ -738,6 +738,19 @@ describe('collectExistenceCheckIds', () => {
 
 	it('restore NO pide existencia: su tarea está borrada y la búsqueda nunca la vería', () => {
 		expect(collectExistenceCheckIds([{ op: 'restore', taskId: 't-borrada' }])).toEqual([]);
+	});
+
+	it('register_habit NO pide existencia de tarea: su objetivo es un HÁBITO (MC6)', () => {
+		expect(collectExistenceCheckIds([{ op: 'register_habit', habitId: 'h1' }])).toEqual([]);
+	});
+
+	it('set_waiting/clear_waiting SÍ piden existencia (targetean una tarea, MC6)', () => {
+		expect(
+			collectExistenceCheckIds([
+				{ op: 'set_waiting', taskId: 't1', until: '2099-01-01' },
+				{ op: 'clear_waiting', taskId: 't1' }
+			])
+		).toEqual(['t1']);
 	});
 });
 
@@ -1227,6 +1240,127 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+	// ── MC6 (2026-09-24, paridad UI↔MCP): set_waiting/clear_waiting/
+	// register_habit/set_list_kind, deadline/reminders de update ────────────
+
+	it('set_waiting: traduce until/for a kind:setWaiting', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_waiting', taskId: 't1', until: '2099-01-01', for: 'María' }
+		];
+		const { batchOps, skipped } = buildBatchFromOps(ops, existing);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 't1', kind: 'setWaiting', payload: { until: '2099-01-01', for: 'María' } }
+		]);
+	});
+
+	it('set_waiting sin `for`: el payload no lo lleva (omitido, no null)', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const ops: MutateTasksOp[] = [{ op: 'set_waiting', taskId: 't1', until: '2099-01-01' }];
+		const { batchOps } = buildBatchFromOps(ops, existing);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 't1', kind: 'setWaiting', payload: { until: '2099-01-01' } }
+		]);
+	});
+
+	it('clear_waiting: traduce a kind:clearWaiting sin payload', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const { batchOps, skipped } = buildBatchFromOps([{ op: 'clear_waiting', taskId: 't1' }], existing);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 't1', kind: 'clearWaiting', payload: {} }]);
+	});
+
+	it.each([
+		['set_waiting', { op: 'set_waiting', taskId: 's1', until: '2099-01-01' } satisfies MutateTasksOp],
+		['clear_waiting', { op: 'clear_waiting', taskId: 's1' } satisfies MutateTasksOp]
+	])('subtarea en `op:"%s"`: SÍ se acepta (sin guard de residencia)', (_name, op) => {
+		const sub = topLevel('s1', { parentId: 't1' });
+		const { batchOps, skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toHaveLength(1);
+	});
+
+	it('register_habit: su objetivo es el HÁBITO (habitId → taskId del BatchOp), sin comprobar existencia de tarea', () => {
+		const ops: MutateTasksOp[] = [{ op: 'register_habit', habitId: 'h1', date: '2026-09-24' }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map());
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 'h1', kind: 'registerHabit', payload: { date: '2026-09-24' } }
+		]);
+	});
+
+	it('register_habit SIN `date`: el payload viaja vacío (falla server-side hasta que la app resuelva el HOY)', () => {
+		const ops: MutateTasksOp[] = [{ op: 'register_habit', habitId: 'h1' }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map());
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 'h1', kind: 'registerHabit', payload: {} }]);
+	});
+
+	it('set_list_kind: traduce listId/listKind a kind:setListKind', () => {
+		const ops: MutateTasksOp[] = [{ op: 'set_list_kind', listId: 'l1', listKind: 'area' }];
+		const { batchOps } = buildBatchFromOps(ops, new Map());
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 'l1', kind: 'setListKind', payload: { listKind: 'area' } }
+		]);
+	});
+
+	it('create_list con `listKind`: viaja en el payload', () => {
+		const ops: MutateTasksOp[] = [{ op: 'create_list', name: 'Casa', listKind: 'area' }];
+		const { batchOps } = buildBatchFromOps(ops, new Map());
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: expect.any(String),
+				kind: 'createList',
+				payload: { name: 'Casa', listKind: 'area' }
+			}
+		]);
+	});
+
+	it('update con `deadline`/`reminders`: viajan en el payload', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const ops: MutateTasksOp[] = [
+			{ op: 'update', taskId: 't1', deadline: '2026-12-31', reminders: [60, 0] }
+		];
+		const { batchOps, skipped } = buildBatchFromOps(ops, existing);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: 't1',
+				kind: 'update',
+				payload: { deadline: '2026-12-31', reminders: [60, 0] }
+			}
+		]);
+	});
+
+	it('update con `deadline:null`: quita el deadline', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 't1', deadline: null }];
+		const { batchOps } = buildBatchFromOps(ops, existing);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 't1', kind: 'update', payload: { deadline: null } }
+		]);
+	});
+
+	it.each([
+		['deadline', { op: 'update', taskId: 's1', deadline: '2026-12-31' } satisfies MutateTasksOp],
+		['reminders', { op: 'update', taskId: 's1', reminders: [30] } satisfies MutateTasksOp]
+	])('update.%s sobre una SUBTAREA: se descarta (§2.5, PROHIBIDO)', (_name, op) => {
+		const sub = topLevel('s1', { parentId: 't1' });
+		const { batchOps, skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
+		expect(batchOps).toEqual([]);
+		expect(skipped[0].error).toMatch(/SUBTAREA/);
+	});
+
+	it('update con `content` (no deadline/reminders) sobre una SUBTAREA: sigue viajando (campo accidental permitido)', () => {
+		const sub = topLevel('s1', { parentId: 't1' });
+		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 's1', content: 'x' }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', sub]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toHaveLength(1);
+	});
 });
 
 // ── Reparto en dos fases (incidente 071553) — `planBatchPhases` /

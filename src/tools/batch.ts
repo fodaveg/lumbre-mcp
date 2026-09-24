@@ -43,23 +43,28 @@ function opWritesVisibleNotes(raw: Record<string, unknown>): boolean {
 }
 
 /**
- * DOS tools de lote sobre las MISMAS 16 ops de siempre, repartidas por lo que
- * hacen (2026-09-19, tarea 6f62c877 — decisión de David del 17 sep):
+ * DOS tools de lote sobre las MISMAS ops de siempre (16 hasta el 23 sep 2026,
+ * 21 desde MC6, ver abajo), repartidas por lo que hacen (2026-09-19, tarea
+ * 6f62c877 — decisión de David del 17 sep):
  *
  * - `mutate_tasks`: solo opera sobre UNA tarea — `add_task`, `complete`,
  *   `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`,
- *   `complete_subtask`, y desde el 2026-09-24 `restore` (sacar de la
- *   Papelera: no destruye nada, así que no va a `organize`).
+ *   `complete_subtask`, `restore` (2026-09-24, sacar de la Papelera: no
+ *   destruye nada, así que no va a `organize`) y, desde MC6 (2026-09-24,
+ *   paridad UI↔MCP), `set_waiting`/`clear_waiting` (estado «esperando») y
+ *   `register_habit` (ocurrencia de un hábito — su objetivo no es una tarea).
  * - `organize`: lo DESTRUCTIVO y la reorganización — `delete`,
  *   `remove_section`, `create_list`, `nest_list`, `rename_list`,
- *   `remove_list`, `set_list_notes` y `move_to_list` (esta va aquí, y no con
+ *   `remove_list`, `set_list_notes`, `move_to_list` (esta va aquí, y no con
  *   las de tarea, porque se encadena con `create_list` por el `listId`
- *   generado en el MISMO lote).
+ *   generado en el MISMO lote) y, desde MC6, `set_list_kind` (tipo visible
+ *   de un proyecto o área existente; `create_list.listKind` es su
+ *   equivalente al crear).
  *
  * El reparto compra dos cosas a la vez. (1) Tamaño: las 9 tools sueltas de
  * mutación individual (`complete_task`…`complete_subtask`) desaparecen —
  * `mutate_tasks`/`organize` ya las cubrían entero — y cada schema EXPUESTO
- * pasa a declarar SOLO los campos que usan SUS ops, no los 22 de las 16.
+ * pasa a declarar SOLO los campos que usan SUS ops, no los de las demás.
  * (2) Una frontera MECÁNICA para los subagentes portables
  * (`skills/lumbre/assets/subagents/contracts.json`): a `lumbre-tagger` y
  * `lumbre-daily-operator` se les da `mutate_tasks` y NO `organize`, así que
@@ -89,7 +94,7 @@ function opWritesVisibleNotes(raw: Record<string, unknown>): boolean {
  *   de "éxito parcial" que ya existía para un `taskId` inexistente: se
  *   reporta esa op concreta y las demás, si son válidas, se encolan igual.
  *
- * Por qué el `op` EXPUESTO es un `z.string()` y no un `z.enum` de las 8 ops
+ * Por qué el `op` EXPUESTO es un `z.string()` y no un `z.enum` de las ops
  * de su tool: un valor fuera del enum lo rechaza el FRAMEWORK
  * (`validateToolInput`, antes de que el handler exista), y eso tumba la
  * llamada entera con un volcado de Zod. Con `z.string()`, una op de la otra
@@ -157,7 +162,12 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			tags: z.array(tagSchema).optional(),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
 			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional(),
-			recurrence: z.union([recurrencePatchSchema, z.null()]).optional()
+			recurrence: z.union([recurrencePatchSchema, z.null()]).optional(),
+			// MC6 (2026-09-24): PROHIBIDOS en una subtarea (§2.5) — rechazado en
+			// `buildBatchFromOps`, no aquí (necesita saber si el `taskId` es
+			// subtarea, que solo se resuelve tras la comprobación de existencia).
+			deadline: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()]).optional(),
+			reminders: z.array(z.number().int().nonnegative()).optional()
 		})
 		.strict(),
 	z
@@ -174,6 +184,21 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			section: z.string().max(200).nullable()
 		})
 		.strict(),
+	// `set_waiting`/`clear_waiting` (MC6, paridad UI↔MCP — estado «esperando»).
+	z
+		.object({
+			op: z.literal('set_waiting'),
+			taskId: z.string().guid(),
+			until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+			for: z.union([z.string().max(2000), z.null()]).optional()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('clear_waiting'),
+			taskId: z.string().guid()
+		})
+		.strict(),
 	z
 		.object({
 			op: z.literal('add_subtask'),
@@ -187,11 +212,24 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			subtaskId: z.string().guid(),
 			done: z.boolean().optional()
 		})
+		.strict(),
+	// `register_habit` (MC6): registra una ocurrencia del hábito `habitId` (NO
+	// una tarea — no pasa el chequeo de existencia de tarea, ver
+	// `TASK_TARGET_ALLOW_SUBTASK` en `lumbre-client.ts`). `date` opcional: hasta
+	// que la app resuelva el HOY local del usuario cuando falte, omitirla falla
+	// server-side (ver el JSDoc de `RegisterHabitMutationPayload`).
+	z
+		.object({
+			op: z.literal('register_habit'),
+			habitId: z.string().guid(),
+			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+		})
 		.strict()
 ]);
 
-/** Formas ESTRICTAS de las 8 ops de `organize` (ver el JSDoc de arriba): las
- *  mismas que tenían en `mutate_tasks` antes del reparto, byte a byte. */
+/** Formas ESTRICTAS de las 9 ops de `organize` (ver el JSDoc de arriba): las
+ *  8 que tenían en `mutate_tasks` antes del reparto, byte a byte, más
+ *  `set_list_kind` (MC6). */
 export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 	z
 		.object({
@@ -211,7 +249,8 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 			name: z.string().min(1).max(200),
 			color: z.string().max(20).optional(),
 			icon: z.string().max(16).optional(),
-			listId: z.string().guid().optional()
+			listId: z.string().guid().optional(),
+			listKind: z.enum(['area', 'project']).optional()
 		})
 		.strict(),
 	z
@@ -249,13 +288,22 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 			listId: z.union([z.string().guid(), z.null()]).optional(),
 			list: z.string().max(200).optional()
 		})
+		.strict(),
+	// `set_list_kind` (MC6): cambia el tipo visible de un proyecto o área
+	// EXISTENTE; `create_list.listKind`, arriba, es su equivalente al crear.
+	z
+		.object({
+			op: z.literal('set_list_kind'),
+			listId: z.string().guid(),
+			listKind: z.enum(['area', 'project'])
+		})
 		.strict()
 ]);
 
 /**
  * Schema EXPUESTO de un elemento de `ops` de `mutate_tasks` (ver el JSDoc de
  * arriba para el porqué de tenerlo separado del estricto): plano, con los
- * campos que usan SUS 8 ops —ya no los 22 de las 16— y todos opcionales salvo
+ * campos que usan SUS ops —ya no los de `organize`— y todos opcionales salvo
  * `op`. Poda de superficie heredada (2026-08-25): cada campo lleva
  * `.describe()` SOLO si aporta algo que el nombre del campo + su tipo/patrón
  * no digan ya (semántica de `null`, default al omitir, o el comportamiento no
@@ -269,10 +317,11 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
  */
 export const mutateTasksOpSchema = z
 	.object({
-		op: z.string().describe('Operación — las 9 de esta tool, con su contrato, en la description de `ops`'),
+		op: z.string().describe('Operación — las 12 de esta tool, con su contrato, en la description de `ops`'),
 		taskId: z.string().guid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
 		subtaskId: z.string().guid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
 		listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
+		habitId: z.string().guid().optional().describe('Id del hábito (register_habit) — ver list_habits'),
 		// `text`/`content`/`deadline`: sin describe propio — el nombre del campo
 		// ya lo dice todo (texto de la tarea nueva o su nuevo texto, fecha
 		// límite) y no hay semántica extra (null, default, autocreación…) que
@@ -287,8 +336,14 @@ export const mutateTasksOpSchema = z
 		date: z
 			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
 			.optional()
-			.describe('YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada'),
-		deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+			.describe(
+				'YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada. En register_habit, el día a registrar ' +
+					'(opcional: sin servidor con el HOY local desplegado, omitirla falla)'
+			),
+		deadline: z
+			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
+			.optional()
+			.describe('update: null la quita. PROHIBIDO sobre una subtarea'),
 		time: z
 			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
 			.optional()
@@ -297,21 +352,30 @@ export const mutateTasksOpSchema = z
 		// crea con la regla entera, `update` manda un cambio parcial); la
 		// forma exacta de cada una la impone su schema estricto (ver `shared.ts`).
 		recurrence: z.union([exposedRecurrenceSchema, z.null()]).optional(),
+		reminders: z
+			.array(z.number().int().nonnegative())
+			.optional()
+			.describe('update: offsets en minutos-antes de time; [] los quita. PROHIBIDO sobre una subtarea'),
 		subtasks: z.array(z.string()).optional().describe('Textos de las subtareas, en orden'),
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
-		cancelled: z.boolean().optional().describe('true = cancelar (default); false = quitar la cancelación')
+		cancelled: z.boolean().optional().describe('true = cancelar (default); false = quitar la cancelación'),
+		until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('set_waiting: fecha de reconsulta, estrictamente futura'),
+		for: z
+			.union([z.string().max(2000), z.null()])
+			.optional()
+			.describe('set_waiting: a quién o qué se espera (texto libre)')
 	})
 	.passthrough();
 
 /**
  * Schema EXPUESTO de un elemento de `ops` de `organize` — mismo criterio que
  * el de `mutate_tasks` de arriba (plano, todo opcional salvo `op`,
- * `.passthrough()`, contrato por-op en la description de `ops`), con los 10
- * campos que usan SUS 8 ops.
+ * `.passthrough()`, contrato por-op en la description de `ops`), con los
+ * campos que usan SUS ops.
  */
 export const organizeOpSchema = z
 	.object({
-		op: z.string().describe('Operación — las 8 de esta tool, con su contrato, en la description de `ops`'),
+		op: z.string().describe('Operación — las 9 de esta tool, con su contrato, en la description de `ops`'),
 		taskId: z.string().guid().optional().describe('Id de la tarea a borrar o mover — ver list_tasks/get_task'),
 		sectionId: z.string().guid().optional().describe('Id de la sección — ver el campo sectionId de una tarea que viva en ella'),
 		listId: z
@@ -329,7 +393,8 @@ export const organizeOpSchema = z
 			.describe('Nota del proyecto o área (reemplaza la anterior entera; null la borra)'),
 		color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
 		icon: z.string().max(16).optional(),
-		revive: z.boolean().optional().describe('true restaura una nota de proyecto o área borrada previamente')
+		revive: z.boolean().optional().describe('true restaura una nota de proyecto o área borrada previamente'),
+		listKind: z.enum(['area', 'project']).optional().describe('create_list/set_list_kind: tipo visible del contenedor')
 	})
 	.passthrough();
 
@@ -540,7 +605,7 @@ async function runOpsBatch(
  * una tarea) y `organize` (reorganizar y borrar) — N operaciones de golpe en
  * UNA sola tool call, con el mismo motor (`runOpsBatch`, arriba) y el mismo
  * informe de éxito parcial. Ver el JSDoc de la cabecera para el reparto de
- * las 16 ops y por qué son dos tools y no una.
+ * las 21 ops (12+9, MC6) y por qué son dos tools y no una.
  */
 export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 	const mutateTasksTool = server.registerTool(
@@ -548,7 +613,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 		{
 			description:
 				`Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
-				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera). Vía ÚNICA para mutar una tarea (no hay tool ` +
+				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
+				`clear_waiting, register_habit (hábito, no tarea). Vía ÚNICA para mutar una tarea (no hay tool ` +
 				`suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
 				`UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
 				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
@@ -564,10 +630,14 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'priority, date, deadline, time, recurrence, subtasks, notes, tags] · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
-							'en una semilla archivada)] · ' +
+							'en una semilla archivada), deadline, reminders (deadline/reminders PROHIBIDOS sobre ' +
+							'una subtarea)] · ' +
 							'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
+							'set_waiting: taskId*, until* (estrictamente futura) [for] · clear_waiting: taskId* · ' +
 							'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
-							'restore: taskId* (tarea borrada; sin efecto si ya se purgó)'
+							'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +
+							'register_habit: habitId* [date] (habitId, no taskId; sin server con el HOY local ' +
+							'desplegado, omitir date falla)'
 					)
 			}
 		},
@@ -587,8 +657,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 		{
 			description:
 				`Reorganiza y borra: delete (tarea), remove_section, create_list, nest_list, rename_list, ` +
-				`remove_list, set_list_notes, move_to_list. Vía ÚNICA para proyectos, áreas y secciones, y ` +
-				`la única que borra. ACCIONES DELICADAS: sin deshacer — confirma con el usuario antes de ` +
+				`remove_list, set_list_notes, move_to_list, set_list_kind. Vía ÚNICA para proyectos, áreas y ` +
+				`secciones, y la única que borra. ACCIONES DELICADAS: sin deshacer — confirma con el usuario antes de ` +
 				`borrar. Mismo lote y mismo éxito PARCIAL que mutate_tasks, con el listId de cada ` +
 				`create_list; para encadenar en el MISMO lote, dale tú ese listId (uuid v4). ${OUTCOME_NOTE}`,
 			inputSchema: {
@@ -599,9 +669,10 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): delete: taskId* · remove_section: sectionId* · ' +
-							'create_list: name* [color, icon, listId] · nest_list: listId*, parentId* · rename_list: ' +
-							'listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* [revive] · ' +
-							'move_to_list: taskId*, uno de [listId, list]'
+							'create_list: name* [color, icon, listId, listKind] · nest_list: listId*, parentId* · ' +
+							'rename_list: listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* ' +
+							'[revive] · move_to_list: taskId*, uno de [listId, list] · ' +
+							'set_list_kind: listId*, listKind* ("area"|"project")'
 					)
 			}
 		},
