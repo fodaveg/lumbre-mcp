@@ -29,8 +29,9 @@ En claude.ai web o móvil, añade un conector personalizado con esa misma URL. N
 añadas un bearer ni un token en el path.
 
 Los clientes cachean `tools/list` al conectar: cuando cambia la superficie del
-MCP (la última vez, el 2026-09-23, al ampliar el esquema de `recurrence`; antes,
-el 2026-09-19, al retirar las nueve tools sueltas de
+MCP (la última vez, el 2026-09-24, al añadir seis ops nuevas de `mutate_tasks`/
+`organize` en MC7; antes, el 2026-09-23, al ampliar el esquema de
+`recurrence`; antes, el 2026-09-19, al retirar las nueve tools sueltas de
 mutación y partir el lote en `mutate_tasks`/`organize`), una sesión ya abierta
 de claude.ai o de Claude Code sigue viendo las tools viejas hasta que
 reconectes el conector o abras una sesión nueva.
@@ -429,11 +430,16 @@ de lote, que ya las cubrían entero:
   `complete_subtask`, `restore` (sacar de la Papelera, desde el 2026-09-24) y,
   desde MC6 (2026-09-24, paridad UI↔MCP), `set_waiting`/`clear_waiting`
   (estado «esperando») y `register_habit` (registra una ocurrencia de hábito;
-  su objetivo NO es una tarea).
+  su objetivo NO es una tarea). Desde MC7 (mismo día, tarea 8eee8c72,
+  decisión de David «solo el mínimo»): `archive`/`unarchive` (visibilidad, no
+  ciclo de vida), `skip_occurrence` (salta una ocurrencia de una serie) y
+  `archive_habit`/`unarchive_habit` (ciclo de vida de hábito; su objetivo
+  tampoco es una tarea).
 - **`organize`** — lo destructivo y la reorganización: `delete`,
   `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
-  `set_list_notes`, `move_to_list` y, desde MC6, `set_list_kind` (tipo visible
-  de un proyecto o área existente).
+  `set_list_notes`, `move_to_list`, `set_list_kind` (desde MC6, tipo visible
+  de un proyecto o área existente) y, desde MC7, `delete_habit` (borra un
+  hábito, sin `restore`).
 
 Por qué se partió así: baja el coste fijo de `tools/list` (de 26.756 a 21.346
 caracteres, -20%) y, sobre todo, deja la frontera de "puede borrar / no puede
@@ -568,6 +574,29 @@ operaciones a la vez» más abajo):
   HOY local del usuario cuando falte (pedido el 2026-09-24) — **hasta que lo
   despliegue, omitir `date` falla server-side**; mándala mientras tanto.
   Resuelve `habitId` con `list_habits`.
+- `{ op: "archive", taskId }` / `{ op: "unarchive", taskId }` (`mutate_tasks`,
+  MC7, 2026-09-24) — archivan/desarchivan una tarea: es VISIBILIDAD, no ciclo
+  de vida (no toca `done`/`cancelledAt`, cruza con todos los estados). Aceptan
+  el id de una SUBTAREA. Pedir el estado en el que ya está (archivar una
+  archivada, desarchivar una viva) es «sin efecto» sin aviso; un `taskId`
+  inexistente lo rechaza el conector ANTES de encolar, igual que el resto de
+  ops de tarea — salvo que `unarchive` casi siempre targetea una YA
+  archivada, así que si la comprobación normal (que excluye archivadas) no la
+  encuentra, el conector repite la búsqueda con `includeArchived` antes de
+  darla por inexistente.
+- `{ op: "skip_occurrence", seriesId, date }` (`mutate_tasks`, MC7) — salta la
+  ocurrencia de `date` (`YYYY-MM-DD`) de la serie `seriesId`. `seriesId` tiene
+  que ser la SEMILLA (`seriesId === id` en `list_tasks`/`get_task`, con regla,
+  de primer nivel) — si no lo es, «sin efecto» con el aviso de la app citando
+  `seriesId`. Sin comprobación de existencia en el cliente: el servidor decide
+  si `seriesId` es una semilla válida. Una ocurrencia FANTASMA (nunca
+  materializada, sin fila propia — el caso normal para una ocurrencia futura)
+  se salta igual: el conector no necesita conocer el id de esa fila, que casi
+  nunca puede saber de antemano.
+- `{ op: "archive_habit", habitId }` / `{ op: "unarchive_habit", habitId }`
+  (`mutate_tasks`, MC7) — ciclo de vida de un HÁBITO (no de una tarea; mismo
+  criterio que `register_habit`, sin comprobación de existencia contra
+  `GET /api/tasks`). Resuelve `habitId` con `list_habits`.
 - `{ op: "add_subtask", taskId, subtasks }` (`mutate_tasks`) — añade una o más
   subtareas (checklist, #17) a `taskId`. `subtasks` tiene tope 50 elementos de
   hasta 500 caracteres cada uno — MISMOS topes que la app aplica hoy en
@@ -583,14 +612,21 @@ operaciones a la vez» más abajo):
   existente, por su id (ver `get_task` de su tarea padre). Mismo mecanismo que
   `complete`: no cascada nada sobre la tarea padre.
 - `{ op: "delete", taskId }` (**`organize`**) — borra (soft-delete) la tarea.
-  **Acción delicada**: sin deshacer desde la tool;
-  confírmalo con el usuario antes de llamarla.
+  Desde MC7 (2026-09-24) acepta también una tarea ARCHIVADA: si la
+  comprobación normal de existencia (que excluye archivadas) no la encuentra,
+  el conector repite la búsqueda con `includeArchived` antes de darla por
+  inexistente — mismo mecanismo que `unarchive`. **Acción delicada**: sin
+  deshacer desde la tool; confírmalo con el usuario antes de llamarla.
 - `{ op: "remove_section", sectionId }` (**`organize`**) — borra (tombstone)
   una sección/heading dentro de un proyecto o área. Sus tareas NUNCA se
   borran: solo pierden la sección (quedan sueltas, "sin sección", dentro de la
   MISMA residencia). Sin `list_sections` todavía: resuelve el `sectionId`
   desde el campo `sectionId` de una tarea que ya viva ahí
   (`list_tasks`/`get_task`).
+- `{ op: "delete_habit", habitId }` (**`organize`**, MC7) — borra (tombstone)
+  un HÁBITO. **Acción delicada**: sin deshacer (a diferencia de una tarea, no
+  hay `restore` para un hábito borrado); confírmalo con el usuario antes de
+  llamarla. Resuelve `habitId` con `list_habits`.
 
 ### Gestión de proyectos y áreas (paridad UI↔MCP)
 
@@ -675,11 +711,13 @@ Fase 2.
   `list_brl_entries` de la que sale el id. Éxito PARCIAL igual que
   `mutate_tasks`: una op inválida no bloquea las demás.
 
-### Hábitos (lectura)
+### Hábitos
 
 Los hábitos v2 (`docs/36-habitos-v2.md` del repo principal) **no son tareas** y no
-salen en `list_tasks`. Escritura: la op `register_habit` de `mutate_tasks`
-(ver más abajo). Lectura:
+salen en `list_tasks`. Escritura: `register_habit` (registra una ocurrencia),
+`archive_habit`/`unarchive_habit` (MC7) de `mutate_tasks`, y `delete_habit`
+(MC7, destructiva) de `organize` — ver "Ejecutar varias operaciones a la vez"
+más abajo. Lectura:
 
 - `list_habits({ includeArchived? })` — enumera tus hábitos por `GET
   /api/export` (mismo token que `list_tasks`, pero límite MÁS ESTRICTO: **10
@@ -708,12 +746,13 @@ resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y 
 de un `add_task`, su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
-21 ops entre las dos tools (MC6, 2026-09-24, añade las 4 últimas de cada fila):
+27 ops entre las dos tools (MC7, 2026-09-24, añade las 5 últimas de la primera
+fila y la última de la segunda):
 
 | tool | ops |
 | --- | --- |
-| `mutate_tasks` (una tarea, hábito o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit` |
-| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind` |
+| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit` |
+| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
 encadena con `create_list` por el `listId` generado en el mismo lote (ver
@@ -738,6 +777,11 @@ add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
 restore: taskId* (tarea borrada; sin comprobación de existencia en el cliente)
 register_habit: habitId* [date] (habitId, NO taskId; sin comprobación de existencia de tarea)
+archive: taskId* (archiva; noop sin aviso si ya lo estaba)
+unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
+skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
+archive_habit: habitId* (sin comprobación de existencia de tarea)
+unarchive_habit: habitId* (sin comprobación de existencia de tarea)
 
 # organize
 delete: taskId*
@@ -749,6 +793,7 @@ remove_list: listId*
 set_list_notes: listId*, notes* [revive]
 move_to_list: taskId*, uno de [listId, list]
 set_list_kind: listId*, listKind*
+delete_habit: habitId* (sin comprobación de existencia de tarea)
 ```
 
 Un elemento que no encaja en la forma de SU `op` (campo obligatorio ausente,
@@ -772,10 +817,11 @@ los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 - **Sí**: `complete`, `cancel`, `delete`, `add_subtask`, `complete_subtask`,
   `update` (sus cinco campos —`content`, `notes`, `tags`, `priority`, `time`— son
   accidentales permitidos; `deadline`/`reminders` NO, ver abajo), `reschedule`,
-  con fecha o con `date: null` (`date` también lo es), y `set_waiting`/
-  `clear_waiting` (MC6: «esperando» no tiene guard de residencia). Una
-  subtarea con `date: null` se queda sin fecha en la checklist de su padre; no
-  cae a la Bandeja.
+  con fecha o con `date: null` (`date` también lo es), `set_waiting`/
+  `clear_waiting` (MC6: «esperando» no tiene guard de residencia) y
+  `archive`/`unarchive` (MC7: solo tocan `archivedAt`, que no está entre los
+  PROHIBIDOS). Una subtarea con `date: null` se queda sin fecha en la
+  checklist de su padre; no cae a la Bandeja.
 - **No** (se descarta esa op, las demás del lote siguen): `set_section` y
   `move_to_list`, porque escriben `sectionId`/`somedayListId`, PROHIBIDOS en
   una subtarea (no tiene proyecto, área ni sección propios: vive en la checklist de su
@@ -812,9 +858,14 @@ uno:
 
 La pareja alta→mutación (crear una tarea y tocarla en el mismo lote) sigue
 siendo inexpresable, como siempre: un `add_task` no lleva id de cliente y las
-11 ops que targetean una tarea comprueban su existencia contra el servidor
-ANTES de mandar el batch (`register_habit` es la excepción MC6, junto con
-`restore`: su objetivo no es una tarea). El encadenado dentro de `organize` es SIEMPRE por
+13 ops que targetean una tarea (MC7 añade `archive`/`unarchive`) comprueban su
+existencia contra el servidor ANTES de mandar el batch — salvo `restore` (su
+objetivo es una tarea BORRADA) y, desde MC7, `unarchive` y `delete` sobre una
+archivada, que repiten esa comprobación con `includeArchived` en vez de
+saltársela. Las ops cuyo objetivo NO es una tarea (`register_habit`,
+`skip_occurrence`, `archive_habit`, `unarchive_habit`, `delete_habit`) no
+comprueban nada contra `GET /api/tasks`: decide el servidor. El encadenado
+dentro de `organize` es SIEMPRE por
 `listId` (el uuid que tú le diste al `create_list`), nunca por `list`
 (nombre): la detección de la dependencia solo mira `listId` a propósito.
 

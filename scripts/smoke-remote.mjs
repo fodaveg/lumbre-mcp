@@ -56,7 +56,9 @@ const scope = 'lumbre:mcp';
 // 2026-09-24 (MC6 + `list_habits`, 5030cf1): 17 tools y 24.594 caracteres;
 // el test subió su techo a 25.800 y este se quedó en 16/22.400 — la misma
 // deriva de arriba, medida en el smoke de ese deploy.
-const CHAR_CEILING = 25800;
+// 2026-09-24 (MC7, tarea 8eee8c72): 6 ops nuevas repartidas en las mismas 17
+// tools, 25.558 caracteres; el test sube su techo a 26.800.
+const CHAR_CEILING = 26800;
 const EXPECTED_TOOL_COUNT = 17;
 
 if (!url) {

@@ -289,8 +289,15 @@ describe('tools/list — superficie completa', () => {
 		// +5,8%). (2) tool nueva `list_habits` → 17 tools, 24.253 (+573).
 		// (3) topes de `subtasks` y rechazo de tags de desarrollo → 17 tools,
 		// 24.594 caracteres = +2.209 sobre los 22.385 de dc4bfc9 (+9,9%).
+		// Re-medido el 2026-09-24 (MC7, tarea 8eee8c72, «solo el mínimo»):
+		// `archive`/`unarchive`/`skip_occurrence`/`archive_habit`/
+		// `unarchive_habit` en `mutate_tasks` y `delete_habit` en `organize` (6
+		// ops nuevas, 21→27) → sigue en 17 tools, 25.558 caracteres = +964 sobre
+		// los 24.594 de arriba (+3,9%). `literal: true` (tarea cd39f028) no
+		// cuenta aquí: no es un campo expuesto al modelo, se fuerza dentro del
+		// cliente sin tocar ningún schema.
 		// Techo = medido + ~5%.
-		const CHAR_CEILING = 25800;
+		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -328,7 +335,7 @@ describe('tools/list — superficie completa', () => {
 	 * se vigila aquí es que esa tabla siga NOMBRANDO las ops de cada tool —
 	 * si alguien añade una op y no la documenta, el modelo no puede llamarla.
 	 */
-	it('`mutate_tasks` y `organize` documentan sus ops (12+9, MC6) en la description de `ops`', () => {
+	it('`mutate_tasks` y `organize` documentan sus ops (17+10, MC7) en la description de `ops`', () => {
 		const opsDescription = (name: string) => {
 			const tool = tools.find((t) => t.name === name);
 			expect(tool).toBeDefined();
@@ -352,13 +359,18 @@ describe('tools/list — superficie completa', () => {
 			'restore',
 			'set_waiting',
 			'clear_waiting',
-			'register_habit'
+			'register_habit',
+			'archive',
+			'unarchive',
+			'skip_occurrence',
+			'archive_habit',
+			'unarchive_habit'
 		]) {
 			expect(mutateTasksOps).toContain(`${op}:`);
 		}
 		// Y NO las de la otra: es la frontera que hace mecánica la prohibición
 		// de borrar para un subagente al que solo se le da `mutate_tasks`.
-		for (const op of ['delete:', 'remove_list:', 'move_to_list:', 'set_list_kind:']) {
+		for (const op of ['delete:', 'remove_list:', 'move_to_list:', 'set_list_kind:', 'delete_habit:']) {
 			expect(mutateTasksOps).not.toContain(op);
 		}
 
@@ -372,7 +384,8 @@ describe('tools/list — superficie completa', () => {
 			'remove_list',
 			'set_list_notes',
 			'move_to_list',
-			'set_list_kind'
+			'set_list_kind',
+			'delete_habit'
 		]) {
 			expect(organizeOps).toContain(`${op}:`);
 		}
@@ -1183,13 +1196,71 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				listKind: 'area',
 				name: 'x'
 			}
+		},
+		// MC7 (2026-09-24, tarea 8eee8c72): las 6 ops nuevas.
+		{
+			op: 'archive',
+			valid: { op: 'archive', taskId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'taskId',
+			extraField: { op: 'archive', taskId: '11111111-1111-1111-1111-111111111111', done: true }
+		},
+		{
+			op: 'unarchive',
+			valid: { op: 'unarchive', taskId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'taskId',
+			extraField: { op: 'unarchive', taskId: '11111111-1111-1111-1111-111111111111', done: true }
+		},
+		{
+			op: 'skip_occurrence',
+			valid: {
+				op: 'skip_occurrence',
+				seriesId: '11111111-1111-1111-1111-111111111111',
+				date: '2026-10-01'
+			},
+			missingField: 'date',
+			extraField: {
+				op: 'skip_occurrence',
+				seriesId: '11111111-1111-1111-1111-111111111111',
+				date: '2026-10-01',
+				taskId: '22222222-2222-2222-2222-222222222222'
+			}
+		},
+		{
+			op: 'archive_habit',
+			valid: { op: 'archive_habit', habitId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'habitId',
+			extraField: {
+				op: 'archive_habit',
+				habitId: '11111111-1111-1111-1111-111111111111',
+				taskId: '22222222-2222-2222-2222-222222222222'
+			}
+		},
+		{
+			op: 'unarchive_habit',
+			valid: { op: 'unarchive_habit', habitId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'habitId',
+			extraField: {
+				op: 'unarchive_habit',
+				habitId: '11111111-1111-1111-1111-111111111111',
+				taskId: '22222222-2222-2222-2222-222222222222'
+			}
+		},
+		{
+			op: 'delete_habit',
+			valid: { op: 'delete_habit', habitId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'habitId',
+			extraField: {
+				op: 'delete_habit',
+				habitId: '11111111-1111-1111-1111-111111111111',
+				taskId: '22222222-2222-2222-2222-222222222222'
+			}
 		}
 	];
 
-	/** Las 9 ops que viven en `organize` (MC6 añade `set_list_kind`); el resto,
-	 *  en `mutate_tasks` (mapa `TASK_OP_TOOL` de `tools/shared.ts` — aquí se
-	 *  repite a propósito: si el reparto cambia en el código sin que nadie lo
-	 *  decida, estos tests caen). */
+	/** Las 10 ops que viven en `organize` (MC6 añade `set_list_kind`, MC7 añade
+	 *  `delete_habit`); el resto, en `mutate_tasks` (mapa `TASK_OP_TOOL` de
+	 *  `tools/shared.ts` — aquí se repite a propósito: si el reparto cambia en
+	 *  el código sin que nadie lo decida, estos tests caen). */
 	const ORGANIZE_OPS = new Set([
 		'delete',
 		'remove_section',
@@ -1199,12 +1270,13 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 		'remove_list',
 		'set_list_notes',
 		'move_to_list',
-		'set_list_kind'
+		'set_list_kind',
+		'delete_habit'
 	]);
 	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
 	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
 
-	it('cubre las 21 operaciones (guardarraíl del propio test; MC6 desde el 2026-09-24)', () => {
+	it('cubre las 27 operaciones (guardarraíl del propio test; MC7 desde el 2026-09-24)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
@@ -1227,7 +1299,13 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				'set_waiting',
 				'clear_waiting',
 				'register_habit',
-				'set_list_kind'
+				'set_list_kind',
+				'archive',
+				'unarchive',
+				'skip_occurrence',
+				'archive_habit',
+				'unarchive_habit',
+				'delete_habit'
 			].sort()
 		);
 	});
@@ -1504,6 +1582,200 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		);
 
 		expect(text).toContain('la op "restore" no existe en organize; está en mutate_tasks');
+		expect(batchCalls(fetchSpy)).toHaveLength(0);
+	});
+
+	// MC7 (2026-09-24, tarea 8eee8c72): visibilidad de tarea, salto de
+	// ocurrencia y ciclo de vida de hábito.
+	it('unarchive sobre una tarea ARCHIVADA: la búsqueda normal no la ve, la segunda con includeArchived sí, y viaja kind:unarchive', async () => {
+		const taskId = '11111111-1111-1111-1111-111111111111';
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?') && u.includes('includeArchived=true')) {
+				return jsonResponse([{ id: taskId, content: 'Ducha', archivedAt: '2026-09-09T18:19:11.922Z' }]);
+			}
+			if (u.includes('/api/tasks?')) return jsonResponse([]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: taskId, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'unarchive', taskId }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toEqual({ type: 'mutate', taskId, kind: 'unarchive', payload: {} });
+		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
+	});
+
+	it('delete sobre una tarea ARCHIVADA: la comprobación de existencia también la encuentra con includeArchived', async () => {
+		const taskId = '22222222-2222-2222-2222-222222222222';
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?') && u.includes('includeArchived=true')) {
+				return jsonResponse([{ id: taskId, content: 'Vieja', archivedAt: '2026-09-09T18:19:11.922Z' }]);
+			}
+			if (u.includes('/api/tasks?')) return jsonResponse([]);
+			return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: taskId }] });
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'delete', taskId }] } });
+
+		expect(result.isError).not.toBe(true);
+		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
+		expect(resultText(result)).not.toMatch(/fallaron/);
+	});
+
+	it('archive_habit sobre un habitId INEXISTENTE: el informe trae el notice target-missing de la app, igual que restore-purged', async () => {
+		// `archive_habit` NO comprueba existencia (su objetivo es un hábito, ver
+		// `TASK_TARGET_ALLOW_SUBTASK`): el id inexistente viaja tal cual y el
+		// `noop`+aviso lo decide el servidor, no el cliente — a diferencia de
+		// `archive`/`unarchive` (tareas), que SÍ lo comprueban antes de encolar.
+		const habitId = '33333333-3333-4333-8333-333333333333';
+		const notice = `«archiveHabit» no se aplicó: no existe nada con el id ${habitId} (o ya estaba borrado).`;
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: habitId, materialization: 'noop' }],
+				notices: [notice]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({ name: 'mutate_tasks', arguments: { ops: [{ op: 'archive_habit', habitId }] } })
+		);
+
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/tasks'))).toBe(false);
+		expect(text).toMatch(/\[0\] archive_habit: sin efecto/);
+		expect(text).toContain(`avisos de la app:\n  - ${notice}`);
+	});
+
+	it('skip_occurrence manda taskId=seriesId al envelope, sin comprobar existencia (sin llamada a /api/tasks)', async () => {
+		const seriesId = '44444444-4444-4444-8444-444444444444';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: seriesId, materialization: 'applied' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'skip_occurrence', seriesId, date: '2026-10-01' }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		// Ninguna llamada a `/api/tasks`: `skip_occurrence` no comprueba
+		// existencia (el servidor decide si `seriesId` es una semilla válida).
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/tasks'))).toBe(false);
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toEqual({
+			type: 'mutate',
+			taskId: seriesId,
+			kind: 'skipOccurrence',
+			payload: { seriesId, date: '2026-10-01' }
+		});
+	});
+
+	it('skip_occurrence sobre un seriesId que NO es semilla: el informe trae el notice target-missing', async () => {
+		const seriesId = '55555555-5555-4555-8555-555555555555';
+		const notice = `«skipOccurrence» no se aplicó: no existe nada con el id ${seriesId} (o ya estaba borrado).`;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: seriesId, materialization: 'noop' }],
+					notices: [notice]
+				})
+			)
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'skip_occurrence', seriesId, date: '2026-10-01' }] }
+			})
+		);
+
+		expect(text).toMatch(/\[0\] skip_occurrence: sin efecto/);
+		expect(text).toContain(`avisos de la app:\n  - ${notice}`);
+	});
+
+	it.each([
+		['archive_habit', 'archiveHabit'],
+		['unarchive_habit', 'unarchiveHabit']
+	])('%s (mutate_tasks): sin comprobación de existencia, viaja kind:%s con habitId como taskId', async (op, kind) => {
+		const habitId = '66666666-6666-4666-8666-666666666666';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: habitId, materialization: 'applied' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'mutate_tasks', arguments: { ops: [{ op, habitId }] } });
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/tasks'))).toBe(false);
+		const calls = batchCalls(fetchSpy);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toEqual({ type: 'mutate', taskId: habitId, kind, payload: {} });
+	});
+
+	it('delete_habit (organize): sin comprobación de existencia, viaja kind:deleteHabit', async () => {
+		const habitId = '77777777-7777-4777-8777-777777777777';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: habitId, materialization: 'applied' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'delete_habit', habitId }] } });
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/tasks'))).toBe(false);
+		const calls = batchCalls(fetchSpy);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toEqual({ type: 'mutate', taskId: habitId, kind: 'deleteHabit', payload: {} });
+	});
+
+	it('archive_habit NO existe en organize / delete_habit NO existe en mutate_tasks: puntero cruzado, sin tocar red', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const habitId = '88888888-8888-4888-8888-888888888888';
+		const textOrganize = resultText(
+			await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'archive_habit', habitId }] } })
+		);
+		const textMutate = resultText(
+			await client.callTool({ name: 'mutate_tasks', arguments: { ops: [{ op: 'delete_habit', habitId }] } })
+		);
+
+		expect(textOrganize).toContain('la op "archive_habit" no existe en organize; está en mutate_tasks');
+		expect(textMutate).toContain('la op "delete_habit" no existe en mutate_tasks; está en organize');
 		expect(batchCalls(fetchSpy)).toHaveLength(0);
 	});
 

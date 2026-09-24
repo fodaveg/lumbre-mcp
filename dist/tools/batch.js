@@ -194,6 +194,40 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
         habitId: z.string().guid(),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
     })
+        .strict(),
+    // MC7 (2026-09-24, tarea 8eee8c72): visibilidad de tarea, salto de
+    // ocurrencia y ciclo de vida de hábito — ver el JSDoc de `MutateTasksOp`
+    // en `lumbre-client.ts` para el contrato completo de cada una.
+    z
+        .object({
+        op: z.literal('archive'),
+        taskId: z.string().guid()
+    })
+        .strict(),
+    z
+        .object({
+        op: z.literal('unarchive'),
+        taskId: z.string().guid()
+    })
+        .strict(),
+    z
+        .object({
+        op: z.literal('skip_occurrence'),
+        seriesId: z.string().guid(),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+    })
+        .strict(),
+    z
+        .object({
+        op: z.literal('archive_habit'),
+        habitId: z.string().guid()
+    })
+        .strict(),
+    z
+        .object({
+        op: z.literal('unarchive_habit'),
+        habitId: z.string().guid()
+    })
         .strict()
 ]);
 /** Formas ESTRICTAS de las 9 ops de `organize` (ver el JSDoc de arriba): las
@@ -266,6 +300,15 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
         listId: z.string().guid(),
         listKind: z.enum(['area', 'project'])
     })
+        .strict(),
+    // `delete_habit` (MC7, 2026-09-24): borra un HÁBITO — destructiva, sin
+    // `restore`, así que vive en `organize` con el resto de lo destructivo, no
+    // junto a `archive_habit`/`unarchive_habit` en `mutate_tasks`.
+    z
+        .object({
+        op: z.literal('delete_habit'),
+        habitId: z.string().guid()
+    })
         .strict()
 ]);
 /**
@@ -285,11 +328,21 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
  */
 export const mutateTasksOpSchema = z
     .object({
-    op: z.string().describe('Operación — las 12 de esta tool, con su contrato, en la description de `ops`'),
+    op: z.string().describe('Operación — las 17 de esta tool, con su contrato, en la description de `ops`'),
     taskId: z.string().guid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
     subtaskId: z.string().guid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
     listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
-    habitId: z.string().guid().optional().describe('Id del hábito (register_habit) — ver list_habits'),
+    habitId: z
+        .string()
+        .guid()
+        .optional()
+        .describe('Id del hábito (register_habit/archive_habit/unarchive_habit) — ver list_habits'),
+    seriesId: z
+        .string()
+        .guid()
+        .optional()
+        .describe('skip_occurrence: id de la SEMILLA de la serie (no de una ocurrencia) — list_tasks/get_task la ' +
+        'muestran como "semilla" en su propia línea y como "serie:<id>" en cada ocurrencia'),
     // `text`/`content`/`deadline`: sin describe propio — el nombre del campo
     // ya lo dice todo (texto de la tarea nueva o su nuevo texto, fecha
     // límite) y no hay semántica extra (null, default, autocreación…) que
@@ -308,7 +361,8 @@ export const mutateTasksOpSchema = z
         .union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
         .optional()
         .describe('YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada. En register_habit, el día a registrar ' +
-        '(opcional: sin servidor con el HOY local desplegado, omitirla falla)'),
+        '(opcional: sin servidor con el HOY local desplegado, omitirla falla). En skip_occurrence, ' +
+        'el día de la ocurrencia a saltar (obligatorio, junto con seriesId)'),
     deadline: z
         .union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
         .optional()
@@ -343,8 +397,9 @@ export const mutateTasksOpSchema = z
  */
 export const organizeOpSchema = z
     .object({
-    op: z.string().describe('Operación — las 9 de esta tool, con su contrato, en la description de `ops`'),
+    op: z.string().describe('Operación — las 10 de esta tool, con su contrato, en la description de `ops`'),
     taskId: z.string().guid().optional().describe('Id de la tarea a borrar o mover — ver list_tasks/get_task'),
+    habitId: z.string().guid().optional().describe('Id del hábito (delete_habit) — ver list_habits'),
     sectionId: z.string().guid().optional().describe('Id de la sección — ver el campo sectionId de una tarea que viva en ella'),
     listId: z
         .union([z.string().guid(), z.null()])
@@ -421,15 +476,23 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
     });
     const idsToCheck = collectExistenceCheckIds(validated);
     const existing = idsToCheck.length > 0 ? await findTasksByIds(ctx.config, idsToCheck) : new Map();
-    // `update` con `recurrence: null` es la única op que la app aplica sobre una
-    // tarea ARCHIVADA (apagar una semilla que sigue generando, ver
-    // `clearArchivedSeedRecurrence` en el repo principal). Solo para esos ids,
-    // y solo si la búsqueda normal no los vio, se repite incluyendo archivadas.
-    const archivedSeedIds = validated
-        .filter((op) => op.op === 'update' && op.recurrence === null && !existing.has(op.taskId))
+    // Tres ops aplican (o pueden aplicar) sobre una tarea ARCHIVADA, que
+    // `findTasksByIds` normal (arriba) no ve: `update` con `recurrence: null`
+    // (apagar una semilla que sigue generando, ver `clearArchivedSeedRecurrence`
+    // en el repo principal — CX7), `unarchive` (MC7: su objetivo CASI SIEMPRE
+    // está archivado, es su caso de uso principal) y `delete` (MC7: acepta
+    // ahora tareas archivadas). Solo para esos ids, y solo si la búsqueda
+    // normal no los vio, se repite incluyendo archivadas — así una
+    // `unarchive`/`delete` legítima sobre una archivada no muere aquí con un
+    // falso "no existe" (`archive`, cuyo objetivo casi siempre es una tarea
+    // VIVA, se queda fuera a propósito: el mismo criterio que ya aplicaba
+    // cualquier otra op antes de MC7, ver el JSDoc de `taskNotFoundError`).
+    const archivedLookupIds = validated
+        .filter((op) => (op.op === 'update' && op.recurrence === null && !existing.has(op.taskId)) ||
+        ((op.op === 'unarchive' || op.op === 'delete') && !existing.has(op.taskId)))
         .map((op) => op.taskId);
-    if (archivedSeedIds.length > 0) {
-        const archived = await findTasksByIds(ctx.config, [...new Set(archivedSeedIds)], {
+    if (archivedLookupIds.length > 0) {
+        const archived = await findTasksByIds(ctx.config, [...new Set(archivedLookupIds)], {
             includeArchived: true
         });
         for (const [id, task] of archived)
@@ -569,13 +632,15 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
  * una tarea) y `organize` (reorganizar y borrar) — N operaciones de golpe en
  * UNA sola tool call, con el mismo motor (`runOpsBatch`, arriba) y el mismo
  * informe de éxito parcial. Ver el JSDoc de la cabecera para el reparto de
- * las 21 ops (12+9, MC6) y por qué son dos tools y no una.
+ * las 27 ops (17+10, MC7) y por qué son dos tools y no una.
  */
 export function registerBatchTool(server, ctx) {
     const mutateTasksTool = server.registerTool('mutate_tasks', {
         description: `Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
             `set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
-            `clear_waiting, register_habit (hábito, no tarea). Vía ÚNICA para mutar una tarea (no hay tool ` +
+            `clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +
+            `unarchive (visibilidad, no ciclo de vida) y skip_occurrence (salta una ocurrencia de una ` +
+            `serie). Vía ÚNICA para mutar una tarea (no hay tool ` +
             `suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
             `UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
             `inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
@@ -597,7 +662,11 @@ export function registerBatchTool(server, ctx) {
                 'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
                 'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +
                 'register_habit: habitId* [date] (habitId, no taskId; sin server con el HOY local ' +
-                'desplegado, omitir date falla)')
+                'desplegado, omitir date falla) · ' +
+                'archive: taskId* (archiva la tarea; noop si ya lo estaba) · ' +
+                'unarchive: taskId* (desarchiva; noop si ya estaba viva) · ' +
+                'skip_occurrence: seriesId*, date* (seriesId = SEMILLA de la serie, no una ocurrencia; ' +
+                'noop con aviso si no lo es) · archive_habit: habitId* · unarchive_habit: habitId*')
         }
     }, async (input) => {
         try {
@@ -609,8 +678,8 @@ export function registerBatchTool(server, ctx) {
     });
     const organizeTool = server.registerTool('organize', {
         description: `Reorganiza y borra: delete (tarea), remove_section, create_list, nest_list, rename_list, ` +
-            `remove_list, set_list_notes, move_to_list, set_list_kind. Vía ÚNICA para proyectos, áreas y ` +
-            `secciones, y la única que borra. ACCIONES DELICADAS: sin deshacer — confirma con el usuario antes de ` +
+            `remove_list, set_list_notes, move_to_list, set_list_kind, delete_habit. Vía ÚNICA para ` +
+            `proyectos, áreas y secciones, y la única que borra. ACCIONES DELICADAS: sin deshacer — confirma con el usuario antes de ` +
             `borrar. Mismo lote y mismo éxito PARCIAL que mutate_tasks, con el listId de cada ` +
             `create_list; para encadenar en el MISMO lote, dale tú ese listId (uuid v4). ${OUTCOME_NOTE}`,
         inputSchema: {
@@ -623,7 +692,8 @@ export function registerBatchTool(server, ctx) {
                 'create_list: name* [color, icon, listId, listKind] · nest_list: listId*, parentId* · ' +
                 'rename_list: listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* ' +
                 '[revive] · move_to_list: taskId*, uno de [listId, list] · ' +
-                'set_list_kind: listId*, listKind* ("area"|"project")')
+                'set_list_kind: listId*, listKind* ("area"|"project") · ' +
+                'delete_habit: habitId* (borra el hábito, sin deshacer)')
         }
     }, async (input) => {
         try {

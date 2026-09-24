@@ -103,7 +103,7 @@ export function formatOutcomeReport(entries, notices) {
     return lines.join('\n');
 }
 /**
- * Mapa op → tool que la implementa, con las 16 ops de tarea repartidas entre
+ * Mapa op → tool que la implementa, con las ops de tarea repartidas entre
  * las DOS tools de lote (2026-09-19, tarea 6f62c877): `mutate_tasks` opera
  * sobre UNA tarea (`add_task`/`complete`/`cancel`/`update`/`reschedule`/
  * `set_section`/`add_subtask`/`complete_subtask`) y `organize` reorganiza y
@@ -112,7 +112,10 @@ export function formatOutcomeReport(entries, notices) {
  * sentidos: cada tool usa el mapa para señalar a la otra cuando recibe una op
  * ajena (ver `formatOpShapeError`, justo debajo), así que un modelo que
  * mande `delete` a `mutate_tasks` lee dónde vive de verdad en vez de un
- * "discriminador inválido" a secas.
+ * "discriminador inválido" a secas. MC6 (2026-09-24) añade `set_waiting`/
+ * `clear_waiting`/`register_habit`/`set_list_kind`; MC7 (mismo día, tarea
+ * 8eee8c72) añade `archive`/`unarchive`/`skip_occurrence`/`archive_habit`/
+ * `unarchive_habit` a `mutate_tasks` y `delete_habit` a `organize`.
  */
 export const TASK_OP_TOOL = {
     add_task: 'mutate_tasks',
@@ -127,6 +130,13 @@ export const TASK_OP_TOOL = {
     register_habit: 'mutate_tasks',
     add_subtask: 'mutate_tasks',
     complete_subtask: 'mutate_tasks',
+    // MC7 (2026-09-24, tarea 8eee8c72): visibilidad/serie/hábito, todas en
+    // `mutate_tasks` salvo `delete_habit` (destructiva, va con `organize`).
+    archive: 'mutate_tasks',
+    unarchive: 'mutate_tasks',
+    skip_occurrence: 'mutate_tasks',
+    archive_habit: 'mutate_tasks',
+    unarchive_habit: 'mutate_tasks',
     delete: 'organize',
     remove_section: 'organize',
     create_list: 'organize',
@@ -135,7 +145,8 @@ export const TASK_OP_TOOL = {
     rename_list: 'organize',
     remove_list: 'organize',
     set_list_notes: 'organize',
-    move_to_list: 'organize'
+    move_to_list: 'organize',
+    delete_habit: 'organize'
 };
 /**
  * Mensaje legible para un elemento de `ops` que no encaja en la forma

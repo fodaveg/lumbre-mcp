@@ -785,6 +785,20 @@ export async function runBatch(config, ops) {
  * siquiera es de la tabla de tareas). `set_list_kind` tampoco: targetea un
  * proyecto/área, como `nest_list`/`rename_list`/`remove_list`.
  *
+ * MC7 (2026-09-24, tarea 8eee8c72): `archive`/`unarchive` entran a `true` —
+ * solo tocan `archivedAt` (visibilidad, docs/18 §4), que no está entre los
+ * campos PROHIBIDOS en subtarea de §2.5, y `archiveTaskOp` no asume que
+ * `taskId` sea de primer nivel (cascada a subtareas propias si las tiene, no
+ * pasa nada si ella misma ya lo es). A diferencia de `restore`, SÍ comprueban
+ * existencia — pero no basta con `findTasksByIds` normal, que excluye
+ * archivadas: `unarchive` (y `delete` sobre una archivada, MC7 también) la
+ * repiten con `includeArchived` cuando la primera búsqueda no la encuentra —
+ * ver `runOpsBatch` en `tools/batch.ts`. `skip_occurrence`/`archive_habit`/
+ * `unarchive_habit`/`delete_habit` NO están aquí: la primera targetea una
+ * SERIE (`seriesId`, no `taskId`/`subtaskId` — el servidor decide si es una
+ * semilla válida), y las otras tres targetean un HÁBITO, mismo motivo que
+ * `register_habit`.
+ *
  * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
  * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
  * `collectExistenceCheckIds` (solo por la PRESENCIA de la clave: qué ops
@@ -805,7 +819,9 @@ const TASK_TARGET_ALLOW_SUBTASK = {
     set_section: false,
     move_to_list: false,
     set_waiting: true,
-    clear_waiting: true
+    clear_waiting: true,
+    archive: true,
+    unarchive: true
 };
 /** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
  *  de lista/sección/creación (ver `TASK_TARGET_ALLOW_SUBTASK`). */
@@ -1033,6 +1049,27 @@ function translateOp(op) {
                 kind: 'registerHabit',
                 payload: op.date !== undefined ? { date: op.date } : {}
             };
+        case 'archive':
+            return { type: 'mutate', taskId: op.taskId, kind: 'archive', payload: {} };
+        case 'unarchive':
+            return { type: 'mutate', taskId: op.taskId, kind: 'unarchive', payload: {} };
+        case 'skip_occurrence':
+            // `taskId` envelope = `seriesId` (decisión MC7 para la ocurrencia
+            // FANTASMA, el caso común — ver el JSDoc del tipo `MutateTasksOp`
+            // para la verificación completa contra `skipOccurrence`/
+            // `movedOccurrence` del repo principal).
+            return {
+                type: 'mutate',
+                taskId: op.seriesId,
+                kind: 'skipOccurrence',
+                payload: { seriesId: op.seriesId, date: op.date }
+            };
+        case 'archive_habit':
+            return { type: 'mutate', taskId: op.habitId, kind: 'archiveHabit', payload: {} };
+        case 'unarchive_habit':
+            return { type: 'mutate', taskId: op.habitId, kind: 'unarchiveHabit', payload: {} };
+        case 'delete_habit':
+            return { type: 'mutate', taskId: op.habitId, kind: 'deleteHabit', payload: {} };
     }
 }
 /**

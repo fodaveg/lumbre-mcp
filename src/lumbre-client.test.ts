@@ -753,7 +753,7 @@ describe('mergeRecurrencePatch (MC3)', () => {
 });
 
 describe('collectExistenceCheckIds', () => {
-	it('recoge taskId/subtaskId SOLO de las 11 ops que targetean una tarea, deduplicados', () => {
+	it('recoge taskId/subtaskId SOLO de las 13 ops que targetean una tarea (MC7 añade archive/unarchive), deduplicados', () => {
 		const ops: MutateTasksOp[] = [
 			{ op: 'complete', taskId: 't1' },
 			{ op: 'cancel', taskId: 't1' }, // repetido: una sola entrada
@@ -784,6 +784,31 @@ describe('collectExistenceCheckIds', () => {
 				{ op: 'clear_waiting', taskId: 't1' }
 			])
 		).toEqual(['t1']);
+	});
+
+	it('archive/unarchive SÍ piden existencia (targetean una tarea, MC7)', () => {
+		expect(
+			collectExistenceCheckIds([
+				{ op: 'archive', taskId: 't1' },
+				{ op: 'unarchive', taskId: 't1' }
+			])
+		).toEqual(['t1']);
+	});
+
+	it('skip_occurrence NO pide existencia: su objetivo es una SERIE, no una tarea/subtarea (MC7)', () => {
+		expect(collectExistenceCheckIds([{ op: 'skip_occurrence', seriesId: 's1', date: '2026-10-01' }])).toEqual(
+			[]
+		);
+	});
+
+	it('archive_habit/unarchive_habit/delete_habit NO piden existencia de tarea: su objetivo es un HÁBITO (MC7)', () => {
+		expect(
+			collectExistenceCheckIds([
+				{ op: 'archive_habit', habitId: 'h1' },
+				{ op: 'unarchive_habit', habitId: 'h1' },
+				{ op: 'delete_habit', habitId: 'h1' }
+			])
+		).toEqual([]);
 	});
 });
 
@@ -1417,6 +1442,51 @@ describe('buildBatchFromOps', () => {
 		const { batchOps, skipped } = buildBatchFromOps(ops, existing);
 		expect(skipped).toEqual([]);
 		expect(batchOps).toHaveLength(2);
+	});
+
+	// ── MC7 (2026-09-24, tarea 8eee8c72): archive/unarchive/skip_occurrence/
+	// archive_habit/unarchive_habit/delete_habit ────────────────────────────
+
+	it.each([
+		['archive', 'archive'],
+		['unarchive', 'unarchive']
+	])('%s: traduce taskId a kind:%s con payload vacío', (op, kind) => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const ops: MutateTasksOp[] = [{ op, taskId: 't1' } as MutateTasksOp];
+		const { batchOps, skipped } = buildBatchFromOps(ops, existing);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 't1', kind, payload: {} }]);
+	});
+
+	it.each([
+		['archive', 'archive'],
+		['unarchive', 'unarchive']
+	])('%s sobre una SUBTAREA: SÍ se acepta (archivedAt no es un campo PROHIBIDO en §2.5)', (op, kind) => {
+		const sub = topLevel('s1', { parentId: 't1' });
+		const ops: MutateTasksOp[] = [{ op, taskId: 's1' } as MutateTasksOp];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['s1', sub]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 's1', kind, payload: {} }]);
+	});
+
+	it('skip_occurrence: traduce a kind:skipOccurrence con taskId=seriesId (decisión MC7, ver el JSDoc del tipo)', () => {
+		const ops: MutateTasksOp[] = [{ op: 'skip_occurrence', seriesId: 's1', date: '2026-10-01' }];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map());
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 's1', kind: 'skipOccurrence', payload: { seriesId: 's1', date: '2026-10-01' } }
+		]);
+	});
+
+	it.each([
+		['archive_habit', 'archiveHabit'],
+		['unarchive_habit', 'unarchiveHabit'],
+		['delete_habit', 'deleteHabit']
+	])('%s: su objetivo es el HÁBITO (habitId → taskId del BatchOp), sin comprobar existencia de tarea', (op, kind) => {
+		const ops: MutateTasksOp[] = [{ op, habitId: 'h1' } as MutateTasksOp];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map());
+		expect(skipped).toEqual([]);
+		expect(batchOps).toEqual([{ type: 'mutate', taskId: 'h1', kind, payload: {} }]);
 	});
 });
 

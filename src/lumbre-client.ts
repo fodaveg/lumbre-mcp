@@ -1147,7 +1147,17 @@ export type MutationKind =
 	| 'registerHabit'
 	| 'createBrlEntry'
 	| 'updateBrlEntry'
-	| 'removeBrlEntry';
+	| 'removeBrlEntry'
+	// MC7 (2026-09-24, tarea 8eee8c72, decisión de David «solo el mínimo»):
+	// visibilidad de tarea, saltar una ocurrencia de serie, y ciclo de vida de
+	// hábito — ver `LifecycleMutationPayload`/`archiveTaskOp`/`materializeLifecycleMutation`
+	// (`$lib/sync/lifecycle-inbound.ts` del repo principal).
+	| 'archive'
+	| 'unarchive'
+	| 'skipOccurrence'
+	| 'archiveHabit'
+	| 'unarchiveHabit'
+	| 'deleteHabit';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -1315,6 +1325,37 @@ export interface UpdateBrlEntryMutationPayload {
 /** Borra la entrada de registro `MutateTaskInput.taskId`. Sin campos. */
 export type RemoveBrlEntryMutationPayload = Record<string, never>;
 
+// ── MC7 (2026-09-24, tarea 8eee8c72): visibilidad, serie y ciclo de vida de
+// hábito ─────────────────────────────────────────────────────────────────
+//
+// `archive`/`unarchive` (visibilidad, no ciclo de vida — docs/18 §4 del repo
+// principal): `MutateTaskInput.taskId` es la TAREA. Un objetivo que no existe
+// (o ya está borrado) es `noop` con el aviso `target-missing`; pedir el
+// estado en el que ya está (archivar una archivada, desarchivar una viva) es
+// `noop` SIN aviso — ver `materializeLifecycleMutation` en
+// `$lib/sync/lifecycle-inbound.ts` del repo principal.
+export type ArchiveMutationPayload = Record<string, never>;
+export type UnarchiveMutationPayload = Record<string, never>;
+/** Salta la ocurrencia de `date` (`YYYY-MM-DD`) de la serie `seriesId`, que
+ *  tiene que ser la SEMILLA (`seriesId === id`, con regla, de primer nivel) —
+ *  si no lo es, `noop` con el aviso `target-missing` citando `seriesId`. Una
+ *  ocurrencia FANTASMA (nunca materializada, sin fila propia) se salta igual:
+ *  el servidor calcula su id determinista internamente a partir de
+ *  `seriesId`+`date`, así que `MutateTaskInput.taskId` (ver `translateOp`) no
+ *  necesita ser el id real de esa fila para que el salto se aplique. */
+export interface SkipOccurrenceMutationPayload {
+	seriesId: string;
+	date: string;
+}
+/** Ciclo de vida de un HÁBITO (`MutateTaskInput.taskId` = id del hábito, no
+ *  de una tarea — mismo uso genérico de la columna que `registerHabit`). Sin
+ *  campos, mismo criterio que `archive`/`unarchive`. */
+export type ArchiveHabitMutationPayload = Record<string, never>;
+export type UnarchiveHabitMutationPayload = Record<string, never>;
+/** Borra (tombstone) el hábito `MutateTaskInput.taskId`. Sin campos — a
+ *  diferencia de `delete` (tareas), no hay `restore` para un hábito borrado. */
+export type DeleteHabitMutationPayload = Record<string, never>;
+
 export interface MutateTaskInput {
 	taskId: string;
 	kind: MutationKind;
@@ -1340,7 +1381,13 @@ export interface MutateTaskInput {
 		| RegisterHabitMutationPayload
 		| CreateBrlEntryMutationPayload
 		| UpdateBrlEntryMutationPayload
-		| RemoveBrlEntryMutationPayload;
+		| RemoveBrlEntryMutationPayload
+		| ArchiveMutationPayload
+		| UnarchiveMutationPayload
+		| SkipOccurrenceMutationPayload
+		| ArchiveHabitMutationPayload
+		| UnarchiveHabitMutationPayload
+		| DeleteHabitMutationPayload;
 }
 
 /**
@@ -1649,7 +1696,61 @@ export type MutateTasksOp =
 	 *  comprobación de existencia — mismo criterio que `restore`, ver
 	 *  `TASK_TARGET_ALLOW_SUBTASK`. `date` opcional: ver el JSDoc de
 	 *  `RegisterHabitMutationPayload`. */
-	| { op: 'register_habit'; habitId: string; date?: string };
+	| { op: 'register_habit'; habitId: string; date?: string }
+	/** Archiva/desarchiva una TAREA (MC7, tarea 8eee8c72): visibilidad, no
+	 *  ciclo de vida — cruza con todos los estados (`done`/`cancelledAt` no se
+	 *  tocan). Acepta el id de una SUBTAREA (`archivedAt` no es un campo
+	 *  PROHIBIDO por `docs/18-que-es-una-tarea.md` §2.5; `archiveTaskOp`
+	 *  archiva también sus subtareas cuando `taskId` es de primer nivel, sin
+	 *  invariante que romper si `taskId` ya es una subtarea) — ver
+	 *  `TASK_TARGET_ALLOW_SUBTASK`. Sin comprobación de existencia contra el
+	 *  `GET /api/tasks` NORMAL (que excluye archivadas): `unarchive` casi
+	 *  siempre targetea una archivada, así que `runOpsBatch` repite la
+	 *  comprobación con `includeArchived` cuando la primera no la encuentra
+	 *  (mismo mecanismo que ya usaba `update` con `recurrence: null` sobre una
+	 *  semilla archivada, CX7). Un objetivo inexistente (o ya en el estado
+	 *  pedido) es `noop` — con aviso `target-missing` si no existe, sin aviso
+	 *  si ya estaba así. */
+	| { op: 'archive'; taskId: string }
+	| { op: 'unarchive'; taskId: string }
+	/** Salta la ocurrencia de `date` de la serie `seriesId` (MC7). `seriesId`
+	 *  tiene que ser la SEMILLA (`seriesId === id`, con regla, de primer
+	 *  nivel); si no lo es, `noop` con el aviso `target-missing` citando
+	 *  `seriesId` — el servidor lo decide, este cliente NO comprueba de
+	 *  antemano que `seriesId` sea una semilla válida (mismo criterio que
+	 *  `register_habit`/`restore`: el objetivo no es una tarea de primer nivel
+	 *  comprobable con `findTasksByIds`, ver `TASK_TARGET_ALLOW_SUBTASK`).
+	 *
+	 *  DECISIÓN (ocurrencia FANTASMA, sin fila propia — el caso más común: casi
+	 *  toda ocurrencia futura de una serie NO está materializada): este cliente
+	 *  NO le pide al modelo el id de esa fila, que casi nunca puede conocer.
+	 *  `translateOp` manda `MutateTaskInput.taskId: seriesId` — verificado
+	 *  contra `materializeLifecycleMutation`/`skipOccurrence`
+	 *  (`$lib/sync/lifecycle-inbound.ts`/`recurrence-materialization.ts` del
+	 *  repo principal): con ese `taskId`, `movedOccurrence` lo trata como "no
+	 *  movida" (`occurrenceId === seed.id` es uno de sus dos atajos de salida) y
+	 *  el servidor calcula por su cuenta el id determinista de la fila a partir
+	 *  de `seriesId`+`date` — el salto se aplica igual. La detección `applied`/
+	 *  `noop` (`skipSnapshot`) tampoco se pierde: la celda `recurrenceExcluded`
+	 *  de la SEMILLA se escribe SIEMPRE, en las tres ramas del switch, antes de
+	 *  bifurcar, y esa celda es la que decide si hubo cambio real (fecha nueva
+	 *  excluida) o no (fecha ya excluida antes). Límite conocido: si la
+	 *  ocurrencia YA fue MOVIDA a mano a otro día (tiene fila propia con id
+	 *  distinto del determinista), este fallback no la localiza por id — la
+	 *  fecha se excluye igual, pero esa fila movida puede quedar huérfana en
+	 *  vez de tombstoneada; no hay forma de pedirle al modelo su id real sin
+	 *  que ya la haya visto en `list_tasks`/`get_task`. */
+	| { op: 'skip_occurrence'; seriesId: string; date: string }
+	/** Ciclo de vida de un HÁBITO (MC7), mismo criterio que `register_habit`:
+	 *  su objetivo NO es una tarea, así que no entra en la comprobación de
+	 *  existencia. */
+	| { op: 'archive_habit'; habitId: string }
+	| { op: 'unarchive_habit'; habitId: string }
+	/** Borra (tombstone) el hábito `habitId` (MC7, vive en `organize` junto al
+	 *  resto de lo destructivo — a diferencia de `delete` sobre una tarea, no
+	 *  hay `restore` para un hábito borrado). Mismo criterio de existencia que
+	 *  `archive_habit`/`unarchive_habit`. */
+	| { op: 'delete_habit'; habitId: string };
 
 /**
  * `allowSubtask` por `op`, SOLO para las 11 variantes cuyo target es una
@@ -1688,6 +1789,20 @@ export type MutateTasksOp =
  * siquiera es de la tabla de tareas). `set_list_kind` tampoco: targetea un
  * proyecto/área, como `nest_list`/`rename_list`/`remove_list`.
  *
+ * MC7 (2026-09-24, tarea 8eee8c72): `archive`/`unarchive` entran a `true` —
+ * solo tocan `archivedAt` (visibilidad, docs/18 §4), que no está entre los
+ * campos PROHIBIDOS en subtarea de §2.5, y `archiveTaskOp` no asume que
+ * `taskId` sea de primer nivel (cascada a subtareas propias si las tiene, no
+ * pasa nada si ella misma ya lo es). A diferencia de `restore`, SÍ comprueban
+ * existencia — pero no basta con `findTasksByIds` normal, que excluye
+ * archivadas: `unarchive` (y `delete` sobre una archivada, MC7 también) la
+ * repiten con `includeArchived` cuando la primera búsqueda no la encuentra —
+ * ver `runOpsBatch` en `tools/batch.ts`. `skip_occurrence`/`archive_habit`/
+ * `unarchive_habit`/`delete_habit` NO están aquí: la primera targetea una
+ * SERIE (`seriesId`, no `taskId`/`subtaskId` — el servidor decide si es una
+ * semilla válida), y las otras tres targetean un HÁBITO, mismo motivo que
+ * `register_habit`.
+ *
  * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
  * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
  * `collectExistenceCheckIds` (solo por la PRESENCIA de la clave: qué ops
@@ -1708,7 +1823,9 @@ const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> =
 	set_section: false,
 	move_to_list: false,
 	set_waiting: true,
-	clear_waiting: true
+	clear_waiting: true,
+	archive: true,
+	unarchive: true
 };
 
 /** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
@@ -1943,6 +2060,27 @@ function translateOp(op: MutateTasksOp): BatchOp {
 				kind: 'registerHabit',
 				payload: op.date !== undefined ? { date: op.date } : {}
 			};
+		case 'archive':
+			return { type: 'mutate', taskId: op.taskId, kind: 'archive', payload: {} };
+		case 'unarchive':
+			return { type: 'mutate', taskId: op.taskId, kind: 'unarchive', payload: {} };
+		case 'skip_occurrence':
+			// `taskId` envelope = `seriesId` (decisión MC7 para la ocurrencia
+			// FANTASMA, el caso común — ver el JSDoc del tipo `MutateTasksOp`
+			// para la verificación completa contra `skipOccurrence`/
+			// `movedOccurrence` del repo principal).
+			return {
+				type: 'mutate',
+				taskId: op.seriesId,
+				kind: 'skipOccurrence',
+				payload: { seriesId: op.seriesId, date: op.date }
+			};
+		case 'archive_habit':
+			return { type: 'mutate', taskId: op.habitId, kind: 'archiveHabit', payload: {} };
+		case 'unarchive_habit':
+			return { type: 'mutate', taskId: op.habitId, kind: 'unarchiveHabit', payload: {} };
+		case 'delete_habit':
+			return { type: 'mutate', taskId: op.habitId, kind: 'deleteHabit', payload: {} };
 	}
 }
 
