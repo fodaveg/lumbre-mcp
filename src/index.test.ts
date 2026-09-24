@@ -103,14 +103,16 @@ describe('tools/list — superficie completa', () => {
 		'mutate_tasks',
 		'organize',
 		'list_brl_entries',
-		'mutate_brl'
+		'mutate_brl',
+		'list_habits'
 	];
 
-	it('sigue exponiendo las 16 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 17 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27; ' +
 		'añadida get_list el 2026-09-16, tarea 827a7878; retiradas las nueve sueltas de mutación ' +
-		'individual y partido el lote en mutate_tasks/organize el 2026-09-19, tarea 6f62c877)', () => {
-		expect(tools).toHaveLength(16);
+		'individual y partido el lote en mutate_tasks/organize el 2026-09-19, tarea 6f62c877; ' +
+		'añadida list_habits MC6 el 2026-09-24)', () => {
+		expect(tools).toHaveLength(17);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -284,8 +286,9 @@ describe('tools/list — superficie completa', () => {
 		// `clear_waiting`/`register_habit` en `mutate_tasks`, `set_list_kind` +
 		// `listKind` de `create_list` en `organize`, y `deadline`/`reminders` en
 		// `update`. 16 tools, 23.680 caracteres = +1.295 sobre los 22.385 de
-		// dc4bfc9 (+5,8%). Techo = medido + ~5%.
-		const CHAR_CEILING = 24900;
+		// dc4bfc9 (+5,8%). Añadida `list_habits` (lectura de hábitos, mismo
+		// commit): 17 tools, 24.253 caracteres = +573. Techo = medido + ~5%.
+		const CHAR_CEILING = 25500;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -2093,6 +2096,113 @@ describe('mutate_brl — las 3 `op` siguen aceptándose (esquema estricto intern
 	});
 });
 
+/** `list_habits` (MC6, 2026-09-24): lectura vía `GET /api/export` — ver
+ *  `tools/habits.ts`/`listHabitsExport` en `lumbre-client.ts`. */
+describe('list_habits — lectura vía GET /api/export (MC6)', () => {
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'list-habits-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function resultText(result: unknown): string {
+		return (result as { content: { type: string; text: string }[] }).content
+			.map((c) => c.text)
+			.join('\n');
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	const EXPORT_BODY = {
+		habits: [
+			{ id: 'h1', nombre: 'Ejercicio', clase: 'cadencia' },
+			{ id: 'h2', nombre: 'Leer', clase: 'registro', archivedAt: 1_700_000_000_000 }
+		],
+		habitLog: [
+			{ id: 'l1', habitId: 'h1', date: '2026-09-22' },
+			{ id: 'l2', habitId: 'h1', date: '2026-09-23' },
+			// tareas/otras claves del export NO relacionadas: se ignoran tal cual
+		],
+		tasks: []
+	};
+
+	it('pide GET /api/export con el mismo Bearer que list_tasks, y solo los vivos por defecto', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(EXPORT_BODY));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: {} });
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/export');
+		expect(fetchSpy.mock.calls[0][1]).toMatchObject({
+			headers: { authorization: `Bearer ${TEST_CONFIG.token}` }
+		});
+		const text = resultText(result);
+		expect(text).toContain('Ejercicio (cadencia)');
+		expect(text).toContain('últimas ocurrencias: 2026-09-23, 2026-09-22');
+		expect(text).not.toContain('Leer'); // archivado, omitido por defecto
+		expect(text).toContain('1 archivado');
+	});
+
+	it('includeArchived:true los incluye, con la fecha de archivado', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(EXPORT_BODY)));
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: { includeArchived: true } });
+
+		const text = resultText(result);
+		expect(text).toContain('Leer (registro)');
+		expect(text).toContain('[archivado 2023-11-14]');
+	});
+
+	it('sin hábitos: no falla, lo dice', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ habits: [], habitLog: [] })));
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		expect(resultText(result)).toContain('0 hábitos');
+	});
+
+	it('servidor sin `habitLog` en la respuesta: no rompe, solo sin últimas ocurrencias', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(jsonResponse({ habits: [{ id: 'h1', nombre: 'Ejercicio', clase: 'cadencia' }] }))
+		);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		expect(resultText(result)).not.toContain('últimas ocurrencias');
+	});
+
+	it('respuesta inesperada (sin `habits`): error explícito', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: true })));
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: {} });
+		expect(result.isError).toBe(true);
+	});
+});
+
 describe('effectiveNotesMode — resuelve el modo de notas de list_tasks (con el alias legado)', () => {
 	it('sin `notes` ni `fullNotes` → "auto" (nuevo default)', () => {
 		expect(effectiveNotesMode({})).toBe('auto');
@@ -2923,8 +3033,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 16 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(16);
+	it('sin `toolset` (default): las 17 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(17);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -2935,8 +3045,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 16, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(16);
+	it('`toolset: "all"` (explícito): las 17, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(17);
 	});
 });
 

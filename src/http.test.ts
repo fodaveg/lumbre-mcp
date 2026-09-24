@@ -125,7 +125,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		expect(body.result.serverInfo.name).toBe('lumbre-mcp');
 	});
 
-	it('tools/list responde con las 16 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
+	it('tools/list responde con las 17 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, {
 			method: 'POST',
 			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
@@ -133,17 +133,14 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: Array<{ name: string; inputSchema: unknown }> } };
-		expect(body.result.tools).toHaveLength(16);
+		expect(body.result.tools).toHaveLength(17);
 		expect(JSON.stringify(body.result.tools)).not.toMatch(/\$schema/);
 		// Mismo techo que `index.test.ts` (medido allí sobre transporte
 		// in-memory) — aquí se confirma que el mismo `stripToolsListSchema`
 		// aplicado sobre `StreamableHTTPServerTransport` da el mismo resultado
 		// que sobre stdio/in-memory, no un tamaño distinto por transporte.
-		// Bajado a 16 tools/22.400 al retirar las nueve tools sueltas de
-		// mutación individual y partir el lote en `mutate_tasks`/`organize`
-		// (tarea 6f62c877, 2026-09-19). Re-medido el 2026-09-24 (MC6, paridad
-		// UI↔MCP): 16 tools, 23.680 caracteres — ver `index.test.ts`.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(24900);
+		// Re-medido el 2026-09-24 (MC6, ver `index.test.ts`): 17 tools/24.594.
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(25800);
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {
@@ -404,7 +401,7 @@ describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)'
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: unknown[] } };
-		expect(body.result.tools).toHaveLength(16);
+		expect(body.result.tools).toHaveLength(17);
 	});
 
 	it('si vienen las dos formas, gana la cabecera', async () => {

@@ -14,6 +14,7 @@ import {
 	findTasksByIds,
 	getListLinks,
 	linkListNote,
+	listHabitsExport,
 	listLists,
 	listTasks,
 	mergeRecurrencePatch,
@@ -340,6 +341,38 @@ describe('listLists', () => {
 	it('respuesta sin `lists` (array) lanza LumbreApiError', async () => {
 		mockFetchJson({ not: 'lists' });
 		await expect(listLists(config)).rejects.toThrow(/inesperada/);
+	});
+});
+
+describe('listHabitsExport (MC6)', () => {
+	it('manda GET /api/export con el mismo Bearer y devuelve habits/habitLog', async () => {
+		const habits = [{ id: 'h1', nombre: 'Ejercicio', clase: 'cadencia' as const }];
+		const habitLog = [{ id: 'l1', habitId: 'h1', date: '2026-09-24' }];
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ habits, habitLog, tasks: [] }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const result = await listHabitsExport(config);
+		expect(result).toEqual({ habits, habitLog });
+
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('https://lumbre.test/api/export');
+		expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
+	});
+
+	it('sin `habitLog` en la respuesta: cae a [] en vez de fallar', async () => {
+		mockFetchJson({ habits: [] });
+		const result = await listHabitsExport(config);
+		expect(result).toEqual({ habits: [], habitLog: [] });
+	});
+
+	it('respuesta sin `habits` (array) lanza LumbreApiError', async () => {
+		mockFetchJson({ not: 'habits' });
+		await expect(listHabitsExport(config)).rejects.toThrow(/inesperada/);
 	});
 });
 

@@ -7,6 +7,7 @@ import { registerSyncTools } from './tools/sync.js';
 import { registerAttachmentTools } from './tools/attachments.js';
 import { registerListTools } from './tools/lists.js';
 import { registerBrlTools } from './tools/brl.js';
+import { registerHabitTools } from './tools/habits.js';
 import { registerTaskTools } from './tools/tasks.js';
 import { registerBatchTool } from './tools/batch.js';
 // Reexportadas tal cual: `index.test.ts` las importa directamente de
@@ -113,7 +114,7 @@ function loadConfig() {
  * INYECTADO (nada de estado de módulo, ver el histórico de este fichero) y
  * devuelve el `McpServer` ya construido, sin conectar a ningún transporte —
  * eso es cosa del llamante (`main`, más abajo, para stdio; `http.ts` para el
- * transporte remoto). Registra las 16 de siempre salvo que
+ * transporte remoto). Registra las 17 de siempre salvo que
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
  * quedan `add_attachment`/`read_attachment`/`delete_attachment` — las demás
  * se registran igual
@@ -147,7 +148,7 @@ export function createServer(config, opts = {}) {
     // necesita a cuál (`requireTaskExists`/`mutateTaskInvalidating` viven en
     // `tools/task-existence.ts`, no en `tools/tasks.ts`, precisamente para que
     // `tools/attachments.ts` pueda usarlas sin importar de `tools/tasks.ts`).
-    // Es el orden en que un cliente MCP VE las 16 tools en `tools/list`, y eso
+    // Es el orden en que un cliente MCP VE las 17 tools en `tools/list`, y eso
     // influye en cuál prueba antes un modelo: tareas individuales encabeza
     // (ya empieza por alta/listado/lectura, lo más usado), luego el lote,
     // listas y proyectos, adjuntos, BRL, y `sync` AL FINAL — `refresh_sync`
@@ -176,6 +177,10 @@ export function createServer(config, opts = {}) {
     // Familia «BRL» (`src/tools/brl.ts`, add-on experimental de registro del
     // día).
     const { listBrlEntriesTool, mutateBrlTool } = registerBrlTools(server, ctx);
+    // Familia «hábitos» (`src/tools/habits.ts`, MC6 2026-09-24): `list_habits`,
+    // lectura vía `GET /api/export`. Igual que BRL, un add-on de otro dominio
+    // que no son tareas — se registra justo después por el mismo motivo.
+    const { listHabitsTool } = registerHabitTools(server, ctx);
     // Familia «sync» (`src/tools/sync.ts`, ver su JSDoc: por qué `refresh_sync`
     // casi nunca hace falta tras una escritura de ESTE MCP) — AL FINAL a
     // propósito, ver el comentario de arriba.
@@ -200,6 +205,7 @@ export function createServer(config, opts = {}) {
             getTaskTool,
             listBrlEntriesTool,
             mutateBrlTool,
+            listHabitsTool,
             mutateTasksTool,
             organizeTool
         ]) {
@@ -218,7 +224,7 @@ export { stripSchemaRecursively, stripToolsListSchema } from './schema-strip.js'
  * Modo acotado del arranque stdio (ver `CreateServerOptions.toolset`):
  * `LUMBRE_MCP_TOOLSET=attachments` registra solo `add_attachment`/
  * `read_attachment`/`delete_attachment`, pensado para un SEGUNDO conector
- * stdio local dedicado (David enchufa a la vez el remoto de las 16 tools y
+ * stdio local dedicado (David enchufa a la vez el remoto de las 17 tools y
  * este, sin duplicar superficie — ver README). Cualquier otro valor (incluido
  * no ponerla) cae
  * al default `'all'` de `createServer` — nunca falla por un valor raro, un

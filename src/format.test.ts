@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { LumbreTask } from './lumbre-client.js';
-import { formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
+import type { LumbreHabit, LumbreHabitLogEntry, LumbreTask } from './lumbre-client.js';
+import { formatHabitList, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 
 /**
  * `creada:<timestamp>` en `formatTask` (tarea de perf, 2026-08-25): antes iba
@@ -310,5 +310,51 @@ describe('«esperando» (MC6, waitingUntil/waitingFor) — solo se pinta si el s
 
 	it('get_task: `waitingUntil` ausente — sin línea, nunca "no está esperando"', () => {
 		expect(formatTaskFull(task())).not.toContain('esperando');
+	});
+});
+
+describe('formatHabitList (MC6, list_habits)', () => {
+	function habit(overrides: Partial<LumbreHabit> = {}): LumbreHabit {
+		return { id: 'h1', nombre: 'Ejercicio', clase: 'cadencia', ...overrides };
+	}
+
+	it('por defecto omite los archivados y lo cuenta en la cabecera', () => {
+		const habits = [habit(), habit({ id: 'h2', nombre: 'Leer', clase: 'registro', archivedAt: 0 })];
+		const output = formatHabitList(habits, [], false);
+		expect(output).toContain('1 hábito(s) (1 archivado omitido):');
+		expect(output).toContain('Ejercicio (cadencia)');
+		expect(output).not.toContain('Leer');
+	});
+
+	it('includeArchived:true los incluye, con la fecha de archivado', () => {
+		const habits = [habit({ id: 'h2', nombre: 'Leer', clase: 'registro', archivedAt: 1_700_000_000_000 })];
+		const output = formatHabitList(habits, [], true);
+		expect(output).toContain('Leer (registro) [archivado 2023-11-14]');
+	});
+
+	it('muestra las últimas ocurrencias, más recientes primero, tope 3', () => {
+		const log: LumbreHabitLogEntry[] = [
+			{ id: 'l1', habitId: 'h1', date: '2026-09-20' },
+			{ id: 'l2', habitId: 'h1', date: '2026-09-23' },
+			{ id: 'l3', habitId: 'h1', date: '2026-09-22' },
+			{ id: 'l4', habitId: 'h1', date: '2026-09-21' } // 4ª: se queda fuera (tope 3)
+		];
+		const output = formatHabitList([habit()], log, false);
+		expect(output).toContain('últimas ocurrencias: 2026-09-23, 2026-09-22, 2026-09-21');
+	});
+
+	it('sin ocurrencias para ese hábito: sin línea de "últimas ocurrencias"', () => {
+		const output = formatHabitList([habit()], [{ id: 'l1', habitId: 'otro', date: '2026-09-20' }], false);
+		expect(output).not.toContain('últimas ocurrencias');
+	});
+
+	it('0 hábitos: lo dice sin fallar', () => {
+		expect(formatHabitList([], [], false)).toContain('0 hábitos');
+	});
+
+	it('0 vivos pero hay archivados omitidos: lo dice y sugiere includeArchived', () => {
+		const output = formatHabitList([habit({ archivedAt: 0 })], [], false);
+		expect(output).toContain('0 hábitos (1 archivado omitido)');
+		expect(output).toContain('includeArchived:true');
 	});
 });

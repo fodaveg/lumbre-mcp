@@ -664,6 +664,24 @@ Fase 2.
   `list_brl_entries` de la que sale el id. Éxito PARCIAL igual que
   `mutate_tasks`: una op inválida no bloquea las demás.
 
+### Hábitos (lectura)
+
+Los hábitos v2 (`docs/36-habitos-v2.md` del repo principal) **no son tareas** y no
+salen en `list_tasks`. Escritura: la op `register_habit` de `mutate_tasks`
+(ver más abajo). Lectura:
+
+- `list_habits({ includeArchived? })` — enumera tus hábitos por `GET
+  /api/export` (mismo token que `list_tasks`, pero límite MÁS ESTRICTO: **10
+  peticiones/min**, porque vuelca la cuenta ENTERA — no la llames en bucle).
+  Por hábito: `id`, `nombre`, `clase` (`registro`|`cadencia`|`contador`) y si
+  está `archivedAt` (epoch ms). Por defecto solo los vivos; `includeArchived:
+  true` incluye los archivados, con su fecha. Añade además las **últimas 3
+  ocurrencias** (fecha) de cada hábito, a coste CERO: `habitLog` viaja en la
+  MISMA respuesta del export, así que enseñarlas no cuesta una petición
+  aparte — más de 3 ya es un caso para leer el export entero, no esta tool.
+  Un servidor que aún no manda `habitLog` no rompe: el listado sale igual,
+  sin esa línea.
+
 ### Ejecutar varias operaciones a la vez (`mutate_tasks` y `organize`)
 
 Las DOS tools de lote comparten motor, formato y tope: `ops` (máx. 200),
@@ -1034,10 +1052,10 @@ stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
 registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
-de las 16 tools de siempre — así no duplicas la superficie de `tools/list` en
-el contexto de cada sesión (pesa ~21 KB de JSON; dos copias son el doble, y el
+de las 17 tools de siempre — así no duplicas la superficie de `tools/list` en
+el contexto de cada sesión (pesa ~24 KB de JSON; dos copias son el doble, y el
 modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 16, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 17, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

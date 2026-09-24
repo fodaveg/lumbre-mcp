@@ -1,4 +1,12 @@
-import type { IngestRecurrence, LumbreListLink, LumbreListSummary, LumbreTask, TaskScope } from './lumbre-client.js';
+import type {
+	IngestRecurrence,
+	LumbreHabit,
+	LumbreHabitLogEntry,
+	LumbreListLink,
+	LumbreListSummary,
+	LumbreTask,
+	TaskScope
+} from './lumbre-client.js';
 import {
 	DEFAULT_NOTES_RECENT_HOURS,
 	formatNoteMarker,
@@ -615,4 +623,51 @@ export function formatListLinks(listId: string, links: LumbreListLink[]): string
 			`  id: ${link.id} · listId: ${link.listId} · kind: ${link.kind} · targetKey: ${link.targetKey} · updatedAt: ${link.updatedAt}`
 	);
 	return [header, ...body].join('\n');
+}
+
+/** Cuántas últimas ocurrencias de `habitLog` mostrar por hábito en
+ *  `list_habits` (MC6 — hábitos, 2026-09-24): coste CERO (`habitLog` viaja en
+ *  la MISMA respuesta de `GET /api/export`, no hace falta pedirlo aparte);
+ *  3 basta para responder «¿lo hice estos días?» sin inflar la respuesta en
+ *  una cuenta con mucho historial — más que eso ya es un caso para leer el
+ *  export entero, no esta tool. */
+const HABIT_LOG_RECENT_COUNT = 3;
+
+/**
+ * Listado compacto de hábitos para `list_habits` (MC6): por defecto solo los
+ * vivos (`includeArchived: false`), con sus últimas `HABIT_LOG_RECENT_COUNT`
+ * ocurrencias (fecha) si las hay — clase `contador` puede repetir fecha (cada
+ * incremento es su propia fila en `habitLog`); esta lista no las agrega, solo
+ * las enseña más recientes primero.
+ */
+export function formatHabitList(
+	habits: LumbreHabit[],
+	habitLog: LumbreHabitLogEntry[],
+	includeArchived: boolean
+): string {
+	const visible = includeArchived ? habits : habits.filter((h) => h.archivedAt === undefined);
+	const omitted = habits.length - visible.length;
+	const omittedSuffix =
+		omitted > 0 ? ` (${omitted} archivado${omitted === 1 ? '' : 's'} omitido${omitted === 1 ? '' : 's'})` : '';
+	if (visible.length === 0) {
+		return `0 hábitos${omittedSuffix}.${omitted > 0 ? ' includeArchived:true para verlos.' : ''}`;
+	}
+	const logByHabit = new Map<string, LumbreHabitLogEntry[]>();
+	for (const e of habitLog) {
+		const list = logByHabit.get(e.habitId);
+		if (list) list.push(e);
+		else logByHabit.set(e.habitId, [e]);
+	}
+	const lines = visible.map((h) => {
+		const archived =
+			h.archivedAt !== undefined ? ` [archivado ${new Date(h.archivedAt).toISOString().slice(0, 10)}]` : '';
+		let line = `- ${h.nombre} (${h.clase})${archived}  · id: ${h.id}`;
+		const recent = (logByHabit.get(h.id) ?? [])
+			.slice()
+			.sort((a, b) => b.date.localeCompare(a.date))
+			.slice(0, HABIT_LOG_RECENT_COUNT);
+		if (recent.length > 0) line += `\n  últimas ocurrencias: ${recent.map((e) => e.date).join(', ')}`;
+		return line;
+	});
+	return [`${visible.length} hábito(s)${omittedSuffix}:`, ...lines].join('\n');
 }

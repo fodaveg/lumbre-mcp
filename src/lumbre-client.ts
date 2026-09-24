@@ -1427,6 +1427,56 @@ export async function listBrlEntries(
 	return (body as { entries: LumbreBrlEntry[] }).entries;
 }
 
+// ── Hábitos v2 (`GET /api/export`, lectura) ─────────────────────────────────
+
+/** Clase de un hábito (`docs/36-habitos-v2.md` del repo principal): `registro`
+ *  (sí/no), `cadencia` (cada N días) o `contador` (N veces al día). */
+export type LumbreHabitClass = 'registro' | 'cadencia' | 'contador';
+
+/** Un hábito tal como viene en `GET /api/export` (`StoreHabit` del repo
+ *  principal, recortado a los campos que expone `list_habits`): id, nombre,
+ *  clase y `archivedAt` (epoch ms, o ausente si sigue vivo). El export ya
+ *  excluye los BORRADOS (`deletedAt`, tombstone real) — solo distingue
+ *  vivo/archivado, que es lo que decide `includeArchived`. */
+export interface LumbreHabit {
+	id: string;
+	nombre: string;
+	clase: LumbreHabitClass;
+	archivedAt?: number;
+}
+
+/** Una ocurrencia de hábito (`StoreHabitLog` del repo principal, recortada):
+ *  `date` (`YYYY-MM-DD`) y `habitId` para agrupar por hábito. Clase
+ *  `contador`: cada incremento es SU PROPIA fila (mismo `habitId`+`date` se
+ *  repite); `list_habits` no agrega, solo enseña las últimas por fecha. */
+export interface LumbreHabitLogEntry {
+	id: string;
+	habitId: string;
+	date: string;
+}
+
+/** `GET /api/export`: vuelca la cuenta ENTERA (tareas, listas, hábitos…) — ver
+ *  el JSDoc del endpoint en el repo principal. `list_habits` solo usa
+ *  `habits`/`habitLog` de la respuesta; el resto se ignora tal cual llega
+ *  (no se valida su forma, evita acoplar este cliente al resto del export).
+ *  MISMA auth que `GET /api/tasks` (token personal o concesión MCP), pero un
+ *  límite MÁS ESTRICTO (10/min, ver el JSDoc del endpoint): no la llames en
+ *  bucle. `habitLog` ausente (servidor que no lo manda) cae a `[]`, nunca un
+ *  error — el listado sigue siendo útil sin las últimas ocurrencias. */
+export async function listHabitsExport(
+	config: LumbreConfig
+): Promise<{ habits: LumbreHabit[]; habitLog: LumbreHabitLogEntry[] }> {
+	const body = await request(config, '/api/export');
+	if (!body || typeof body !== 'object' || !Array.isArray((body as { habits?: unknown }).habits)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/export.');
+	}
+	const habitLogRaw = (body as { habitLog?: unknown }).habitLog;
+	return {
+		habits: (body as { habits: LumbreHabit[] }).habits,
+		habitLog: Array.isArray(habitLogRaw) ? (habitLogRaw as LumbreHabitLogEntry[]) : []
+	};
+}
+
 /** Traduce `'p1'..'p4'` (de cara al modelo) al nivel numérico que espera
  *  `/api/mutations`/`/api/batch` para `kind: 'update'`: `p4` = quitar la
  *  prioridad (`null`). Vive aquí (no en `index.ts`) porque `translateOp`
