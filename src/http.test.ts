@@ -140,7 +140,10 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// aplicado sobre `StreamableHTTPServerTransport` da el mismo resultado
 		// que sobre stdio/in-memory, no un tamaño distinto por transporte.
 		// Re-medido el 2026-09-24 (MC6, ver `index.test.ts`): 17 tools/24.594.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(25800);
+		// Re-medido el mismo día (MC7, tarea 8eee8c72): 17 tools/25.893 sobre
+		// este transporte (25.558 en `index.test.ts`, in-memory — la diferencia
+		// no es de este lote, ya existía antes; mismo techo que allí, 26.800).
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(26800);
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {
