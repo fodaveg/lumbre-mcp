@@ -679,6 +679,16 @@ describe('addTask / mutateTask — resultado real (MC1)', () => {
 		await expect(addTask(config, { text: 'a' })).resolves.toEqual({ notices: [] });
 	});
 
+	it('addTask manda SIEMPRE `literal: true` a /api/ingest, aunque el llamante no lo pida (tarea cd39f028)', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		await addTask(config, { text: 'a', list: 'Casa' });
+		const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>;
+		expect(body).toMatchObject({ text: 'a', list: 'Casa', literal: true });
+	});
+
 	it('mutateTask devuelve el outcome y los notices de /api/mutations', async () => {
 		mockFetchJson({ ok: true, outcome: 'not-found', outcomes: ['not-found'], notices: ['n1'] });
 		await expect(
@@ -1192,7 +1202,9 @@ describe('buildBatchFromOps', () => {
 		const { batchOps, skipped } = buildBatchFromOps(ops, new Map()); // existing VACÍO
 		expect(skipped).toEqual([]);
 		expect(batchOps).toHaveLength(6);
-		expect(batchOps[0]).toEqual({ type: 'ingest', task: { text: 'nueva tarea' } });
+		// `literal: true` SIEMPRE (tarea cd39f028, 2026-09-24): ver el JSDoc de
+		// `AddTaskInput.literal`.
+		expect(batchOps[0]).toEqual({ type: 'ingest', task: { text: 'nueva tarea', literal: true } });
 	});
 
 	it('set_list_notes traduce nota, borrado y revive sin comprobar existencia de tarea', () => {

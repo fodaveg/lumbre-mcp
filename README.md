@@ -155,6 +155,16 @@ presentar esa hipótesis como un fallo observado.
   materializa en el servidor en la misma petición; tus dispositivos la reciben
   al sincronizar. La respuesta reenvía los avisos de la app (`notices`), por
   ejemplo si el proyecto pedido estaba borrado y la tarea fue a la Bandeja.
+  `text` se guarda TAL CUAL (`literal: true` SIEMPRE, tarea `cd39f028`,
+  2026-09-24 — el conector lo fuerza, no es un campo que el modelo controle):
+  la app NO interpreta fecha, hora, prioridad, `!`/`!!`, «cada …», `$Lista` ni
+  `#tags` dentro del texto — una fecha escrita en `text` se queda como texto,
+  usa el campo `date` para agendarla. La COLOCACIÓN no cambia por esto (mismo
+  resultado que sin `literal`): texto solo (sin `list`/`date`/el resto de
+  metadata) aterriza en "hoy"; con alguna metadata estructurada (`priority`/
+  `deadline`/`recurrence`/`subtasks`/`tags`) y sin `date` ni `list`, en la
+  Bandeja de entrada; con `list` (o `listId` vivo), en esa lista; con `date`,
+  ese día. `time` sin `date` agenda hoy y gana a la Bandeja.
   Acepta `list` (nombre, se crea como proyecto si no existe) o `listId` (id
   ESTABLE del proyecto o área, preferente sobre `list`, inmune a renames —
   sácalo de `list_tasks`). `tags` fija sus tags propios; `[]` declara

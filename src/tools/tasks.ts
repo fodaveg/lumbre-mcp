@@ -110,8 +110,11 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.max(200)
 					.optional()
 					.describe(
-						'Nombre del proyecto o área destino (se crea como proyecto si no existe). Sin `list` y sin ' +
-							'date, el cliente la coloca en "hoy" al materializarla.'
+						'Nombre del proyecto o área destino (se crea como proyecto si no existe). El texto se ' +
+							'guarda TAL CUAL — no interpreta fecha, hora, prioridad, "!"/"!!", "cada …", $Lista ni ' +
+							'#tags, usa esos campos en su lugar. Sin `list` ni `date`: texto solo (sin priority/' +
+							'deadline/recurrence/subtasks/tags) aterriza en "hoy"; con alguno de esos campos, en la ' +
+							'Bandeja de entrada.'
 					),
 				listId: z
 					.string()
@@ -136,7 +139,10 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.string()
 					.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 					.optional()
-					.describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy'),
+					.describe(
+						'Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy — esto pasa ANTES de decidir ' +
+							'lista/Bandeja (ver `list`), así que gana incluso con `list` o metadata estructurada'
+					),
 				recurrence: recurrenceSchema.optional(),
 				subtasks: subtasksSchema
 					.optional()

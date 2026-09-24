@@ -2202,6 +2202,30 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		expect(text).toContain('avisos de la app:\n  - Fue a la Bandeja');
 	});
 
+	it('add_task (tool): manda SIEMPRE `literal: true` a /api/ingest (tarea cd39f028) — el modelo no lo controla', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'add_task', arguments: { text: 'Comprar leche' } });
+		expect(result.isError).not.toBe(true);
+		expect(bodyOf(fetchSpy, '/api/ingest')).toMatchObject({ text: 'Comprar leche', literal: true });
+	});
+
+	it('mutate_tasks op add_task: manda SIEMPRE `literal: true` a /api/batch, misma tarea cd39f028', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'add_task', text: 'Comprar leche' }] }
+		});
+		expect(result.isError).not.toBe(true);
+		const body = bodyOf(fetchSpy, '/api/batch') as { ops: { task: Record<string, unknown> }[] };
+		expect(body.ops[0].task).toMatchObject({ text: 'Comprar leche', literal: true });
+	});
+
 	it('add_task (tool): la regla completa llega entera a /api/ingest (antes Zod borraba byWeekday/streak…)', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
 		vi.stubGlobal('fetch', fetchSpy);

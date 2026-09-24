@@ -77,12 +77,14 @@ function readNotices(body) {
 /** `POST /api/ingest`: crea una tarea. La app la encola y la materializa en
  *  el servidor en la misma petición; los dispositivos la reciben al
  *  sincronizar. Devuelve los `notices` para que la tool se los cuente al
- *  modelo (MC1 del audit de paridad: antes se tiraban). */
+ *  modelo (MC1 del audit de paridad: antes se tiraban). `literal: true`
+ *  SIEMPRE (tarea cd39f028, 2026-09-24, ver el JSDoc de `AddTaskInput.literal`):
+ *  el llamante no lo controla, se fuerza aquí sin mirar `input`. */
 export async function addTask(config, input) {
     const body = await request(config, '/api/ingest', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(input)
+        body: JSON.stringify({ ...input, literal: true })
     });
     if (!body || typeof body !== 'object' || body.ok !== true) {
         throw new LumbreApiError('Lumbre no confirmó la ingesta (respuesta inesperada).');
@@ -910,7 +912,10 @@ function translateOp(op) {
     switch (op.op) {
         case 'add_task': {
             const { op: _discard, ...task } = op;
-            return { type: 'ingest', task };
+            // `literal: true` SIEMPRE (tarea cd39f028, 2026-09-24, ver el JSDoc de
+            // `AddTaskInput.literal`) — mismo forzado que `addTask` aplica a
+            // `POST /api/ingest`, aquí para la vía `POST /api/batch`.
+            return { type: 'ingest', task: { ...task, literal: true } };
         }
         case 'complete':
             return {

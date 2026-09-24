@@ -109,6 +109,20 @@ export interface AddTaskInput {
 	time?: string;
 	recurrence?: IngestRecurrence;
 	subtasks?: string[];
+	/** `true` = el texto es el título TAL CUAL (sin parseo *smart*: ni fecha,
+	 *  hora, prioridad, `!`/`!!`, «cada …», `$Lista` ni `#tags`); la
+	 *  COLOCACIÓN es EXACTAMENTE la misma que sin `literal` (tarea `cd39f028`
+	 *  del repo principal, docs/21 §3 obligación 7 — ver `literalOverrides` en
+	 *  `$lib/server/ingest-enqueue.ts`): texto solo sin lista → hoy; con
+	 *  metadata estructurada (tags/prioridad/fecha límite/regla/subtareas) y
+	 *  sin fecha ni lista → Bandeja; con lista (nombre o `listId` vivo) → esa
+	 *  lista; con `date` → ese día. NO es un campo que el modelo controle:
+	 *  `addTask`/`translateOp` (op `add_task` de `mutate_tasks`) lo fuerzan a
+	 *  `true` SIEMPRE (tarea cd39f028, 2026-09-24) — el MCP ya manda fecha,
+	 *  hora, prioridad, lista y tags como campos estructurados, así que
+	 *  interpretar el texto solo puede desviar lo que el modelo quiso decir
+	 *  literalmente. */
+	literal?: true;
 }
 
 /** Alcances que acepta `GET /api/tasks`. `upcoming` (2026-07-26) es la ventana
@@ -367,12 +381,14 @@ export interface AddTaskResult {
 /** `POST /api/ingest`: crea una tarea. La app la encola y la materializa en
  *  el servidor en la misma petición; los dispositivos la reciben al
  *  sincronizar. Devuelve los `notices` para que la tool se los cuente al
- *  modelo (MC1 del audit de paridad: antes se tiraban). */
+ *  modelo (MC1 del audit de paridad: antes se tiraban). `literal: true`
+ *  SIEMPRE (tarea cd39f028, 2026-09-24, ver el JSDoc de `AddTaskInput.literal`):
+ *  el llamante no lo controla, se fuerza aquí sin mirar `input`. */
 export async function addTask(config: LumbreConfig, input: AddTaskInput): Promise<AddTaskResult> {
 	const body = await request(config, '/api/ingest', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify(input)
+		body: JSON.stringify({ ...input, literal: true })
 	});
 	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
 		throw new LumbreApiError('Lumbre no confirmó la ingesta (respuesta inesperada).');
@@ -1921,7 +1937,10 @@ function translateOp(op: MutateTasksOp): BatchOp {
 	switch (op.op) {
 		case 'add_task': {
 			const { op: _discard, ...task } = op;
-			return { type: 'ingest', task };
+			// `literal: true` SIEMPRE (tarea cd39f028, 2026-09-24, ver el JSDoc de
+			// `AddTaskInput.literal`) — mismo forzado que `addTask` aplica a
+			// `POST /api/ingest`, aquí para la vía `POST /api/batch`.
+			return { type: 'ingest', task: { ...task, literal: true } };
 		}
 		case 'complete':
 			return {
