@@ -52,8 +52,12 @@ const scope = 'lumbre:mcp';
 // smoke en rojo por un recuento congelado, no por un fallo real. Si tocas el
 // número de tools, `grep -rn "CHAR_CEILING\|EXPECTED_TOOL_COUNT" src scripts`
 // enseña los TRES sitios de golpe.
-const CHAR_CEILING = 22400;
-const EXPECTED_TOOL_COUNT = 16;
+//
+// 2026-09-24 (MC6 + `list_habits`, 5030cf1): 17 tools y 24.594 caracteres;
+// el test subió su techo a 25.800 y este se quedó en 16/22.400 — la misma
+// deriva de arriba, medida en el smoke de ese deploy.
+const CHAR_CEILING = 25800;
+const EXPECTED_TOOL_COUNT = 17;
 
 if (!url) {
 	console.error('smoke-remote: falta la URL. Uso: node scripts/smoke-remote.mjs <url> <token>');
