@@ -52,8 +52,10 @@ function opWritesVisibleNotes(raw: Record<string, unknown>): boolean {
  *   `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`,
  *   `complete_subtask`, `restore` (2026-09-24, sacar de la Papelera: no
  *   destruye nada, así que no va a `organize`) y, desde MC6 (2026-09-24,
- *   paridad UI↔MCP), `set_waiting`/`clear_waiting` (estado «esperando») y
- *   `register_habit` (ocurrencia de un hábito — su objetivo no es una tarea).
+ *   paridad UI↔MCP), `set_waiting`/`clear_waiting` (estado «esperando»),
+ *   `register_habit` (ocurrencia de un hábito — su objetivo no es una tarea)
+ *   y, desde el 2026-09-25, `set_parent` (anidar/desanidar una tarea: no
+ *   destruye nada, así que tampoco va a `organize`).
  * - `organize`: lo DESTRUCTIVO y la reorganización — `delete`,
  *   `remove_section`, `create_list`, `nest_list`, `rename_list`,
  *   `remove_list`, `set_list_notes`, `move_to_list` (esta va aquí, y no con
@@ -260,6 +262,15 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			op: z.literal('unarchive_habit'),
 			habitId: z.string().guid()
 		})
+		.strict(),
+	// `set_parent` (2026-09-25): anida `taskId` bajo `parentId`, o la desanida
+	// con `null`. Ver el JSDoc de `MutateTasksOp` en `lumbre-client.ts`.
+	z
+		.object({
+			op: z.literal('set_parent'),
+			taskId: z.string().guid(),
+			parentId: z.union([z.string().guid(), z.null()])
+		})
 		.strict()
 ]);
 
@@ -362,9 +373,13 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
  */
 export const mutateTasksOpSchema = z
 	.object({
-		op: z.string().describe('Operación — las 17 de esta tool, con su contrato, en la description de `ops`'),
+		op: z.string().describe('Operación — las 18 de esta tool, con su contrato, en la description de `ops`'),
 		taskId: z.string().guid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
 		subtaskId: z.string().guid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
+		parentId: z
+			.union([z.string().guid(), z.null()])
+			.optional()
+			.describe('set_parent: id de la tarea madre, o null para sacarla de la checklist'),
 		listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
 		habitId: z
 			.string()
@@ -548,6 +563,14 @@ async function runOpsBatch(
 					!existing.has(op.taskId))
 		)
 		.map((op) => (op as { taskId: string }).taskId);
+	// `set_parent` (2026-09-25): una madre ARCHIVADA existe y la rechaza el
+	// servidor con su motivo; sin este reintento, el cliente la daría por
+	// inexistente. Va en la misma segunda petición agrupada.
+	for (const op of validated) {
+		if (op.op === 'set_parent' && op.parentId !== null && !existing.has(op.parentId)) {
+			archivedLookupIds.push(op.parentId);
+		}
+	}
 	if (archivedLookupIds.length > 0) {
 		const archived = await findTasksByIds(ctx.config, [...new Set(archivedLookupIds)], {
 			includeArchived: true
@@ -687,7 +710,7 @@ async function runOpsBatch(
  * una tarea) y `organize` (reorganizar y borrar) — N operaciones de golpe en
  * UNA sola tool call, con el mismo motor (`runOpsBatch`, arriba) y el mismo
  * informe de éxito parcial. Ver el JSDoc de la cabecera para el reparto de
- * las 27 ops (17+10, MC7) y por qué son dos tools y no una.
+ * las 28 ops (18+10: MC7 más `set_parent`) y por qué son dos tools y no una.
  */
 export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 	const mutateTasksTool = server.registerTool(
@@ -697,8 +720,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 				`Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
 				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
 				`clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +
-				`unarchive (visibilidad, no ciclo de vida) y skip_occurrence (salta una ocurrencia de una ` +
-				`serie). Vía ÚNICA para mutar una tarea (no hay tool ` +
+				`unarchive (visibilidad, no ciclo de vida), skip_occurrence (salta una ocurrencia de una ` +
+				`serie) y set_parent (la hace subtarea de otra o la saca). Vía ÚNICA para mutar una tarea (no hay tool ` +
 				`suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
 				`UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
 				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
@@ -727,7 +750,10 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'unarchive: taskId* (desarchiva; noop si ya estaba viva) · ' +
 							'skip_occurrence: seriesId*, date* [occurrenceId] (seriesId = SEMILLA de la serie, no ' +
 							'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
-							'unarchive_habit: habitId*'
+							'unarchive_habit: habitId* · ' +
+							'set_parent: taskId*, parentId* (la anida al final de la checklist de parentId; null ' +
+							'la saca a la lista de su madre. La app rechaza si tiene subtareas, deadline, ' +
+							'recordatorios o repetición: quítalos antes con update)'
 					)
 			}
 		},

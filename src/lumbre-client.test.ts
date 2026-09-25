@@ -820,6 +820,16 @@ describe('collectExistenceCheckIds', () => {
 			])
 		).toEqual([]);
 	});
+
+	it('set_parent pide existencia del objetivo y de su madre no-null en el mismo lote; null no añade madre', () => {
+		expect(
+			collectExistenceCheckIds([
+				{ op: 'set_parent', taskId: 't1', parentId: 'p1' },
+				{ op: 'set_parent', taskId: 't2', parentId: null },
+				{ op: 'set_parent', taskId: 't3', parentId: 'p1' } // madre repetida: una sola entrada
+			]).sort()
+		).toEqual(['p1', 't1', 't2', 't3']);
+	});
 });
 
 describe('collectSeriesSeedIds (CX6)', () => {
@@ -1499,6 +1509,45 @@ describe('buildBatchFromOps', () => {
 		const { batchOps, skipped } = buildBatchFromOps(ops, new Map());
 		expect(skipped).toEqual([]);
 		expect(batchOps).toEqual([{ type: 'mutate', taskId: 'h1', kind, payload: {} }]);
+	});
+
+	it('set_parent: anida con madre existente y desanida una SUBTAREA; madre inexistente se descarta', () => {
+		const sub = topLevel('s1', { parentId: 't1' });
+		const existing = new Map([
+			['t1', topLevel('t1')],
+			['t2', topLevel('t2')],
+			['s1', sub]
+		]);
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_parent', taskId: 't2', parentId: 't1' },
+			{ op: 'set_parent', taskId: 's1', parentId: null },
+			{ op: 'set_parent', taskId: 't2', parentId: 'no-existe' }
+		];
+		const { batchOps, originalIndexes, skipped } = buildBatchFromOps(ops, existing);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: 't2', kind: 'setParent', payload: { parentId: 't1' } },
+			{ type: 'mutate', taskId: 's1', kind: 'setParent', payload: { parentId: null } }
+		]);
+		expect(originalIndexes).toEqual([0, 1]);
+		expect(skipped).toHaveLength(1);
+		expect(skipped[0].index).toBe(2);
+		expect(skipped[0].error).toContain('la tarea madre no-existe no está entre las tareas');
+	});
+
+	it('set_parent: las reglas de negocio NO se repiten aquí (madre subtarea o la propia tarea viajan y decide la app)', () => {
+		const existing = new Map([
+			['t1', topLevel('t1')],
+			['s1', topLevel('s1', { parentId: 't1' })]
+		]);
+		const { batchOps, skipped } = buildBatchFromOps(
+			[
+				{ op: 'set_parent', taskId: 't1', parentId: 's1' },
+				{ op: 'set_parent', taskId: 't1', parentId: 't1' }
+			],
+			existing
+		);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toHaveLength(2);
 	});
 });
 

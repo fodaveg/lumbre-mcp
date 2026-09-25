@@ -753,7 +753,8 @@ export function subtaskNotAllowedError(taskId: string): Error {
 			'lista ni sección propias — vive en la checklist de su padre (docs/18-que-es-una-tarea.md ' +
 			'§2.5, prohibidos en subtarea: `somedayListId`, `sectionId`). Eso deja fuera move_to_list y ' +
 			'set_section. Si querías cambiar de lista o de sección lo que la contiene, resuelve el id de ' +
-			'la tarea PADRE con list_tasks y opera sobre él. Sobre la SUBTAREA sí valen las ops update ' +
+			'la tarea PADRE con list_tasks y opera sobre él; para sacarla de la checklist, set_parent con ' +
+			'parentId:null (mutate_tasks). Sobre la SUBTAREA sí valen las ops update ' +
 			'(texto, notas, prioridad, hora), reschedule (darle fecha o quitársela con date:null), ' +
 			'complete/complete_subtask, cancel y add_subtask de mutate_tasks, y delete de organize. No ' +
 			'se ha encolado ninguna mutación.'
@@ -1177,7 +1178,11 @@ export type MutationKind =
 	| 'skipOccurrence'
 	| 'archiveHabit'
 	| 'unarchiveHabit'
-	| 'deleteHabit';
+	| 'deleteHabit'
+	// Anidar/desanidar una tarea (2026-09-25, encargo de David): ver
+	// `SetParentMutationPayload`. Contrato descrito por la sesión de la app,
+	// AÚN no en `main` de lumbre ni desplegado.
+	| 'setParent';
 
 export interface CompleteMutationPayload {
 	done: boolean;
@@ -1375,6 +1380,20 @@ export type UnarchiveHabitMutationPayload = Record<string, never>;
  *  diferencia de `delete` (tareas), no hay `restore` para un hábito borrado. */
 export type DeleteHabitMutationPayload = Record<string, never>;
 
+/**
+ * Convierte la tarea `MutateTaskInput.taskId` en subtarea de `parentId`, o la
+ * saca de su checklist con `parentId: null` (2026-09-25). Contrato tal como lo
+ * describe la sesión de la app — todavía NO está en `main` de lumbre: las
+ * reglas las aplica el SERVIDOR y este cliente no las repite (madre viva, de
+ * primer nivel, no archivada ni borrada y distinta de la tarea; un solo nivel;
+ * nada de deadline, recordatorios ni repetición en la tarea que se anida). Al
+ * anidar pierde lista y sección y va al final de la checklist de la madre; al
+ * desanidar queda en la lista de la madre, sin sección.
+ */
+export interface SetParentMutationPayload {
+	parentId: string | null;
+}
+
 export interface MutateTaskInput {
 	taskId: string;
 	kind: MutationKind;
@@ -1406,7 +1425,8 @@ export interface MutateTaskInput {
 		| SkipOccurrenceMutationPayload
 		| ArchiveHabitMutationPayload
 		| UnarchiveHabitMutationPayload
-		| DeleteHabitMutationPayload;
+		| DeleteHabitMutationPayload
+		| SetParentMutationPayload;
 }
 
 /**
@@ -1769,7 +1789,14 @@ export type MutateTasksOp =
 	 *  resto de lo destructivo — a diferencia de `delete` sobre una tarea, no
 	 *  hay `restore` para un hábito borrado). Mismo criterio de existencia que
 	 *  `archive_habit`/`unarchive_habit`. */
-	| { op: 'delete_habit'; habitId: string };
+	| { op: 'delete_habit'; habitId: string }
+	/** Anida `taskId` bajo la tarea `parentId`, o la desanida con `null`
+	 *  (2026-09-25, ver `SetParentMutationPayload`). `taskId` puede ser ya una
+	 *  subtarea (es el caso de desanidar), así que entra en
+	 *  `TASK_TARGET_ALLOW_SUBTASK` a `true`. De `parentId` el cliente solo
+	 *  comprueba que exista, en la MISMA petición agrupada que los `taskId`
+	 *  (`collectExistenceCheckIds`); el resto de reglas las decide el servidor. */
+	| { op: 'set_parent'; taskId: string; parentId: string | null };
 
 /**
  * `allowSubtask` por `op`, SOLO para las 11 variantes cuyo target es una
@@ -1823,6 +1850,12 @@ export type MutateTasksOp =
  * semilla válida), y las otras tres targetean un HÁBITO, mismo motivo que
  * `register_habit`.
  *
+ * `set_parent` (2026-09-25) entra a `true`: desanidar exige targetear una
+ * subtarea. Anidar una que ya lo es (moverla a otra madre) lo decide el
+ * servidor, no esta tabla. Su `parentId` no-null también se comprueba, pero
+ * fuera de esta tabla (no es el objetivo de la op): lo añade
+ * `collectExistenceCheckIds` y lo rechaza `buildBatchFromOps`.
+ *
  * La tabla es la ÚNICA fuente de la decisión: la leen `buildBatchFromOps`
  * (para el `allowSubtask` que pasa a `assertTaskUsable`) y
  * `collectExistenceCheckIds` (solo por la PRESENCIA de la clave: qué ops
@@ -1845,7 +1878,8 @@ const TASK_TARGET_ALLOW_SUBTASK: Partial<Record<MutateTasksOp['op'], boolean>> =
 	set_waiting: true,
 	clear_waiting: true,
 	archive: true,
-	unarchive: true
+	unarchive: true,
+	set_parent: true
 };
 
 /** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
@@ -1860,6 +1894,9 @@ function targetIdOf(op: MutateTasksOp): string | undefined {
  * Ids que `mutate_tasks` debe resolver con `findTasksByIds` ANTES de mandar
  * el lote — deduplicados (varias ops pueden targetear la misma tarea). Pura,
  * sin red: separada de la llamada real para poder testearla sola.
+ *
+ * Incluye el `parentId` no-null de `set_parent`: así la madre se resuelve en
+ * la MISMA petición agrupada que los objetivos, sin una petición por op.
  */
 export function collectExistenceCheckIds(ops: MutateTasksOp[]): string[] {
 	const ids = new Set<string>();
@@ -1867,8 +1904,22 @@ export function collectExistenceCheckIds(ops: MutateTasksOp[]): string[] {
 		if (TASK_TARGET_ALLOW_SUBTASK[op.op] === undefined) continue;
 		const id = targetIdOf(op);
 		if (id !== undefined) ids.add(id);
+		if (op.op === 'set_parent' && op.parentId !== null) ids.add(op.parentId);
 	}
 	return [...ids];
+}
+
+/**
+ * Error de `set_parent` cuando la tarea madre no sale en la comprobación de
+ * existencia (ni viva ni archivada, ver `runOpsBatch`). Solo cubre la
+ * existencia: si la madre existe pero no vale como madre (subtarea,
+ * archivada, la propia tarea…), la op viaja y el motivo lo da la app.
+ */
+export function parentNotFoundError(parentId: string): Error {
+	return new Error(
+		`set_parent: la tarea madre ${parentId} no está entre las tareas del usuario (mal transcrita o ` +
+			'borrada; resuélvela con list_tasks). No se ha encolado ninguna mutación.'
+	);
 }
 
 /** Tags de desarrollo (tarea 2db86c2d, 2026-09-24): el estado va como marca
@@ -2103,6 +2154,8 @@ function translateOp(op: MutateTasksOp): BatchOp {
 			return { type: 'mutate', taskId: op.habitId, kind: 'unarchiveHabit', payload: {} };
 		case 'delete_habit':
 			return { type: 'mutate', taskId: op.habitId, kind: 'deleteHabit', payload: {} };
+		case 'set_parent':
+			return { type: 'mutate', taskId: op.taskId, kind: 'setParent', payload: { parentId: op.parentId } };
 	}
 }
 
@@ -2269,6 +2322,13 @@ export function buildBatchFromOps(
 		}
 		if (op.op === 'add_subtask' && existing.get(op.taskId)?.parentId) {
 			skipped.push({ index, error: nestedSubtaskNotAllowedError(op.taskId).message });
+			return;
+		}
+		// `set_parent`: de la madre solo se comprueba que exista (resuelta en la
+		// misma petición que el objetivo, ver `collectExistenceCheckIds`). Que
+		// valga como madre lo decide el servidor, con su motivo.
+		if (op.op === 'set_parent' && op.parentId !== null && !existing.has(op.parentId)) {
+			skipped.push({ index, error: parentNotFoundError(op.parentId).message });
 			return;
 		}
 		// MC6: `deadline`/`reminders` son PROHIBIDOS en una subtarea (§2.5) —

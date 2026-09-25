@@ -194,6 +194,8 @@ export const TASK_OP_TOOL: Record<string, 'mutate_tasks' | 'organize'> = {
 	skip_occurrence: 'mutate_tasks',
 	archive_habit: 'mutate_tasks',
 	unarchive_habit: 'mutate_tasks',
+	// 2026-09-25: anidar/desanidar opera sobre UNA tarea y no destruye nada.
+	set_parent: 'mutate_tasks',
 	delete: 'organize',
 	remove_section: 'organize',
 	create_list: 'organize',

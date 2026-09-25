@@ -296,6 +296,9 @@ describe('tools/list — superficie completa', () => {
 		// los 24.594 de arriba (+3,9%). `literal: true` (tarea cd39f028) no
 		// cuenta aquí: no es un campo expuesto al modelo, se fuerza dentro del
 		// cliente sin tocar ningún schema.
+		// Re-medido el 2026-09-25 (`set_parent` en `mutate_tasks`, campo
+		// `parentId` expuesto, 27→28 ops): 17 tools, 26.724 caracteres (+426
+		// sobre los 26.298 de fd83faf). Cabe bajo el techo sin subirlo.
 		// Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
@@ -335,7 +338,7 @@ describe('tools/list — superficie completa', () => {
 	 * se vigila aquí es que esa tabla siga NOMBRANDO las ops de cada tool —
 	 * si alguien añade una op y no la documenta, el modelo no puede llamarla.
 	 */
-	it('`mutate_tasks` y `organize` documentan sus ops (17+10, MC7) en la description de `ops`', () => {
+	it('`mutate_tasks` y `organize` documentan sus ops (18+10, MC7 y set_parent) en la description de `ops`', () => {
 		const opsDescription = (name: string) => {
 			const tool = tools.find((t) => t.name === name);
 			expect(tool).toBeDefined();
@@ -364,7 +367,8 @@ describe('tools/list — superficie completa', () => {
 			'unarchive',
 			'skip_occurrence',
 			'archive_habit',
-			'unarchive_habit'
+			'unarchive_habit',
+			'set_parent'
 		]) {
 			expect(mutateTasksOps).toContain(`${op}:`);
 		}
@@ -1254,6 +1258,23 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				habitId: '11111111-1111-1111-1111-111111111111',
 				taskId: '22222222-2222-2222-2222-222222222222'
 			}
+		},
+		// 2026-09-25: anidar/desanidar. `parentId` es obligatorio (null desanida),
+		// así que omitirlo es forma inválida, no «desanidar por defecto».
+		{
+			op: 'set_parent',
+			valid: {
+				op: 'set_parent',
+				taskId: '11111111-1111-1111-1111-111111111111',
+				parentId: '22222222-2222-2222-2222-222222222222'
+			},
+			missingField: 'parentId',
+			extraField: {
+				op: 'set_parent',
+				taskId: '11111111-1111-1111-1111-111111111111',
+				parentId: null,
+				section: 'x'
+			}
 		}
 	];
 
@@ -1276,7 +1297,7 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
 	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
 
-	it('cubre las 27 operaciones (guardarraíl del propio test; MC7 desde el 2026-09-24)', () => {
+	it('cubre las 28 operaciones (guardarraíl del propio test; MC7 y set_parent desde el 2026-09-25)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
@@ -1305,7 +1326,8 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				'skip_occurrence',
 				'archive_habit',
 				'unarchive_habit',
-				'delete_habit'
+				'delete_habit',
+				'set_parent'
 			].sort()
 		);
 	});
@@ -2109,6 +2131,365 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(text).toContain('0/1 operación(es) encoladas.');
 		expect(text).toContain('[0] create_list:');
 	});
+});
+
+/**
+ * `set_parent` (2026-09-25, encargo de David): convertir una tarea en subtarea
+ * de otra y sacarla, con el cableado real de `mutate_tasks`. El contrato del
+ * lado app (kind `setParent`, payload `{ parentId: uuid | null }`) lo describe
+ * su sesión y aún no está en `main` de lumbre: las respuestas de rechazo de
+ * aquí son SUPUESTAS con las dos formas que ya usa `/api/batch` (`ok:false`
+ * con `error`, o `materialization:'noop'` con un aviso).
+ */
+describe('set_parent — anidar y desanidar una tarea', () => {
+	const TASK_ID = '11111111-1111-4111-8111-111111111111';
+	const PARENT_ID = '22222222-2222-4222-8222-222222222222';
+	const OTHER_PARENT_ID = '33333333-3333-4333-8333-333333333333';
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	function task(overrides: Record<string, unknown> = {}) {
+		return {
+			id: TASK_ID,
+			content: 'tarea',
+			notes: null,
+			done: false,
+			priority: null,
+			date: null,
+			deadline: null,
+			list: null,
+			createdAt: '2026-09-25T00:00:00.000Z',
+			parentId: null,
+			...overrides
+		};
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'set-parent-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function batchCalls(fetchSpy: ReturnType<typeof vi.fn>) {
+		return fetchSpy.mock.calls.filter((call) => String(call[0]).endsWith('/api/batch'));
+	}
+
+	function taskLookups(fetchSpy: ReturnType<typeof vi.fn>) {
+		return fetchSpy.mock.calls.filter((call) => String(call[0]).includes('/api/tasks?'));
+	}
+
+	function batchOps(fetchSpy: ReturnType<typeof vi.fn>) {
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		return (JSON.parse(String((calls[0][1] as RequestInit).body)) as { ops: unknown[] }).ops;
+	}
+
+	function resultText(result: unknown): string {
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		return first.type === 'text' ? (first.text ?? '') : '';
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('con parentId uuid: resuelve tarea y madre en UNA petición agrupada y viaja kind:setParent', async () => {
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			if (String(url).includes('/api/tasks?')) {
+				return jsonResponse([task(), task({ id: PARENT_ID, content: 'madre' })]);
+			}
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: PARENT_ID }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		const lookups = taskLookups(fetchSpy);
+		expect(lookups).toHaveLength(1);
+		expect(String(lookups[0][0])).toContain(TASK_ID);
+		expect(String(lookups[0][0])).toContain(PARENT_ID);
+		expect(batchOps(fetchSpy)).toEqual([
+			{ type: 'mutate', taskId: TASK_ID, kind: 'setParent', payload: { parentId: PARENT_ID } }
+		]);
+		const text = resultText(result);
+		expect(text).toContain('1/1 operación(es) encoladas.');
+		expect(text).toContain('Resultado en la app: 1 aplicadas.');
+	});
+
+	it('con parentId null sobre una SUBTAREA: la acepta como objetivo y viaja payload {parentId:null}', async () => {
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([task({ parentId: PARENT_ID })]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: null }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		const lookups = taskLookups(fetchSpy);
+		expect(lookups).toHaveLength(1);
+		expect(String(lookups[0][0])).not.toContain(PARENT_ID);
+		expect(batchOps(fetchSpy)).toEqual([
+			{ type: 'mutate', taskId: TASK_ID, kind: 'setParent', payload: { parentId: null } }
+		]);
+		expect(resultText(result)).not.toMatch(/fallaron/);
+	});
+
+	it('varias ops con madres distintas: una sola petición de existencia para todos los ids', async () => {
+		const secondTask = '44444444-4444-4444-8444-444444444444';
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			if (String(url).includes('/api/tasks?')) {
+				return jsonResponse([
+					task(),
+					task({ id: secondTask }),
+					task({ id: PARENT_ID }),
+					task({ id: OTHER_PARENT_ID })
+				]);
+			}
+			return jsonResponse({
+				ok: true,
+				results: [
+					{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' },
+					{ index: 1, type: 'mutate', ok: true, id: secondTask, materialization: 'applied' }
+				]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'set_parent', taskId: TASK_ID, parentId: PARENT_ID },
+					{ op: 'set_parent', taskId: secondTask, parentId: OTHER_PARENT_ID }
+				]
+			}
+		});
+
+		expect(taskLookups(fetchSpy)).toHaveLength(1);
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+	});
+
+	it('parentId que no es uuid: rechazo por forma, sin encolar', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: 'tarea-madre' }] }
+		});
+
+		expect(resultText(result)).toMatch(/parentId/);
+		expect(batchCalls(fetchSpy)).toHaveLength(0);
+	});
+
+	it('sin parentId: rechazo por forma (null desanida, omitirlo no), sin encolar', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID }] }
+			})
+		);
+
+		expect(text).toContain('0/1 operación(es) encoladas.');
+		expect(text).toMatch(/\[0\] set_parent: .*parentId/);
+		expect(batchCalls(fetchSpy)).toHaveLength(0);
+	});
+
+	it('parentId inexistente (ni viva ni archivada): rechazada antes de encolar, las demás ops siguen', async () => {
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?') && u.includes('includeArchived=true')) return jsonResponse([]);
+			if (u.includes('/api/tasks?')) return jsonResponse([task()]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: {
+					ops: [
+						{ op: 'set_parent', taskId: TASK_ID, parentId: PARENT_ID },
+						{ op: 'complete', taskId: TASK_ID }
+					]
+				}
+			})
+		);
+
+		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain(`[0] set_parent: set_parent: la tarea madre ${PARENT_ID} no está entre las tareas`);
+		expect(batchOps(fetchSpy)).toEqual([{ type: 'mutate', taskId: TASK_ID, kind: 'complete', payload: { done: true } }]);
+	});
+
+	it('madre ARCHIVADA: el cliente la encuentra con includeArchived y deja que decida el servidor', async () => {
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?') && u.includes('includeArchived=true')) {
+				return jsonResponse([task({ id: PARENT_ID, archivedAt: '2026-09-20T10:00:00.000Z' })]);
+			}
+			if (u.includes('/api/tasks?')) return jsonResponse([task()]);
+			return jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: false, id: TASK_ID, error: 'La tarea madre está archivada' }]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: PARENT_ID }] }
+			})
+		);
+
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+		expect(text).toContain('[0] set_parent: La tarea madre está archivada');
+	});
+
+	it('rechazo del servidor al encolar (ok:false): el informe muestra su motivo literal', async () => {
+		const reason = 'La tarea tiene fecha límite: quítala antes de convertirla en subtarea (deadline)';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockImplementation(async (url: unknown) => {
+				if (String(url).includes('/api/tasks?')) return jsonResponse([task(), task({ id: PARENT_ID })]);
+				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: false, id: TASK_ID, error: reason }] });
+			})
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: PARENT_ID }] }
+			})
+		);
+
+		expect(text).toContain('0/1 operación(es) encoladas.');
+		expect(text).toContain(`1 fallaron:\n  [0] set_parent: ${reason}`);
+	});
+
+	it('rechazo del servidor al aplicar (noop + aviso): el informe dice sin efecto y reenvía el aviso', async () => {
+		const notice = '«setParent» no se aplicó: la tarea tiene subtareas propias (un solo nivel).';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockImplementation(async (url: unknown) => {
+				if (String(url).includes('/api/tasks?')) return jsonResponse([task(), task({ id: PARENT_ID })]);
+				return jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'noop' }],
+					notices: [notice]
+				});
+			})
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: PARENT_ID }] }
+			})
+		);
+
+		expect(text).toMatch(/\[0\] set_parent: sin efecto/);
+		expect(text).toContain(`avisos de la app:\n  - ${notice}`);
+	});
+
+	it('set_parent NO existe en organize: puntero a mutate_tasks, sin tocar red', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'organize',
+				arguments: { ops: [{ op: 'set_parent', taskId: TASK_ID, parentId: null }] }
+			})
+		);
+
+		expect(text).toContain('la op "set_parent" no existe en organize; está en mutate_tasks');
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('get_task de una SUBTAREA pinta el id de su madre (parentId)', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([task({ parentId: PARENT_ID })])));
+		const client = await buildClient();
+
+		const text = resultText(await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } }));
+
+		expect(text).toContain(`- subtarea de: ${PARENT_ID} (parentId)`);
+	});
+
+	it('get_task de una tarea de primer nivel no pinta ninguna madre', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([task()])));
+		const client = await buildClient();
+
+		const text = resultText(await client.callTool({ name: 'get_task', arguments: { taskId: TASK_ID } }));
+
+		expect(text).not.toContain('subtarea de:');
+	});
+
+	// Las subtareas no salen del listado: lo filtra la app en el modo listado
+	// de `GET /api/tasks` (`parentId === undefined`), no el conector. Lo que
+	// fija este test es que `list_tasks` pide SIEMPRE ese modo, con cualquier
+	// combinación de filtros, y nunca `id=`/`ids=`/`updatedSince=`, que sí
+	// devuelven subtareas.
+	it.each(['today', 'week', 'upcoming', 'inbox', 'someday', 'overdue', 'all'])(
+		'list_tasks scope %s pide el modo listado, que excluye subtareas sueltas',
+		async (scope) => {
+			const fetchSpy = vi.fn().mockResolvedValue(jsonResponse([]));
+			vi.stubGlobal('fetch', fetchSpy);
+			const client = await buildClient();
+
+			await client.callTool({
+				name: 'list_tasks',
+				arguments: { scope, includeDone: true, includeArchived: true, notes: 'none' }
+			});
+
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			const url = new URL(String(fetchSpy.mock.calls[0][0]));
+			expect(url.pathname).toBe('/api/tasks');
+			for (const param of ['id', 'ids', 'updatedSince']) expect(url.searchParams.has(param)).toBe(false);
+		}
+	);
 });
 
 /**
