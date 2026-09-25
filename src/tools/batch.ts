@@ -529,22 +529,23 @@ async function runOpsBatch(
 	const idsToCheck = collectExistenceCheckIds(validated);
 	const existing: Map<string, LumbreTask> =
 		idsToCheck.length > 0 ? await findTasksByIds(ctx.config, idsToCheck) : new Map();
-	// Tres ops aplican (o pueden aplicar) sobre una tarea ARCHIVADA, que
+	// Cuatro ops aplican (o pueden aplicar) sobre una tarea ARCHIVADA, que
 	// `findTasksByIds` normal (arriba) no ve: `update` con `recurrence: null`
 	// (apagar una semilla que sigue generando, ver `clearArchivedSeedRecurrence`
 	// en el repo principal — CX7), `unarchive` (MC7: su objetivo CASI SIEMPRE
-	// está archivado, es su caso de uso principal) y `delete` (MC7: acepta
-	// ahora tareas archivadas). Solo para esos ids, y solo si la búsqueda
-	// normal no los vio, se repite incluyendo archivadas — así una
-	// `unarchive`/`delete` legítima sobre una archivada no muere aquí con un
-	// falso "no existe" (`archive`, cuyo objetivo casi siempre es una tarea
-	// VIVA, se queda fuera a propósito: el mismo criterio que ya aplicaba
-	// cualquier otra op antes de MC7, ver el JSDoc de `taskNotFoundError`).
+	// está archivado, es su caso de uso principal), `delete` (MC7: acepta
+	// ahora tareas archivadas) y `archive` (archivar una ya archivada es `noop`
+	// SIN aviso en la app, `materializeLifecycleMutation` de
+	// `lifecycle-inbound.ts`, `4eda45d`; sin reintento moría aquí como "no
+	// existe"). Solo para esos ids, y solo si la búsqueda normal no los vio, se
+	// repite incluyendo archivadas, en UNA sola petición agrupada — así una op
+	// legítima sobre una archivada no muere con un falso "no existe".
 	const archivedLookupIds = validated
 		.filter(
 			(op) =>
 				(op.op === 'update' && op.recurrence === null && !existing.has(op.taskId)) ||
-				((op.op === 'unarchive' || op.op === 'delete') && !existing.has(op.taskId))
+				((op.op === 'unarchive' || op.op === 'delete' || op.op === 'archive') &&
+					!existing.has(op.taskId))
 		)
 		.map((op) => (op as { taskId: string }).taskId);
 	if (archivedLookupIds.length > 0) {

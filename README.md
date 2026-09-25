@@ -591,9 +591,9 @@ operaciones a la vez» más abajo):
   archivada, desarchivar una viva) es «sin efecto» sin aviso; un `taskId`
   inexistente lo rechaza el conector ANTES de encolar, igual que el resto de
   ops de tarea — salvo que `unarchive` casi siempre targetea una YA
-  archivada, así que si la comprobación normal (que excluye archivadas) no la
-  encuentra, el conector repite la búsqueda con `includeArchived` antes de
-  darla por inexistente.
+  archivada (y `archive` puede hacerlo), así que si la comprobación normal
+  (que excluye archivadas) no la encuentra, el conector repite la búsqueda
+  con `includeArchived` antes de darla por inexistente.
 - `{ op: "skip_occurrence", seriesId, date, occurrenceId? }` (`mutate_tasks`,
   MC7) — salta la ocurrencia de `date` (`YYYY-MM-DD`) de la serie `seriesId`.
   `seriesId` tiene que ser la SEMILLA (`seriesId === id` en
@@ -876,8 +876,8 @@ La pareja alta→mutación (crear una tarea y tocarla en el mismo lote) sigue
 siendo inexpresable, como siempre: un `add_task` no lleva id de cliente y las
 13 ops que targetean una tarea (MC7 añade `archive`/`unarchive`) comprueban su
 existencia contra el servidor ANTES de mandar el batch — salvo `restore` (su
-objetivo es una tarea BORRADA) y, desde MC7, `unarchive` y `delete` sobre una
-archivada, que repiten esa comprobación con `includeArchived` en vez de
+objetivo es una tarea BORRADA) y, desde MC7, `archive`, `unarchive` y `delete`
+sobre una archivada, que repiten esa comprobación con `includeArchived` en vez de
 saltársela. Las ops cuyo objetivo NO es una tarea (`register_habit`,
 `skip_occurrence`, `archive_habit`, `unarchive_habit`, `delete_habit`) no
 comprueban nada contra `GET /api/tasks`: decide el servidor. El encadenado

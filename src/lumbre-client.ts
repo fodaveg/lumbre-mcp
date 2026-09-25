@@ -1720,10 +1720,11 @@ export type MutateTasksOp =
 	 *  invariante que romper si `taskId` ya es una subtarea) — ver
 	 *  `TASK_TARGET_ALLOW_SUBTASK`. Sin comprobación de existencia contra el
 	 *  `GET /api/tasks` NORMAL (que excluye archivadas): `unarchive` casi
-	 *  siempre targetea una archivada, así que `runOpsBatch` repite la
-	 *  comprobación con `includeArchived` cuando la primera no la encuentra
-	 *  (mismo mecanismo que ya usaba `update` con `recurrence: null` sobre una
-	 *  semilla archivada, CX7). Un objetivo inexistente (o ya en el estado
+	 *  siempre targetea una archivada, y `archive` puede targetear una que ya
+	 *  lo está, así que `runOpsBatch` repite la comprobación con
+	 *  `includeArchived` cuando la primera no la encuentra (mismo mecanismo que
+	 *  ya usaba `update` con `recurrence: null` sobre una semilla archivada,
+	 *  CX7). Un objetivo inexistente (o ya en el estado
 	 *  pedido) es `noop` — con aviso `target-missing` si no existe, sin aviso
 	 *  si ya estaba así. */
 	| { op: 'archive'; taskId: string }
@@ -1809,8 +1810,9 @@ export type MutateTasksOp =
  * `taskId` sea de primer nivel (cascada a subtareas propias si las tiene, no
  * pasa nada si ella misma ya lo es). A diferencia de `restore`, SÍ comprueban
  * existencia — pero no basta con `findTasksByIds` normal, que excluye
- * archivadas: `unarchive` (y `delete` sobre una archivada, MC7 también) la
- * repiten con `includeArchived` cuando la primera búsqueda no la encuentra —
+ * archivadas: `archive`/`unarchive` (y `delete` sobre una archivada, MC7
+ * también) la repiten con `includeArchived` cuando la primera búsqueda no la
+ * encuentra —
  * ver `runOpsBatch` en `tools/batch.ts`. `skip_occurrence`/`archive_habit`/
  * `unarchive_habit`/`delete_habit` NO están aquí: la primera targetea una
  * SERIE (`seriesId`, no `taskId`/`subtaskId` — el servidor decide si es una

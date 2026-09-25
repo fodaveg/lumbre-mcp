@@ -1638,6 +1638,61 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(resultText(result)).not.toMatch(/fallaron/);
 	});
 
+	// La app responde `noop` SIN aviso a archivar una archivada
+	// (`materializeLifecycleMutation`, `lifecycle-inbound.ts` de 4eda45d); sin
+	// el reintento con includeArchived, el conector la rechazaba antes de
+	// encolar como si no existiera.
+	it('archive sobre una tarea YA archivada: UNA segunda búsqueda agrupada con includeArchived (junto a unarchive) y el informe dice sin efecto', async () => {
+		const archivedId = '77777777-7777-4777-8777-777777777777';
+		const otherArchivedId = '88888888-8888-4888-8888-888888888888';
+		const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?') && u.includes('includeArchived=true')) {
+				return jsonResponse([
+					{ id: archivedId, content: 'Vieja', archivedAt: '2026-09-09T18:19:11.922Z' },
+					{ id: otherArchivedId, content: 'Otra', archivedAt: '2026-09-09T18:19:11.922Z' }
+				]);
+			}
+			if (u.includes('/api/tasks?')) return jsonResponse([]);
+			return jsonResponse({
+				ok: true,
+				results: [
+					{ index: 0, type: 'mutate', ok: true, id: archivedId, materialization: 'noop' },
+					{ index: 1, type: 'mutate', ok: true, id: otherArchivedId, materialization: 'applied' }
+				]
+			});
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'archive', taskId: archivedId },
+					{ op: 'unarchive', taskId: otherArchivedId }
+				]
+			}
+		});
+
+		expect(result.isError).not.toBe(true);
+		const archivedLookups = fetchSpy.mock.calls.filter(
+			(c) => String(c[0]).includes('/api/tasks?') && String(c[0]).includes('includeArchived=true')
+		);
+		expect(archivedLookups).toHaveLength(1);
+		expect(String(archivedLookups[0][0])).toContain(archivedId);
+		expect(String(archivedLookups[0][0])).toContain(otherArchivedId);
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toEqual({ type: 'mutate', taskId: archivedId, kind: 'archive', payload: {} });
+		const text = resultText(result);
+		expect(text).toMatch(/\[0\] archive: sin efecto/);
+		expect(text).not.toMatch(/fallaron/);
+	});
+
 	it('archive_habit sobre un habitId INEXISTENTE: el informe trae el notice target-missing de la app, igual que restore-purged', async () => {
 		// `archive_habit` NO comprueba existencia (su objetivo es un hábito, ver
 		// `TASK_TARGET_ALLOW_SUBTASK`): el id inexistente viaja tal cual y el
