@@ -260,6 +260,9 @@ export function formatTaskFull(t, refs) {
     const lines = [
         `Tarea ${t.id}`,
         `- contenido: ${renderRefs(t.content, refs)}`,
+        // Subtarea: el id de su madre (`parentId` de `GET /api/tasks?id=`). Es lo
+        // que necesita `set_parent` para moverla o sacarla de la checklist.
+        ...(t.parentId ? [`- subtarea de: ${t.parentId} (parentId)`] : []),
         `- tags propios: ${t.tags && t.tags.length > 0 ? t.tags.map((tag) => `#${tag}`).join(', ') : '(ninguno)'}`,
         `- tags efectivos: ${t.effectiveTags && t.effectiveTags.length > 0 ? t.effectiveTags.map((tag) => `#${tag}`).join(', ') : '(ninguno)'}`,
         `- estado: ${stateLabel(t)}`,
