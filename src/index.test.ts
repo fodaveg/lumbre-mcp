@@ -308,6 +308,8 @@ describe('tools/list — superficie completa', () => {
 		// subtarea): 26.757 (+40), sigue sin subir el techo. Tras la revisión
 		// de textos de subtareas (recortes en `mutate_tasks`, `taskId` de
 		// `add_attachment` que remite a `get_task` de la madre): 26.734 (−23).
+		// Con «esperando» entre los rechazos de `set_parent` (se quita antes
+		// con `clear_waiting`): 26.774 (+40), sigue sin subir el techo.
 		// Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
