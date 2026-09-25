@@ -341,7 +341,7 @@ export function listNotFoundError(listId) {
 export function subtaskNotAllowedError(taskId, op) {
     return new Error(`El id ${taskId} es de una SUBTAREA y esta operación no aplica ahí: ${subtaskRejectionReason(op)} ` +
         'Sobre la SUBTAREA sí valen las ops update (texto, notas, tags, prioridad, hora; no deadline, ' +
-        'reminders ni recurrence), reschedule (darle fecha o quitársela con date:null), ' +
+        'reminders ni recurrence con regla), reschedule (darle fecha o quitársela con date:null), ' +
         'complete/complete_subtask, cancel, clear_waiting, unarchive y set_parent de mutate_tasks, ' +
         'delete de organize y la tool add_attachment. No valen move_to_list, set_section, set_waiting ' +
         'ni archive. No se ha encolado ninguna mutación.');

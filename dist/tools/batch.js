@@ -673,8 +673,8 @@ export function registerBatchTool(server, ctx) {
             `set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
             `clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +
             `unarchive (visibilidad, no ciclo de vida), skip_occurrence (salta una ocurrencia de una ` +
-            `serie) y set_parent. Vía ÚNICA para mutar una tarea (no hay tool ` +
-            `suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
+            `serie) y set_parent. Vía ÚNICA para mutar una tarea ` +
+            `y preferente para varias de golpe: resuelve existencias y encola en ` +
             `UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
             `inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
             `cada add_task encolada. ${OUTCOME_NOTE}`,
@@ -697,8 +697,8 @@ export function registerBatchTool(server, ctx) {
                 'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +
                 'register_habit: habitId* [date] (habitId, no taskId; sin server con el HOY local ' +
                 'desplegado, omitir date falla) · ' +
-                'archive: taskId* (noop si ya lo estaba; en subtarea, archiva su madre) · ' +
-                'unarchive: taskId* (desarchiva; noop si ya estaba viva) · ' +
+                'archive: taskId* (noop si ya lo estaba; no en subtarea) · ' +
+                'unarchive: taskId* (noop si ya estaba viva) · ' +
                 'skip_occurrence: seriesId*, date* [occurrenceId] (seriesId = SEMILLA de la serie, no ' +
                 'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
                 'unarchive_habit: habitId* · ' +
