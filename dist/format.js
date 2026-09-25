@@ -250,7 +250,9 @@ function formatTask(t, opts, isDuplicateTitle) {
  * `subtasks` (si la tarea es de primer nivel y tiene alguna, ver
  * `LumbreTask.subtasks`): una línea `[x]`/`[ ]` por subtarea, con SU id — es
  * el ÚNICO sitio donde el modelo puede obtener el id de una subtarea, para
- * poder pasárselo después a `complete_subtask`.
+ * poder pasárselo después a `complete_subtask`. Cierra el bloque una línea que
+ * manda a `get_task` de la subtarea para su fecha, prioridad, notas y
+ * adjuntos: la API no los trae en `subtasks[]`, así que aquí no hay marcador.
  *
  * `refs` (opcional): resolución EN VIVO de las referencias del texto, las notas
  * y las subtareas (`refs.ts`) — mismo trato que en el listado, porque una nota
@@ -308,6 +310,11 @@ export function formatTaskFull(t, refs) {
             const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
             lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}${suffix}  · id: ${s.id}`);
         }
+        // `GET /api/tasks?id=<madre>` solo trae de cada subtarea id, texto,
+        // hecha y tags (`ApiSubtask`, serialize.ts de la app): de aquí no se
+        // puede saber si tiene fecha, nota o adjuntos. Se dice en la salida
+        // para que el modelo abra la subtarea en vez de dar por hecho que no.
+        lines.push('  (fecha, prioridad, notas y adjuntos de una subtarea: get_task con su id)');
     }
     return lines.join('\n');
 }
