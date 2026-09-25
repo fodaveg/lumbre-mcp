@@ -1354,11 +1354,10 @@ export type ArchiveMutationPayload = Record<string, never>;
 export type UnarchiveMutationPayload = Record<string, never>;
 /** Salta la ocurrencia de `date` (`YYYY-MM-DD`) de la serie `seriesId`, que
  *  tiene que ser la SEMILLA (`seriesId === id`, con regla, de primer nivel) —
- *  si no lo es, `noop` con el aviso `target-missing` citando `seriesId`. Una
- *  ocurrencia FANTASMA (nunca materializada, sin fila propia) se salta igual:
- *  el servidor calcula su id determinista internamente a partir de
- *  `seriesId`+`date`, así que `MutateTaskInput.taskId` (ver `translateOp`) no
- *  necesita ser el id real de esa fila para que el salto se aplique. */
+ *  si no lo es, `noop` con el aviso `target-missing` citando `seriesId`.
+ *  `MutateTaskInput.taskId` lleva la fila de la ocurrencia (`occurrenceId` de
+ *  la op) o, sin ella, `seriesId`: esto último solo acierta con una ocurrencia
+ *  sin mover de día (ver `translateOp` y el JSDoc de `MutateTasksOp`). */
 export interface SkipOccurrenceMutationPayload {
 	seriesId: string;
 	date: string;
@@ -1737,26 +1736,25 @@ export type MutateTasksOp =
 	 *  `register_habit`/`restore`: el objetivo no es una tarea de primer nivel
 	 *  comprobable con `findTasksByIds`, ver `TASK_TARGET_ALLOW_SUBTASK`).
 	 *
-	 *  DECISIÓN (ocurrencia FANTASMA, sin fila propia — el caso más común: casi
-	 *  toda ocurrencia futura de una serie NO está materializada): este cliente
-	 *  NO le pide al modelo el id de esa fila, que casi nunca puede conocer.
-	 *  `translateOp` manda `MutateTaskInput.taskId: seriesId` — verificado
-	 *  contra `materializeLifecycleMutation`/`skipOccurrence`
-	 *  (`$lib/sync/lifecycle-inbound.ts`/`recurrence-materialization.ts` del
-	 *  repo principal): con ese `taskId`, `movedOccurrence` lo trata como "no
-	 *  movida" (`occurrenceId === seed.id` es uno de sus dos atajos de salida) y
-	 *  el servidor calcula por su cuenta el id determinista de la fila a partir
-	 *  de `seriesId`+`date` — el salto se aplica igual. La detección `applied`/
-	 *  `noop` (`skipSnapshot`) tampoco se pierde: la celda `recurrenceExcluded`
-	 *  de la SEMILLA se escribe SIEMPRE, en las tres ramas del switch, antes de
-	 *  bifurcar, y esa celda es la que decide si hubo cambio real (fecha nueva
-	 *  excluida) o no (fecha ya excluida antes). Límite conocido: si la
-	 *  ocurrencia YA fue MOVIDA a mano a otro día (tiene fila propia con id
-	 *  distinto del determinista), este fallback no la localiza por id — la
-	 *  fecha se excluye igual, pero esa fila movida puede quedar huérfana en
-	 *  vez de tombstoneada; no hay forma de pedirle al modelo su id real sin
-	 *  que ya la haya visto en `list_tasks`/`get_task`. */
-	| { op: 'skip_occurrence'; seriesId: string; date: string }
+	 *  `occurrenceId` (opcional) = id de la FILA de la ocurrencia tal como la
+	 *  devuelve `list_tasks`; `translateOp` lo manda como
+	 *  `MutateTaskInput.taskId`, que la app pasa a `skipOccurrence` como
+	 *  `occurrenceId` (`lifecycle-inbound.ts` del repo principal, `4eda45d`).
+	 *  Es un UUID incluso en una ocurrencia generada (`deterministicUuid` de
+	 *  `recur:<serie>:<fecha>`), y `/api/batch` rechaza un `taskId` que no lo
+	 *  sea, así que se valida como `guid` igual que el resto de ids.
+	 *
+	 *  Sin `occurrenceId`, `translateOp` manda `taskId: seriesId`: la app lo
+	 *  trata como ocurrencia "no movida" (`movedOccurrence` sale por
+	 *  `occurrenceId === seed.id`), excluye `date` en la semilla y retira por su
+	 *  cuenta la fila determinista de ESA fecha. Vale para una ocurrencia
+	 *  FANTASMA o materializada en su día original. NO vale si la ocurrencia se
+	 *  MOVIÓ de día: medido con `materializeLifecycleMutation`, excluye la
+	 *  fecha pedida, la fila movida sigue ABIERTA en su día nuevo y la op
+	 *  vuelve igualmente `applied` (la celda `recurrenceExcluded` de la semilla
+	 *  sí cambió), así que el `applied` no delata el fallo. Con el id de esa
+	 *  fila en `occurrenceId`, la app la localiza y la retira. */
+	| { op: 'skip_occurrence'; seriesId: string; date: string; occurrenceId?: string }
 	/** Ciclo de vida de un HÁBITO (MC7), mismo criterio que `register_habit`:
 	 *  su objetivo NO es una tarea, así que no entra en la comprobación de
 	 *  existencia. */
@@ -2084,13 +2082,12 @@ function translateOp(op: MutateTasksOp): BatchOp {
 		case 'unarchive':
 			return { type: 'mutate', taskId: op.taskId, kind: 'unarchive', payload: {} };
 		case 'skip_occurrence':
-			// `taskId` envelope = `seriesId` (decisión MC7 para la ocurrencia
-			// FANTASMA, el caso común — ver el JSDoc del tipo `MutateTasksOp`
-			// para la verificación completa contra `skipOccurrence`/
-			// `movedOccurrence` del repo principal).
+			// `taskId` envelope = fila de la ocurrencia si el modelo la da; si
+			// no, `seriesId` (solo correcto para una ocurrencia sin mover, ver
+			// el JSDoc del tipo `MutateTasksOp`).
 			return {
 				type: 'mutate',
-				taskId: op.seriesId,
+				taskId: op.occurrenceId ?? op.seriesId,
 				kind: 'skipOccurrence',
 				payload: { seriesId: op.seriesId, date: op.date }
 			};

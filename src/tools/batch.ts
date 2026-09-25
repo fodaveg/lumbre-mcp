@@ -245,7 +245,8 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 		.object({
 			op: z.literal('skip_occurrence'),
 			seriesId: z.string().guid(),
-			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+			occurrenceId: z.string().guid().optional()
 		})
 		.strict(),
 	z
@@ -377,6 +378,14 @@ export const mutateTasksOpSchema = z
 			.describe(
 				'skip_occurrence: id de la SEMILLA de la serie (no de una ocurrencia) — list_tasks/get_task la ' +
 					'muestran como "semilla" en su propia línea y como "serie:<id>" en cada ocurrencia'
+			),
+		occurrenceId: z
+			.string()
+			.guid()
+			.optional()
+			.describe(
+				'skip_occurrence: id de la fila de la ocurrencia en list_tasks. Pásalo si está materializada ' +
+					'(imprescindible si se movió de día); sin él solo salta bien una ocurrencia sin mover'
 			),
 		// `text`/`content`/`deadline`: sin describe propio — el nombre del campo
 		// ya lo dice todo (texto de la tarea nueva o su nuevo texto, fecha
@@ -714,8 +723,9 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'desplegado, omitir date falla) · ' +
 							'archive: taskId* (archiva la tarea; noop si ya lo estaba) · ' +
 							'unarchive: taskId* (desarchiva; noop si ya estaba viva) · ' +
-							'skip_occurrence: seriesId*, date* (seriesId = SEMILLA de la serie, no una ocurrencia; ' +
-							'noop con aviso si no lo es) · archive_habit: habitId* · unarchive_habit: habitId*'
+							'skip_occurrence: seriesId*, date* [occurrenceId] (seriesId = SEMILLA de la serie, no ' +
+							'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
+							'unarchive_habit: habitId*'
 					)
 			}
 		},

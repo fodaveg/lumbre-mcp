@@ -594,15 +594,21 @@ operaciones a la vez» más abajo):
   archivada, así que si la comprobación normal (que excluye archivadas) no la
   encuentra, el conector repite la búsqueda con `includeArchived` antes de
   darla por inexistente.
-- `{ op: "skip_occurrence", seriesId, date }` (`mutate_tasks`, MC7) — salta la
-  ocurrencia de `date` (`YYYY-MM-DD`) de la serie `seriesId`. `seriesId` tiene
-  que ser la SEMILLA (`seriesId === id` en `list_tasks`/`get_task`, con regla,
-  de primer nivel) — si no lo es, «sin efecto» con el aviso de la app citando
-  `seriesId`. Sin comprobación de existencia en el cliente: el servidor decide
-  si `seriesId` es una semilla válida. Una ocurrencia FANTASMA (nunca
-  materializada, sin fila propia — el caso normal para una ocurrencia futura)
-  se salta igual: el conector no necesita conocer el id de esa fila, que casi
-  nunca puede saber de antemano.
+- `{ op: "skip_occurrence", seriesId, date, occurrenceId? }` (`mutate_tasks`,
+  MC7) — salta la ocurrencia de `date` (`YYYY-MM-DD`) de la serie `seriesId`.
+  `seriesId` tiene que ser la SEMILLA (`seriesId === id` en
+  `list_tasks`/`get_task`, con regla, de primer nivel) — si no lo es, «sin
+  efecto» con el aviso de la app citando `seriesId`. Sin comprobación de
+  existencia en el cliente: el servidor decide si `seriesId` es una semilla
+  válida. `occurrenceId` es el id de la FILA de la ocurrencia que devuelve
+  `list_tasks`, y viaja como `taskId` del envelope (la app lo usa como id de la
+  ocurrencia). Pásalo siempre que la ocurrencia esté materializada (aparece en
+  `list_tasks`); es imprescindible si se movió de día. Sin él, el conector
+  manda `seriesId` y el salto solo es correcto para una ocurrencia sin mover
+  (una FANTASMA, sin fila propia, o una materializada en su día original).
+  Con una ocurrencia movida y sin `occurrenceId`, la app
+  excluye la fecha pedida pero la fila movida sigue abierta en su día nuevo, y
+  la op vuelve igualmente «aplicada».
 - `{ op: "archive_habit", habitId }` / `{ op: "unarchive_habit", habitId }`
   (`mutate_tasks`, MC7) — ciclo de vida de un HÁBITO (no de una tarea; mismo
   criterio que `register_habit`, sin comprobación de existencia contra

@@ -1664,7 +1664,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(text).toContain(`avisos de la app:\n  - ${notice}`);
 	});
 
-	it('skip_occurrence manda taskId=seriesId al envelope, sin comprobar existencia (sin llamada a /api/tasks)', async () => {
+	it('skip_occurrence SIN occurrenceId manda taskId=seriesId al envelope, sin comprobar existencia (sin llamada a /api/tasks)', async () => {
 		const seriesId = '44444444-4444-4444-8444-444444444444';
 		const fetchSpy = vi.fn().mockResolvedValue(
 			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: seriesId, materialization: 'applied' }] })
@@ -1692,6 +1692,67 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 			kind: 'skipOccurrence',
 			payload: { seriesId, date: '2026-10-01' }
 		});
+	});
+
+	// La app toma `taskId` como la fila de la ocurrencia (`occurrenceId` de
+	// `skipOccurrence`): con una ocurrencia MOVIDA de día, mandar `seriesId`
+	// excluye la fecha pedida y deja la fila movida abierta, así que el id de
+	// la fila tiene que llegar tal cual al envelope.
+	it('skip_occurrence CON occurrenceId manda taskId=occurrenceId al envelope y seriesId/date en el payload', async () => {
+		const seriesId = '44444444-4444-4444-8444-444444444444';
+		const occurrenceId = '66666666-6666-4666-8666-666666666666';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: occurrenceId, materialization: 'applied' }]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'skip_occurrence', seriesId, date: '2026-10-01', occurrenceId }] }
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/tasks'))).toBe(false);
+		const calls = batchCalls(fetchSpy);
+		expect(calls).toHaveLength(1);
+		const body = JSON.parse(String((calls[0][1] as RequestInit).body)) as {
+			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		};
+		expect(body.ops[0]).toEqual({
+			type: 'mutate',
+			taskId: occurrenceId,
+			kind: 'skipOccurrence',
+			payload: { seriesId, date: '2026-10-01' }
+		});
+	});
+
+	it('skip_occurrence con un occurrenceId que no es uuid falla por forma, sin encolar', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: {
+					ops: [
+						{
+							op: 'skip_occurrence',
+							seriesId: '44444444-4444-4444-8444-444444444444',
+							date: '2026-10-01',
+							occurrenceId: 'recur:44444444-4444-4444-8444-444444444444:2026-10-01'
+						}
+					]
+				}
+			})
+		);
+
+		expect(text).toMatch(/occurrenceId/);
+		expect(batchCalls(fetchSpy)).toHaveLength(0);
 	});
 
 	it('skip_occurrence sobre un seriesId que NO es semilla: el informe trae el notice target-missing', async () => {
