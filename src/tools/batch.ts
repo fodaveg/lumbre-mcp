@@ -711,7 +711,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
-							'priority, date, deadline, time, recurrence, subtasks, notes, tags] · complete: taskId* ' +
+							'priority, date, deadline, time, recurrence, subtasks, notes, tags] (text se guarda tal ' +
+							'cual, sin interpretar fechas ni #etiquetas; usa date/tags/priority) · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
 							'en una semilla archivada), deadline, reminders (deadline/reminders PROHIBIDOS sobre ' +
