@@ -309,7 +309,10 @@ presentar esa hipótesis como un fallo observado.
   archivada. Si
   tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/
   pendiente — es la ÚNICA forma de obtener el id de una subtarea (`list_tasks`
-  nunca las lista), necesario para la op `complete_subtask`. Da error si el `taskId`
+  nunca las lista), necesario para la op `complete_subtask`. Si el `taskId` es
+  de una SUBTAREA, añade la línea `- subtarea de: <id> (parentId)` con el id de
+  su tarea madre (el `parentId` que ya devuelve `GET /api/tasks?id=`), que es
+  lo que necesita la op `set_parent`. Da error si el `taskId`
   no existe entre las tareas visibles del usuario para ese alcance.
 - `read_attachment({ attachment_id })` — descarga los BYTES de un adjunto de
   una tarea (vía `GET /api/attachments/:id`, sácalo del campo `attachments`
@@ -447,7 +450,8 @@ de lote, que ya las cubrían entero:
   decisión de David «solo el mínimo»): `archive`/`unarchive` (visibilidad, no
   ciclo de vida), `skip_occurrence` (salta una ocurrencia de una serie) y
   `archive_habit`/`unarchive_habit` (ciclo de vida de hábito; su objetivo
-  tampoco es una tarea).
+  tampoco es una tarea). Desde el 2026-09-25: `set_parent` (convierte una
+  tarea en subtarea de otra, o la saca de la checklist).
 - **`organize`** — lo destructivo y la reorganización: `delete`,
   `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
   `set_list_notes`, `move_to_list`, `set_list_kind` (desde MC6, tipo visible
@@ -630,6 +634,20 @@ operaciones a la vez» más abajo):
   hecha (`done` default `true`) o desmarca (`done: false`) una SUBTAREA
   existente, por su id (ver `get_task` de su tarea padre). Mismo mecanismo que
   `complete`: no cascada nada sobre la tarea padre.
+- `{ op: "set_parent", taskId, parentId }` (`mutate_tasks`, 2026-09-25) —
+  convierte `taskId` en subtarea de `parentId` (va al final de su checklist y
+  pierde lista y sección), o la saca con `parentId: null` (queda en la lista
+  de la que era su madre, sin sección). Conserva id, notas, adjuntos, tags,
+  prioridad, estado y fecha. `taskId` puede ser una subtarea (es el caso de
+  sacarla); de `parentId` el conector solo comprueba que exista, en la misma
+  petición agrupada que el resto de objetivos del lote (también si está
+  archivada, para que el motivo lo dé la app). Las reglas las aplica la app y
+  el informe muestra su motivo literal: la madre tiene que ser una tarea viva
+  de primer nivel, no archivada y distinta de `taskId`; el anidamiento es de
+  un solo nivel (una tarea con subtareas propias no se anida); y una tarea con
+  deadline, recordatorios o repetición (o de una serie) no se anida. Quítalos
+  antes con `update` (`deadline: null`, `reminders: []`, `recurrence: null`).
+  Requiere el kind `setParent` en la app (en construcción el 2026-09-25).
 - `{ op: "delete", taskId }` (**`organize`**) — borra (soft-delete) la tarea.
   Desde MC7 (2026-09-24) acepta también una tarea ARCHIVADA: si la
   comprobación normal de existencia (que excluye archivadas) no la encuentra,
@@ -765,12 +783,13 @@ resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y 
 de un `add_task`, su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
-27 ops entre las dos tools (MC7, 2026-09-24, añade las 5 últimas de la primera
-fila y la última de la segunda):
+28 ops entre las dos tools (MC7, 2026-09-24, añade `archive`…`unarchive_habit`
+en la primera fila y la última de la segunda; `set_parent` llega el
+2026-09-25):
 
 | tool | ops |
 | --- | --- |
-| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit` |
+| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `set_parent` |
 | `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
@@ -801,6 +820,7 @@ unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
 skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
 archive_habit: habitId* (sin comprobación de existencia de tarea)
 unarchive_habit: habitId* (sin comprobación de existencia de tarea)
+set_parent: taskId*, parentId* (uuid de la madre, o null para sacarla; taskId puede ser subtarea; el resto de reglas, en la app)
 
 # organize
 delete: taskId*
@@ -877,10 +897,12 @@ uno:
 
 La pareja alta→mutación (crear una tarea y tocarla en el mismo lote) sigue
 siendo inexpresable, como siempre: un `add_task` no lleva id de cliente y las
-13 ops que targetean una tarea (MC7 añade `archive`/`unarchive`) comprueban su
-existencia contra el servidor ANTES de mandar el batch — salvo `restore` (su
-objetivo es una tarea BORRADA) y, desde MC7, `archive`, `unarchive` y `delete`
-sobre una archivada, que repiten esa comprobación con `includeArchived` en vez de
+14 ops que targetean una tarea (MC7 añade `archive`/`unarchive`; el
+2026-09-25, `set_parent`, que comprueba también su `parentId` en la misma
+petición) comprueban su existencia contra el servidor ANTES de mandar el
+batch — salvo `restore` (su objetivo es una tarea BORRADA) y, desde MC7,
+`archive`, `unarchive` y `delete` sobre una archivada (y la madre archivada de
+un `set_parent`), que repiten esa comprobación con `includeArchived` en vez de
 saltársela. Las ops cuyo objetivo NO es una tarea (`register_habit`,
 `skip_occurrence`, `archive_habit`, `unarchive_habit`, `delete_habit`) no
 comprueban nada contra `GET /api/tasks`: decide el servidor. El encadenado
