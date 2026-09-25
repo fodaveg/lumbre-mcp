@@ -298,7 +298,9 @@ describe('tools/list — superficie completa', () => {
 		// cliente sin tocar ningún schema.
 		// Re-medido el 2026-09-25 (`set_parent` en `mutate_tasks`, campo
 		// `parentId` expuesto, 27→28 ops): 17 tools, 26.724 caracteres (+426
-		// sobre los 26.298 de fd83faf). Cabe bajo el techo sin subirlo.
+		// sobre los 26.298 de fd83faf). Cabe bajo el techo sin subirlo. Tras la
+		// revisión de `set_parent` (consejo de `recurrence: null` corregido y
+		// descripciones recortadas): 26.706 caracteres (−18).
 		// Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
