@@ -379,7 +379,7 @@ export const mutateTasksOpSchema = z
 		parentId: z
 			.union([z.string().guid(), z.null()])
 			.optional()
-			.describe('set_parent: id de la tarea madre, o null para sacarla de la checklist'),
+			.describe('set_parent: madre, o null'),
 		listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
 		habitId: z
 			.string()
@@ -721,7 +721,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
 				`clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +
 				`unarchive (visibilidad, no ciclo de vida), skip_occurrence (salta una ocurrencia de una ` +
-				`serie) y set_parent (la hace subtarea de otra o la saca). Vía ÚNICA para mutar una tarea (no hay tool ` +
+				`serie) y set_parent. Vía ÚNICA para mutar una tarea (no hay tool ` +
 				`suelta por operación) y preferente para varias de golpe: resuelve existencias y encola en ` +
 				`UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
 				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
@@ -751,9 +751,10 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'skip_occurrence: seriesId*, date* [occurrenceId] (seriesId = SEMILLA de la serie, no ' +
 							'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
 							'unarchive_habit: habitId* · ' +
-							'set_parent: taskId*, parentId* (la anida al final de la checklist de parentId; null ' +
-							'la saca a la lista de su madre. La app rechaza si tiene subtareas, deadline, ' +
-							'recordatorios o repetición: quítalos antes con update)'
+							'set_parent: taskId*, parentId* (la anida en parentId; null la saca a la lista de su ' +
+							'madre. La app rechaza con subtareas, deadline, recordatorios o serie; update quita ' +
+							'antes deadline y recordatorios, no la serie: recurrence null apaga la serie entera, ' +
+							'solo si el usuario lo pide)'
 					)
 			}
 		},
