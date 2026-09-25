@@ -162,9 +162,12 @@ presentar esa hipótesis como un fallo observado.
   usa el campo `date` para agendarla. La COLOCACIÓN no cambia por esto (mismo
   resultado que sin `literal`): texto solo (sin `list`/`date`/el resto de
   metadata) aterriza en "hoy"; con alguna metadata estructurada (`priority`/
-  `deadline`/`recurrence`/`subtasks`/`tags`) y sin `date` ni `list`, en la
-  Bandeja de entrada; con `list` (o `listId` vivo), en esa lista; con `date`,
-  ese día. `time` sin `date` agenda hoy y gana a la Bandeja.
+  `deadline`/`subtasks`/`tags`) y sin `date` ni `list`, en la Bandeja de
+  entrada; con `list` (o `listId` vivo), en esa lista; con `date`, ese día.
+  `time` sin `date` agenda hoy y gana a la Bandeja. `recurrence` sin `date`
+  también aterriza HOY (la app le pone la fecha de hoy para que la regla
+  tenga ancla, `inbound-materialize.ts` del repo principal), no en la
+  Bandeja; con `list`, hoy dentro de esa lista.
   Acepta `list` (nombre, se crea como proyecto si no existe) o `listId` (id
   ESTABLE del proyecto o área, preferente sobre `list`, inmune a renames —
   sácalo de `list_tasks`). `tags` fija sus tags propios; `[]` declara

@@ -112,9 +112,9 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Nombre del proyecto o área destino (se crea como proyecto si no existe). El texto se ' +
 							'guarda TAL CUAL — no interpreta fecha, hora, prioridad, "!"/"!!", "cada …", $Lista ni ' +
-							'#tags, usa esos campos en su lugar. Sin `list` ni `date`: texto solo (sin priority/' +
-							'deadline/recurrence/subtasks/tags) aterriza en "hoy"; con alguno de esos campos, en la ' +
-							'Bandeja de entrada.'
+							'#tags, usa esos campos en su lugar. Con `list` o un `listId` existente, va a esa lista. ' +
+							'Sin `list`/`listId` ni `date`: texto solo aterriza en "hoy"; con priority/deadline/' +
+							'subtasks/tags, en la Bandeja de entrada. `recurrence` sin `date` aterriza hoy.'
 					),
 				listId: z
 					.string()

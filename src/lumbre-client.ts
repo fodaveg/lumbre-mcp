@@ -114,9 +114,13 @@ export interface AddTaskInput {
 	 *  COLOCACIÓN es EXACTAMENTE la misma que sin `literal` (tarea `cd39f028`
 	 *  del repo principal, docs/21 §3 obligación 7 — ver `literalOverrides` en
 	 *  `$lib/server/ingest-enqueue.ts`): texto solo sin lista → hoy; con
-	 *  metadata estructurada (tags/prioridad/fecha límite/regla/subtareas) y
-	 *  sin fecha ni lista → Bandeja; con lista (nombre o `listId` vivo) → esa
-	 *  lista; con `date` → ese día. NO es un campo que el modelo controle:
+	 *  metadata estructurada (tags/prioridad/fecha límite/subtareas) y sin
+	 *  fecha ni lista → Bandeja; con lista (nombre o `listId` vivo) → esa
+	 *  lista; con `date` → ese día. Una REGLA sin `date` aterriza HOY, no en
+	 *  la Bandeja (con lista, hoy dentro de ella): `materializeStructuredTask`
+	 *  hace `item.date ?? (item.recurrence ? today : null)`
+	 *  (`$lib/sync/inbound-materialize.ts`, `4eda45d`). NO es un campo que el
+	 *  modelo controle:
 	 *  `addTask`/`translateOp` (op `add_task` de `mutate_tasks`) lo fuerzan a
 	 *  `true` SIEMPRE (tarea cd39f028, 2026-09-24) — el MCP ya manda fecha,
 	 *  hora, prioridad, lista y tags como campos estructurados, así que
