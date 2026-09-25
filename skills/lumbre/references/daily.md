@@ -23,14 +23,24 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    crear otra principal, busca en ese proyecto una principal abierta del mismo tema: si
    existe, añade las nuevas como subtareas suyas (`add_subtask`). Una tarea sin
    relación con nada queda en primer nivel, y puede ser la principal de un lote futuro.
-3. **Límites de la app.** Hay un solo nivel. Una subtarea no admite deadline,
-   recordatorios ni repetición: la tarea que los necesite queda en primer nivel. Las
-   subtareas se crean solo con texto, pero una subtarea es una tarea completa: después
-   admite fecha, prioridad y notas con `update` y adjuntos con `add_attachment`, igual
-   que una principal.
+3. **Límites de la app.** Hay un solo nivel. Una subtarea nace solo con texto y tags,
+   pero es una tarea completa: después admite fecha, hora, prioridad y notas con
+   `update` y adjuntos con `add_attachment`, igual que una principal. Deadline,
+   recordatorios, repetición y «esperando» no existen en una subtarea: la tarea que
+   los necesite queda en primer nivel.
 
 Lo que el usuario indique (proyecto, tarea suelta, otra agrupación) manda sobre este
 comportamiento. Al terminar, di el proyecto elegido, la principal y sus subtareas.
+
+## Subtareas: leer y completar
+
+- **Leer.** `list_tasks` no muestra subtareas, ni siquiera las que tienen fecha. Se
+  ven con `get_task` de la principal, y el detalle de cada una (fecha, prioridad,
+  notas, adjuntos) con `get_task` de la subtarea.
+- **Completar.** Completar o cancelar la principal cierra todas sus subtareas
+  pendientes, y descompletarla no las reabre. Completar la última subtarea no
+  completa la principal. Antes de completar una principal con subtareas abiertas,
+  dilo o pregunta.
 
 No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`. Expresa una
 tarea bloqueada, aplazada, devuelta a pendiente o enviada al backlog mediante los
