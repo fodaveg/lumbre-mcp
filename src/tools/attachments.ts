@@ -125,7 +125,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 				'1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
 				'sacar un nombre). Ver README para el detalle de mimes/límites y el conector local dedicado.',
 			inputSchema: {
-				taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks)'),
+				taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks; de una subtarea, get_task de su madre)'),
 				file_path: z
 					.string()
 					.min(1)
