@@ -658,9 +658,10 @@ operaciones a la vez» más abajo):
   por reglas llega como `noop` con el motivo en los avisos de la app. La
   madre tiene que ser una tarea viva de primer nivel, no archivada y distinta
   de `taskId`; el anidamiento es de un solo nivel (una tarea con subtareas
-  propias no se anida); y una tarea con deadline, recordatorios o repetición
-  (o de una serie) no se anida. Deadline y recordatorios se quitan antes con
-  `update` (`deadline: null`, `reminders: []`); la repetición no:
+  propias no se anida); y una tarea con deadline, recordatorios, «esperando»
+  o repetición (o de una serie) no se anida. Deadline y recordatorios se
+  quitan antes con `update` (`deadline: null`, `reminders: []`) y «esperando»
+  con `clear_waiting`; la repetición no:
   `recurrence: null` apaga la serie entera y conserva `seriesId`, así que
   el rechazo sigue. No lo hagas sin que el usuario lo pida.
   Requiere el kind `setParent` en la app (en construcción el 2026-09-25).
