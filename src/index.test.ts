@@ -303,7 +303,9 @@ describe('tools/list — superficie completa', () => {
 		// descripciones recortadas): 26.706 caracteres (−18).
 		// Re-medido el 2026-09-25 (`add_attachment` admite una subtarea, «a una
 		// tarea o subtarea» en su description): 26.717 caracteres (+11). Cabe
-		// bajo el techo sin subirlo.
+		// bajo el techo sin subirlo. Con el contrato de subtareas en
+		// `mutate_tasks` (recurrence, set_waiting y archive no valen en una
+		// subtarea): 26.757 (+40), sigue sin subir el techo.
 		// Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
@@ -3392,6 +3394,37 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 		expect(resultText(result)).toContain('0/1 operación(es) encoladas.');
 		expect(resultText(result)).toContain('SUBTAREA');
 		expect(mutationBodies(fetchSpy)).toEqual([]);
+	});
+
+	it('25 sep 2026: set_waiting, archive y update.recurrence se cortan; clear_waiting y unarchive viajan', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?ids=')) return jsonResponse([subtaskRow()]);
+			if (u.includes('/api/batch')) {
+				const { ops } = JSON.parse(String(init?.body)) as { ops: unknown[] };
+				return jsonResponse({ ok: true, results: ops.map((_, index) => ({ index, type: 'mutate', ok: true })) });
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClientWith(fetchSpy);
+		const result = await client.callTool({
+			name: 'mutate_tasks',
+			arguments: {
+				ops: [
+					{ op: 'set_waiting', taskId: SUB_ID, until: '2099-01-01' },
+					{ op: 'archive', taskId: SUB_ID },
+					{ op: 'update', taskId: SUB_ID, recurrence: { freq: 'daily' } },
+					{ op: 'clear_waiting', taskId: SUB_ID },
+					{ op: 'unarchive', taskId: SUB_ID }
+				]
+			}
+		});
+		const text = resultText(result);
+		expect(text).toContain('2/5 operación(es) encoladas.');
+		expect(text).toMatch(/«esperando» no existe en una subtarea/);
+		expect(text).toMatch(/archiva su tarea madre/);
+		expect(text).toMatch(/recurrence no aplica/);
+		expect(mutationBodies(fetchSpy).map((op) => op.kind)).toEqual(['clearWaiting', 'unarchive']);
 	});
 });
 

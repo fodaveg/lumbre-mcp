@@ -165,6 +165,8 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			tags: z.array(tagSchema).optional(),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
 			time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional(),
+			// `recurrence` con regla también se rechaza sobre una subtarea (25 sep
+			// 2026, `subtaskForbiddenUpdateFields`); `null` pasa.
 			recurrence: z.union([recurrencePatchSchema, z.null()]).optional(),
 			// MC6 (2026-09-24): PROHIBIDOS en una subtarea (§2.5) — rechazado en
 			// `buildBatchFromOps`, no aquí (necesita saber si el `taskId` es
@@ -738,15 +740,15 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'cual, sin interpretar fechas ni #etiquetas; usa date/tags/priority) · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
-							'en una semilla archivada), deadline, reminders (deadline/reminders PROHIBIDOS sobre ' +
+							'en una semilla archivada), deadline, reminders (deadline/reminders/recurrence PROHIBIDOS sobre ' +
 							'una subtarea)] · ' +
 							'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
-							'set_waiting: taskId*, until* (estrictamente futura) [for] · clear_waiting: taskId* · ' +
+							'set_waiting: taskId*, until* (estrictamente futura; no en subtarea) [for] · clear_waiting: taskId* · ' +
 							'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
 							'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +
 							'register_habit: habitId* [date] (habitId, no taskId; sin server con el HOY local ' +
 							'desplegado, omitir date falla) · ' +
-							'archive: taskId* (archiva la tarea; noop si ya lo estaba) · ' +
+							'archive: taskId* (noop si ya lo estaba; en subtarea, archiva su madre) · ' +
 							'unarchive: taskId* (desarchiva; noop si ya estaba viva) · ' +
 							'skip_occurrence: seriesId*, date* [occurrenceId] (seriesId = SEMILLA de la serie, no ' +
 							'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
