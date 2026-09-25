@@ -831,7 +831,7 @@ add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
 restore: taskId* (tarea borrada; sin comprobación de existencia en el cliente)
 register_habit: habitId* [date] (habitId, NO taskId; sin comprobación de existencia de tarea)
-archive: taskId* (archiva; noop sin aviso si ya lo estaba; en subtarea, archiva su madre)
+archive: taskId* (archiva; noop sin aviso si ya lo estaba; no en subtarea)
 unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
 skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
 archive_habit: habitId* (sin comprobación de existencia de tarea)
