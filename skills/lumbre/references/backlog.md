@@ -21,9 +21,8 @@ Una subtarea es una tarea de pleno derecho dentro de su principal: conserva id, 
 adjuntos, tags, prioridad y fecha, y no tiene lista ni sección propias. Tampoco admite
 deadline, recordatorios, repetición ni «esperando», y su archivado lo hereda de la
 principal. `set_parent` anida una tarea existente o la saca. La app lo rechaza si la
-tarea tiene deadline, recordatorios, repetición o subtareas propias; esa tarea queda en
-primer nivel. Si un
-bloque necesita identidad propia por encima de un lote, la válvula es un proyecto o un
+tarea tiene deadline, recordatorios, «esperando», repetición o subtareas propias; esa
+tarea queda en primer nivel. Si un bloque necesita identidad propia por encima de un lote, la válvula es un proyecto o un
 área.
 
 Antes de crear o asignar una sección durante un lote, comprueba si su nombre replica el
