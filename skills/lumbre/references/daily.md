@@ -25,8 +25,9 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    relación con nada queda en primer nivel, y puede ser la principal de un lote futuro.
 3. **Límites de la app.** Hay un solo nivel. Una subtarea no admite deadline,
    recordatorios ni repetición: la tarea que los necesite queda en primer nivel. Las
-   subtareas se crean solo con texto; fecha, prioridad o notas se ponen después con
-   `update`.
+   subtareas se crean solo con texto, pero una subtarea es una tarea completa: después
+   admite fecha, prioridad y notas con `update` y adjuntos con `add_attachment`, igual
+   que una principal.
 
 Lo que el usuario indique (proyecto, tarea suelta, otra agrupación) manda sobre este
 comportamiento. Al terminar, di el proyecto elegido, la principal y sus subtareas.
