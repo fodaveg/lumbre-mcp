@@ -214,7 +214,8 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
         .object({
         op: z.literal('skip_occurrence'),
         seriesId: z.string().guid(),
-        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        occurrenceId: z.string().guid().optional()
     })
         .strict(),
     z
@@ -343,6 +344,12 @@ export const mutateTasksOpSchema = z
         .optional()
         .describe('skip_occurrence: id de la SEMILLA de la serie (no de una ocurrencia) — list_tasks/get_task la ' +
         'muestran como "semilla" en su propia línea y como "serie:<id>" en cada ocurrencia'),
+    occurrenceId: z
+        .string()
+        .guid()
+        .optional()
+        .describe('skip_occurrence: id de la fila de la ocurrencia en list_tasks. Pásalo si está materializada ' +
+        '(imprescindible si se movió de día); sin él solo salta bien una ocurrencia sin mover'),
     // `text`/`content`/`deadline`: sin describe propio — el nombre del campo
     // ya lo dice todo (texto de la tarea nueva o su nuevo texto, fecha
     // límite) y no hay semántica extra (null, default, autocreación…) que
@@ -476,20 +483,21 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
     });
     const idsToCheck = collectExistenceCheckIds(validated);
     const existing = idsToCheck.length > 0 ? await findTasksByIds(ctx.config, idsToCheck) : new Map();
-    // Tres ops aplican (o pueden aplicar) sobre una tarea ARCHIVADA, que
+    // Cuatro ops aplican (o pueden aplicar) sobre una tarea ARCHIVADA, que
     // `findTasksByIds` normal (arriba) no ve: `update` con `recurrence: null`
     // (apagar una semilla que sigue generando, ver `clearArchivedSeedRecurrence`
     // en el repo principal — CX7), `unarchive` (MC7: su objetivo CASI SIEMPRE
-    // está archivado, es su caso de uso principal) y `delete` (MC7: acepta
-    // ahora tareas archivadas). Solo para esos ids, y solo si la búsqueda
-    // normal no los vio, se repite incluyendo archivadas — así una
-    // `unarchive`/`delete` legítima sobre una archivada no muere aquí con un
-    // falso "no existe" (`archive`, cuyo objetivo casi siempre es una tarea
-    // VIVA, se queda fuera a propósito: el mismo criterio que ya aplicaba
-    // cualquier otra op antes de MC7, ver el JSDoc de `taskNotFoundError`).
+    // está archivado, es su caso de uso principal), `delete` (MC7: acepta
+    // ahora tareas archivadas) y `archive` (archivar una ya archivada es `noop`
+    // SIN aviso en la app, `materializeLifecycleMutation` de
+    // `lifecycle-inbound.ts`, `4eda45d`; sin reintento moría aquí como "no
+    // existe"). Solo para esos ids, y solo si la búsqueda normal no los vio, se
+    // repite incluyendo archivadas, en UNA sola petición agrupada — así una op
+    // legítima sobre una archivada no muere con un falso "no existe".
     const archivedLookupIds = validated
         .filter((op) => (op.op === 'update' && op.recurrence === null && !existing.has(op.taskId)) ||
-        ((op.op === 'unarchive' || op.op === 'delete') && !existing.has(op.taskId)))
+        ((op.op === 'unarchive' || op.op === 'delete' || op.op === 'archive') &&
+            !existing.has(op.taskId)))
         .map((op) => op.taskId);
     if (archivedLookupIds.length > 0) {
         const archived = await findTasksByIds(ctx.config, [...new Set(archivedLookupIds)], {
@@ -652,7 +660,8 @@ export function registerBatchTool(server, ctx) {
                 .max(200)
                 .describe('Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
                 '(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
-                'priority, date, deadline, time, recurrence, subtasks, notes, tags] · complete: taskId* ' +
+                'priority, date, deadline, time, recurrence, subtasks, notes, tags] (text se guarda tal ' +
+                'cual, sin interpretar fechas ni #etiquetas; usa date/tags/priority) · complete: taskId* ' +
                 '[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
                 'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
                 'en una semilla archivada), deadline, reminders (deadline/reminders PROHIBIDOS sobre ' +
@@ -665,8 +674,9 @@ export function registerBatchTool(server, ctx) {
                 'desplegado, omitir date falla) · ' +
                 'archive: taskId* (archiva la tarea; noop si ya lo estaba) · ' +
                 'unarchive: taskId* (desarchiva; noop si ya estaba viva) · ' +
-                'skip_occurrence: seriesId*, date* (seriesId = SEMILLA de la serie, no una ocurrencia; ' +
-                'noop con aviso si no lo es) · archive_habit: habitId* · unarchive_habit: habitId*')
+                'skip_occurrence: seriesId*, date* [occurrenceId] (seriesId = SEMILLA de la serie, no ' +
+                'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
+                'unarchive_habit: habitId*')
         }
     }, async (input) => {
         try {

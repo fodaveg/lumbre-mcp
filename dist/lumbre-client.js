@@ -793,8 +793,9 @@ export async function runBatch(config, ops) {
  * `taskId` sea de primer nivel (cascada a subtareas propias si las tiene, no
  * pasa nada si ella misma ya lo es). A diferencia de `restore`, SÍ comprueban
  * existencia — pero no basta con `findTasksByIds` normal, que excluye
- * archivadas: `unarchive` (y `delete` sobre una archivada, MC7 también) la
- * repiten con `includeArchived` cuando la primera búsqueda no la encuentra —
+ * archivadas: `archive`/`unarchive` (y `delete` sobre una archivada, MC7
+ * también) la repiten con `includeArchived` cuando la primera búsqueda no la
+ * encuentra —
  * ver `runOpsBatch` en `tools/batch.ts`. `skip_occurrence`/`archive_habit`/
  * `unarchive_habit`/`delete_habit` NO están aquí: la primera targetea una
  * SERIE (`seriesId`, no `taskId`/`subtaskId` — el servidor decide si es una
@@ -1059,13 +1060,12 @@ function translateOp(op) {
         case 'unarchive':
             return { type: 'mutate', taskId: op.taskId, kind: 'unarchive', payload: {} };
         case 'skip_occurrence':
-            // `taskId` envelope = `seriesId` (decisión MC7 para la ocurrencia
-            // FANTASMA, el caso común — ver el JSDoc del tipo `MutateTasksOp`
-            // para la verificación completa contra `skipOccurrence`/
-            // `movedOccurrence` del repo principal).
+            // `taskId` envelope = fila de la ocurrencia si el modelo la da; si
+            // no, `seriesId` (solo correcto para una ocurrencia sin mover, ver
+            // el JSDoc del tipo `MutateTasksOp`).
             return {
                 type: 'mutate',
-                taskId: op.seriesId,
+                taskId: op.occurrenceId ?? op.seriesId,
                 kind: 'skipOccurrence',
                 payload: { seriesId: op.seriesId, date: op.date }
             };
