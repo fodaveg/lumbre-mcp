@@ -150,7 +150,7 @@ describe('assertTaskUsable', () => {
 			expect(valid).toContain(op);
 		}
 		for (const op of REJECT_SUBTASK) expect(invalid).toContain(op);
-		expect(valid).toMatch(/no deadline, reminders ni recurrence/);
+		expect(valid).toMatch(/no deadline, reminders ni recurrence con regla/);
 	});
 
 	it('los mensajes de error mencionan explícitamente cómo seguir (list_tasks/get_task/complete_subtask)', () => {
