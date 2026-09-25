@@ -23,7 +23,9 @@ independiente.
   envío, pero cada operación reporta su propio resultado y el lote puede quedar
   aplicado a medias: no asumas atomicidad ni éxito global. Cambiar de proyecto o área limpia la
   sección; mueve primero y reasigna después si debe conservarla.
-- Las subtareas son checklist de un nivel, no tareas residentes equivalentes.
+- Las subtareas tienen un solo nivel y viven dentro de su principal, sin lista ni
+  sección propias: `list_tasks` no las lista sueltas y se leen con `get_task` de la
+  principal. `set_parent` anida o saca una tarea existente.
 - Completar significa «hecha» y cancelar «no se hará»; no confundas los resultados.
   Una cancelada se lee `[-]`/«cancelada», nunca como hecha.
 - Un cambio de `recurrence` en `update` es parcial: conserva lo no enviado. Para quitar

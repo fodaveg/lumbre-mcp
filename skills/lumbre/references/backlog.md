@@ -10,14 +10,19 @@ no para una lectura incidental.
 - **Sección = bloque conceptual.** Agrupa dentro de un proyecto o área, por ejemplo backlog,
   documentación, ideas o rediseño.
 - **Punto = tarea real.** Conserva id, notas, prioridad, fecha, adjuntos y referencias.
-- **Lote = `#tag` libre.** Un lote cruza secciones si hace falta; no lo conviertas en
-  sección solo por ser un lote de ejecución.
+- **Lote = tarea principal con subtareas.** Es la forma por defecto de agrupar trabajo
+  relacionado dentro de un proyecto o área. Un `#tag` libre marca el lote solo cuando
+  cruza secciones, proyectos o áreas (por ejemplo, un lote de desarrollo); no lo
+  conviertas en sección solo por ser un lote de ejecución.
 - **`@contexto` = valor de un diccionario controlado; `#tag` = marcador libre.** No
   uses `@` para lotes o categorías arbitrarias.
 
-No rebajes una tarea real a subtarea para simplificar la estructura: una subtarea es
-solo checklist. Si un bloque necesita identidad, prosa o propiedades propias, un proyecto,
-un área o una tarea independiente es la válvula apropiada.
+Una subtarea es una tarea de pleno derecho dentro de su principal: conserva id, notas,
+adjuntos, tags, prioridad y fecha, y no tiene lista ni sección propias. `set_parent`
+anida una tarea existente o la saca. La app lo rechaza si la tarea tiene deadline,
+recordatorios, repetición o subtareas propias; esa tarea queda en primer nivel. Si un
+bloque necesita identidad propia por encima de un lote, la válvula es un proyecto o un
+área.
 
 Antes de crear o asignar una sección durante un lote, comprueba si su nombre replica el
 lote o si se está creando una sección por cada lote. Si ocurre, detén la operación: el
