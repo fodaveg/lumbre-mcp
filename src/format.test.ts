@@ -282,6 +282,27 @@ describe('cancelada, regla y serie (MC4)', () => {
 	});
 });
 
+describe('bloque «- subtareas:» de get_task', () => {
+	it('pinta cada subtarea con su id y cierra con la línea que manda a get_task de la subtarea', () => {
+		const full = formatTaskFull(
+			task({
+				subtasks: [
+					{ id: '22222222-2222-2222-2222-222222222222', content: 'hija', done: false, tags: [], effectiveTags: [] }
+				]
+			})
+		);
+		const block = full.slice(full.indexOf('- subtareas:'));
+		expect(block).toContain('[ ] hija  · id: 22222222-2222-2222-2222-222222222222');
+		expect(block).toMatch(/fecha, prioridad, notas y adjuntos de una subtarea: get_task con su id/);
+		// La API no trae notas ni adjuntos por subtarea: nada de marcadores inventados.
+		expect(block).not.toMatch(/✎|📎/);
+	});
+
+	it('sin subtareas no hay bloque ni línea de get_task', () => {
+		expect(formatTaskFull(task())).not.toContain('get_task con su id');
+	});
+});
+
 describe('«esperando» (MC6, waitingUntil/waitingFor) — solo se pinta si el servidor la manda', () => {
 	it('list_tasks: tag `esperando:<fecha> (for)` en la línea compacta', () => {
 		const output = formatTaskList(
