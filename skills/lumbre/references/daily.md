@@ -23,9 +23,10 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    crear otra principal, busca en ese proyecto una principal abierta del mismo tema: si
    existe, añade las nuevas como subtareas suyas (`add_subtask`). Una tarea sin
    relación con nada queda en primer nivel, y puede ser la principal de un lote futuro.
-3. **Límites de la app.** Hay un solo nivel. Una subtarea nace solo con texto y tags,
-   pero es una tarea completa: después admite fecha, hora, prioridad y notas con
-   `update` y adjuntos con `add_attachment`, igual que una principal. Deadline,
+3. **Límites de la app.** Hay un solo nivel. Una subtarea nace solo con texto, y los
+   `#tags` escritos en ese texto se capturan como tags. Pero es una tarea completa:
+   después admite fecha con `reschedule`; hora, prioridad, notas y tags con `update`;
+   y adjuntos con `add_attachment`, igual que una principal. Deadline,
    recordatorios, repetición y «esperando» no existen en una subtarea: la tarea que
    los necesite queda en primer nivel.
 
