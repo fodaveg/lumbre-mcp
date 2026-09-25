@@ -321,7 +321,9 @@ presentar esa hipótesis como un fallo observado.
   no hay forma de leer su contenido con esta tool.
 - `add_attachment({ taskId, file_path?, content_base64?, filename? })` — sube
   un fichero y lo deja adjunto y **enlazado** a una tarea (vía
-  `POST /api/attachments?taskId=`). Acepta **exactamente una** de dos vías,
+  `POST /api/attachments?taskId=`). `taskId` puede ser el de una
+  **subtarea**: es una tarea de pleno derecho y la app la acepta como destino
+  con ese mismo `taskId`, sin ningún campo más. Acepta **exactamente una** de dos vías,
   según DÓNDE corre este conector:
   - `file_path` — ruta LOCAL, absoluta o `~/…` (una relativa se rechaza), tope
     **25 MB**. Solo funciona si el conector corre en TU máquina (stdio local,
@@ -342,8 +344,8 @@ presentar esa hipótesis como un fallo observado.
 
   `filename` es opcional con `file_path` (por defecto su basename) y
   obligatorio con `content_base64`. Tope de tamaño comprobado en el cliente
-  (mensaje con el tamaño real) y de forma AUTORITATIVA en el servidor. No
-  admite subtareas. A diferencia de TODO lo demás en Fase 1/Fase 2 (que se
+  (mensaje con el tamaño real) y de forma AUTORITATIVA en el servidor. A
+  diferencia de TODO lo demás en Fase 1/Fase 2 (que se
   encola), **esta vía es SÍNCRONA**: el servidor escribe la metadata al CRDT
   antes de responder 200, así que el adjunto ya está enlazado y visible
   cuando la tool contesta — no hace falta esperar a ningún sync.
