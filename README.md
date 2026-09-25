@@ -641,12 +641,16 @@ operaciones a la vez» más abajo):
   prioridad, estado y fecha. `taskId` puede ser una subtarea (es el caso de
   sacarla); de `parentId` el conector solo comprueba que exista, en la misma
   petición agrupada que el resto de objetivos del lote (también si está
-  archivada, para que el motivo lo dé la app). Las reglas las aplica la app y
-  el informe muestra su motivo literal: la madre tiene que ser una tarea viva
-  de primer nivel, no archivada y distinta de `taskId`; el anidamiento es de
-  un solo nivel (una tarea con subtareas propias no se anida); y una tarea con
-  deadline, recordatorios o repetición (o de una serie) no se anida. Quítalos
-  antes con `update` (`deadline: null`, `reminders: []`, `recurrence: null`).
+  archivada, para que el motivo lo dé la app). Las reglas las aplica la app:
+  un payload mal formado vuelve `ok:false` con su motivo literal, y un rechazo
+  por reglas llega como `noop` con el motivo en los avisos de la app. La
+  madre tiene que ser una tarea viva de primer nivel, no archivada y distinta
+  de `taskId`; el anidamiento es de un solo nivel (una tarea con subtareas
+  propias no se anida); y una tarea con deadline, recordatorios o repetición
+  (o de una serie) no se anida. Deadline y recordatorios se quitan antes con
+  `update` (`deadline: null`, `reminders: []`); la repetición no:
+  `recurrence: null` apaga la serie entera y conserva `seriesId`, así que
+  el rechazo sigue. No lo hagas sin que el usuario lo pida.
   Requiere el kind `setParent` en la app (en construcción el 2026-09-25).
 - `{ op: "delete", taskId }` (**`organize`**) — borra (soft-delete) la tarea.
   Desde MC7 (2026-09-24) acepta también una tarea ARCHIVADA: si la
