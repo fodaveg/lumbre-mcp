@@ -309,7 +309,11 @@ presentar esa hipótesis como un fallo observado.
   archivada. Si
   tiene subtareas (checklist, #17), las incluye con su id y su estado hecha/
   pendiente — es la ÚNICA forma de obtener el id de una subtarea (`list_tasks`
-  nunca las lista), necesario para la op `complete_subtask`. Si el `taskId` es
+  nunca las lista, ni siquiera las que tienen fecha), necesario para la op
+  `complete_subtask`. `GET /api/tasks?id=` solo trae de cada subtarea id,
+  texto, hecha y tags, así que el bloque cierra con una línea que manda a
+  `get_task` con el id de la subtarea para su fecha, prioridad, notas y
+  adjuntos (no hay marcador de nota o adjunto por subtarea). Si el `taskId` es
   de una SUBTAREA, añade la línea `- subtarea de: <id> (parentId)` con el id de
   su tarea madre (el `parentId` que ya devuelve `GET /api/tasks?id=`), que es
   lo que necesita la op `set_parent`. Da error si el `taskId`
@@ -551,10 +555,11 @@ operaciones a la vez» más abajo):
   rechaza entera, porque la app solo aplicaría el apagado.
   **Acepta también el id de una SUBTAREA**: los cinco primeros campos son
   accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
-  del repo principal); `deadline` y `reminders` NO — están PROHIBIDOS ahí (§2.5,
-  «restricción del mundo/aviso sin sentido en una checklist») y el conector
-  rechaza la op ANTES de encolar si alguno de los dos viaja sobre un `taskId`
-  de subtarea. Si `notes` no es vacío, el informe por op avisa
+  del repo principal); `deadline`, `reminders` y `recurrence` con regla NO —
+  están PROHIBIDOS ahí (§2.5, «restricción del mundo/aviso sin sentido en una
+  checklist»; «la hija no repite») y el conector rechaza la op ANTES de encolar
+  si alguno viaja sobre un `taskId` de subtarea. `recurrence: null` sí pasa:
+  solo limpia y sirve para arreglar una subtarea que arrastre una regla. Si `notes` no es vacío, el informe por op avisa
   siempre («aplicada; si la nota de esa tarea estaba borrada, tu texto se
   escribió pero sigue oculto…», MC8 del audit de paridad): sobre una nota YA
   BORRADA la app escribe la celda igual (cambió algo de verdad, por eso
@@ -584,8 +589,11 @@ operaciones a la vez» más abajo):
   no esa regla); `for` (opcional) es texto libre de a quién o qué se espera.
   Sale en `list_tasks`/`get_task` como `esperando:<until>` cuando el servidor
   lo manda (aún no lo hace: campo tolerado como "desconocido" hasta entonces).
+  **No acepta el id de una SUBTAREA**: «esperando» no existe en ella (§2.5) y
+  la app aún no tiene guard que lo impida, así que lo corta el conector.
 - `{ op: "clear_waiting", taskId }` (`mutate_tasks`, MC6) — sale de
-  «esperando». Sin campos, espejo de `restore`.
+  «esperando». Sin campos, espejo de `restore`. Acepta una subtarea, para
+  limpiar una que ya lo tenga.
 - `{ op: "register_habit", habitId, date? }` (`mutate_tasks`, MC6) — registra
   una ocurrencia del HÁBITO `habitId` (no de una tarea: es la única op de
   `mutate_tasks`, junto a `restore`, cuyo objetivo NO se comprueba contra
@@ -595,8 +603,10 @@ operaciones a la vez» más abajo):
   Resuelve `habitId` con `list_habits`.
 - `{ op: "archive", taskId }` / `{ op: "unarchive", taskId }` (`mutate_tasks`,
   MC7, 2026-09-24) — archivan/desarchivan una tarea: es VISIBILIDAD, no ciclo
-  de vida (no toca `done`/`cancelledAt`, cruza con todos los estados). Aceptan
-  el id de una SUBTAREA. Pedir el estado en el que ya está (archivar una
+  de vida (no toca `done`/`cancelledAt`, cruza con todos los estados). Sobre
+  una SUBTAREA, `archive` se rechaza: su archivado se hereda de la madre
+  (§2.5, cascadas), así que se archiva la madre. `unarchive` sí la acepta,
+  para arreglar una subtarea que ya esté archivada. Pedir el estado en el que ya está (archivar una
   archivada, desarchivar una viva) es «sin efecto» sin aviso; un `taskId`
   inexistente lo rechaza el conector ANTES de encolar, igual que el resto de
   ops de tarea — salvo que `unarchive` casi siempre targetea una YA
@@ -815,13 +825,13 @@ cancel: taskId* [cancelled]
 update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders]
 reschedule: taskId*, date*
 set_section: taskId*, section*
-set_waiting: taskId*, until* (estrictamente futura) [for]
+set_waiting: taskId*, until* (estrictamente futura; no en subtarea) [for]
 clear_waiting: taskId*
 add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
 restore: taskId* (tarea borrada; sin comprobación de existencia en el cliente)
 register_habit: habitId* [date] (habitId, NO taskId; sin comprobación de existencia de tarea)
-archive: taskId* (archiva; noop sin aviso si ya lo estaba)
+archive: taskId* (archiva; noop sin aviso si ya lo estaba; en subtarea, archiva su madre)
 unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
 skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
 archive_habit: habitId* (sin comprobación de existencia de tarea)
@@ -859,21 +869,24 @@ que tenían las tools individuales). Quién lo decide: `docs/18-que-es-una-tarea
 §2.5 del repo principal, no este conector — una op vale sobre una subtarea si
 los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 
-- **Sí**: `complete`, `cancel`, `delete`, `add_subtask`, `complete_subtask`,
+- **Sí**: `complete`, `cancel`, `delete`, `complete_subtask`, `set_parent`,
   `update` (sus cinco campos —`content`, `notes`, `tags`, `priority`, `time`— son
-  accidentales permitidos; `deadline`/`reminders` NO, ver abajo), `reschedule`,
-  con fecha o con `date: null` (`date` también lo es), `set_waiting`/
-  `clear_waiting` (MC6: «esperando» no tiene guard de residencia) y
-  `archive`/`unarchive` (MC7: solo tocan `archivedAt`, que no está entre los
-  PROHIBIDOS). Una subtarea con `date: null` se queda sin fecha en la
+  accidentales permitidos; `deadline`/`reminders`/`recurrence` NO, ver abajo),
+  `reschedule`, con fecha o con `date: null` (`date` también lo es),
+  `clear_waiting` y `unarchive` (para limpiar una subtarea que ya tenga
+  «esperando» o esté archivada). Fuera de `mutate_tasks`, también la tool
+  `add_attachment`. Una subtarea con `date: null` se queda sin fecha en la
   checklist de su padre; no cae a la Bandeja.
 - **No** (se descarta esa op, las demás del lote siguen): `set_section` y
   `move_to_list`, porque escriben `sectionId`/`somedayListId`, PROHIBIDOS en
   una subtarea (no tiene proyecto, área ni sección propios: vive en la checklist de su
-  padre); y un `update` que traiga `deadline`/`reminders` (MC6, §2.5 los lista
-  PROHIBIDOS en subtarea junto a `recurrence`) — sus OTROS campos, si trae
-  alguno permitido, se rechazan con ellos (la op entera se descarta, no solo
-  esos dos). Para eso, opera sobre el id de la tarea PADRE.
+  padre); `set_waiting` («esperando» no existe en una subtarea, y la app aún
+  no lo impide); `archive` (el archivado se hereda de la madre: se archiva la
+  madre); `add_subtask` (un solo nivel); y un `update` que traiga `deadline`,
+  `reminders` o `recurrence` con regla (§2.5 los lista PROHIBIDOS en
+  subtarea) — sus OTROS campos, si trae alguno permitido, se rechazan con
+  ellos (la op entera se descarta). Si la tarea los necesita, sácala a primer
+  nivel con `set_parent` y `parentId: null`.
 
 El rechazo es por-op y con el motivo REAL de esa op (no un error genérico):
 entra en el mismo informe de éxito PARCIAL que un `taskId` inexistente,
