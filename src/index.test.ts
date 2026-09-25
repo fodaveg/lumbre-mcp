@@ -305,7 +305,9 @@ describe('tools/list — superficie completa', () => {
 		// tarea o subtarea» en su description): 26.717 caracteres (+11). Cabe
 		// bajo el techo sin subirlo. Con el contrato de subtareas en
 		// `mutate_tasks` (recurrence, set_waiting y archive no valen en una
-		// subtarea): 26.757 (+40), sigue sin subir el techo.
+		// subtarea): 26.757 (+40), sigue sin subir el techo. Tras la revisión
+		// de textos de subtareas (recortes en `mutate_tasks`, `taskId` de
+		// `add_attachment` que remite a `get_task` de la madre): 26.734 (−23).
 		// Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
