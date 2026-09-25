@@ -756,8 +756,8 @@ export function subtaskNotAllowedError(taskId: string): Error {
 			'la tarea PADRE con list_tasks y opera sobre él; para sacarla de la checklist, set_parent con ' +
 			'parentId:null (mutate_tasks). Sobre la SUBTAREA sí valen las ops update ' +
 			'(texto, notas, prioridad, hora), reschedule (darle fecha o quitársela con date:null), ' +
-			'complete/complete_subtask, cancel y add_subtask de mutate_tasks, y delete de organize. No ' +
-			'se ha encolado ninguna mutación.'
+			'complete/complete_subtask, cancel y add_subtask de mutate_tasks, delete de organize y la ' +
+			'tool add_attachment. No se ha encolado ninguna mutación.'
 	);
 }
 
@@ -862,10 +862,11 @@ export function subtaskFieldsNotAllowedError(taskId: string, fields: readonly st
  *    escribe `somedayListId`. También `reschedule`, SIN condición sobre el
  *    payload desde 2026-09-04 (ver más abajo).
  *    `get_task` ni siquiera pasa por aquí, pero acepta un `subtaskId` igual.
+ *    Y, desde el 25 sep 2026, la tool `add_attachment` (ver
+ *    `SUBTASK_ATTACHMENTS` en `tools/attachments.ts`): una subtarea es una
+ *    tarea de pleno derecho y la app la acepta como destino de un adjunto.
  *  - `allowSubtask: false` (default) — `set_section` y `move_to_list`
- *    (escriben `sectionId`/`somedayListId`, PROHIBIDOS en subtarea por §2.5);
- *    y `add_attachment`, que queda fuera del alcance de §2.5 y conserva su
- *    criterio anterior.
+ *    (escriben `sectionId`/`somedayListId`, PROHIBIDOS en subtarea por §2.5).
  *
  * `reschedule` estuvo CONDICIONADO al payload (sí con fecha, no con
  * `date: null`) mientras `task-ops.unscheduleTask` de la app no tuvo guard de

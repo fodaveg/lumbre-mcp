@@ -1,6 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { deleteAttachment, getAttachment, uploadAttachment } from '../lumbre-client.js';
+import {
+	deleteAttachment,
+	getAttachment,
+	uploadAttachment,
+	type SubtaskDecision
+} from '../lumbre-client.js';
 import { decodeBase64Attachment, readLocalAttachment } from '../attachments.js';
 import { requireTaskExists } from './task-existence.js';
 import { errorResult, textResult, type ToolCtx } from './shared.js';
@@ -48,6 +53,18 @@ function remoteFileAccessError(): string {
 			'sí puede usar file_path.'
 	);
 }
+
+/**
+ * `add_attachment` admite el id de una SUBTAREA en sus dos vías (encargo de
+ * David, 25 sep 2026: «las subtareas ahora son tareas completas, se les puede
+ * poner adjuntos y notas como en las tareas madre»). Medido en la app antes
+ * de abrirlo: `POST /api/attachments` solo lee `taskId` (query en la vía de
+ * máquina) y lo valida con `isTaskLive` (`src/lib/sync/store.ts`), que busca
+ * la fila en la tabla de tareas del CRDT sin mirar `parentId`, y una subtarea
+ * es una fila más de esa tabla con `parentId` (docs/18 §2.5). No existe un
+ * campo aparte para la madre: el `taskId` de la subtarea basta.
+ */
+const SUBTASK_ATTACHMENTS: SubtaskDecision = { allowSubtask: true };
 
 /**
  * Familia «adjuntos»: `read_attachment`/`add_attachment`/`delete_attachment`
@@ -98,7 +115,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		'add_attachment',
 		{
 			description:
-				'Sube un fichero y lo deja adjunto a una tarea (SÍNCRONA, a diferencia de add_task/' +
+				'Sube un fichero y lo deja adjunto a una tarea o subtarea (SÍNCRONA, a diferencia de add_task/' +
 				'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
 				'`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
 				'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
@@ -164,14 +181,15 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 					// — un base64 inválido o por encima del tope no debe gastar la
 					// llamada de existencia.
 					file = decodeBase64Attachment(input.content_base64!, input.filename);
-					await requireTaskExists(ctx, input.taskId, { allowSubtask: false });
+					// Una subtarea vale (25 sep 2026, ver `SUBTASK_ATTACHMENTS`).
+					await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
 				} else if (!ctx.localFilesystem) {
 					// Ni requireTaskExists ni uploadAttachment: contra este disco NO
 					// existe una ruta correcta que probar (ver `remoteFileAccessError`),
 					// así que ni se toca la red.
 					return errorResult(new Error(remoteFileAccessError()));
 				} else {
-					await requireTaskExists(ctx, input.taskId, { allowSubtask: false });
+					await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
 					file = await readLocalAttachment(input.file_path!, input.filename);
 				}
 

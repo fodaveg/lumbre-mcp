@@ -301,6 +301,9 @@ describe('tools/list — superficie completa', () => {
 		// sobre los 26.298 de fd83faf). Cabe bajo el techo sin subirlo. Tras la
 		// revisión de `set_parent` (consejo de `recurrence: null` corregido y
 		// descripciones recortadas): 26.706 caracteres (−18).
+		// Re-medido el 2026-09-25 (`add_attachment` admite una subtarea, «a una
+		// tarea o subtarea» en su description): 26.717 caracteres (+11). Cabe
+		// bajo el techo sin subirlo.
 		// Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
@@ -3507,10 +3510,33 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
 	});
 
-	it('taskId de una SUBTAREA: rechazada, igual que update_task/move_to_list', async () => {
+	/**
+	 * Una subtarea es una tarea de pleno derecho (25 sep 2026): el adjunto se
+	 * sube con el `taskId` de la SUBTAREA, sin más campos, porque la app solo
+	 * lee `taskId` y lo acepta si la fila está viva (ver `SUBTASK_ATTACHMENTS`).
+	 * Las dos vías pasan por su propio `requireTaskExists`, así que se cubren
+	 * las dos.
+	 */
+	it.each([
+		['file_path', () => ({ file_path: filePath })],
+		['content_base64', () => ({ content_base64: Buffer.from('hola').toString('base64'), filename: 'nota.txt' })]
+	] as const)('taskId de una SUBTAREA por %s: sube con ese taskId a /api/attachments', async (_via, fileArgs) => {
+		const uploadUrls: string[] = [];
 		const fetchSpy = vi.fn(async (url: string | URL) => {
 			const u = String(url);
 			if (u.includes('/api/tasks?id=')) return jsonResponse([lumbreTask({ id: SUB_ID, parentId: TASK_ID })]);
+			if (u.includes('/api/attachments?taskId=')) {
+				uploadUrls.push(u);
+				return jsonResponse({
+					id: 'att-sub',
+					taskId: SUB_ID,
+					filename: 'adjunto',
+					mime: 'application/octet-stream',
+					size: 4,
+					storageKey: 'attachments/att-sub',
+					createdAt: 1_700_000_000_000
+				});
+			}
 			throw new Error(`fetch no mockeado en este test: ${u}`);
 		});
 		vi.stubGlobal('fetch', fetchSpy);
@@ -3518,11 +3544,14 @@ describe('add_attachment — sube un fichero LOCAL y lo enlaza a una tarea (SÍN
 		const client = await buildClient();
 		const result = await client.callTool({
 			name: 'add_attachment',
-			arguments: { taskId: SUB_ID, file_path: filePath }
+			arguments: { taskId: SUB_ID, ...fileArgs() }
 		});
-		expect(result.isError).toBe(true);
-		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toMatch(/subtarea/i);
-		expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/attachments'))).toBe(false);
+		expect(result.isError).not.toBe(true);
+		expect(uploadUrls).toHaveLength(1);
+		const uploadUrl = new URL(uploadUrls[0]!);
+		expect(uploadUrl.searchParams.get('taskId')).toBe(SUB_ID);
+		expect([...uploadUrl.searchParams.keys()]).toEqual(['taskId']);
+		expect(firstResultText(result as { content: { type: string; text?: string }[] })).toContain(SUB_ID);
 	});
 
 	it('fichero local inexistente: error legible y NINGUNA llamada a /api/attachments', async () => {
