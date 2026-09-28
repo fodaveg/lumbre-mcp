@@ -493,26 +493,60 @@ export interface ListNoteLinkInput {
 	label: string;
 }
 
-/** Identifica la nota sin alterar la URL que se guardará y mostrará. */
+/** UUID v4 de una nota de Hebra, igual que exige el servidor (`hebraListNoteId`
+ *  en `src/lib/list-links.ts` del repo `lumbre`). */
+const HEBRA_NOTE_UUID_V4 =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Identifica la nota sin alterar la URL que se guardará y mostrará. Acepta
+ * `obsidian://`, el enlace universal `https://app.hebra.pro/note/<uuid>` y el
+ * esquema nativo de la app `hebra://note/<uuid>[?target=note:<uuid>[:…]]` —
+ * alineado con `hebraListNoteId` del servidor (repo `lumbre`,
+ * `src/lib/list-links.ts`, que exige v4 y devuelve el uuid en minúsculas):
+ * ambas formas de Hebra de la MISMA nota devuelven el mismo `noteId`/
+ * `targetKey` (uuid en minúsculas), para que no acaben creando dos vínculos.
+ * Un `target` con ancla (`:heading:…`/`:block:…`) se acepta pero se colapsa al
+ * `targetKey` de la nota entera: este vínculo es de LISTA, no de un punto
+ * concreto de la nota.
+ */
 export function parseListNoteUrl(raw: string):
 	| { kind: 'obsidian'; targetKey: string }
 	| { kind: 'hebra'; noteId: string; targetKey: string }
 	| null {
 	if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048) return null;
+	let url: URL;
 	try {
-		const url = new URL(raw);
-		if (url.username || url.password) return null;
-		if (url.protocol === 'obsidian:' && raw.length > 'obsidian://'.length) {
-			return { kind: 'obsidian', targetKey: raw };
-		}
-		if (url.origin !== 'https://app.hebra.pro') return null;
-		const match =
-			/^\/note\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(url.pathname);
-		if (!match) return null;
-		return { kind: 'hebra', noteId: match[1], targetKey: match[1] };
+		url = new URL(raw);
 	} catch {
 		return null;
 	}
+	if (url.username || url.password) return null;
+	if (url.protocol === 'obsidian:' && raw.length > 'obsidian://'.length) {
+		return { kind: 'obsidian', targetKey: raw };
+	}
+	if (url.protocol === 'https:' && url.origin === 'https://app.hebra.pro') {
+		const match = /^\/note\/([0-9a-f-]+)$/i.exec(url.pathname);
+		if (!match || !HEBRA_NOTE_UUID_V4.test(match[1])) return null;
+		const noteId = match[1].toLowerCase();
+		return { kind: 'hebra', noteId, targetKey: noteId };
+	}
+	if (url.protocol === 'hebra:') {
+		if (url.port !== '' || url.hostname !== 'note' || url.hash !== '') return null;
+		const match = /^\/([0-9a-f-]+)$/i.exec(url.pathname);
+		if (!match || !HEBRA_NOTE_UUID_V4.test(match[1])) return null;
+		const noteId = match[1].toLowerCase();
+		const queryKeys = [...url.searchParams.keys()];
+		if (queryKeys.length > 1 || (queryKeys.length === 1 && queryKeys[0] !== 'target')) return null;
+		const targetValues = url.searchParams.getAll('target');
+		if (targetValues.length > 1) return null;
+		if (targetValues.length === 1) {
+			const targetMatch = /^note:([0-9a-f-]+)(?::.*)?$/i.exec(targetValues[0]);
+			if (!targetMatch || targetMatch[1].toLowerCase() !== noteId) return null;
+		}
+		return { kind: 'hebra', noteId, targetKey: noteId };
+	}
+	return null;
 }
 
 export interface LinkListNoteResult {

@@ -293,10 +293,13 @@ presentar esa hipótesis como un fallo observado.
   válida o fue revocada, sin mencionar `LUMBRE_TOKEN` ni exponer ningún token.
 - `link_list_note({ listId, url, label })` — vincula de forma síncrona e
   idempotente una nota de Obsidian o Hebra con un proyecto o área mediante
-  `POST /api/list-links`. `url` debe ser un deep link `obsidian://` o el enlace
-  universal `https://app.hebra.pro/note/<uuid>`, sin credenciales (máx. 2.048
-  caracteres y bytes UTF-8). El MCP infiere `kind` y, para Hebra, el `noteId`
-  del UUID de la ruta. `label`, tras recortarlo,
+  `POST /api/list-links`. `url` debe ser un deep link `obsidian://`, el enlace
+  universal `https://app.hebra.pro/note/<uuid>` o el esquema nativo
+  `hebra://note/<uuid>` (con o sin `?target=note:<uuid>[:…]`), sin credenciales
+  ni puerto (máx. 2.048 caracteres y bytes UTF-8). Las dos formas de Hebra de la
+  misma nota producen el mismo `noteId`/`targetKey` (UUID v4 en minúsculas), así
+  que no crean vínculos duplicados. El MCP infiere `kind` y, para Hebra, el
+  `noteId` del UUID de la ruta. `label`, tras recortarlo,
   debe medir 1..300 caracteres. Solo se recortan los extremos: la URL se guarda
   sin normalizar. La respuesta incluye `deleted=true` si la lista está en la
   papelera y devuelve la metadata del vínculo confirmado.

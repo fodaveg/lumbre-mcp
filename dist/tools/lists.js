@@ -8,7 +8,7 @@ const listNoteTargetInputSchema = {
         .string()
         .trim()
         .refine((url) => parseListNoteUrl(url) !== null, 'URL de Obsidian o Hebra inválida')
-        .describe('URL obsidian:// o https://app.hebra.pro/note/<uuid> (máx. 2048 caracteres/bytes)'),
+        .describe('URL obsidian://, https://app.hebra.pro/note/<uuid> o hebra://note/<uuid> (máx. 2048 caracteres/bytes)'),
     label: z.string().trim().min(1).max(300).describe('Nombre visible de la nota (1..300 caracteres)')
 };
 /**

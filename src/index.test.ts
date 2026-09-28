@@ -310,7 +310,14 @@ describe('tools/list — superficie completa', () => {
 		// `add_attachment` que remite a `get_task` de la madre): 26.734 (−23).
 		// Con «esperando» entre los rechazos de `set_parent` (se quita antes
 		// con `clear_waiting`): 26.774 (+40), sigue sin subir el techo.
-		// Techo = medido + ~5%.
+		// Re-medido el 2026-09-28 (`feat(lists): admite enlaces universales de
+		// Hebra`, https://app.hebra.pro/note/<uuid> en link_list_note/
+		// unlink_list_note): 26.706 sobre este mismo camino, antes de la tool
+		// nativa de abajo — la descripción de otros campos se recortó en el
+		// mismo commit y compensa lo nuevo. Con `hebra://note/<uuid>` admitido
+		// junto a las otras dos formas en la `.describe()` de `url`
+		// (`link_list_note`/`unlink_list_note` comparten schema, así que el
+		// coste es doble): 26.748 (+42). Techo = medido + ~5%.
 		const CHAR_CEILING = 26800;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
@@ -1016,6 +1023,28 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 		expect(JSON.parse(String(init.body)).target).toEqual({ kind: 'hebra', noteId: NOTE_ID, url: HEBRA_URL, label: 'Proyecto Lumbre' });
 	});
 
+	it('vincula por el deep link nativo hebra://note/<uuid>, con o sin ?target=', async () => {
+		for (const url of [`hebra://note/${NOTE_ID}`, `hebra://note/${NOTE_ID}?target=note%3A${NOTE_ID}`]) {
+			const link = { ...LINK, kind: 'hebra', noteId: NOTE_ID, targetKey: NOTE_ID, url };
+			const fetchSpy = vi.fn().mockResolvedValue(new Response(
+				JSON.stringify({ ok: true, type: 'link', listId: LIST_ID, deleted: false, link }),
+				{ status: 200, headers: { 'content-type': 'application/json' } }
+			));
+			vi.stubGlobal('fetch', fetchSpy);
+			const client = await buildClient();
+			const result = await client.callTool({
+				name: 'link_list_note',
+				arguments: { listId: LIST_ID, url, label: 'Proyecto Lumbre' }
+			});
+			expect(result.isError).not.toBe(true);
+			const text = ((result as { content: { text: string }[] }).content[0]).text;
+			expect(text).toContain(`kind: hebra · targetKey: ${NOTE_ID}`);
+			expect(text).toContain(url);
+			const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+			expect(JSON.parse(String(init.body)).target).toEqual({ kind: 'hebra', noteId: NOTE_ID, url, label: 'Proyecto Lumbre' });
+		}
+	});
+
 	it.each([
 		['uuid', { listId: 'no-es-uuid', url: URL, label: 'Nota' }],
 		['protocolo', { listId: LIST_ID, url: 'https://example.com/nota', label: 'Nota' }],
@@ -1029,7 +1058,16 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 		['Hebra credenciales', { listId: LIST_ID, url: `https://user:pass@app.hebra.pro/note/${NOTE_ID}`, label: 'Nota' }],
 		['Hebra UUID inválido', { listId: LIST_ID, url: 'https://app.hebra.pro/note/no-uuid', label: 'Nota' }],
 		['Hebra ruta extra', { listId: LIST_ID, url: `${HEBRA_URL}/extra`, label: 'Nota' }],
-		['Hebra app link nativo', { listId: LIST_ID, url: `hebra://note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra nativo host distinto', { listId: LIST_ID, url: `hebra://tag/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra nativo con puerto', { listId: LIST_ID, url: `hebra://note:8443/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra nativo con credenciales', { listId: LIST_ID, url: `hebra://user:pass@note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra nativo con fragmento', { listId: LIST_ID, url: `hebra://note/${NOTE_ID}#heading`, label: 'Nota' }],
+		['Hebra nativo con query ajena a target', { listId: LIST_ID, url: `hebra://note/${NOTE_ID}?from=lumbre`, label: 'Nota' }],
+		[
+			'Hebra nativo con target de otro uuid',
+			{ listId: LIST_ID, url: `hebra://note/${NOTE_ID}?target=note:44444444-4444-4444-8444-444444444444`, label: 'Nota' }
+		],
+		['Hebra nativo UUID inválido', { listId: LIST_ID, url: 'hebra://note/no-uuid', label: 'Nota' }],
 		['más de 2048 caracteres', { listId: LIST_ID, url: `obsidian://open?file=${'a'.repeat(2_048)}`, label: 'Nota' }],
 		['más de 2048 bytes UTF-8', { listId: LIST_ID, url: `obsidian://open?file=${'á'.repeat(1_020)}`, label: 'Nota' }],
 		['label vacío tras trim', { listId: LIST_ID, url: URL, label: '   ' }],
