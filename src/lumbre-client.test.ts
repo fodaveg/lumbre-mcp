@@ -514,6 +514,8 @@ describe('getListLinks', () => {
 describe('linkListNote / unlinkListNote', () => {
 	const LIST_ID = '11111111-1111-4111-8111-111111111111';
 	const URL = 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md';
+	const NOTE_ID = '33333333-3333-4333-8333-333333333333';
+	const HEBRA_URL = `https://app.hebra.pro/note/${NOTE_ID}?from=lumbre#detalle`;
 	const LINK = {
 		id: '22222222-2222-4222-8222-222222222222',
 		listId: LIST_ID,
@@ -570,6 +572,42 @@ describe('linkListNote / unlinkListNote', () => {
 			listId: LIST_ID,
 			target: { kind: 'obsidian', url: URL, label: 'Proyecto Lumbre' }
 		});
+	});
+
+	it('envía noteId para Hebra en link y unlink, y comprueba la identidad confirmada', async () => {
+		const hebraLink = { ...LINK, kind: 'hebra', noteId: NOTE_ID, targetKey: NOTE_ID, url: HEBRA_URL };
+		const fetchSpy = vi.fn()
+			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, type: 'link', listId: LIST_ID, deleted: false, link: hebraLink }), { status: 200, headers: { 'content-type': 'application/json' } }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, type: 'unlink', listId: LIST_ID, deleted: false, removed: true }), { status: 200, headers: { 'content-type': 'application/json' } }));
+		vi.stubGlobal('fetch', fetchSpy);
+
+		expect((await linkListNote(config, { listId: LIST_ID, url: HEBRA_URL, label: 'Proyecto Lumbre' })).link).toEqual(hebraLink);
+		expect(await unlinkListNote(config, { listId: LIST_ID, url: HEBRA_URL, label: 'Proyecto Lumbre' })).toMatchObject({ removed: true });
+		for (const [index, type] of ['link', 'unlink'].entries()) {
+			const [, init] = fetchSpy.mock.calls[index] as [string, RequestInit];
+			expect(JSON.parse(String(init.body))).toEqual({
+				type,
+				listId: LIST_ID,
+				target: { kind: 'hebra', noteId: NOTE_ID, url: HEBRA_URL, label: 'Proyecto Lumbre' }
+			});
+		}
+	});
+
+	it('acepta noteId normalizado por PostgreSQL para una URL con UUID en mayúsculas', async () => {
+		const upperId = 'ABCDEF12-3456-4ABC-8DEF-ABCDEF123456';
+		const url = `https://app.hebra.pro/note/${upperId}`;
+		const link = { ...LINK, kind: 'hebra', noteId: upperId.toLowerCase(), targetKey: upperId, url };
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, type: 'link', listId: LIST_ID, deleted: false, link }), { status: 200, headers: { 'content-type': 'application/json' } })));
+		expect((await linkListNote(config, { listId: LIST_ID, url, label: 'Proyecto Lumbre' })).link).toEqual(link);
+	});
+
+	it.each([
+		['noteId distinto', { ...LINK, kind: 'hebra', noteId: '44444444-4444-4444-8444-444444444444', targetKey: NOTE_ID, url: HEBRA_URL }],
+		['targetKey URL', { ...LINK, kind: 'hebra', noteId: NOTE_ID, targetKey: HEBRA_URL, url: HEBRA_URL }],
+		['kind distinto', { ...LINK, kind: 'obsidian', noteId: NOTE_ID, targetKey: NOTE_ID, url: HEBRA_URL }]
+	])('rechaza confirmación Hebra con %s', async (_name, link) => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, type: 'link', listId: LIST_ID, deleted: false, link }), { status: 200, headers: { 'content-type': 'application/json' } })));
+		await expect(linkListNote(config, { listId: LIST_ID, url: HEBRA_URL, label: 'Proyecto Lumbre' })).rejects.toThrow(/respuesta inesperada/);
 	});
 
 	it.each([

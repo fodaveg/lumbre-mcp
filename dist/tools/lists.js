@@ -1,27 +1,14 @@
 import { z } from 'zod';
-import { getListLinks, linkListNote, listLists, listNotFoundError, unlinkListNote } from '../lumbre-client.js';
+import { getListLinks, linkListNote, listLists, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, textResult } from './shared.js';
-/** Misma validación pura que aplica Lumbre antes de guardar un destino de
- * Obsidian. Recibe el valor ya recortado y no lo normaliza ni reserializa. */
-function isValidObsidianDeepLink(raw) {
-    if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048)
-        return false;
-    try {
-        const url = new URL(raw);
-        return url.protocol === 'obsidian:' && !url.username && !url.password && raw.length > 'obsidian://'.length;
-    }
-    catch {
-        return false;
-    }
-}
 const listNoteTargetInputSchema = {
     listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)'),
     url: z
         .string()
         .trim()
-        .refine(isValidObsidianDeepLink, 'URL de Obsidian inválida')
-        .describe('Deep link obsidian:// de la nota (máx. 2048 caracteres y bytes UTF-8)'),
+        .refine((url) => parseListNoteUrl(url) !== null, 'URL de Obsidian o Hebra inválida')
+        .describe('URL obsidian:// o https://app.hebra.pro/note/<uuid> (máx. 2048 caracteres/bytes)'),
     label: z.string().trim().min(1).max(300).describe('Nombre visible de la nota (1..300 caracteres)')
 };
 /**
@@ -47,8 +34,8 @@ export function registerListTools(server, ctx) {
         }
     });
     const getListLinksTool = server.registerTool('get_list_links', {
-        description: 'Lee los vínculos configurados para UN proyecto o área por su listId (incluye URL y metadata; puede ser ' +
-            'Obsidian obsidian://). No abre ni lee el contenido de los destinos. Respuesta vacía si no tiene vínculos.',
+        description: 'Lee los vínculos de un proyecto o área por listId (URL, kind y metadata). ' +
+            'No abre el destino. Vacío si no tiene vínculos.',
         inputSchema: {
             listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
         }
@@ -82,8 +69,8 @@ export function registerListTools(server, ctx) {
         }
     });
     const linkListNoteTool = server.registerTool('link_list_note', {
-        description: 'Vincula de forma síncrona e idempotente una nota de Obsidian con un proyecto o área. ' +
-            'Guarda solo el deep link y el nombre visible; no lee ni copia el contenido de la nota.',
+        description: 'Vincula de forma síncrona e idempotente una nota de Obsidian o Hebra con un proyecto o área. ' +
+            'Guarda enlace e identidad de la nota; no lee ni copia su contenido.',
         inputSchema: listNoteTargetInputSchema
     }, async (input) => {
         try {
@@ -96,7 +83,7 @@ export function registerListTools(server, ctx) {
         }
     });
     const unlinkListNoteTool = server.registerTool('unlink_list_note', {
-        description: 'Desvincula de forma síncrona e idempotente una nota de Obsidian de un proyecto o área. ' +
+        description: 'Desvincula de forma síncrona e idempotente una nota de Obsidian o Hebra de un proyecto o área. ' +
             '`removed=false` confirma que el vínculo ya no estaba registrado.',
         inputSchema: listNoteTargetInputSchema
     }, async (input) => {

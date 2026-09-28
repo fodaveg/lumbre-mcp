@@ -574,7 +574,7 @@ export function formatListDetail(l) {
 /**
  * Formatea los vínculos de un proyecto o área sin seguirlos ni leer su destino. Cada
  * fila conserva la metadata que identifica el vínculo y su URL literal,
- * incluido el esquema `obsidian://` cuando el destino enlaza una nota local.
+ * incluidos `obsidian://` y el enlace universal de Hebra para notas.
  */
 export function formatListLinks(listId, links) {
     if (links.length === 0)

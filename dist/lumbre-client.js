@@ -117,6 +117,28 @@ export async function listTasks(config, input) {
     }
     return body;
 }
+/** Identifica la nota sin alterar la URL que se guardará y mostrará. */
+export function parseListNoteUrl(raw) {
+    if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048)
+        return null;
+    try {
+        const url = new URL(raw);
+        if (url.username || url.password)
+            return null;
+        if (url.protocol === 'obsidian:' && raw.length > 'obsidian://'.length) {
+            return { kind: 'obsidian', targetKey: raw };
+        }
+        if (url.origin !== 'https://app.hebra.pro')
+            return null;
+        const match = /^\/note\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(url.pathname);
+        if (!match)
+            return null;
+        return { kind: 'hebra', noteId: match[1], targetKey: match[1] };
+    }
+    catch {
+        return null;
+    }
+}
 /**
  * `GET /api/tasks?includeLists=1`: enumera TODOS los proyectos y áreas
  * vivos del usuario, INCLUIDOS los que no tienen ninguna tarea todavía. Sin
@@ -135,7 +157,7 @@ export async function listLists(config) {
 /**
  * `GET /api/list-links?listId=`: lee los vínculos configurados para UN proyecto o área.
  * Un destino sin vínculos devuelve `[]`; no se consulta ni se expone contenido
- * del destino, incluidos los targets con esquema `obsidian://`.
+ * del destino, incluidos `obsidian://` y los enlaces universales de Hebra.
  */
 export async function getListLinks(config, listId) {
     const params = new URLSearchParams({ listId });
@@ -145,29 +167,35 @@ export async function getListLinks(config, listId) {
     }
     return body.links;
 }
-function isListLink(value, listId, url, label) {
+function isListLink(value, listId, url, label, target) {
     if (!value || typeof value !== 'object')
         return false;
     const link = value;
     return (typeof link.id === 'string' &&
         link.listId === listId &&
-        link.kind === 'obsidian' &&
-        link.targetKey === url &&
+        link.kind === target.kind &&
+        link.targetKey === target.targetKey &&
+        // PostgreSQL normaliza la columna UUID a minúsculas; targetKey conserva el texto enviado.
+        (target.kind === 'obsidian' ||
+            (typeof link.noteId === 'string' && link.noteId.toLowerCase() === target.noteId.toLowerCase())) &&
         link.url === url &&
         link.label === label &&
         typeof link.updatedAt === 'string');
 }
-/** Escritura síncrona e idempotente de un vínculo de nota de Obsidian. */
+/** Escritura síncrona e idempotente de un vínculo de nota de Obsidian o Hebra. */
 export async function linkListNote(config, input) {
     const url = input.url.trim();
     const label = input.label.trim();
+    const target = parseListNoteUrl(url);
+    if (!target)
+        throw new LumbreApiError('URL de Obsidian o Hebra inválida.');
     const body = await request(config, '/api/list-links', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
             type: 'link',
             listId: input.listId,
-            target: { kind: 'obsidian', url, label }
+            target: { kind: target.kind, ...(target.kind === 'hebra' ? { noteId: target.noteId } : {}), url, label }
         })
     });
     if (!body ||
@@ -176,22 +204,25 @@ export async function linkListNote(config, input) {
         body.type !== 'link' ||
         body.listId !== input.listId ||
         typeof body.deleted !== 'boolean' ||
-        !isListLink(body.link, input.listId, url, label)) {
+        !isListLink(body.link, input.listId, url, label, target)) {
         throw new LumbreApiError('Lumbre no confirmó el vínculo de lista (respuesta inesperada).');
     }
     return body;
 }
-/** Retirada síncrona e idempotente de un vínculo de nota de Obsidian. */
+/** Retirada síncrona e idempotente de un vínculo de nota de Obsidian o Hebra. */
 export async function unlinkListNote(config, input) {
     const url = input.url.trim();
     const label = input.label.trim();
+    const target = parseListNoteUrl(url);
+    if (!target)
+        throw new LumbreApiError('URL de Obsidian o Hebra inválida.');
     const body = await request(config, '/api/list-links', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
             type: 'unlink',
             listId: input.listId,
-            target: { kind: 'obsidian', url, label }
+            target: { kind: target.kind, ...(target.kind === 'hebra' ? { noteId: target.noteId } : {}), url, label }
         })
     });
     if (!body ||

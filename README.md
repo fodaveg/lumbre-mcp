@@ -280,8 +280,9 @@ presentar esa hipótesis como un fallo observado.
   visibles del usuario.
 - `get_list_links({ listId })` — lee los vínculos configurados para un proyecto o área
   (vía `GET /api/list-links?listId=`), con su URL y metadata completa. Puede
-  devolver destinos `obsidian://`; el MCP los presenta como vínculos y nunca
-  abre ni lee contenido de Obsidian. Si el destino no tiene vínculos, devuelve
+  devolver destinos `obsidian://` y notas Hebra con URL
+  `https://app.hebra.pro/note/<uuid>`; muestra `kind`, `targetKey` y la URL sin
+  abrir ni leer su contenido. Si el destino no tiene vínculos, devuelve
   una respuesta vacía clara. Un error de autenticación o de la API se devuelve
   como error, nunca como una lista vacía. Como el resto de tools, un 401
   contra Lumbre viaja como error de autenticación — el texto depende del modo
@@ -291,16 +292,19 @@ presentar esa hipótesis como un fallo observado.
   el conector remoto autorizado por OAuth dice que la autorización OAuth no es
   válida o fue revocada, sin mencionar `LUMBRE_TOKEN` ni exponer ningún token.
 - `link_list_note({ listId, url, label })` — vincula de forma síncrona e
-  idempotente una nota de Obsidian con un proyecto o área mediante
-  `POST /api/list-links`. `url` debe ser un deep link `obsidian://` sin
-  credenciales (máx. 2.048 caracteres y bytes UTF-8) y `label`, tras recortarlo,
+  idempotente una nota de Obsidian o Hebra con un proyecto o área mediante
+  `POST /api/list-links`. `url` debe ser un deep link `obsidian://` o el enlace
+  universal `https://app.hebra.pro/note/<uuid>`, sin credenciales (máx. 2.048
+  caracteres y bytes UTF-8). El MCP infiere `kind` y, para Hebra, el `noteId`
+  del UUID de la ruta. `label`, tras recortarlo,
   debe medir 1..300 caracteres. Solo se recortan los extremos: la URL se guarda
   sin normalizar. La respuesta incluye `deleted=true` si la lista está en la
   papelera y devuelve la metadata del vínculo confirmado.
 - `unlink_list_note({ listId, url, label })` — retira ese vínculo por la URL
-  exacta (tras recortar extremos). Es síncrona e idempotente: `removed=false`
+  exacta para Obsidian o por el `noteId` de Hebra (tras recortar extremos).
+  Es síncrona e idempotente: `removed=false`
   confirma que ya no estaba registrado; también muestra `deleted`. La API exige
-  `label` aunque la identidad de la retirada sea la URL. Ambas escrituras usan
+  `label` aunque no forme parte de la identidad. Ambas escrituras usan
   el mismo Bearer que el resto del MCP, incluido el conector remoto OAuth cuando
   el endpoint compatible está desplegado.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin

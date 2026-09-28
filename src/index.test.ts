@@ -809,7 +809,7 @@ describe('get_list_links — registro y contrato HTTP', () => {
 		vi.unstubAllGlobals();
 	});
 
-	it('registra el UUID, conserva un obsidian:// y devuelve una lista vacía legible', async () => {
+	it('conserva los vínculos Obsidian y Hebra con kind y targetKey, y devuelve una lista vacía legible', async () => {
 		const indexModule = await import('./index.js');
 		const server = indexModule.createServer(TEST_CONFIG);
 		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
@@ -834,6 +834,16 @@ describe('get_list_links — registro y contrato HTTP', () => {
 								url: 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md',
 								label: 'Proyecto Lumbre',
 								updatedAt: '2026-09-08T09:00:00.000Z'
+							},
+							{
+								id: '33333333-3333-4333-8333-333333333333',
+								listId: LIST_ID,
+								kind: 'hebra',
+								noteId: '44444444-4444-4444-8444-444444444444',
+								targetKey: '44444444-4444-4444-8444-444444444444',
+								url: 'https://app.hebra.pro/note/44444444-4444-4444-8444-444444444444',
+								label: 'Nota Hebra',
+								updatedAt: '2026-09-28T09:00:00.000Z'
 							}
 						]
 					}),
@@ -852,6 +862,8 @@ describe('get_list_links — registro y contrato HTTP', () => {
 		expect(linked.isError).not.toBe(true);
 		const linkedText = ((linked as { content: { text: string }[] }).content[0]).text;
 		expect(linkedText).toContain('obsidian://open?vault=fodaveg');
+		expect(linkedText).toContain('Nota Hebra — https://app.hebra.pro/note/44444444-4444-4444-8444-444444444444');
+		expect(linkedText).toContain('kind: hebra · targetKey: 44444444-4444-4444-8444-444444444444');
 		for (const value of [
 			'Proyecto Lumbre',
 			'22222222-2222-4222-8222-222222222222',
@@ -907,6 +919,8 @@ describe('get_list_links — registro y contrato HTTP', () => {
 describe('link_list_note / unlink_list_note — registro, validación y contrato HTTP', () => {
 	const LIST_ID = '11111111-1111-4111-8111-111111111111';
 	const URL = 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md';
+	const NOTE_ID = '33333333-3333-4333-8333-333333333333';
+	const HEBRA_URL = `https://app.hebra.pro/note/${NOTE_ID}`;
 	const LINK = {
 		id: '22222222-2222-4222-8222-222222222222',
 		listId: LIST_ID,
@@ -982,12 +996,40 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 		}
 	});
 
+	it('vincula una nota Hebra y muestra kind, UUID y URL en el resultado', async () => {
+		const link = { ...LINK, kind: 'hebra', noteId: NOTE_ID, targetKey: NOTE_ID, url: HEBRA_URL };
+		const fetchSpy = vi.fn().mockResolvedValue(new Response(
+			JSON.stringify({ ok: true, type: 'link', listId: LIST_ID, deleted: false, link }),
+			{ status: 200, headers: { 'content-type': 'application/json' } }
+		));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'link_list_note',
+			arguments: { listId: LIST_ID, url: ` ${HEBRA_URL} `, label: 'Proyecto Lumbre' }
+		});
+		expect(result.isError).not.toBe(true);
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+		expect(text).toContain(`kind: hebra · targetKey: ${NOTE_ID}`);
+		expect(text).toContain(HEBRA_URL);
+		const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(JSON.parse(String(init.body)).target).toEqual({ kind: 'hebra', noteId: NOTE_ID, url: HEBRA_URL, label: 'Proyecto Lumbre' });
+	});
+
 	it.each([
 		['uuid', { listId: 'no-es-uuid', url: URL, label: 'Nota' }],
 		['protocolo', { listId: LIST_ID, url: 'https://example.com/nota', label: 'Nota' }],
 		['vacía tras trim', { listId: LIST_ID, url: '   ', label: 'Nota' }],
 		['sin destino', { listId: LIST_ID, url: 'obsidian://', label: 'Nota' }],
 		['credenciales', { listId: LIST_ID, url: 'obsidian://user:pass@open?file=nota', label: 'Nota' }],
+		['Hebra host distinto', { listId: LIST_ID, url: `https://app.hebra.pro.evil.test/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra subdominio', { listId: LIST_ID, url: `https://foo.app.hebra.pro/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra http', { listId: LIST_ID, url: `http://app.hebra.pro/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra puerto distinto', { listId: LIST_ID, url: `https://app.hebra.pro:8443/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra credenciales', { listId: LIST_ID, url: `https://user:pass@app.hebra.pro/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra UUID inválido', { listId: LIST_ID, url: 'https://app.hebra.pro/note/no-uuid', label: 'Nota' }],
+		['Hebra ruta extra', { listId: LIST_ID, url: `${HEBRA_URL}/extra`, label: 'Nota' }],
+		['Hebra app link nativo', { listId: LIST_ID, url: `hebra://note/${NOTE_ID}`, label: 'Nota' }],
 		['más de 2048 caracteres', { listId: LIST_ID, url: `obsidian://open?file=${'a'.repeat(2_048)}`, label: 'Nota' }],
 		['más de 2048 bytes UTF-8', { listId: LIST_ID, url: `obsidian://open?file=${'á'.repeat(1_020)}`, label: 'Nota' }],
 		['label vacío tras trim', { listId: LIST_ID, url: URL, label: '   ' }],

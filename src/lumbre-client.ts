@@ -470,12 +470,14 @@ export interface LumbreListSummary {
 }
 
 /** Vínculo de un proyecto o área (`GET /api/list-links?listId=`).
- * `url` se conserva literal: puede ser una URL web o `obsidian://`, que el
+ * `url` se conserva literal: puede ser un enlace universal de Hebra o `obsidian://`, que el
  * MCP solo presenta como vínculo; nunca lee ni interpreta su contenido. */
 export interface LumbreListLink {
 	id: string;
 	listId: string;
 	kind: string;
+	/** UUID de Hebra; null para Obsidian cuando el servidor lo expone. */
+	noteId?: string | null;
 	targetKey: string;
 	url: string;
 	label: string;
@@ -483,11 +485,34 @@ export interface LumbreListLink {
 }
 
 /** Destino de nota que acepta `POST /api/list-links`. La API exige también
- * `label` al desvincular, aunque solo usa `url` como identidad del destino. */
+ * `label` al desvincular; la identidad es la URL para Obsidian y el noteId para Hebra.
+ */
 export interface ListNoteLinkInput {
 	listId: string;
 	url: string;
 	label: string;
+}
+
+/** Identifica la nota sin alterar la URL que se guardará y mostrará. */
+export function parseListNoteUrl(raw: string):
+	| { kind: 'obsidian'; targetKey: string }
+	| { kind: 'hebra'; noteId: string; targetKey: string }
+	| null {
+	if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048) return null;
+	try {
+		const url = new URL(raw);
+		if (url.username || url.password) return null;
+		if (url.protocol === 'obsidian:' && raw.length > 'obsidian://'.length) {
+			return { kind: 'obsidian', targetKey: raw };
+		}
+		if (url.origin !== 'https://app.hebra.pro') return null;
+		const match =
+			/^\/note\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(url.pathname);
+		if (!match) return null;
+		return { kind: 'hebra', noteId: match[1], targetKey: match[1] };
+	} catch {
+		return null;
+	}
 }
 
 export interface LinkListNoteResult {
@@ -528,7 +553,7 @@ export async function listLists(config: LumbreConfig): Promise<LumbreListSummary
 /**
  * `GET /api/list-links?listId=`: lee los vínculos configurados para UN proyecto o área.
  * Un destino sin vínculos devuelve `[]`; no se consulta ni se expone contenido
- * del destino, incluidos los targets con esquema `obsidian://`.
+ * del destino, incluidos `obsidian://` y los enlaces universales de Hebra.
  */
 export async function getListLinks(config: LumbreConfig, listId: string): Promise<LumbreListLink[]> {
 	const params = new URLSearchParams({ listId });
@@ -539,31 +564,42 @@ export async function getListLinks(config: LumbreConfig, listId: string): Promis
 	return (body as { links: LumbreListLink[] }).links;
 }
 
-function isListLink(value: unknown, listId: string, url: string, label: string): value is LumbreListLink {
+function isListLink(
+	value: unknown,
+	listId: string,
+	url: string,
+	label: string,
+	target: NonNullable<ReturnType<typeof parseListNoteUrl>>
+): value is LumbreListLink {
 	if (!value || typeof value !== 'object') return false;
 	const link = value as Partial<LumbreListLink>;
 	return (
 		typeof link.id === 'string' &&
 		link.listId === listId &&
-		link.kind === 'obsidian' &&
-		link.targetKey === url &&
+		link.kind === target.kind &&
+		link.targetKey === target.targetKey &&
+		// PostgreSQL normaliza la columna UUID a minúsculas; targetKey conserva el texto enviado.
+		(target.kind === 'obsidian' ||
+			(typeof link.noteId === 'string' && link.noteId.toLowerCase() === target.noteId.toLowerCase())) &&
 		link.url === url &&
 		link.label === label &&
 		typeof link.updatedAt === 'string'
 	);
 }
 
-/** Escritura síncrona e idempotente de un vínculo de nota de Obsidian. */
+/** Escritura síncrona e idempotente de un vínculo de nota de Obsidian o Hebra. */
 export async function linkListNote(config: LumbreConfig, input: ListNoteLinkInput): Promise<LinkListNoteResult> {
 	const url = input.url.trim();
 	const label = input.label.trim();
+	const target = parseListNoteUrl(url);
+	if (!target) throw new LumbreApiError('URL de Obsidian o Hebra inválida.');
 	const body = await request(config, '/api/list-links', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
 			type: 'link',
 			listId: input.listId,
-			target: { kind: 'obsidian', url, label }
+			target: { kind: target.kind, ...(target.kind === 'hebra' ? { noteId: target.noteId } : {}), url, label }
 		})
 	});
 	if (
@@ -573,27 +609,29 @@ export async function linkListNote(config: LumbreConfig, input: ListNoteLinkInpu
 		(body as { type?: unknown }).type !== 'link' ||
 		(body as { listId?: unknown }).listId !== input.listId ||
 		typeof (body as { deleted?: unknown }).deleted !== 'boolean' ||
-		!isListLink((body as { link?: unknown }).link, input.listId, url, label)
+		!isListLink((body as { link?: unknown }).link, input.listId, url, label, target)
 	) {
 		throw new LumbreApiError('Lumbre no confirmó el vínculo de lista (respuesta inesperada).');
 	}
 	return body as LinkListNoteResult;
 }
 
-/** Retirada síncrona e idempotente de un vínculo de nota de Obsidian. */
+/** Retirada síncrona e idempotente de un vínculo de nota de Obsidian o Hebra. */
 export async function unlinkListNote(
 	config: LumbreConfig,
 	input: ListNoteLinkInput
 ): Promise<UnlinkListNoteResult> {
 	const url = input.url.trim();
 	const label = input.label.trim();
+	const target = parseListNoteUrl(url);
+	if (!target) throw new LumbreApiError('URL de Obsidian o Hebra inválida.');
 	const body = await request(config, '/api/list-links', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
 			type: 'unlink',
 			listId: input.listId,
-			target: { kind: 'obsidian', url, label }
+			target: { kind: target.kind, ...(target.kind === 'hebra' ? { noteId: target.noteId } : {}), url, label }
 		})
 	});
 	if (
