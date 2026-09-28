@@ -39,9 +39,34 @@ y no cierres hasta resolver el feedback. El agente nunca completa el checkbox en
 del usuario. Sin esta extensión, distingue cancelada, bloqueada, aplazada y backlog
 mediante las superficies nativas.
 
+## Subtareas
+
+Una subtarea es una tarea de pleno derecho: cuando se trabaja, lleva su propio estado
+con el mismo mecanismo que una principal (marca al final de su `content`, op `update`
+con el `taskId` de la subtarea, a partir del `content` íntegro de su propio `get_task`,
+y verificación con `get_task` de esa subtarea). El estado de la principal no sustituye
+al de la subtarea ni al revés.
+
+La principal refleja a sus subtareas, no las decide por su cuenta:
+
+- Cuando una subtarea pasa a `@wip`, la principal pasa a `@wip` si no tenía estado o
+  estaba en `@acked`.
+- La principal solo pasa a `@done` cuando todas sus subtareas están en `@done` o
+  cerradas (completadas o canceladas) y el trabajo propio de la principal, si lo
+  tiene, está verificado. Terminar una subtarea no pone la principal en `@done`.
+- Un `@not-done` en una subtarea devuelve la principal a `@acked` (o `@wip` si se
+  corrige ya) si estaba en `@done`.
+
+`list_tasks` no muestra subtareas: localízalas con `get_task` de la principal, que
+lista sus ids, y lee cada una con `get_task` antes de tocar su estado. Si delegas el
+cambio en `lumbre-tagger`, pásale los ids de las subtareas explícitamente; el mecánico
+no las descubre por sí solo.
+
 ## Lotes y checkpoints
 
-- Agrupa por causa y superficie compartida. El lote es un `#tag`, nunca una sección.
+- Agrupa por causa y superficie compartida. El lote por defecto es una tarea principal
+  con sus subtareas; añade un `#tag` libre solo cuando cruza secciones, proyectos o
+  áreas. No lo conviertas en sección por ser un lote de ejecución.
 - Antes de delegar, registra ids, alcance, ownership y superficies compartidas cuando
   el riesgo o la concurrencia lo justifique.
 - Una sola tarea no se presenta como lote salvo delimitación explícita.
@@ -71,10 +96,13 @@ Lumbre, porque el usuario lee la tarea, no el historial de la conversación. Det
 el trabajo a medias es obligación de quien lo dejó, nunca del usuario.
 
 Antes de declarar cerrado un lote o de anunciar una entrega, haz el barrido y
-enséñalo: lista las tareas del lote por su `#tag`, comprueba su estado real en Lumbre
-(no de memoria ni del plan) y confirma que ninguna sigue en `@wip`. Mientras quede
-una sin resolver, no anuncies el lote cerrado, no lo des por entregado y no pases al
-siguiente.
+enséñalo: para un lote principal + subtareas, lee la principal con `get_task` (lista
+los ids de sus subtareas) y lee cada subtarea con `get_task`, porque `list_tasks` no
+las muestra; para un lote marcado con `#tag` por cruzar secciones, proyectos o áreas,
+lista sus tareas por ese `#tag`. Comprueba el estado real en Lumbre (no de memoria ni
+del plan) y confirma que ninguna, principal o subtarea, sigue en `@wip`. Mientras
+quede una sin resolver, no anuncies el lote cerrado, no lo des por entregado y no
+pases al siguiente.
 
 Matices:
 
@@ -86,6 +114,8 @@ Matices:
   el trabajo hecho ni se reescribe para que parezca no empezada.
 - Terminar en `@done` exige la verificación que pida el criterio vigente. Ante la
   duda entre `@done` sin verificar y `@acked` con motivo, es `@acked`.
+- Una principal que queda con subtareas sin terminar sale de `@wip` a `@acked` con un
+  motivo que nombra qué subtareas faltan, no un motivo genérico.
 
 ## Evidencia
 

@@ -41,6 +41,7 @@
       ],
       "workflow": [
         "Resuelve cada id con get_task antes de escribir. Si el usuario dio texto en lugar de ids, localiza candidatos con list_tasks y confirma el elegido con get_task.",
+        "Si te dan ids de subtareas, resuélvelos igual con get_task: list_tasks no las lista, así que exige ids explícitos y no las busques por texto.",
         "Parte exclusivamente del content íntegro devuelto por get_task. No copies el texto de display de list_tasks ni intentes limpiarlo con una regex aproximada.",
         "Retira @acked, @wip, @done y, solo al reabrir feedback humano, @not-done; añade al final un único tag objetivo en minúsculas. Conserva byte a byte el resto del contenido y los tags ortogonales.",
         "Escribe siempre con mutate_tasks, una o varias tareas: operaciones update que solo contengan taskId y content, agrupadas en una única llamada.",
