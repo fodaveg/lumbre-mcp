@@ -53,5 +53,7 @@ si falta una decisión material, ofrece como máximo dos o tres opciones claras.
 conviertas esta skill en una implementación completa de GTD: su objetivo es operar
 Lumbre con baja fricción.
 
-Después de crear o editar, verifica solo los campos pedidos y comunica qué cambió y
-cualquier limitación de sincronización.
+Después de crear o editar, confirma solo los campos pedidos con el resultado por op
+(relee solo en los casos de «Consistencia» de
+[mcp-safe-operations.md](mcp-safe-operations.md)) y comunica qué cambió y cualquier
+limitación de sincronización.
