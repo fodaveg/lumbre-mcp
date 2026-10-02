@@ -150,11 +150,19 @@ presentar esa hipótesis como un fallo observado.
 
 ## Qué hace (Fase 1 — crear/leer)
 
+Todas las tools llevan `annotations` de MCP: `readOnlyHint` en las de lectura
+(`list_tasks`, `get_task`, `list_lists`, `get_list`, `get_list_links`,
+`list_brl_entries`, `list_habits`, `read_attachment`), `destructiveHint: true`
+en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
+`idempotentHint` en `link_list_note`, `unlink_list_note` y `refresh_sync`.
+
 - `add_task` — añade una tarea nueva a Lumbre (vía `POST /api/ingest`, el
   mismo endpoint que usa email-to-task/Atajos de iOS). La app la encola y la
   materializa en el servidor en la misma petición; tus dispositivos la reciben
   al sincronizar. La respuesta reenvía los avisos de la app (`notices`), por
   ejemplo si el proyecto pedido estaba borrado y la tarea fue a la Bandeja.
+  NO devuelve el id de la tarea: si lo necesitas, usa la op `add_task` de
+  `mutate_tasks`, que sí lo devuelve.
   `text` se guarda TAL CUAL (`literal: true` SIEMPRE, tarea `cd39f028`,
   2026-09-24 — el conector lo fuerza, no es un campo que el modelo controle):
   la app NO interpreta fecha, hora, prioridad, `!`/`!!`, «cada …», `$Lista` ni
@@ -233,12 +241,12 @@ presentar esa hipótesis como un fallo observado.
   a `get_task` para las que quedaron sin leer. `'none'` omite las notas,
   `'preview'` es el recorte legado a ~240 chars colapsado a una línea, `'full'`
   las deja íntegras y sin colapsar saltos de línea para TODO el lote
-  (`fullNotes: true` sigue siendo su alias) — útil si vas a reeditar una nota
+  — útil si vas a reeditar una nota
   con `mutate_tasks({op:"update"})` (que la REEMPLAZA entera) y el lote ya está acotado. Para
   una sola tarea concreta, mejor `get_task` (también íntegra siempre, y
   también registra la huella). `notesSince` (`"YYYY-MM-DD"` o ISO completo)
   es una consulta de precisión APARTE, SIN estado y con exclusividad de
-  criterio: ignora `notes`/`fullNotes`, `@done`/`#done` y la huella local por
+  criterio: ignora `notes`, `@done`/`#done` y la huella local por
   completo — íntegra SOLO si `notesUpdatedAt` es igual o posterior a esa
   fecha, marcador el resto (incluida una tarea `@done` con nota vieja); la
   cabecera lo declara (`tocadas desde 2026-07-20`). Úsalo para "qué ha
@@ -275,7 +283,7 @@ presentar esa hipótesis como un fallo observado.
   nombre, tipo (proyecto/área), padre, estado (cierre/aparcado/fecha, cuando
   el servidor los trae) y recuento de tareas, seguidos de su nota ÍNTEGRA y
   verbatim (2026-09-16, tarea 827a7878) — útil para leerla ANTES de
-  reescribirla con `mutate_tasks({ op: "set_list_notes" })`, que la reemplaza
+  reescribirla con `organize({ op: "set_list_notes" })`, que la reemplaza
   entera. Da error explícito si el `listId` no existe entre los proyectos/áreas
   visibles del usuario.
 - `get_list_links({ listId })` — lee los vínculos configurados para un proyecto o área
@@ -356,8 +364,7 @@ presentar esa hipótesis como un fallo observado.
   `filename` es opcional con `file_path` (por defecto su basename) y
   obligatorio con `content_base64`. Tope de tamaño comprobado en el cliente
   (mensaje con el tamaño real) y de forma AUTORITATIVA en el servidor. A
-  diferencia de TODO lo demás en Fase 1/Fase 2 (que se
-  encola), **esta vía es SÍNCRONA**: el servidor escribe la metadata al CRDT
+  diferencia de una escritura de tarea, el servidor escribe la metadata al CRDT
   antes de responder 200, así que el adjunto ya está enlazado y visible
   cuando la tool contesta — no hace falta esperar a ningún sync.
 
@@ -372,14 +379,15 @@ presentar esa hipótesis como un fallo observado.
   Obtén antes el id desde `get_task`/`list_tasks` y confirma el objetivo con el
   usuario. Un 404 no distingue entre un id inexistente y uno ajeno, para no
   filtrar ownership; el éxito solo se devuelve cuando la API confirma
-  `{ ok: true }`.
+  `{ ok: true }`. Responde con texto, como el resto de las tools (sin
+  `outputSchema` ni `structuredContent`).
 - `refresh_sync()` — fuerza el flush del sync (vía `POST /api/sync/flush`),
   para que el servidor persista los cambios que recibió por WebSocket y que
   aún tiene en un pequeño rebote/debounce. Las lecturas del MCP van por la API
   REST, que lee lo ya persistido, así que sin ese flush un cambio recién
   llegado por WebSocket no se ve.
   **Cuándo hace falta y cuándo NO** (medido el 27 ago 2026, ver el JSDoc de la
-  tool en `src/index.ts`): NO hace falta detrás de una mutación hecha con este
+  tool en `src/tools/sync.ts`): NO hace falta detrás de una mutación hecha con este
   mismo MCP. Cinco corridas contra el servidor real, por los dos caminos de
   escritura (`add_task` → `POST /api/ingest` y `mutate_tasks` →
   `POST /api/batch`), y en las cinco la tarea recién creada salía ya en el
@@ -487,7 +495,7 @@ drenaje posterior) o en cuarentena (la retuvo el cortacircuitos de borrado
 masivo). El informe lo cuenta así:
 
 ```
-Lumbre: 3/3 operación(es) encoladas.
+Lumbre: 3/3 operación(es) aceptadas.
 Resultado en la app: 1 aplicadas, 1 sin efecto, 1 fallidas al aplicar.
 sin aplicar:
   [1] complete: sin efecto: la app no cambió nada (ya estaba así, o el objetivo no admite el cambio)
@@ -496,7 +504,7 @@ avisos de la app:
   - …
 ```
 
-«encoladas» sigue contando las que la app aceptó; lo que se aplicó es la
+«aceptadas» cuenta las que la app aceptó; lo que se aplicó es la
 segunda línea. Los `notices` del lote (por ejemplo, «la lista destino estaba
 borrada y la tarea fue a la Bandeja») salen en `avisos de la app`. Contra un
 servidor que aún no manda `materialization`, cada op sale «sin confirmar»,
@@ -750,8 +758,9 @@ Fase 2.
   `GET /api/brl/:date` NO lleva ids a propósito (es la nota que lee el
   usuario, no un formato de máquina).
 - `mutate_brl({ ops })` — añade, reescribe o borra una o varias entradas de
-  golpe (`ops`, máx. 200; sustituye a `add_brl_entry`/`update_brl_entry`/
-  `delete_brl_entry`, podadas el 2026-08-27, cero llamadas medidas en un mes).
+  golpe (`ops`, máx. 200). Como `mutate_tasks`, su schema expuesto es laxo
+  (`op` es un string y se admiten campos de más): una op inválida se reporta
+  por posición y las demás se ejecutan.
   Cada elemento es `{ op: "add"|"update"|"delete", date, ... }`:
   - `add`: `date*`, `text*` [`kind`, `time`] — apunta una entrada nueva.
     `kind: "thought"` la marca como pensamiento (`=`); por defecto es nota

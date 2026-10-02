@@ -105,6 +105,17 @@ barras. Para rotar, preparar el mismo valor
 nuevo en ambos servicios y reiniciarlos en una ventana coordinada; mientras no
 coincidan, `/requests` falla cerrado y no se emiten grants locales.
 
+### `LUMBRE_APP_BASE_URL`
+
+Origen de la app de Lumbre al que el relé OAuth llama por backchannel
+(`/api/integrations/lumbre-mcp/…`, con el secreto de arriba como bearer). Lo
+lee `src/oauth.ts` y lo valida `src/lumbre-oauth-backchannel.ts`: si falta o
+está vacío vale `https://app.lumbre.pro`, y cualquier otro valor (otro
+origen, con ruta, query o credenciales) aborta el arranque con un error. En
+`deploy/compose.yml` ya va fijado a ese valor; no es lo mismo que
+`LUMBRE_BASE_URL`, que es la API de tareas a la que el relé reenvía las
+llamadas de las tools.
+
 ## Publicar una versión nueva
 
 ```bash
@@ -204,7 +215,7 @@ node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp "$LUMBRE_TOKEN"
 
 Comprueba el descubrimiento OAuth (PRM path-specific + alias y metadata del
 authorization server), el challenge exacto del 401, `initialize` +
-`tools/list` con token directo en cabecera (200, 16 tools, techo de bytes), y
+`tools/list` con token directo en cabecera (200, todas las tools, techo de bytes), y
 las dos mismas comprobaciones con el token en el PATH (`<url>/<token>`,
 compatibilidad temporal), más su propio NEGATIVO con un segmento mal formado.
 Un deploy no se da por bueno solo con el camino feliz en verde: si un caso
