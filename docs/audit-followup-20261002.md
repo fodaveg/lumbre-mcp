@@ -100,3 +100,56 @@ necesarios para evaluar el resultado quedan versionados aquí.
 la invocación directa con `LUMBRE_MCP_HOST=-invalid` arrancó y terminó con
 exit 1 y el rechazo esperado del host, antes de compilar o conectar. Esa
 prueba demuestra que el fallo de permiso se corrigió sin desplegar nada.
+
+## Entrega conjunta y evidencia
+
+El candidato reúne R8 (un POST batch para BRL, con resultados parciales),
+el saneamiento de logs HTTP, el permiso ejecutable del deploy y el
+inventario de las 17 tools con pruebas nuevas de BRL y refresh_sync.
+R6 y R9 requieren cambios de la API de la app, descritos en
+`docs/audit-api-dependencies-20261002.md`; no se modificó ese repo.
+
+El piloto autorizado se capturó una sola vez sobre `f36f345` con prompts
+ficticios y la skill pública, sin datos reales ni herramientas ejecutadas.
+Su resultado conductual es **8/12**, con fallos P02, P03, P09 y P10. La
+captura, el sobre de evaluación y los eventos quedan versionados en
+`tests/skill-lumbre/evidence/forward-pilot-current.*`. El oráculo no se
+cambió después de capturar. El gate verifica integridad y privacidad, no
+convierte ese resultado conductual en 12/12.
+
+La corrección posterior del harness (`283cd15`) mantiene la integridad
+contra el commit capturado, exige que la skill y el oráculo publicados
+coincidan con él y ejecuta los controles congelados en un clon temporal.
+Una captura con SHA falso, una skill alterada y un oráculo alterado fueron
+rechazados por sondas independientes (exit 1 en cada caso). La evidencia
+local de esas sondas está en
+`/private/tmp/lumbre-mcp-pilot-fix-evidence-20261002/`.
+
+Verificación conjunta en macOS y Node 22.22.3, con dependencias existentes
+y una sola suite a la vez:
+
+- `npm run typecheck`: exit 0.
+- `node node_modules/vitest/vitest.mjs run --maxWorkers=1`: exit 0,
+  792 pruebas en 13 ficheros, incluida la correspondencia de dist.
+- `sh tests/skill-lumbre/validate.sh full --require-pilot`: exit 0;
+  32/32 de cobertura contractual, integridad de 4 eventos,
+  109/109 controles negativos y 6 adaptadores de subagentes.
+- `git diff --check`: exit 0.
+
+El árbol exacto verificado se registra en el cuerpo del commit de entrega.
+Logs locales: `/private/tmp/lumbre-mcp-root-evidence-20261002/`
+(`typecheck-final.log`, `vitest-final.log`, `skill-final.log`). Son temporales;
+los comandos, resultados y límites necesarios quedan versionados aquí.
+Esta entrega acredita el candidato local, sin afirmar integración, push
+ni despliegue del MCP. Los dotfiles sí se publicaron y sus SHAs remotos se
+comprobaron: Codex `001ccfe`, Claude `77d3fde`.
+
+Fedora y Windows quedaron excluidos por David. El apunte de compatibilidad
+se verificó en Obsidian; su doble escritura en Hebra queda pendiente porque
+la nota del mismo título devuelve `not_found`.
+
+Se retiraron los worktrees limpios de dotfiles ya publicados y el entorno
+temporal de tiktoken con su caché. Se conservan los candidatos MCP y la
+evidencia necesarios para revisar y publicar. Espacio observado con `df`:
+141 GiB al arrancar, 140 GiB al terminar esta verificación; no se atribuye
+esa diferencia a la limpieza de esta sesión.
