@@ -39,10 +39,10 @@ Añade solo las extensiones necesarias:
   despliegue. Lee primero las reglas vivas del repo y después
   [references/project-release.md](references/project-release.md).
 
-Una petición tiene un modo base y puede añadir ambas extensiones. Mover una tarea de
-desarrollo, por ejemplo, usa triaje como base y desarrollo como extensión. Consultar
-una tarea con estado no activa desarrollo; implementar y preparar un release puede
-añadir desarrollo y proyecto/release a la gestión cotidiana.
+Una petición tiene un modo base y puede añadir ambas extensiones. Mover una tarea a otro
+proyecto es triaje, aunque sea de desarrollo; cambiar solo su marca de estado es gestión
+cotidiana + desarrollo. Consultar una tarea con estado no activa desarrollo; implementar
+y preparar un release puede añadir desarrollo y proyecto/release a la gestión cotidiana.
 
 Ejemplos rápidos:
 
@@ -68,36 +68,28 @@ inferir alcance o taxonomía, muestra primero una propuesta breve.
 
 ## Subagentes opcionales
 
-La skill funciona íntegramente sin subagentes. Si el runtime expone uno compatible,
-puedes delegar trabajo mecánico a `lumbre-tagger` (solo tags de desarrollo),
-`lumbre-reader` (solo lectura) o `lumbre-daily-operator` (gestión cotidiana segura).
-El coordinador conserva intención, autorización y veredicto; si el agente no existe,
-ejecuta aquí el mismo contrato sin bloquear la petición.
-
-Las definiciones nativas se generan desde una única fuente portable con
-`scripts/manage-subagents.mjs`. No las improvises ni mantengas copias manuales. Instala
-o reemplaza esos ficheros solo cuando el usuario lo pida expresamente: usa primero
-`install --runtime all --dry-run`, después `install --runtime all`, y para actualizar
-una copia gestionada exige `--replace-managed`. El script informa las limitaciones y el
-perfil de modelo económico configurado para cada runtime; cuando el despacho admita
-elegir modelo, aplica ese valor. Nunca reemplaces un fichero no gestionado sin
-`--replace-unmanaged` explícito. En Claude, si el conector usa otro alias, repite
-`--claude-tool-prefix mcp__<alias>__` por cada prefijo real al migrar una copia
-manual o cambiar aliases. Después el gestor conserva esa lista recuperándola de sus
-propios ficheros; si las copias gestionadas discrepan, aborta sin elegir una.
+La skill funciona íntegramente sin subagentes. Solo si el runtime expone alguno de
+`lumbre-tagger`, `lumbre-reader` o `lumbre-daily-operator`, o el usuario pide instalarlos
+o actualizarlos, lee [references/subagents.md](references/subagents.md). El coordinador
+conserva intención, autorización y veredicto.
 
 ## Reglas compartidas
 
 1. Antes de mutar, identifica por id la entidad exacta. Si un proyecto o área vacío
    puede confundirse con uno inexistente, enumera proyectos y áreas antes de concluir.
-2. Para reeditar contenido o notas, obtén primero la versión íntegra. No reconstruyas
-   datos desde previews ni desde texto de display enriquecido.
+2. Para reeditar contenido o notas (se reemplazan enteros), antes de delegar trabajo
+   sobre una tarea o cuando la decisión dependa de un campo que no has leído, obtén
+   primero la versión íntegra. Con el id ya resuelto, `reschedule`, `complete`,
+   `cancel`, prioridad o sección no la necesitan. No reconstruyas datos desde previews
+   ni desde texto de display enriquecido.
 3. Conserva los campos no solicitados. Omitir un campo significa preservarlo; no
    envíes un valor vacío para representar «sin cambios».
-4. Solo cuando vayas a escribir o configurar la conexión, lee
+4. Solo cuando vayas a escribir, lee
    [references/mcp-safe-operations.md](references/mcp-safe-operations.md). Agrupa
    operaciones compatibles y verifica el resultado sin atribuir a una respuesta
-   aceptada una consistencia que el servidor no garantice.
+   aceptada una consistencia que el servidor no garantice. Para adjuntos o para
+   configurar la conexión, lee además
+   [references/attachments-and-connection.md](references/attachments-and-connection.md).
 5. Confirma inmediatamente antes de borrar o de otra acción difícil de recuperar,
    salvo autorización inequívoca para ese objetivo concreto.
 6. Usa la autorización segura del cliente MCP. Nunca pongas tokens en URLs, tareas,

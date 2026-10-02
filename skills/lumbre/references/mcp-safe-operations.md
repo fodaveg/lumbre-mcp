@@ -4,21 +4,23 @@ Lee esta referencia antes de escribir. Usa las tools que el cliente exponga; no
 inventes operaciones ni supongas capacidades de otra versión del servidor.
 Antes de concluir que una capacidad no existe, comprueba el esquema de las tools de
 lote: una operación puede estar expuesta como `op` de una tool de batch y no como tool
-independiente.
+independiente. Para adjuntos o para configurar la conexión, lee además
+[attachments-and-connection.md](attachments-and-connection.md).
 
 ## Identidad y lectura íntegra
 
 - Resuelve por id. Si partes de texto, lista y desambigua antes de mutar.
 - Enumera proyectos y áreas antes de concluir que uno no existe.
-- Antes de mutar una tarea existente o delegar trabajo sobre ella, recupérala
-  íntegramente por id; la resolución contextual o un preview no sustituyen esa lectura.
+- Recupera la tarea íntegra por id antes de reeditar su `content` o sus `notes` (se
+  reemplazan enteros), antes de delegar trabajo sobre ella o cuando la decisión dependa
+  de un campo que no has leído; la resolución contextual o un preview no sustituyen esa
+  lectura. `reschedule`, `complete`, `cancel`, prioridad, sección y similares, con el id
+  ya resuelto, no la necesitan.
 - Recupera contenido, notas y adjuntos íntegros que puedan afectar la decisión.
-- Una lectura íntegra vale para todo el encargo en curso: reutiliza el contenido y las
-  notas ya leídos en vez de pedirlos otra vez por rutina, y parte de ellos, más lo
-  que tus propias escrituras aplicadas cambiaron, para la siguiente escritura. Relee
-  solo si pudo cambiar por otra vía (lo editó el usuario u otra sesión, un
-  `refresh_sync` trajo cambios, una op tuya no salió `aplicada`) o si lo que tienes es
-  un preview o un marcador de nota.
+- Una lectura íntegra vale para todo el encargo: reutilízala en vez de pedirla otra vez
+  por rutina. Relee solo si pudo cambiar por otra vía (lo editó el usuario u otra
+  sesión, un `refresh_sync` trajo cambios), si una op tuya no salió «aplicada» o si lo
+  que tienes es un preview o un marcador de nota.
 - Resuelve referencias por id vivo; una etiqueta incrustada puede estar caducada.
 
 ## Preservación y orden
@@ -29,15 +31,21 @@ independiente.
   envío, pero cada operación reporta su propio resultado y el lote puede quedar
   aplicado a medias: no asumas atomicidad ni éxito global. Cambiar de proyecto o área limpia la
   sección; mueve primero y reasigna después si debe conservarla.
-- Las subtareas tienen un solo nivel y viven dentro de su principal, sin lista ni
-  sección propias: `list_tasks` no las lista sueltas y se leen con `get_task` de la
-  principal. `set_parent` anida o saca una tarea existente.
-- `get_task` de la principal trae de cada subtarea su id, su `content`, si está hecha
-  y sus tags, pero no su fecha, prioridad, notas ni adjuntos. Con esa sola lectura
-  basta para conocer y cambiar el `content` de todas; abre `get_task` de una subtarea
-  solo cuando necesites uno de los campos que faltan (vas a trabajarla y puede tener
-  nota o adjuntos, o vas a editar esos campos) o cuando su línea muestre una
-  referencia renderizada (`→tarea…`, `→proyecto/área…`) en vez del texto crudo.
+- **Subtareas** (definición única). Un solo nivel: viven dentro de su principal, sin
+  lista ni sección propias, y su archivado lo hereda. Son tareas completas (id, notas,
+  adjuntos, tags, prioridad y fecha), pero no admiten deadline, recordatorios,
+  repetición ni «esperando»: la tarea que los necesite queda en primer nivel.
+  `set_parent` anida o saca una tarea existente, y la app lo rechaza si tiene deadline,
+  recordatorios, «esperando», repetición o subtareas propias.
+- Leerlas: `list_tasks` no las lista, ni siquiera con fecha. `get_task` de la principal
+  trae de cada una su id, su `content`, si está hecha y sus tags (basta para conocer y
+  cambiar el `content` de todas), pero no su fecha, prioridad, notas ni adjuntos. Abre
+  `get_task` de una subtarea solo cuando necesites uno de esos campos o cuando su línea
+  muestre una referencia renderizada (`→tarea…`, `→proyecto/área…`) en vez del texto
+  crudo.
+- Completarlas: completar o cancelar la principal cierra sus subtareas pendientes, y
+  descompletarla no las reabre; completar la última subtarea no completa la principal.
+  Antes de completar una principal con subtareas abiertas, dilo o pregunta.
 - Completar significa «hecha» y cancelar «no se hará»; no confundas los resultados.
   Una cancelada se lee `[-]`/«cancelada», nunca como hecha.
 - Un cambio de `recurrence` en `update` es parcial: conserva lo no enviado. Para quitar
@@ -49,18 +57,18 @@ independiente.
 
 ## Consistencia
 
-Salvo la subida de adjuntos, una escritura puede aceptarse antes de materializarse.
-`mutate_tasks`, `organize` y `mutate_brl` distinguen «encoladas» (aceptadas) de lo que
-la app hizo con cada una: aplicada, sin efecto, sin objetivo, fallida al aplicar, en
-cuarentena o sin confirmar. Solo «aplicada» cuenta como hecho; cualquier otra es un
-resultado que se informa, no un éxito. Lee también los `avisos de la app`: dicen cuándo
-una tarea acabó en otro sitio del pedido.
+`mutate_tasks`, `organize` y `mutate_brl` informan cuántas operaciones fueron
+aceptadas («N/N operación(es) aceptadas») y, por cada una, qué hizo la app
+con ella: aplicada, sin efecto, sin objetivo, fallida al aplicar, en cuarentena o sin
+confirmar. Aceptada no es aplicada: solo «aplicada» cuenta como hecho; cualquier otra es
+un resultado que se informa, no un éxito. Lee también los `avisos de la app`: dicen
+cuándo una tarea acabó en otro sitio del pedido.
 Espera la respuesta y lee el resultado de cada operación. Ese informe dice qué pasó
 con cada op, pero no devuelve los campos finales de la tarea. Una op `aplicada`, sin
 «aplicadas con aviso» ni `avisos de la app` que la afecten, acredita los campos que
 enviaste con su valor final completo (un `update` de `content` o `notes` enteros, una
 `priority`, un `reschedule`, un `complete`) y preserva los que no enviaste: no releas
-para confirmarlos. Encolada no es aplicada.
+para confirmarlos.
 
 Relee por id o filtro acotado, comparando los campos objetivo y los que debían
 preservarse, solo cuando el informe no basta:
@@ -80,26 +88,3 @@ flush de cambios ya recibidos y no autoriza nuevas escrituras.
 
 Un dispositivo offline no puede forzarse a enviar cambios que aún no alcanzaron el
 servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicado.
-
-## Adjuntos y topología
-
-- Una ruta local solo es legible por un conector que corra en la misma máquina.
-- Base64 aumenta el tamaño; resérvalo para artefactos pequeños.
-- Respeta límites y nombres exigidos. Descargar metadata no equivale a leer contenido.
-- `add_attachment` es síncrona: cuando responde, el adjunto ya está enlazado. El resto
-  de escrituras se encola y exige el bucle de consistencia anterior.
-- `delete_attachment` es destructiva y no ofrece deshacer desde el MCP. Resuelve el id
-  desde la tarea íntegra, confirma con el usuario el adjunto exacto antes de llamarla y,
-  tras el éxito, relee la tarea para comprobar que ese id ya no aparece. Un 404 no
-  demuestra si el id era inexistente o pertenecía a otra cuenta.
-
-## Autorización
-
-Conecta el MCP mediante el flujo OAuth/autorización que ofrezca el cliente. Nunca pongas
-un token en una URL ni lo copies a tareas, notas, logs o documentación.
-
-El acceso directo a una API no es el flujo normal de esta skill. Úsalo solo para un
-diagnóstico explícitamente autorizado cuando el MCP no permita obtener la evidencia,
-después de comprobar la documentación viva. Mantén cualquier secreto en el mecanismo
-seguro del entorno o cabecera correspondiente, no lo muestres y no escribas directamente
-en el almacenamiento interno de Lumbre.

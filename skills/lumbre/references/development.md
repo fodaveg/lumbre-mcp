@@ -23,11 +23,11 @@ realmente en curso. Ninguna tarea termina un lote, una entrega o un turno en `@w
 
 **Dónde se escribe el estado:** como marca `@estado` al final del `content` de la
 tarea (`… texto de la tarea @wip`), con una op `update` que lleve solo `taskId` y
-`content`. Nunca en el campo `tags` de `mutate_tasks`: eso crea una etiqueta `#wip`,
-que no es un estado. Parte del `content` íntegro ya leído en este encargo (`get_task` de
-la tarea o, para una subtarea, la línea de `get_task` de su principal), no del texto de
-`list_tasks`. El `update` envía el `content` final entero y no toca `tags`, así que un
-resultado `aplicada` sin aviso deja acreditado el estado: no hace falta releer (ver
+`content`. Nunca en el campo `tags` de `mutate_tasks`: el MCP rechaza esos tags de
+estado con un error (y no son un estado). Parte del `content` íntegro ya leído en este
+encargo (`get_task` de la tarea o, para una subtarea, la línea de `get_task` de su
+principal), no del texto de `list_tasks`. El `update` envía el `content` final entero y
+no toca `tags`, así que un resultado `aplicada` sin aviso deja acreditado el estado (ver
 «Consistencia» en [mcp-safe-operations.md](mcp-safe-operations.md)). El mecánico de
 esto es `lumbre-tagger`.
 
@@ -44,9 +44,10 @@ mediante las superficies nativas.
 
 ## Subtareas
 
-Una subtarea es una tarea de pleno derecho: cuando se trabaja, lleva su propio estado
-con el mismo mecanismo que una principal (marca al final de su `content`, op `update`
-con el `taskId` de la subtarea). El estado de la principal no sustituye al de la
+Una subtarea es una tarea de pleno derecho (límites y lectura en «Preservación y orden» de
+[mcp-safe-operations.md](mcp-safe-operations.md)): cuando se trabaja, lleva su propio
+estado con el mismo mecanismo que una principal (marca al final de su `content`, op
+`update` con el `taskId` de la subtarea). El estado de la principal no sustituye al de la
 subtarea ni al revés.
 
 La principal refleja a sus subtareas, no las decide por su cuenta:
@@ -59,13 +60,10 @@ La principal refleja a sus subtareas, no las decide por su cuenta:
 - Un `@not-done` en una subtarea devuelve la principal a `@acked` (o `@wip` si se
   corrige ya) si estaba en `@done`.
 
-`list_tasks` no muestra subtareas. `get_task` de la principal lista cada una con su id,
-su `content` y sus tags: esa lectura basta para conocer y cambiar el estado de todas.
-No hace falta un `get_task` por subtarea para tocar su marca; ábrelo solo si vas a
-trabajarla y puede tener nota o adjuntos, o si su línea muestra una referencia
-renderizada en vez del texto crudo. Si delegas el cambio en `lumbre-tagger`, pásale el
-id de la principal y los de las subtareas explícitamente; el mecánico no las descubre
-por sí solo.
+`get_task` de la principal basta para conocer y cambiar el estado de todas sus subtareas:
+no hace falta un `get_task` por subtarea para tocar su marca. Si delegas el cambio en
+`lumbre-tagger`, pásale el id de la principal y los de las subtareas explícitamente; el
+mecánico no las descubre por sí solo.
 
 ## Lotes y checkpoints
 
@@ -81,8 +79,8 @@ por sí solo.
 - Al iniciar y delegar trabajo, deja en la conversación un checkpoint proporcional con
   estado, ownership y siguiente paso. En una tarea trivial basta una línea. Escríbelo
   también en las notas solo si lo pide el usuario o el contrato vigente del repositorio.
-- Si el inicio escribe `@wip`, confirma esa escritura antes de delegar: basta el
-  resultado `aplicada` sin aviso; relee solo si no llega.
+- Si el inicio escribe `@wip`, confirma esa escritura antes de delegar con el resultado
+  de la op (ver «Consistencia»).
 - Límites como dos tareas, seis horas o lotes de tres a seis son perfiles opcionales.
   Un presupuesto explícito del usuario prevalece.
 
@@ -102,13 +100,15 @@ Lumbre, porque el usuario lee la tarea, no el historial de la conversación. Det
 el trabajo a medias es obligación de quien lo dejó, nunca del usuario.
 
 Antes de declarar cerrado un lote o de anunciar una entrega, haz el barrido y
-enséñalo: para un lote principal + subtareas, lee la principal con `get_task`, cuya
-lista de subtareas trae el `content`, y con él la marca, de cada una (`list_tasks` no
-las muestra; no hace falta un `get_task` por subtarea); para un lote marcado con
-`#tag` por cruzar secciones, proyectos o áreas, lista sus tareas por ese `#tag`. Comprueba el estado real en Lumbre (no de memoria ni
-del plan) y confirma que ninguna, principal o subtarea, sigue en `@wip`. Mientras
-quede una sin resolver, no anuncies el lote cerrado, no lo des por entregado y no
-pases al siguiente.
+enséñalo: tarea por tarea del lote (principal y subtareas), su marca final y de dónde
+consta, contra las lecturas y los resultados «aplicada» de este encargo, no de memoria
+ni del plan. Relee solo la tarea cuyo estado no consta por una escritura propia
+aplicada, o que pudo cambiar por otra vía: para un lote principal + subtareas,
+`get_task` de la principal trae el `content` y la marca de cada una; para un lote
+marcado con `#tag` por cruzar proyectos, lista el proyecto (o `scope:"all"`) y filtra
+por el tag en el resultado. Confirma que ninguna, principal o subtarea, sigue en
+`@wip`. Mientras quede una sin resolver, no anuncies el lote cerrado, no lo des por
+entregado y no pases al siguiente.
 
 Matices:
 

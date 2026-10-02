@@ -17,13 +17,10 @@ no para una lectura incidental.
 - **`@contexto` = valor de un diccionario controlado; `#tag` = marcador libre.** No
   uses `@` para lotes o categorías arbitrarias.
 
-Una subtarea es una tarea de pleno derecho dentro de su principal: conserva id, notas,
-adjuntos, tags, prioridad y fecha, y no tiene lista ni sección propias. Tampoco admite
-deadline, recordatorios, repetición ni «esperando», y su archivado lo hereda de la
-principal. `set_parent` anida una tarea existente o la saca. La app lo rechaza si la
-tarea tiene deadline, recordatorios, «esperando», repetición o subtareas propias; esa
-tarea queda en primer nivel. Si un bloque necesita identidad propia por encima de un lote, la válvula es un proyecto o un
-área.
+Una subtarea es una tarea de pleno derecho dentro de su principal, sin lista ni sección
+propias; sus límites y `set_parent` están en «Preservación y orden» de
+[mcp-safe-operations.md](mcp-safe-operations.md). Si un bloque necesita identidad propia
+por encima de un lote, la válvula es un proyecto o un área.
 
 Antes de crear o asignar una sección durante un lote, comprueba si su nombre replica el
 lote o si se está creando una sección por cada lote. Si ocurre, detén la operación: el
@@ -48,7 +45,12 @@ ni reestructures un contenedor configurado sin autorización.
    limpia esa relación.
 5. Verifica el lote completo y los elementos que debían quedar intactos.
 
-Crear un proyecto nuevo, borrar un proyecto o área existente, o anidar un proyecto de forma que
-cambie la navegación requiere que la petición autorice esa transformación. `create_list` crea un
-proyecto; esta versión del MCP no crea ni convierte áreas. No busques un contenedor «parecido» ni
-lo crees por inferencia cuando el usuario nombró uno que no existe.
+Crear un proyecto o un área, convertir uno en otro, borrar un proyecto o área existente, o
+anidar un proyecto de forma que cambie la navegación requiere que la petición autorice
+esa transformación. `organize` crea con `create_list` (`listKind`: `"area"` o
+`"project"`) y convierte un contenedor existente con `set_list_kind`. No busques un
+contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno que no
+existe.
+
+Los vínculos de un proyecto o área con una nota de Obsidian o Hebra se gestionan con
+`link_list_note` y `unlink_list_note`; solo con petición expresa.

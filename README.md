@@ -85,9 +85,11 @@ node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" check \
 
 El instalador nunca reemplaza silenciosamente una definición existente. Para
 migrar copias manuales antiguas añade `--replace-unmanaged`; para actualizar
-copias que ya generó este script, `--replace-managed`. Los prefijos de tools de
-Claude se pueden repetir, por ejemplo
-`--claude-tool-prefix mcp__lumbre__ --claude-tool-prefix mcp__claude_ai_Lumbre__`.
+copias que ya generó este script, `--replace-managed`. Por defecto Claude recibe
+los tres prefijos reales del conector (`mcp__lumbre__`, `mcp__claude_ai_Lumbre__`
+y `mcp__claude_ai_lumbre__`). Si el tuyo es otro, repite el flag por cada
+prefijo, por ejemplo
+`--claude-tool-prefix mcp__lumbre__ --claude-tool-prefix mcp__mi_alias__`.
 Esa lista forma parte de la definición generada. Hay que pasarla al migrar
 ficheros manuales con `--replace-unmanaged` o al cambiar los aliases
 deliberadamente. A partir de ahí, el gestor la recupera de sus propios ficheros
@@ -141,8 +143,8 @@ La skill y el MCP se instalan por separado: este paso aporta las instrucciones
 de trabajo al agente, pero no conecta Lumbre. Para autorizar el MCP remoto,
 completa antes los pasos de [Conectar el MCP remoto](#conectar-el-mcp-remoto).
 
-La instalación pública es ligera: incluye el router, seis referencias operativas,
-metadata y una validación estructural pequeña. El historial, los bundles y el
+La instalación pública es ligera: incluye el router, ocho referencias operativas
+(las de subagentes y de adjuntos y conexión se leen solo bajo demanda), metadata y una validación estructural pequeña. El historial, los bundles y el
 oráculo del piloto permanecen en `tests/skill-lumbre/` dentro del repositorio y no
 se copian a los runtimes. No se ha medido que Claude cargara accidentalmente esos
 artefactos; separarlos elimina el riesgo de enrutamiento y reduce el paquete sin

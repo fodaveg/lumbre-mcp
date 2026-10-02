@@ -5,13 +5,21 @@ semántica está validada 32/32, el gate comprueba integridad y privacidad de la
 y 109 controles negativos. El piloto conductual y la observación longitudinal son
 evidencia informativa post-publicación, no gates de release.
 
+**El piloto es histórico y no acredita la skill actual.** Se capturó sobre un router de
+95 líneas y sobre un commit (`0957116`) que ya no existe en el repositorio; desde entonces
+el router, las referencias y los contratos han cambiado (ver «Auditoría de octubre de
+2026»). `tests/skill-lumbre/validate.sh` lo detecta, omite los tres pasos que lo resuelven
+y lo dice en su veredicto final: `validation: ok (sin piloto: evidencia histórica no
+verificable)`. «validation: ok» a secas solo significa que el piloto se verificó.
+
 ## Método
 
 1. Se tomó como única entrada la unión de seis cuerpos divergentes ya inventariada.
 2. Se resolvieron contradicciones mediante las decisiones de producto, sin partir de una
    copia preferida.
 3. Se separó el router corto de seis referencias operativas por modo y una referencia
-   de seguridad para escrituras.
+   de seguridad para escrituras (desde octubre de 2026, ocho: se añaden subagentes y
+   adjuntos/conexión, de lectura bajo demanda).
 4. `tests/skill-lumbre/evidence/consolidation-manifest.md` y `source-variants.md`
    permanecen como evidencia repo-only. Ninguna cláusula se eliminó solo por parecer
    redundante.
@@ -115,6 +123,48 @@ se anotarán durante el piloto.
 La baseline pedía además cargar `source-variants.md` en desarrollo/release; la candidata
 lo retira del camino operativo, pero conserva el fichero y el manifiesto como evidencia.
 Estas son líneas, no tokens ni tiempo medido.
+
+## Auditoría de octubre de 2026
+
+Cambios sobre la candidata, medidos en bytes (`wc -c`), no en tokens:
+
+| Fichero | Antes | Después |
+|---|---:|---:|
+| `SKILL.md` | 6 404 | 5 806 |
+| `references/read.md` | 1 413 | 1 786 |
+| `references/daily.md` | 3 275 | 3 758 |
+| `references/backlog.md` | 3 358 | 3 337 |
+| `references/development.md` | 8 821 | 8 815 |
+| `references/mcp-safe-operations.md` | 6 572 | 5 872 |
+| `references/project-release.md` | 2 774 | 2 774 |
+| `references/attachments-and-connection.md` (nueva) | 0 | 1 606 |
+| `references/subagents.md` (nueva) | 0 | 1 472 |
+| `assets/subagents/contracts.json` | 10 550 | 11 094 |
+
+| Flujo | Antes | Después |
+|---|---:|---:|
+| «apúntame X» (router + daily + seguridad) | 16 251 | 15 436 |
+| Estado de desarrollo (router + development + seguridad) | 21 797 | 20 493 |
+
+Qué cambió:
+
+- Los adjuntos y la autorización, y el bloque de subagentes, salen de la ruta de toda
+  escritura a dos referencias que solo se leen bajo demanda; las referencias públicas
+  pasan de seis a ocho.
+- La skill ya no dice que las escrituras «se encolan»: el informe de cada op dice si se
+  aplicó, y solo «aplicada» cuenta como hecho.
+- La lectura íntegra se exige antes de reeditar `content` o `notes`, de delegar o cuando la
+  decisión dependa de un campo no leído; no antes de cualquier mutación.
+- La regla de no releer una op aplicada y la de subtareas tienen una sola definición
+  (`mcp-safe-operations.md`); el resto remite. `contracts.json` no puede remitir y las
+  acorta.
+- Se retiran las menciones a `ids` y `#tag` como parámetros de `list_tasks`, la afirmación
+  de que no hay áreas creables y el límite «solo admite» de `mutate_tasks` (ahora es el
+  límite del encargo). Se añaden hábitos, `restore`, archivado, «esperando», vínculos de
+  nota y registro BRL.
+- Claude recibe por defecto los tres prefijos reales del conector.
+- `tests/skill-lumbre/validate-tool-names.mjs` comprueba contra `src/tools/` que las tools,
+  ops y parámetros citados por la skill existen.
 
 ## Retirada de copias antiguas
 

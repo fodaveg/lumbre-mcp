@@ -6,12 +6,14 @@ import { basename, join, resolve } from "node:path";
 const skillDir = resolve(process.argv[2] ?? new URL("..", import.meta.url).pathname);
 const referencesDir = join(skillDir, "references");
 const operationalReferences = [
+  "attachments-and-connection.md",
   "backlog.md",
   "daily.md",
   "development.md",
   "mcp-safe-operations.md",
   "project-release.md",
   "read.md",
+  "subagents.md",
 ];
 
 function read(relativePath) {
@@ -50,13 +52,16 @@ const development = read("references/development.md");
 const release = read("references/project-release.md");
 const safeOperations = read("references/mcp-safe-operations.md");
 const normalizedSafeOperations = safeOperations.replace(/\s+/g, " ");
+const attachments = read("references/attachments-and-connection.md");
+const normalizedAttachments = attachments.replace(/\s+/g, " ");
+const subagents = read("references/subagents.md");
 
 const installedReferences = readdirSync(referencesDir, { withFileTypes: true })
   .filter((entry) => entry.isFile())
   .map((entry) => entry.name)
   .sort();
 invariant(
-  "PUBLIC_REFERENCES_EXACTLY_OPERATIONAL_SIX",
+  "PUBLIC_REFERENCES_EXACTLY_OPERATIONAL_EIGHT",
   JSON.stringify(installedReferences) === JSON.stringify(operationalReferences),
   `expected ${operationalReferences.join(", ")}; found ${installedReferences.join(", ")}`,
 );
@@ -95,6 +100,28 @@ invariant(
   "SAFE_OPERATIONS_REFERENCE_ONLY_BEFORE_WRITE",
   hasAll(safeReferenceRule, [/Solo cuando vayas a escribir/i, /mcp-safe-operations\.md/]),
   "read-only requests must not preload the write contract",
+);
+invariant(
+  "SUBAGENTS_AND_ATTACHMENTS_LOAD_ON_DEMAND",
+  hasAll(normalizedEntry, [
+    /references\/subagents\.md/,
+    /references\/attachments-and-connection\.md/,
+  ]) && !/manage-subagents\.mjs/.test(entry) && !/--replace-managed/.test(entry),
+  "the router must only point to subagent and attachment references, not carry their bodies",
+);
+invariant(
+  "SUBAGENT_MANAGER_INSTRUCTIONS_LIVE_IN_REFERENCE",
+  hasAll(subagents, [
+    /manage-subagents\.mjs/,
+    /--dry-run/,
+    /--replace-managed/,
+    /--replace-unmanaged/,
+    /--claude-tool-prefix/,
+    /mcp__lumbre__/,
+    /mcp__claude_ai_Lumbre__/,
+    /mcp__claude_ai_lumbre__/,
+  ]),
+  "subagent installation rules and the three default Claude prefixes must be documented",
 );
 invariant(
   "MISSING_MCP_FAILS_HONESTLY",
@@ -149,13 +176,30 @@ invariant(
   "an asynchronous write must get one refresh and bounded reread before a limitation",
 );
 invariant(
-  "ATTACHMENT_UPLOAD_IS_SYNCHRONOUS_EXCEPTION",
-  hasAll(section(safeOperations, "Adjuntos y topología").replace(/\s+/g, " "), [
+  "ATTACHMENT_UPLOAD_IS_SYNCHRONOUS_AND_OTHER_WRITES_NEED_APPLIED",
+  hasAll(section(attachments, "Adjuntos y topología").replace(/\s+/g, " "), [
     /`add_attachment` es s[ií]ncrona/i,
     /ya est[aá] enlazado/i,
-    /resto de escrituras se encola/i,
+    /Las dem[aá]s escrituras se dan por hechas solo si el informe de cada op dice «aplicada»/i,
+  ]) && !/se encola/i.test(normalizedAttachments),
+  "attachment linking must be distinguished from other writes, which count only when reported «aplicada»",
+);
+invariant(
+  "WRITES_ARE_ACCEPTED_THEN_REPORTED_PER_OP",
+  hasAll(section(safeOperations, "Consistencia").replace(/\s+/g, " "), [
+    /aceptadas/i,
+    /Aceptada no es aplicada/i,
+    /solo «aplicada» cuenta como hecho/i,
+  ]) && !/\bencoladas?\b/i.test(normalizedSafeOperations),
+  "the write report must speak of accepted operations and never present them as queued",
+);
+invariant(
+  "FULL_READ_NARROW_BEFORE_MUTATION",
+  hasAll(section(safeOperations, "Identidad y lectura íntegra").replace(/\s+/g, " "), [
+    /antes de reeditar su `content` o sus `notes`/i,
+    /`reschedule`, `complete`, `cancel`[\s\S]*no la necesitan/i,
   ]),
-  "attachment visibility must be distinguished from queued writes",
+  "full reads are required before re-editing content or notes, not before every mutation",
 );
 
 invariant(
@@ -194,9 +238,10 @@ invariant(
       /escribe el motivo/i,
       /nota de la tarea/i,
       /barrido/i,
-      /estado real en Lumbre/i,
+      /resultados «aplicada» de este encargo/i,
+      /Relee solo la tarea cuyo estado no consta/i,
     ]),
-  "closing a batch must force every @wip task to @done or back to @acked with a written reason, verified by sweeping the batch tag",
+  "closing a batch must force every @wip task to @done or back to @acked with a written reason, verified by a sweep against this task's reads and applied results",
 );
 invariant(
   "RELEASE_AUTHORITY_DOES_NOT_EXPAND_MUTATION",
@@ -212,14 +257,23 @@ invariant(
 // Exact wording is intentional for this safety-critical prohibition.
 invariant(
   "TOKEN_NEVER_APPEARS_IN_URL_OR_LUMBRE_DATA",
-  normalizedSafeOperations.includes(
+  normalizedAttachments.includes(
     "Nunca pongas un token en una URL ni lo copies a tareas, notas, logs o documentación.",
   ),
   "the exact token-handling prohibition changed",
 );
 
-const publicText = [entry, readMode, daily, backlog, development, release, safeOperations]
-  .join("\n");
+const publicText = [
+  entry,
+  readMode,
+  daily,
+  backlog,
+  development,
+  release,
+  safeOperations,
+  attachments,
+  subagents,
+].join("\n");
 invariant(
   "PUBLIC_SKILL_HAS_NO_USER_PATHS",
   !/(?:\/Users\/|\/home\/[A-Za-z0-9_.-]+\/)/.test(publicText),

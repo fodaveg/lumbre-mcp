@@ -17,31 +17,38 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
 1. **Proyecto más adecuado.** Enumera proyectos y áreas (`list_lists`) y elige el que
    mejor encaje por nombre y contenido. Solo uno existente: no crees ni inventes un
    proyecto por inferencia. Si ninguno encaja con claridad, créala sin destino (la app
-   la coloca) y dilo.
+   la coloca) y dilo. Manda el destino elegido por `listId` (el de `list_lists`), no por
+   `list`: un nombre mal escrito crea un proyecto nuevo.
 2. **En lote.** Las tareas relacionadas van como una tarea principal que nombra el
    resultado común y el resto como sus subtareas (`add_task` con `subtasks`). Antes de
    crear otra principal, busca en ese proyecto una principal abierta del mismo tema: si
    existe, añade las nuevas como subtareas suyas (`add_subtask`). Una tarea sin
    relación con nada queda en primer nivel, y puede ser la principal de un lote futuro.
-3. **Límites de la app.** Hay un solo nivel. Una subtarea nace solo con texto, y los
-   `#tags` escritos en ese texto se capturan como tags. Pero es una tarea completa:
-   después admite fecha con `reschedule`; hora, prioridad, notas y tags con `update`;
-   y adjuntos con `add_attachment`, igual que una principal. Deadline,
-   recordatorios, repetición y «esperando» no existen en una subtarea: la tarea que
-   los necesite queda en primer nivel.
+3. **Id de lo creado.** Si después necesitas el id (añadir subtareas, citarla o cambiar
+   su estado), crea con la op `add_task` de `mutate_tasks`, que lo devuelve; la tool
+   `add_task` suelta no.
+4. **Subtareas.** Una subtarea nace solo con texto, y los `#tags` escritos en ese texto
+   se capturan como tags. Después se edita como una tarea completa: fecha con
+   `reschedule`; hora, prioridad, notas y tags con `update`; adjuntos con
+   `add_attachment`. Sus límites, y cómo leerlas y completarlas, están en «Preservación
+   y orden» de [mcp-safe-operations.md](mcp-safe-operations.md).
 
 Lo que el usuario indique (proyecto, tarea suelta, otra agrupación) manda sobre este
 comportamiento. Al terminar, di el proyecto elegido, la principal y sus subtareas.
 
-## Subtareas: leer y completar
+## Otras operaciones de tarea
 
-- **Leer.** `list_tasks` no muestra subtareas, ni siquiera las que tienen fecha. Se
-  ven con `get_task` de la principal, y el detalle de cada una (fecha, prioridad,
-  notas, adjuntos) con `get_task` de la subtarea.
-- **Completar.** Completar o cancelar la principal cierra todas sus subtareas
-  pendientes, y descompletarla no las reabre. Completar la última subtarea no
-  completa la principal. Antes de completar una principal con subtareas abiertas,
-  dilo o pregunta.
+Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus campos.
+
+- `restore` saca de la Papelera una tarea borrada; `archive` y `unarchive` cambian su
+  visibilidad (no su ciclo de vida).
+- `set_waiting` y `clear_waiting` ponen y quitan el estado «esperando» (con fecha
+  futura); no existe en subtareas.
+- Hábitos: `register_habit`, `skip_occurrence`, `archive_habit` y `unarchive_habit`
+  actúan sobre `habitId` o `seriesId`, no sobre una tarea (para leerlos, `list_habits`).
+  Borrar un hábito (`delete_habit`, en `organize`) exige confirmación como cualquier
+  borrado.
+- El registro del día (BRL) se escribe con `mutate_brl`; `delete` es destructiva.
 
 No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`. Expresa una
 tarea bloqueada, aplazada, devuelta a pendiente o enviada al backlog mediante los

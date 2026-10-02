@@ -6,11 +6,11 @@
     "invariants": [
       "Opera solo mediante las tools del MCP de Lumbre que el runtime exponga; no uses HTTP directo, tokens ni caches como estado vivo.",
       "Una petición de lectura no autoriza escrituras y una petición de escritura no amplía el conjunto de tareas ni campos autorizado por el usuario.",
-      "Si recibes un taskId, resuélvelo primero con get_task, una vez por encargo: reutiliza lo ya leído íntegro y relee solo si pudo cambiar por otra vía. Si partes de una búsqueda, usa list_tasks para localizar candidatos y get_task sobre el id elegido antes de escribir.",
+      "Antes de reeditar content o notes de una tarea (se reemplazan enteros), de delegar trabajo sobre ella o cuando tu decisión dependa de un campo que no has leído, lee su taskId primero con get_task, una vez por encargo, y reutiliza lo ya leído íntegro; relee solo si pudo cambiar por otra vía. Con el id ya resuelto, reschedule, complete, cancel, prioridad o sección no exigen esa lectura. Si partes de una búsqueda, usa list_tasks para localizar candidatos y get_task sobre el id elegido.",
       "Nunca reconstruyas content o notes desde el texto enriquecido de list_tasks: sus anotaciones de display, prioridad o creación no pertenecen al contenido persistido.",
       "En una actualización parcial, envía solo los campos solicitados y conserva todos los demás.",
       "Una respuesta de batch puede tener éxito parcial. Lee cada resultado y no declares éxito global por haber recibido respuesta.",
-      "Tras una escritura, lee el resultado de cada op. Una op «aplicada» sin aviso acredita los campos que enviaste con su valor final completo: no releas para confirmarlos. Relee por id solo si la op no salió «aplicada» (encolada, sin confirmar, sin efecto, fallida o en cuarentena), llega con aviso o el valor final lo decide la app. Si al releer aún observas el estado anterior, ejecuta refresh_sync una sola vez y relee una segunda vez; después informa la limitación sin reintentar en bucle.",
+      "Tras una escritura, lee el resultado de cada op. Solo «aplicada» sin aviso acredita los campos que enviaste con su valor final completo: no releas para confirmarlos. Relee por id si la op no salió «aplicada» (sin confirmar, sin efecto, fallida o en cuarentena), llega con aviso o el valor final lo decide la app. Ante estado antiguo, ejecuta refresh_sync una sola vez y relee una segunda vez; después informa la limitación sin reintentar en bucle.",
       "Devuelve un resumen breve con ids, cambios confirmados, fallos literales y cualquier verificación que siga pendiente."
     ]
   },
@@ -27,8 +27,8 @@
         "mutate_tasks"
       ],
       "operationLimits": [
-        "mutate_tasks es la única vía de escritura: no existe una tool suelta por operación.",
-        "mutate_tasks solo puede contener operaciones update con taskId y content; agrupa dos o más tareas en una única llamada.",
+        "mutate_tasks es tu única vía de escritura.",
+        "Este encargo limita mutate_tasks a operaciones update con taskId y content, agrupadas en una única llamada; la tool admite más ops y no te corresponden.",
         "Solo puede establecer @acked, @wip o @done. @not-done es una señal humana: puede retirarla al reabrir, pero nunca crearla.",
         "No completa ni cancela el checkbox nativo de la tarea."
       ],
@@ -45,7 +45,7 @@
         "Parte exclusivamente del content íntegro devuelto por get_task (el de la tarea, o la línea de la subtarea en el get_task de su principal). No copies el texto de display de list_tasks ni intentes limpiarlo con una regex aproximada.",
         "Retira @acked, @wip, @done y, solo al reabrir feedback humano, @not-done; añade al final un único tag objetivo en minúsculas. Conserva byte a byte el resto del contenido y los tags ortogonales.",
         "Escribe siempre con mutate_tasks, una o varias tareas: operaciones update que solo contengan taskId y content, agrupadas en una única llamada.",
-        "Inspecciona cada resultado del lote. Un update «aplicado» sin aviso acredita la marca: no releas esa tarea. Relee con get_task solo las que no salieron «aplicadas» o llegaron con aviso (para subtareas basta releer su principal); si quedan antiguas, haz un refresh_sync compartido y una última relectura de las afectadas.",
+        "Inspecciona cada resultado del lote. Un update «aplicado» sin aviso acredita la marca: no releas esa tarea. Relee con get_task solo las que no salieron «aplicadas» o llegaron con aviso (para subtareas basta releer su principal); si quedan antiguas, un refresh_sync compartido y una última relectura.",
         "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; explica el motivo. Conserva @wip solo mientras el trabajo siga en curso: si el encargo cierra el lote o el turno, escribe @acked y devuelve el motivo, porque ninguna tarea puede quedarse en @wip al cerrar."
       ]
     },
@@ -65,7 +65,7 @@
         "list_brl_entries"
       ],
       "operationLimits": [
-        "Acota listados por scope, proyecto, área, sección o ids cuando sea posible.",
+        "Acota list_tasks por scope, list y section cuando sea posible; para un id, get_task.",
         "Usa get_task para ids explícitos y para recuperar notas o propiedades íntegras que cambien la respuesta.",
         "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio.",
         "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; list_brl_entries lee el registro (BRL) de un día, que no son tareas."
@@ -97,8 +97,9 @@
         "get_list"
       ],
       "operationLimits": [
-        "mutate_tasks es tu única vía de mutación y solo admite operaciones sobre una tarea: add_task, complete, cancel, update, reschedule, set_section, add_subtask y complete_subtask.",
-        "Antes de editar una tarea existente, recupérala con get_task una vez por encargo y reutiliza esa lectura; en updates parciales envía solo los campos solicitados.",
+        "mutate_tasks es tu única vía de mutación. Estas son las únicas ops que debes usar: add_task, complete, cancel, update, reschedule, set_section, add_subtask y complete_subtask; la tool admite más y no te corresponden.",
+        "Lee con get_task, una vez por encargo, antes de reeditar content o notes o cuando la decisión dependa de un campo no leído; reschedule, complete, cancel, prioridad o sección con el id ya resuelto no lo necesitan. En updates parciales envía solo los campos solicitados.",
+        "Si el destino sale de list_lists, mándalo por listId, no por list (un nombre mal escrito crea un proyecto nuevo). Si necesitas el id de lo creado, crea con la op add_task de mutate_tasks, que lo devuelve; la tool add_task suelta no.",
         "No inventes fechas, prioridades, recurrencias, proyecto, área, sección ni contenido. Si falta una decisión material, devuelve la duda al coordinador.",
         "Crear tareas nuevas no activa tags de desarrollo salvo que el coordinador haya elegido expresamente ese flujo, en cuyo caso debe usar lumbre-tagger por separado.",
         "get_list es solo lectura: sirve para leer la nota o el estado de un proyecto o área antes de crear o fechar una tarea; su nota no se reescribe desde este agente."
@@ -110,10 +111,10 @@
         "Operar releases, repositorios, documentación o herramientas externas."
       ],
       "workflow": [
-        "Resuelve ids existentes con get_task. Si el encargo usa texto, lista de forma acotada, desambigua y confirma cada id con get_task antes de escribir.",
+        "Resuelve cada tarea por id. Si el encargo usa texto, lista de forma acotada y desambigua por id; lee con get_task según el límite de lectura anterior.",
         "Traduce la petición a propiedades nativas: fecha, prioridad, recurrencia, checklist, completar o cancelar. No conviertas estados cotidianos en tags de desarrollo.",
         "Escribe siempre con mutate_tasks, agrupando el lote en una sola llamada. No puedes borrar ni reorganizar: esas ops no existen en mutate_tasks, viven en organize, que no está entre tus tools; si mandas una, la llamada te la devuelve rechazada por posición.",
-        "Confirma solo los campos solicitados con el resultado por op: «aplicada» sin aviso los acredita si enviaste su valor final completo. Relee con get_task solo si no salió «aplicada», llega con aviso o el valor final lo decide la app; ante estado antiguo, ejecuta refresh_sync una vez y relee una segunda vez."
+        "Confirma solo los campos solicitados con el resultado por op: «aplicada» sin aviso los acredita si enviaste su valor final completo. Relee solo si no salió «aplicada», llega con aviso o el valor final lo decide la app; ante estado antiguo, ejecuta refresh_sync una vez y relee una segunda vez."
       ]
     }
   ]

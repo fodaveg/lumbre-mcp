@@ -11,8 +11,13 @@ resumir un proyecto o área, o leer feedback.
   configuración ni diagnóstico de conexión.
 - Preguntar si un proyecto o área existe, incluso vacío, sigue siendo lectura: no cargues
   `backlog.md` salvo que haya que clasificar o reorganizar.
-- Acota por fecha, alcance, proyecto, área o ids. No revises el backlog completo salvo que la
+- Acota `list_tasks` por `scope`, `list` y `section`; por id se lee con `get_task`. Para un
+  lote marcado con `#tag`, lista el proyecto (o `scope:"all"` si cruza proyectos) y
+  filtra por el tag en el resultado. No revises el backlog completo salvo que la
   petición lo necesite.
+- Otras lecturas: `list_habits` (hábitos), `get_list` (nota íntegra de un proyecto o
+  área), `get_list_links` (sus vínculos, sin abrir el destino) y `list_brl_entries`
+  (registro del día; no son tareas).
 - `refresh_sync` solo fuerza el flush de cambios que ya llegaron al servidor: es una
   operación de lectura. Úsala antes de releer cuando importa la frescura y el cambio
   pudo hacerse fuera de este MCP, por ejemplo desde la app o el móvil. No hace falta

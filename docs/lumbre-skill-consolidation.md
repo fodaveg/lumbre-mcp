@@ -144,6 +144,16 @@ tras recapturarlo. Pendiente: recapturar el piloto con `run-forward-pilot.mjs` s
 vivo cuando Codex esté disponible, y entonces `evidence/forward-pilot-evidence.json` y su
 `.envelope.txt` se regeneran contra ese nuevo commit.
 
+**Nota (2026-10-02).** El piloto es histórico y no acredita la skill actual: se capturó
+sobre un router de 95 líneas y un commit inexistente, y desde entonces la skill cambió
+(router de 106 líneas, ocho referencias, contratos de subagentes reescritos). Por eso
+`tests/skill-lumbre/validate.sh` ya no termina en un «validation: ok» a secas cuando lo
+omite: la última línea es `validation: ok (sin piloto: evidencia histórica no
+verificable)`. No se borra la evidencia ni se recaptura el piloto (exige correr modelos).
+Además, `tests/skill-lumbre/validate-tool-names.mjs` contrasta los nombres de tools, ops
+y parámetros de la skill con `src/tools/`; la evidencia repo-only de este documento sigue
+describiendo la baseline, no la skill de hoy.
+
 La evaluación confirmó también que las contradicciones de `@acked`, revisión y definición
 de «entrega» siguen abiertas. Eso es el resultado esperado de esta fase de unión; resolverlas
 corresponde a la optimización y sus pruebas de comportamiento.
