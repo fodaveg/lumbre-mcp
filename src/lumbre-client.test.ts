@@ -17,6 +17,7 @@ import {
 	listHabitsExport,
 	listLists,
 	listTasks,
+	LumbreApiError,
 	mergeRecurrencePatch,
 	mutateTask,
 	nestedSubtaskNotAllowedError,
@@ -2168,7 +2169,11 @@ describe('getAttachment — tope de descarga', () => {
 	/** Responde con un stream que va soltando `chunks` trozos de 1 MiB, y
 	 *  cuenta cuántos llegó a pedir el lector: así se ve si la descarga se
 	 *  cortó o se la tragó entera. */
-	function streamedResponse(chunks: number, declareLength: boolean): { fetchSpy: ReturnType<typeof vi.fn>; served: () => number } {
+	function streamedResponse(
+		chunks: number,
+		declareLength: boolean,
+		mime = 'application/pdf'
+	): { fetchSpy: ReturnType<typeof vi.fn>; served: () => number } {
 		let served = 0;
 		const megabyte = new Uint8Array(1024 * 1024);
 		const body = new ReadableStream<Uint8Array>({
@@ -2181,35 +2186,120 @@ describe('getAttachment — tope de descarga', () => {
 				controller.enqueue(megabyte);
 			}
 		});
-		const headers: Record<string, string> = { 'content-type': 'application/pdf' };
+		const headers: Record<string, string> = { 'content-type': mime };
 		if (declareLength) headers['content-length'] = String(chunks * 1024 * 1024);
 		const fetchSpy = vi.fn().mockResolvedValue(new Response(body, { status: 200, headers }));
 		vi.stubGlobal('fetch', fetchSpy);
 		return { fetchSpy, served: () => served };
 	}
 
-	it('un adjunto normal se descarga entero', async () => {
-		const { served } = streamedResponse(2, true);
+	it('una imagen dentro del tope se descarga entera', async () => {
+		const { served } = streamedResponse(2, true, 'image/png');
 		const downloaded = await getAttachment(config, ATTACHMENT_ID);
-		expect(downloaded.contentType).toBe('application/pdf');
+		expect(downloaded.contentType).toBe('image/png');
 		expect(downloaded.bytes).toHaveLength(2 * 1024 * 1024);
+		expect(downloaded.size).toBe(2 * 1024 * 1024);
+		expect(downloaded.skipped).toBeUndefined();
 		expect(served()).toBe(2);
 	});
 
-	it('con content-length por encima de 25 MiB ni se lee el cuerpo', async () => {
+	it('un adjunto que NO es imagen no se lee: tamaño de content-length y stream cancelado', async () => {
 		const { served } = streamedResponse(26, true);
-		await expect(getAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/supera el tope de 25 MiB/);
+		const downloaded = await getAttachment(config, ATTACHMENT_ID);
+		expect(downloaded.skipped).toBe('not-image');
+		expect(downloaded.bytes).toBeUndefined();
+		expect(downloaded.size).toBe(26 * 1024 * 1024);
 		// 1 y no 0: `ReadableStream` adelanta un `pull` al construir la
-		// `Response`, antes de que nadie lea. Lo que importa es que se corta
-		// ahí y no se materializan los 26 MiB.
+		// `Response`, antes de que nadie lea.
 		expect(served()).toBeLessThanOrEqual(1);
 	});
 
-	it('sin content-length, el stream se corta al pasarse (no se materializan 26 MiB)', async () => {
+	it('un adjunto que NO es imagen y sin content-length: tamaño desconocido (null), sin leer', async () => {
 		const { served } = streamedResponse(26, false);
-		await expect(getAttachment(config, ATTACHMENT_ID)).rejects.toThrow(/supera el tope de 25 MiB/);
-		// 25 MiB entran; el trozo 26 es el que dispara el corte y ahí se
-		// cancela el stream, sin pedir nada más.
-		expect(served()).toBe(26);
+		const downloaded = await getAttachment(config, ATTACHMENT_ID);
+		expect(downloaded).toMatchObject({ skipped: 'not-image', size: null });
+		expect(served()).toBeLessThanOrEqual(1);
+	});
+
+	it('una imagen por encima de 3,5 MiB con content-length ni se lee el cuerpo', async () => {
+		const { served } = streamedResponse(4, true, 'image/jpeg');
+		const downloaded = await getAttachment(config, ATTACHMENT_ID);
+		expect(downloaded).toMatchObject({ skipped: 'image-too-large', size: 4 * 1024 * 1024 });
+		expect(downloaded.bytes).toBeUndefined();
+		expect(served()).toBeLessThanOrEqual(1);
+	});
+
+	it('una imagen por encima de 3,5 MiB sin content-length: el stream se corta al pasarse', async () => {
+		const { served } = streamedResponse(26, false, 'image/jpeg');
+		const downloaded = await getAttachment(config, ATTACHMENT_ID);
+		expect(downloaded).toMatchObject({ skipped: 'image-too-large', size: null });
+		// 3 MiB enteros caben; el cuarto trozo dispara el corte y se cancela
+		// (el `pull` adelantado del stream puede pedir uno más): lejos de los 26.
+		expect(served()).toBeLessThanOrEqual(5);
+	});
+});
+
+describe('timeouts de red (R4)', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** `fetch` que nunca resuelve y solo reacciona a la señal de aborto. */
+	function hangingFetch() {
+		return vi.fn(
+			(_url: string | URL, init?: RequestInit) =>
+				new Promise<Response>((_, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+				})
+		);
+	}
+
+	it('una petición JSON sin respuesta falla a los 30 s con un mensaje claro', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', hangingFetch());
+		const pending = listTasks(config, {});
+		const assertion = expect(pending).rejects.toThrow('Lumbre no respondió en 30 s');
+		await vi.advanceTimersByTimeAsync(29_999);
+		await vi.advanceTimersByTimeAsync(1);
+		await assertion;
+		await expect(pending).rejects.toBeInstanceOf(LumbreApiError);
+	});
+
+	it('la descarga de un adjunto sin respuesta falla a los 120 s', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', hangingFetch());
+		const assertion = expect(
+			getAttachment(config, '33333333-3333-4333-8333-333333333333')
+		).rejects.toThrow('Lumbre no respondió en 120 s');
+		await vi.advanceTimersByTimeAsync(119_999);
+		await vi.advanceTimersByTimeAsync(1);
+		await assertion;
+	});
+
+	it('la subida de un adjunto sin respuesta falla a los 120 s', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', hangingFetch());
+		const assertion = expect(
+			uploadAttachment(config, {
+				taskId: 't',
+				filename: 'a.txt',
+				mime: 'text/plain',
+				bytes: Buffer.from('x')
+			})
+		).rejects.toThrow('Lumbre no respondió en 120 s');
+		await vi.advanceTimersByTimeAsync(120_000);
+		await assertion;
+	});
+
+	it('una petición que responde a tiempo no deja temporizador pendiente', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+			)
+		);
+		await expect(listTasks(config, {})).resolves.toEqual([]);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

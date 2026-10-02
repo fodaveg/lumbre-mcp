@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 // El tope de bajada es el MISMO que el de subida y vive en un solo sitio
 // (`attachments.ts`), que no importa nada de aquí: no hay ciclo.
-import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 
 /**
  * Cliente HTTP mínimo contra la API de Lumbre. Fase 1: `POST /api/ingest`
@@ -331,12 +330,64 @@ function extractMessage(body: unknown): string | null {
 	return null;
 }
 
+/** Tope de espera de una petición JSON a la app (R4 del audit de rendimiento:
+ *  ningún `fetch` tenía timeout y una Lumbre colgada dejaba la tool esperando
+ *  para siempre). */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Tope de espera de la subida y la descarga de un adjunto (hasta 25 MiB:
+ *  más margen que una petición JSON). */
+export const ATTACHMENT_TIMEOUT_MS = 120_000;
+
+/**
+ * Ejecuta `fn` con una señal que se aborta a los `ms` — cubre TODA la
+ * operación, también la lectura del cuerpo, no solo las cabeceras. Al vencer
+ * lanza un `LumbreApiError` claro («Lumbre no respondió en N s») sea cual sea
+ * el error con que `fn` reaccione al aborto, y compite con el aborto por si
+ * un `fetch` ignora la señal. Temporizador normal (`setTimeout`) y no
+ * `AbortSignal.timeout` para poder controlarlo con temporizadores falsos.
+ */
+async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	const controller = new AbortController();
+	let timedOut = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeoutError = () => new LumbreApiError(`Lumbre no respondió en ${Math.round(ms / 1000)} s.`);
+	const expired = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+			reject(timeoutError());
+		}, ms);
+	});
+	// Si `fn` gana la carrera, `expired` nunca se rechaza; si pierde, el
+	// rechazo ya lo atiende la propia carrera.
+	expired.catch(() => undefined);
+	try {
+		return await Promise.race([fn(controller.signal), expired]);
+	} catch (err) {
+		if (timedOut) throw timeoutError();
+		throw err;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 async function request(config: LumbreConfig, path: string, init: RequestInit = {}): Promise<unknown> {
+	return withTimeout(REQUEST_TIMEOUT_MS, (signal) => requestOnce(config, path, init, signal));
+}
+
+async function requestOnce(
+	config: LumbreConfig,
+	path: string,
+	init: RequestInit,
+	signal: AbortSignal
+): Promise<unknown> {
 	const url = `${config.baseUrl.replace(/\/$/, '')}${path}`;
 	let res: Response;
 	try {
 		res = await fetch(url, {
 			...init,
+			signal,
 			headers: {
 				authorization: `Bearer ${config.token}`,
 				...init.headers
@@ -1027,24 +1078,50 @@ export interface SubtaskDecision {
 	op?: string;
 }
 
-/** Adjunto ya descargado: tipo MIME (de la respuesta) + bytes. */
+/** Tope de bytes crudos de una imagen que `read_attachment` devuelve como
+ *  imagen (3,5 MiB): un base64 mayor no cabe como imagen en el contexto del
+ *  modelo. Por encima no se devuelve la imagen, solo su metadata. */
+export const MAX_IMAGE_ATTACHMENT_BYTES = Math.floor(3.5 * 1024 * 1024);
+
+/**
+ * Adjunto consultado: tipo MIME (de la respuesta) + tamaño + bytes SOLO si es
+ * una imagen dentro de `MAX_IMAGE_ATTACHMENT_BYTES`.
+ *
+ * - `bytes` presente: imagen dentro del tope; `size` = bytes leídos.
+ * - `skipped: 'not-image'`: el cuerpo NO se ha leído (stream cancelado);
+ *   `size` sale de `content-length` o es `null` si no vino.
+ * - `skipped: 'image-too-large'`: imagen por encima del tope, cuerpo cancelado;
+ *   `size` de `content-length` o `null` si no vino (solo se sabe que supera el tope).
+ */
 export interface DownloadedAttachment {
 	contentType: string;
-	bytes: Buffer;
+	size: number | null;
+	bytes?: Buffer;
+	skipped?: 'not-image' | 'image-too-large';
 }
 
 /**
- * `GET /api/attachments/:id`: descarga los bytes de un adjunto propio. Mismo
- * token que el resto (`Authorization: Bearer`); ese endpoint solo sirve el
- * adjunto si pertenece al dueño del token (anti-IDOR server-side, ver el
- * endpoint en el repo principal). No pasa por `request()` porque la respuesta
- * no es JSON.
+ * `GET /api/attachments/:id`: consulta un adjunto propio. Mismo token que el
+ * resto (`Authorization: Bearer`); ese endpoint solo sirve el adjunto si
+ * pertenece al dueño del token (anti-IDOR server-side, ver el endpoint en el
+ * repo principal). No pasa por `request()` porque la respuesta no es JSON.
+ * Solo se descarga el cuerpo si es una imagen dentro del tope (R7 del audit de
+ * rendimiento: antes se bajaban hasta 25 MiB para devolver tipo y tamaño).
+ * Timeout de `ATTACHMENT_TIMEOUT_MS` sobre toda la operación.
  */
 export async function getAttachment(config: LumbreConfig, id: string): Promise<DownloadedAttachment> {
+	return withTimeout(ATTACHMENT_TIMEOUT_MS, (signal) => getAttachmentOnce(config, id, signal));
+}
+
+async function getAttachmentOnce(
+	config: LumbreConfig,
+	id: string,
+	signal: AbortSignal
+): Promise<DownloadedAttachment> {
 	const url = `${config.baseUrl.replace(/\/$/, '')}/api/attachments/${id}`;
 	let res: Response;
 	try {
-		res = await fetch(url, { headers: { authorization: `Bearer ${config.token}` } });
+		res = await fetch(url, { signal, headers: { authorization: `Bearer ${config.token}` } });
 	} catch (err) {
 		const cause = err instanceof Error ? err.message : String(err);
 		throw new LumbreApiError(
@@ -1063,38 +1140,34 @@ export async function getAttachment(config: LumbreConfig, id: string): Promise<D
 		}
 		throw new LumbreApiError(`Lumbre respondió ${res.status} al pedir el adjunto ${id}.`, res.status);
 	}
-	return {
-		contentType: res.headers.get('content-type') ?? 'application/octet-stream',
-		bytes: await readBoundedBody(res, id)
-	};
+	const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
+	const lengthHeader = res.headers.get('content-length');
+	const declaredNumber = lengthHeader === null ? Number.NaN : Number(lengthHeader);
+	const declared = Number.isFinite(declaredNumber) && declaredNumber >= 0 ? declaredNumber : null;
+
+	if (!contentType.toLowerCase().startsWith('image/')) {
+		// No hay nada que mostrar: ni se lee el cuerpo.
+		await res.body?.cancel().catch(() => undefined);
+		return { contentType, size: declared, skipped: 'not-image' };
+	}
+	if (declared !== null && declared > MAX_IMAGE_ATTACHMENT_BYTES) {
+		await res.body?.cancel().catch(() => undefined);
+		return { contentType, size: declared, skipped: 'image-too-large' };
+	}
+	const bytes = await readBoundedBody(res, MAX_IMAGE_ATTACHMENT_BYTES);
+	if (bytes === undefined) return { contentType, size: declared, skipped: 'image-too-large' };
+	return { contentType, size: bytes.length, bytes };
 }
 
 /**
- * Lee el cuerpo de la descarga con el tope de `MAX_ATTACHMENT_BYTES` (25 MiB,
- * el mismo límite AUTORITATIVO del servidor al SUBIR, ver `attachments.ts`):
- * si nada puede subir más de 25 MiB, nada legítimo puede bajar más.
- *
- * Hasta ahora era un `res.arrayBuffer()` a pelo, sin tope: el tamaño de lo que
- * se materializa en memoria lo decidía el otro lado de la conexión. Con este
- * conector corriendo en un VPS compartido (`http.ts`), una respuesta enorme
- * —una Lumbre comprometida, un proxy intermedio, un `LUMBRE_BASE_URL` mal
- * puesto apuntando a cualquier otra cosa— se convertía en memoria del proceso.
- *
- * Dos comprobaciones, como en el resto del repo (`readBoundedJson` del
- * backchannel): el `content-length` declarado ANTES de leer nada, y la cuenta
- * real mientras llega, porque esa cabecera puede faltar o mentir. Al pasarse
- * se CANCELA el stream: no se sigue descargando algo que ya se ha descartado.
+ * Lee el cuerpo de una imagen con el tope `maxBytes`: la cuenta real mientras
+ * llega (el `content-length` ya se miró antes, pero puede faltar o mentir).
+ * Al pasarse se CANCELA el stream —no se sigue descargando algo que ya se ha
+ * descartado— y devuelve `undefined`. Mantiene la defensa de memoria que tuvo
+ * el tope de 25 MiB: con este conector en un VPS compartido (`http.ts`), el
+ * tamaño de lo que se materializa no lo decide el otro lado de la conexión.
  */
-async function readBoundedBody(res: Response, id: string): Promise<Buffer> {
-	const tooLarge = (): LumbreApiError =>
-		new LumbreApiError(
-			`El adjunto ${id} supera el tope de ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MiB y no se ha descargado.`
-		);
-	const declared = Number(res.headers.get('content-length'));
-	if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES) {
-		await res.body?.cancel().catch(() => undefined);
-		throw tooLarge();
-	}
+async function readBoundedBody(res: Response, maxBytes: number): Promise<Buffer | undefined> {
 	if (!res.body) return Buffer.alloc(0);
 	const reader = res.body.getReader();
 	const chunks: Uint8Array[] = [];
@@ -1103,9 +1176,9 @@ async function readBoundedBody(res: Response, id: string): Promise<Buffer> {
 		const { done, value } = await reader.read();
 		if (done) break;
 		size += value.byteLength;
-		if (size > MAX_ATTACHMENT_BYTES) {
+		if (size > maxBytes) {
 			await reader.cancel().catch(() => undefined);
-			throw tooLarge();
+			return undefined;
 		}
 		chunks.push(value);
 	}
@@ -1190,11 +1263,20 @@ export async function uploadAttachment(
 	config: LumbreConfig,
 	input: { taskId: string; filename: string; mime: string; bytes: Buffer }
 ): Promise<UploadedAttachment> {
+	return withTimeout(ATTACHMENT_TIMEOUT_MS, (signal) => uploadAttachmentOnce(config, input, signal));
+}
+
+async function uploadAttachmentOnce(
+	config: LumbreConfig,
+	input: { taskId: string; filename: string; mime: string; bytes: Buffer },
+	signal: AbortSignal
+): Promise<UploadedAttachment> {
 	const params = new URLSearchParams({ taskId: input.taskId });
 	const url = `${config.baseUrl.replace(/\/$/, '')}/api/attachments?${params.toString()}`;
 	let res: Response;
 	try {
 		res = await fetch(url, {
+			signal,
 			method: 'POST',
 			headers: {
 				authorization: `Bearer ${config.token}`,

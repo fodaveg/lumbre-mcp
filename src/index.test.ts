@@ -4049,6 +4049,65 @@ describe('delete_attachment — elimina un adjunto existente (DESTRUCTIVO)', () 
 	});
 });
 
+describe('read_attachment — imagen, imagen demasiado grande y no imagen (R7)', () => {
+	const ATTACHMENT_ID = '55555555-5555-4555-8555-555555555555';
+
+	async function callRead(response: Response) {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'read-attachment-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		const result = await client.callTool({ name: 'read_attachment', arguments: { attachment_id: ATTACHMENT_ID } });
+		return result.content as { type: string; text?: string; data?: string; mimeType?: string }[];
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('imagen dentro del tope: se devuelve como imagen', async () => {
+		const content = await callRead(
+			new Response(Buffer.from('png-falso'), { status: 200, headers: { 'content-type': 'image/png' } })
+		);
+		expect(content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });
+		expect(content[0].data).toBe(Buffer.from('png-falso').toString('base64'));
+	});
+
+	it('imagen por encima de 3,5 MiB: texto con tipo, tamaño y motivo, sin imagen', async () => {
+		const size = 4 * 1024 * 1024;
+		const content = await callRead(
+			new Response(Buffer.alloc(size), {
+				status: 200,
+				headers: { 'content-type': 'image/jpeg', 'content-length': String(size) }
+			})
+		);
+		expect(content).toHaveLength(1);
+		expect(content[0].type).toBe('text');
+		expect(content[0].text).toContain('image/jpeg');
+		expect(content[0].text).toContain(`${size} bytes`);
+		expect(content[0].text).toContain('3.5 MiB');
+	});
+
+	it('no imagen: solo tipo y tamaño (de content-length) sin descargar el cuerpo', async () => {
+		const content = await callRead(
+			new Response(Buffer.alloc(1000), {
+				status: 200,
+				headers: { 'content-type': 'application/pdf', 'content-length': '1000' }
+			})
+		);
+		expect(content[0].type).toBe('text');
+		expect(content[0].text).toContain('application/pdf');
+		expect(content[0].text).toContain('1000 bytes');
+		expect(content[0].text).toContain('no se ha descargado');
+	});
+});
+
 describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TOOLSET=attachments)', () => {
 	async function toolNamesOf(opts: { toolset?: 'all' | 'attachments' } = {}) {
 		const indexModule = await import('./index.js');

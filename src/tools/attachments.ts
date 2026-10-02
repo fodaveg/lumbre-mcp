@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
 	deleteAttachment,
 	getAttachment,
+	MAX_IMAGE_ATTACHMENT_BYTES,
 	uploadAttachment,
 	type SubtaskDecision
 } from '../lumbre-client.js';
@@ -93,18 +94,29 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		},
 		async (input) => {
 			try {
-				const { contentType, bytes } = await getAttachment(ctx.config, input.attachment_id);
-				if (contentType.startsWith('image/')) {
+				const { contentType, size, bytes, skipped } = await getAttachment(
+					ctx.config,
+					input.attachment_id
+				);
+				if (bytes !== undefined) {
 					return {
 						content: [
 							{ type: 'image' as const, data: bytes.toString('base64'), mimeType: contentType }
 						]
 					};
 				}
+				const sizeLabel = size === null ? 'tamaño desconocido' : `${size} bytes`;
+				if (skipped === 'image-too-large') {
+					return textResult(
+						`Adjunto ${input.attachment_id}: imagen "${contentType}", ${sizeLabel}. Supera el tope de ` +
+							`${MAX_IMAGE_ATTACHMENT_BYTES / (1024 * 1024)} MiB para devolverla como imagen (un base64 ` +
+							'mayor no cabe como imagen en el contexto del modelo), así que no se ha descargado.'
+					);
+				}
 				return textResult(
-					`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
-						'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
-						'servidor MCP; no hay forma de mostrártelo a partir de aquí).'
+					`Adjunto ${input.attachment_id}: tipo "${contentType}", ${sizeLabel}. No es una ` +
+						'imagen, así que esta tool no puede mostrar su contenido (no se ha descargado: ' +
+						'no hay forma de mostrártelo a partir de aquí).'
 				);
 			} catch (err) {
 				return errorResult(err);
