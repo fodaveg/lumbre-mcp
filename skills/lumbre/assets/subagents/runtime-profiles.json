@@ -6,7 +6,9 @@
       "extension": ".md",
       "model": "haiku",
       "defaultToolPrefixes": [
-        "mcp__lumbre__"
+        "mcp__lumbre__",
+        "mcp__claude_ai_Lumbre__",
+        "mcp__claude_ai_lumbre__"
       ],
       "enforcesToolAllowlist": true
     },

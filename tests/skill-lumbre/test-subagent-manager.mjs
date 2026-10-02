@@ -92,6 +92,27 @@ for (const agent of definitions.contracts.agents) {
   assert.doesNotMatch(`${claude}\n${codex}`, /bookkeeper/i);
 }
 
+// Sin `--claude-tool-prefix`, Claude recibe los tres alias reales del conector
+// (CLI, claude.ai con «Lumbre» y claude.ai en minúscula): un alias que falte deja
+// al subagente sin tools aunque el MCP esté conectado.
+const defaultPrefixes = ["mcp__lumbre__", "mcp__claude_ai_Lumbre__", "mcp__claude_ai_lumbre__"];
+assert.deepEqual(definitions.runtimeProfiles.profiles.claude.defaultToolPrefixes, defaultPrefixes);
+for (const agent of definitions.contracts.agents) {
+  assert.deepEqual(
+    claudeTools(renderAgent(definitions, "claude", agent.name)),
+    defaultPrefixes.flatMap((prefix) =>
+      agent.allowedOperations.map((operation) => `${prefix}${operation}`),
+    ),
+    `${agent.name}: default Claude tools must cover the three connector aliases`,
+  );
+}
+assert.ok(
+  claudeTools(renderAgent(definitions, "claude", "lumbre-reader")).includes(
+    "mcp__claude_ai_lumbre__get_task",
+  ),
+  "the lowercase claude.ai alias must be covered by default",
+);
+
 const taggerContract = definitions.contracts.agents.find((agent) => agent.name === "lumbre-tagger");
 const taggerPrompt = renderInstructions(definitions.contracts, taggerContract);
 assert.match(taggerPrompt, /taskId[\s\S]*primero con get_task/i);
@@ -100,7 +121,7 @@ assert.match(taggerPrompt, /No copies el texto de display de list_tasks/i);
 assert.match(taggerPrompt, /Conserva byte a byte el resto del contenido/i);
 assert.match(taggerPrompt, /éxito parcial/i);
 assert.match(taggerPrompt, /refresh_sync una sola vez[\s\S]*relee una segunda vez/i);
-assert.match(taggerPrompt, /mutate_tasks solo puede contener operaciones update con taskId y content/i);
+assert.match(taggerPrompt, /limita mutate_tasks a operaciones update con taskId y content/i);
 assert.ok(!taggerContract.allowedOperations.includes("organize"));
 assert.ok(!taggerContract.allowedOperations.includes("update_task"));
 assert.match(taggerPrompt, /@not-done es una señal humana/i);
