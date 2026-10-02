@@ -18,6 +18,7 @@ import {
 	recordNotesSeen,
 	saveNotesSeenState,
 	touchNotesSeen,
+	touchNotesSeenBatch,
 	type NotesSeenState,
 	type NotesSeenStore
 } from './notes.js';
@@ -286,6 +287,45 @@ describe('parseNotesSince', () => {
 
 	it('fecha inválida → undefined, sin lanzar', () => {
 		expect(parseNotesSince('no-es-una-fecha')).toBeUndefined();
+	});
+});
+
+describe('touchNotesSeenBatch — coste con el estado lleno', () => {
+	it('2.000 entradas + 445 tareas nuevas en un lote: equivale a la versión en serie y tarda < 150 ms', () => {
+		let full: NotesSeenState = {};
+		for (let i = 0; i < 2000; i++) {
+			full = touchNotesSeenBatch(full, [
+				{ taskId: `old-${i}`, noteLength: 10, notesUpdatedAt: '2026-07-01T00:00:00.000Z' }
+			]);
+		}
+		const items = Array.from({ length: 445 }, (_, i) => ({
+			taskId: `new-${i}`,
+			noteLength: 20,
+			notesUpdatedAt: '2026-07-20T00:00:00.000Z'
+		}));
+
+		const started = performance.now();
+		const batched = touchNotesSeenBatch(full, items);
+		const elapsedMs = performance.now() - started;
+		expect(elapsedMs).toBeLessThan(150);
+
+		// Misma salida que aplicar `touchNotesSeen` una a una (muestra de 40 para
+		// no pagar aquí el coste que se evita).
+		let serial = full;
+		for (const it of items.slice(0, 40)) serial = touchNotesSeen(serial, it.taskId, it.noteLength, it.notesUpdatedAt);
+		expect(Object.keys(touchNotesSeenBatch(full, items.slice(0, 40)))).toEqual(Object.keys(serial));
+
+		const keys = Object.keys(batched);
+		expect(keys).toHaveLength(2000);
+		expect(keys[keys.length - 1]).toBe('new-444');
+		expect(keys[0]).toBe('old-445'); // expulsados los 445 más antiguos
+		expect(Object.keys(full)).toHaveLength(2000); // el original no se muta
+	});
+
+	it('sin cambios devuelve la MISMA referencia', () => {
+		const state = touchNotesSeen({}, 'a', 3, '2026-07-01T00:00:00.000Z');
+		const same = touchNotesSeenBatch(state, [{ taskId: 'a', noteLength: 3, notesUpdatedAt: '2026-07-01T00:00:00.000Z' }]);
+		expect(same).toBe(state);
 	});
 });
 
@@ -858,7 +898,10 @@ describe('createAccountNotesSeenStore — limpieza best-effort de cuentas viejas
 		await mkdir(dir, { recursive: true });
 
 		const oldStore = createAccountNotesSeenStore('token-cuenta-vieja');
-		const recentStore = createAccountNotesSeenStore('token-cuenta-reciente');
+		// Reloj inyectado: la poda se limita a una vez cada 10 min, así que el
+		// segundo `save` (más abajo) ocurre 11 min "después" del primero.
+		let clockMs = Date.now();
+		const recentStore = createAccountNotesSeenStore('token-cuenta-reciente', { now: () => clockMs });
 		await oldStore.save(touchNotesSeen({}, 'entrada-vieja', 4, '2026-07-01T00:00:00.000Z'));
 		await recentStore.save(touchNotesSeen({}, 'entrada-reciente', 4, '2026-07-01T00:00:00.000Z'));
 		await saveNotesSeenState(touchNotesSeen({}, 'entrada-stdio', 4, '2026-07-01T00:00:00.000Z'));
@@ -883,6 +926,7 @@ describe('createAccountNotesSeenStore — limpieza best-effort de cuentas viejas
 		// Un `save` cualquiera dispara la poda (ver JSDoc de
 		// `pruneStaleAccountFiles`) — se usa el store reciente para no tocar el
 		// viejo directamente.
+		clockMs += 11 * 60 * 1000;
 		await recentStore.save(touchNotesSeen(await recentStore.load(), 'entrada-reciente-2', 4, '2026-07-02T00:00:00.000Z'));
 
 		const namesAfter = await readdir(dir);
@@ -890,6 +934,30 @@ describe('createAccountNotesSeenStore — limpieza best-effort de cuentas viejas
 		expect(namesAfter).toContain('notes-seen.json'); // el fichero sin sufijo NUNCA se borra
 		const recentFiles = namesAfter.filter((n) => n.startsWith('notes-seen-') && n !== 'notes-seen.json');
 		expect(recentFiles).toHaveLength(1); // el reciente sigue ahí
+	});
+
+	it('la poda se limita a una vez cada 10 min por proceso', async () => {
+		const dir = join(stateDir, 'lumbre-mcp');
+		let clockMs = Date.now();
+		const store = createAccountNotesSeenStore('token-throttle', { now: () => clockMs });
+		const victim = createAccountNotesSeenStore('token-throttle-victima');
+		await store.save(touchNotesSeen({}, 'a', 4, '2026-07-01T00:00:00.000Z'));
+		await victim.save(touchNotesSeen({}, 'b', 4, '2026-07-01T00:00:00.000Z'));
+		let victimFile: string | undefined;
+		for (const name of await readdir(dir)) {
+			if (name !== 'notes-seen.json' && (await readFile(join(dir, name), 'utf8')).includes('"b"')) victimFile = name;
+		}
+		expect(victimFile).toBeDefined();
+		const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+		await utimes(join(dir, victimFile as string), old, old);
+
+		clockMs += 5 * 60 * 1000; // dentro del intervalo: NO poda
+		await store.save(touchNotesSeen({}, 'c', 4, '2026-07-01T00:00:00.000Z'));
+		expect(await readdir(dir)).toContain(victimFile);
+
+		clockMs += 6 * 60 * 1000; // pasado el intervalo: poda
+		await store.save(touchNotesSeen({}, 'd', 4, '2026-07-01T00:00:00.000Z'));
+		expect(await readdir(dir)).not.toContain(victimFile);
 	});
 
 	it('un directorio SIN ningún fichero de cuenta no revienta la poda (best-effort)', async () => {

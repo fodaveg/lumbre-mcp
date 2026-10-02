@@ -420,6 +420,14 @@ const ACCOUNT_FILE_PATTERN = /^notes-seen-[0-9a-f]{16}\.json$/;
  *  cap de `MAX_STATE_ENTRIES` de su fichero nunca se llegue a tocar. */
 const ACCOUNT_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** Intervalo mínimo entre dos podas (`pruneStaleAccountFiles`) en el mismo
+ *  proceso: la ventana de borrado es de 30 días, no hace falta mirar el
+ *  directorio en cada guardado. */
+const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
+
+/** Última poda por directorio de estado (clave = `stateDir()`), en memoria. */
+const lastPruneAtMs = new Map<string, number>();
+
 /**
  * Poda best-effort de ficheros de huella POR CUENTA con más de
  * `ACCOUNT_FILE_MAX_AGE_MS` sin escribirse (`mtime`) — se dispara al final
@@ -434,6 +442,11 @@ const ACCOUNT_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 async function pruneStaleAccountFiles(nowMs: number): Promise<void> {
 	try {
 		const dir = stateDir();
+		// Máximo una poda cada `PRUNE_INTERVAL_MS` por proceso y directorio: cada
+		// `save` hacía `readdir` + `stat` de los ficheros de TODAS las cuentas.
+		const last = lastPruneAtMs.get(dir);
+		if (last !== undefined && nowMs - last < PRUNE_INTERVAL_MS) return;
+		lastPruneAtMs.set(dir, nowMs);
 		const names = await readdir(dir);
 		for (const name of names) {
 			if (!ACCOUNT_FILE_PATTERN.test(name)) continue;
@@ -479,15 +492,20 @@ async function pruneStaleAccountFiles(nowMs: number): Promise<void> {
  * teniendo SU huella persistente) sin el problema de mezclar cuentas.
  *
  * Cada `save` dispara, de paso, `pruneStaleAccountFiles` — best-effort, ver
- * su JSDoc.
+ * su JSDoc — como mucho una vez cada 10 min por proceso. `opts.now` es el
+ * reloj inyectable (solo para tests).
  */
-export function createAccountNotesSeenStore(token: string): NotesSeenStore {
+export function createAccountNotesSeenStore(
+	token: string,
+	opts: { now?: () => number } = {}
+): NotesSeenStore {
+	const now = opts.now ?? Date.now;
 	const filename = accountFileName(token);
 	return {
 		load: () => readStateFile(filename),
 		save: async (state) => {
 			await writeStateFileAtomic(filename, state);
-			await pruneStaleAccountFiles(Date.now());
+			await pruneStaleAccountFiles(now());
 		}
 	};
 }
@@ -535,28 +553,53 @@ export function touchNotesSeen(
 	notesUpdatedAt: string | null | undefined,
 	maxEntries: number = MAX_STATE_ENTRIES
 ): NotesSeenState {
-	const updated = parseNotesUpdatedAt(notesUpdatedAt);
+	return touchNotesSeenBatch(state, [{ taskId, noteLength, notesUpdatedAt }], maxEntries);
+}
 
-	if (!updated) {
-		if (!(taskId in state)) return state;
-		const map = new Map(Object.entries(state));
+/**
+ * Versión por LOTE de `touchNotesSeen` — mismo comportamiento que aplicarla
+ * en serie sobre cada elemento de `items`, pero sobre UNA sola estructura
+ * mutable (un `Map` creado la primera vez que algo cambia de verdad) y
+ * serializando UNA vez al final. Con el estado lleno (2.000 entradas) la
+ * versión en serie copiaba el estado entero por tarea (1,4 s de CPU síncrona
+ * con 445 tareas nuevas).
+ *
+ * Devuelve la MISMA referencia de `state` si ningún elemento cambió nada (ver
+ * el fast path de `touchNotesSeen`); si no, un objeto nuevo y `state` queda
+ * intacto.
+ */
+export function touchNotesSeenBatch(
+	state: NotesSeenState,
+	items: { taskId: string; noteLength: number; notesUpdatedAt: string | null | undefined }[],
+	maxEntries: number = MAX_STATE_ENTRIES
+): NotesSeenState {
+	let map: Map<string, unknown> | undefined;
+	for (const { taskId, noteLength, notesUpdatedAt } of items) {
+		const updated = parseNotesUpdatedAt(notesUpdatedAt);
+		const current = map ? map.get(taskId) : state[taskId];
+		const present = map ? map.has(taskId) : taskId in state;
+
+		if (!updated) {
+			if (!present) continue;
+			map ??= new Map(Object.entries(state));
+			map.delete(taskId);
+			continue;
+		}
+
+		const existing = readSeenEntry(current);
+		if (existing && existing.u === notesUpdatedAt && existing.n === noteLength) continue;
+
+		map ??= new Map(Object.entries(state));
 		map.delete(taskId);
-		return Object.fromEntries(map);
+		const entry: NotesSeenEntry = { u: notesUpdatedAt as string, n: noteLength };
+		map.set(taskId, entry);
+		while (map.size > maxEntries) {
+			const oldestKey = map.keys().next().value;
+			if (oldestKey === undefined) break;
+			map.delete(oldestKey);
+		}
 	}
-
-	const existing = readSeenEntry(state[taskId]);
-	if (existing && existing.u === notesUpdatedAt && existing.n === noteLength) return state;
-
-	const map = new Map(Object.entries(state));
-	map.delete(taskId);
-	const entry: NotesSeenEntry = { u: notesUpdatedAt as string, n: noteLength };
-	map.set(taskId, entry);
-	while (map.size > maxEntries) {
-		const oldestKey = map.keys().next().value;
-		if (oldestKey === undefined) break;
-		map.delete(oldestKey);
-	}
-	return Object.fromEntries(map);
+	return map ? (Object.fromEntries(map) as NotesSeenState) : state;
 }
 
 /**
@@ -580,10 +623,14 @@ export async function recordNotesSeen(
 ): Promise<void> {
 	if (entries.length === 0) return;
 	try {
-		let state = await store.load();
-		for (const e of entries) {
-			state = touchNotesSeen(state, e.taskId, e.notes.trim().length, e.notesUpdatedAt);
-		}
+		const state = touchNotesSeenBatch(
+			await store.load(),
+			entries.map((e) => ({
+				taskId: e.taskId,
+				noteLength: e.notes.trim().length,
+				notesUpdatedAt: e.notesUpdatedAt
+			}))
+		);
 		await store.save(state);
 	} catch {
 		// Best-effort — ver JSDoc de arriba.
@@ -658,7 +705,7 @@ export async function computeAutoNotesRender(
 	const previousState = await store.load();
 	let fullCount = 0;
 	let markerCount = 0;
-	let nextState = previousState;
+	const touches: { taskId: string; noteLength: number; notesUpdatedAt: string | null | undefined }[] = [];
 	for (const t of withNotes) {
 		const previous = readSeenEntry(previousState[t.id]);
 		const length = noteLengthOf(t);
@@ -673,8 +720,9 @@ export async function computeAutoNotesRender(
 		perTask.set(t.id, decision);
 		if (decision.kind === 'full') fullCount++;
 		else markerCount++;
-		nextState = touchNotesSeen(nextState, t.id, length, t.notesUpdatedAt);
+		touches.push({ taskId: t.id, noteLength: length, notesUpdatedAt: t.notesUpdatedAt });
 	}
+	const nextState = touchNotesSeenBatch(previousState, touches);
 	if (nextState !== previousState) await store.save(nextState);
 	return { perTask, fullCount, markerCount };
 }
