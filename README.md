@@ -157,6 +157,12 @@ Todas las tools llevan `annotations` de MCP: `readOnlyHint` en las de lectura
 `list_brl_entries`, `list_habits`, `read_attachment`), `destructiveHint: true`
 en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
 `idempotentHint` en `link_list_note`, `unlink_list_note` y `refresh_sync`.
+`destructiveHint: false` solo en las escrituras puramente aditivas (`add_task`,
+`add_attachment`, `link_list_note`, `refresh_sync`): `mutate_tasks` (su `update`
+reemplaza contenido y notas) y `unlink_list_note` (retira un vínculo) no lo
+declaran y quedan con el valor por defecto de la especificación. `list_tasks` y
+`get_task` van como solo lectura aunque actualizan la huella local de notas
+vistas del conector (estado interno, no datos del usuario en Lumbre).
 
 - `add_task` — añade una tarea nueva a Lumbre (vía `POST /api/ingest`, el
   mismo endpoint que usa email-to-task/Atajos de iOS). La app la encola y la

@@ -721,7 +721,6 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 	const mutateTasksTool = server.registerTool(
 		'mutate_tasks',
 		{
-			annotations: { destructiveHint: false },
 			description:
 				`Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
 				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +

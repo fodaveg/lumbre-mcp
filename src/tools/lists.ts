@@ -116,7 +116,7 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 	const unlinkListNoteTool = server.registerTool(
 		'unlink_list_note',
 		{
-			annotations: { destructiveHint: false, idempotentHint: true },
+			annotations: { idempotentHint: true },
 			description:
 				'Desvincula de forma síncrona e idempotente una nota de Obsidian o Hebra de un proyecto o área. ' +
 				'`removed=false` confirma que el vínculo ya no estaba registrado.',

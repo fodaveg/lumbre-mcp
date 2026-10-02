@@ -181,9 +181,14 @@ describe('tools/list — superficie completa', () => {
 		expect(tools.filter((t) => ann(t).readOnlyHint === true).map((t) => t.name).sort()).toEqual(READ_ONLY);
 		expect(tools.filter((t) => ann(t).destructiveHint === true).map((t) => t.name).sort()).toEqual(DESTRUCTIVE);
 		expect(tools.filter((t) => ann(t).idempotentHint === true).map((t) => t.name).sort()).toEqual(IDEMPOTENT);
-		// Las 6 de escritura no destructiva lo declaran explícitamente (el default MCP es true).
-		for (const name of ['add_task', 'mutate_tasks', 'add_attachment', 'link_list_note', 'unlink_list_note', 'refresh_sync']) {
+		// Las 4 de escritura puramente aditiva lo declaran explícitamente (el default MCP es true).
+		for (const name of ['add_task', 'add_attachment', 'link_list_note', 'refresh_sync']) {
 			expect(ann(tools.find((t) => t.name === name)!).destructiveHint).toBe(false);
+		}
+		// `mutate_tasks` (update reemplaza contenido y notas) y `unlink_list_note` (retira un
+		// vínculo) NO son aditivas: sin `destructiveHint`, queda el default de la especificación.
+		for (const name of ['mutate_tasks', 'unlink_list_note']) {
+			expect(ann(tools.find((t) => t.name === name)!)).not.toHaveProperty('destructiveHint');
 		}
 	});
 
