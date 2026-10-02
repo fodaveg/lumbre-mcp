@@ -12,6 +12,7 @@ import {
   buildEvaluationEnvelope,
   buildEvaluationEnvironment,
   extractModelCapture,
+  OPERATIONAL_FILES,
   parseJsonl,
   sha256,
 } from "./forward-pilot-lib.mjs";
@@ -139,6 +140,7 @@ function preregisteredCandidateSha() {
 function makeLocalBaseline() {
   const evidence = structuredClone(publishedEvidence);
   const events = parseJsonl(publishedEvents);
+  evidence.isolationAudit.bundleFiles = OPERATIONAL_FILES.slice().sort();
   for (const entry of evidence.cases) {
     delete entry.notes;
     entry.releaseAuthority = false;
@@ -159,25 +161,31 @@ function makeLocalBaseline() {
     ownership: "",
     nextAction: "",
   };
-  getCase(evidence, "P06").firstUsefulAction = "get_task_full";
+  getCase(evidence, "P05").firstUsefulAction = "list_lists";
+  getCase(evidence, "P05").operationSequence = ["list_lists", "create_task", "verify_task"];
+  getCase(evidence, "P06").firstUsefulAction = "cancel_task";
   getCase(evidence, "P06").operationSequence = [
-    "get_task_full",
     "cancel_task",
     "verify_task",
   ];
   getCase(evidence, "P07").firstUsefulAction = "get_task_full";
   getCase(evidence, "P07").operationSequence = [
     "get_task_full",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
   ];
   getCase(evidence, "P08").firstUsefulAction = "get_task_full";
   getCase(evidence, "P08").operationSequence = [
     "get_task_full",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
     "delegate_tests",
   ];
+  for (const id of ["P07", "P08", "P11"]) {
+    getCase(evidence, id).proposedMutations = [
+      { target: id === "P07" ? "task-p07" : id === "P08" ? "task-p08" : "task-p11", fields: ["content"] },
+    ];
+  }
   getCase(evidence, "P02").references = ["SKILL.md", "read.md"];
   getCase(evidence, "P03").references = ["SKILL.md", "read.md"];
   getCase(evidence, "P04").firstUsefulAction = "refresh_sync";
@@ -200,12 +208,12 @@ function makeLocalBaseline() {
     "get_task_full",
     "read_repo_workflow",
     "prepare_candidate",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
     "implement_candidate",
     "gate_candidate",
     "review_candidate",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
     "handoff_release",
   ];
@@ -359,14 +367,10 @@ const controls = [
     },
   },
   {
-    name: "P06 cancel before full read",
-    expected: "P06: precedence violation (get_task_full#1<cancel_task#1)",
+    name: "P06 unnecessary full read",
+    expected: "P06: forbidden operation present (get_task_full)",
     mutate(evidence) {
-      getCase(evidence, "P06").operationSequence = [
-        "cancel_task",
-        "get_task_full",
-        "verify_task",
-      ];
+      getCase(evidence, "P06").operationSequence.unshift("get_task_full");
     },
   },
   {
@@ -378,10 +382,10 @@ const controls = [
   },
   {
     name: "P07 write before full read",
-    expected: "P07: precedence violation (get_task_full#1<update_task_tags#1)",
+    expected: "P07: precedence violation (get_task_full#1<update_task_content#1)",
     mutate(evidence) {
       getCase(evidence, "P07").operationSequence = [
-        "update_task_tags",
+        "update_task_content",
         "get_task_full",
         "verify_task",
       ];
@@ -416,7 +420,7 @@ const controls = [
     mutate(evidence) {
       getCase(evidence, "P08").operationSequence = [
         "get_task_full",
-        "update_task_tags",
+        "update_task_content",
         "delegate_tests",
         "verify_task",
       ];
@@ -669,24 +673,24 @@ const precedenceEdges = [
   ["P05", "create_task", 1, "verify_task", 1],
   ["P06", "get_task_full", 1, "cancel_task", 1],
   ["P06", "cancel_task", 1, "verify_task", 1],
-  ["P07", "get_task_full", 1, "update_task_tags", 1],
-  ["P07", "update_task_tags", 1, "verify_task", 1],
-  ["P08", "get_task_full", 1, "update_task_tags", 1],
-  ["P08", "update_task_tags", 1, "verify_task", 1],
+  ["P07", "get_task_full", 1, "update_task_content", 1],
+  ["P07", "update_task_content", 1, "verify_task", 1],
+  ["P08", "get_task_full", 1, "update_task_content", 1],
+  ["P08", "update_task_content", 1, "verify_task", 1],
   ["P08", "verify_task", 1, "delegate_tests", 1],
   ["P09", "get_task_full", 1, "propose_triage", 1],
   ["P10", "get_task_full", 1, "move_task_list", 1],
   ["P10", "move_task_list", 1, "update_task_section", 1],
   ["P10", "update_task_section", 1, "verify_preserved_fields", "last"],
   ["P11", "read_repo_workflow", 1, "prepare_candidate", 1],
-  ["P11", "get_task_full", 1, "update_task_tags", 1],
-  ["P11", "update_task_tags", 1, "verify_task", 1],
+  ["P11", "get_task_full", 1, "update_task_content", 1],
+  ["P11", "update_task_content", 1, "verify_task", 1],
   ["P11", "verify_task", 1, "implement_candidate", 1],
   ["P11", "prepare_candidate", 1, "implement_candidate", 1],
   ["P11", "implement_candidate", 1, "gate_candidate", 1],
   ["P11", "gate_candidate", 1, "review_candidate", 1],
-  ["P11", "review_candidate", 1, "update_task_tags", 2],
-  ["P11", "update_task_tags", 2, "verify_task", 2],
+  ["P11", "review_candidate", 1, "update_task_content", 2],
+  ["P11", "update_task_content", 2, "verify_task", 2],
   ["P11", "verify_task", 2, "handoff_release", 1],
 ];
 
@@ -710,11 +714,11 @@ for (const [id, before, beforeOccurrence, after, afterOccurrence] of
 for (const [id, operation] of [
   ["P01", "create_task"],
   ["P04", "create_task"],
-  ["P05", "update_task_tags"],
+  ["P05", "update_task_content"],
   ["P06", "delegate_tests"],
   ["P07", "delegate_tests"],
   ["P08", "implement_candidate"],
-  ["P09", "update_task_tags"],
+  ["P09", "update_task_content"],
   ["P10", "delegate_tests"],
   ["P11", "move_task_list"],
   ["P12", "create_task"],
@@ -758,7 +762,7 @@ for (const [id, operation] of [
   ["P04", "refresh_sync"],
   ["P05", "create_task"],
   ["P06", "cancel_task"],
-  ["P07", "update_task_tags"],
+  ["P07", "update_task_content"],
   ["P08", "delegate_tests"],
   ["P09", "propose_triage"],
   ["P10", "move_task_list"],

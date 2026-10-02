@@ -4477,3 +4477,75 @@ describe('refTexts — qué textos se escanean buscando referencias', () => {
 		expect(refTexts([conNota], 'auto', full)).toEqual(['tarea A', 'nota de A']);
 	});
 });
+
+describe('refresh_sync y list_brl_entries — handlers MCP', () => {
+	const entryId = '11111111-1111-4111-8111-111111111111';
+
+	afterEach(() => vi.unstubAllGlobals());
+
+	async function buildClient() {
+		const { createServer, stripToolsListSchema } = await import('./index.js');
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		stripToolsListSchema(serverTransport);
+		await createServer(TEST_CONFIG).connect(serverTransport);
+		const client = new Client({ name: 'brl-sync-handler-test', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	it('refresh_sync hace POST sin cuerpo y confirma el flush aplicado', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const result = await (await buildClient()).callTool({ name: 'refresh_sync', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		expect(JSON.stringify(result.content)).toContain('Sync de Lumbre refrescado');
+		expect(fetchSpy).toHaveBeenCalledOnce();
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('https://lumbre.test/api/sync/flush');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBeUndefined();
+	});
+
+	it('refresh_sync no anuncia éxito si la app no confirma el flush', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: false })));
+		const result = await (await buildClient()).callTool({ name: 'refresh_sync', arguments: {} });
+		expect(result.isError).toBe(true);
+		expect(JSON.stringify(result.content)).toContain('no confirmó el flush');
+	});
+
+	it('list_brl_entries lee el día pedido y conserva ids, hora y texto', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ entries: [{ id: entryId, time: '09:15', entry: '- Idea' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const result = await (await buildClient()).callTool({
+			name: 'list_brl_entries', arguments: { date: '2026-10-02' }
+		});
+		expect(result.isError).not.toBe(true);
+		expect(JSON.stringify(result.content)).toContain(`${entryId}  09:15  - Idea`);
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('https://lumbre.test/api/brl/2026-10-02?format=json');
+		expect(init.method).toBeUndefined();
+	});
+
+	it('list_brl_entries distingue un día vacío de una respuesta inválida', async () => {
+		const fetchSpy = vi.fn().mockResolvedValueOnce(jsonResponse({ entries: [] }))
+			.mockResolvedValueOnce(jsonResponse({ entries: null }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const empty = await client.callTool({ name: 'list_brl_entries', arguments: { date: '2026-10-02' } });
+		const invalid = await client.callTool({ name: 'list_brl_entries', arguments: { date: '2026-10-03' } });
+		expect(JSON.stringify(empty.content)).toContain('está vacío');
+		expect(invalid.isError).toBe(true);
+		expect(JSON.stringify(invalid.content)).toContain('respuesta inesperada');
+	});
+});
