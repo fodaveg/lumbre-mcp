@@ -379,6 +379,15 @@ describe('refCounts — recuentos de la cabecera', () => {
 			total: 5
 		});
 	});
+
+	it('cuenta las notas con servidor NUEVO (`notesLength`, `notes` null) y VIEJO (`notes` entero)', () => {
+		const resolution = resolutionOf([
+			task({ id: ID_A, notes: null, notesLength: 42 }),
+			task({ id: ID_B, notes: null, notesLength: null }),
+			task({ id: ID_C, notes: 'nota entera' })
+		]);
+		expect(refCounts(resolution).withNotes).toBe(2);
+	});
 });
 
 describe('integración con los pintores (format.ts)', () => {
