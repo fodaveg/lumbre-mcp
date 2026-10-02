@@ -5,12 +5,12 @@ semántica está validada 32/32, el gate comprueba integridad y privacidad de la
 y 109 controles negativos. El piloto conductual y la observación longitudinal son
 evidencia informativa post-publicación, no gates de release.
 
-**El piloto es histórico y no acredita la skill actual.** Se capturó sobre un router de
-95 líneas y sobre un commit (`0957116`) que ya no existe en el repositorio; desde entonces
-el router, las referencias y los contratos han cambiado (ver «Auditoría de octubre de
-2026»). `tests/skill-lumbre/validate.sh` lo detecta, omite los tres pasos que lo resuelven
-y lo dice en su veredicto final: `validation: ok (sin piloto: evidencia histórica no
-verificable)`. «validation: ok» a secas solo significa que el piloto se verificó.
+**La recaptura de la skill actual existe y quedó roja: 8/12 contratos.** El piloto
+anterior sigue siendo histórico: se capturó sobre un router de 95 líneas y un commit
+(`0957116`) ausente. La captura nueva está anclada a `f36f345` y su integridad pasa;
+`tests/skill-lumbre/validate.sh --require-pilot` distingue esa integridad del resultado
+conductual, que se conserva rechazado en el recibo de evidencia. El piloto es
+informativo, no un gate de release.
 
 ## Método
 
@@ -165,6 +165,35 @@ Qué cambió:
 - Claude recibe por defecto los tres prefijos reales del conector.
 - `tests/skill-lumbre/validate-tool-names.mjs` comprueba contra `src/tools/` que las tools,
   ops y parámetros citados por la skill existen.
+
+## Recaptura conductual del 2 oct 2026
+
+Se congelaron 13 ficheros de criterio antes de una única invocación de Codex CLI
+0.160.0 con `gpt-6.1-sol`. El candidato `f36f345a619be19a3e91adcd80219b84f97c0564`
+incluye el router y las ocho referencias actuales. El runner aisló ese bundle con
+sandbox de solo lectura y sin configuración de MCP ni acceso a herramientas del
+evaluador. Los bytes del envelope y del JSONL están en
+`tests/skill-lumbre/evidence/forward-pilot-current.*`.
+
+Resultado preregistrado: **8/12, captura rechazada**. P02 volvió a copiar `@wip`
+preexistente a `devState` durante una lectura pura, aunque no propuso mutaciones:
+ese campo puede representar el estado observado y el fallo no demuestra una
+transición de desarrollo. P03 omitió `list_tasks` tras
+`list_lists`; P09 empezó por `list_lists` y marcó que la propuesta abierta requiere
+confirmación; P10 ejecutó mover y reasignar sección para cada una de las dos tareas
+en lugar de representar un único par de operaciones en batch, con verificaciones
+intermedias que pueden ser redundantes. Los cuatro cuentan
+como fallos del oráculo congelado. En P03/P09/P10 hay tensión entre ese oráculo y la
+redacción vigente de la skill; no se cambió el criterio después de ver la salida ni
+se recapturó para reinterpretar el resultado.
+
+La integridad dio verde: 4 eventos, cero llamadas a tools, shell o MCP, cero
+mutaciones de fichero y cero rutas privadas. Tiempo observado del batch: 54.985 ms;
+40.377 tokens de entrada y 1.690 de salida según `turn.completed`. La media por
+caso sería derivada, no tiempo individual. Los 109 controles negativos del
+verificador y `validate.sh --require-pilot` pasaron. Su exit 0 certifica que la
+captura es auténtica y que el rechazo conductual está registrado, no que los doce
+casos hayan acertado.
 
 ## Retirada de copias antiguas
 
