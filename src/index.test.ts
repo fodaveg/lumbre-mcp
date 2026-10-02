@@ -262,9 +262,8 @@ describe('tools/list — superficie completa', () => {
 		// `move_to_list`) se BORRAN — `mutate_tasks` ya cubría exactamente las
 		// mismas ops, con el mismo shape (`translateOp` en `lumbre-client.ts`).
 		// (2) `add_brl_entry`/`update_brl_entry`/`delete_brl_entry` se
-		// SUSTITUYEN por `mutate_brl` (mismo patrón que `mutate_tasks`, pero
-		// SIN `runBatch` — no hay `/api/batch` para el BRL, así que es un
-		// `mutateTask` por op, en el orden pedido). `list_brl_entries` se
+		// SUSTITUYEN por `mutate_brl` (mismo patrón que `mutate_tasks`, con
+		// `runBatch` para las mutaciones BRL, en el orden pedido). `list_brl_entries` se
 		// queda tal cual. Resultado: 19 tools, 22.198 caracteres — -4.380
 		// sobre los 26.578 de arriba (-16,5%). `mutate_brl` completo (nombre +
 		// description + inputSchema) pesa 1.684 — medido aparte porque el
@@ -2965,12 +2964,15 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		expect(text).toMatch(/\[0\] update: .*habit/);
 	});
 
-	it('mutate_brl: un outcome not-found se informa, no se cuenta como aplicado', async () => {
+	it('mutate_brl: un noop del batch se informa sin inventar si el objetivo desapareció', async () => {
 		vi.stubGlobal(
 			'fetch',
 			vi.fn(async (url: string | URL) => {
-				if (String(url).includes('/api/mutations')) {
-					return jsonResponse({ ok: true, outcome: 'not-found', outcomes: ['not-found'] });
+				if (String(url).includes('/api/batch')) {
+					return jsonResponse({
+						ok: true,
+						results: [{ index: 0, type: 'mutate', ok: true, materialization: 'noop' }]
+					});
 				}
 				throw new Error(`fetch no mockeado: ${String(url)}`);
 			})
@@ -2982,14 +2984,79 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 				arguments: { ops: [{ op: 'add', date: '2026-09-23', text: 'Apunte' }] }
 			})
 		);
-		expect(text).toContain('Resultado en la app: 0 aplicadas, 1 sin objetivo.');
-		expect(text).toMatch(/\[0\] add: sin efecto: la app no encontró el objetivo/);
+		expect(text).toContain('Resultado en la app: 0 aplicadas, 1 sin efecto.');
+		expect(text).toMatch(/\[0\] add: sin efecto: la app no cambió nada/);
+	});
+
+	it('mutate_brl: add, update y delete comparten un batch, conservan orden e ids', async () => {
+		const firstId = '11111111-1111-4111-8111-111111111111';
+		const secondId = '22222222-2222-4222-8222-222222222222';
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/brl/')) {
+				return jsonResponse({ entries: [{ id: firstId }, { id: secondId }] });
+			}
+			if (String(url).includes('/api/batch')) {
+				return jsonResponse({
+					ok: true,
+					results: [
+						{ index: 0, type: 'mutate', ok: true, materialization: 'applied' },
+						{ index: 1, type: 'mutate', ok: true, materialization: 'noop' },
+						{ index: 2, type: 'mutate', ok: false, error: 'rechazada' }
+					],
+					notices: ['Aviso del drenaje']
+				});
+			}
+			throw new Error(`fetch no mockeado: ${String(url)}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(await client.callTool({
+			name: 'mutate_brl',
+			arguments: { ops: [
+				{ op: 'add', date: '2026-09-23', text: 'Pensamiento', kind: 'thought', time: '09:15' },
+				{ op: 'update', date: '2026-09-23', entryId: firstId, text: 'Nota nueva' },
+				{ op: 'delete', date: '2026-09-23', entryId: secondId }
+			] }
+		}));
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		const batch = bodyOf(fetchSpy, '/api/batch');
+		const ops = batch.ops as { taskId: string; kind: string; payload: Record<string, unknown> }[];
+		expect(ops.map(({ kind }) => kind)).toEqual(['createBrlEntry', 'updateBrlEntry', 'removeBrlEntry']);
+		expect(ops[0].payload).toEqual({ date: '2026-09-23', entry: '= Pensamiento', time: '09:15' });
+		expect(ops[1]).toMatchObject({ taskId: firstId, payload: { entry: '- Nota nueva' } });
+		expect(ops[2]).toMatchObject({ taskId: secondId, payload: {} });
+		expect(text).toContain('2/3 operación(es) aceptadas.');
+		expect(text).toContain('Resultado en la app: 1 aplicadas, 1 sin efecto.');
+		expect(text).toContain(`[0] add: id ${ops[0].taskId}`);
+		expect(text).toContain('[2] delete: rechazada');
+		expect(text).toContain('Aviso del drenaje');
+	});
+
+	it('mutate_brl: un id inexistente no entra en el batch, las otras ops sí', async () => {
+		const missingId = '33333333-3333-4333-8333-333333333333';
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/brl/')) return jsonResponse({ entries: [] });
+			if (String(url).includes('/api/batch')) {
+				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, materialization: 'applied' }] });
+			}
+			throw new Error(`fetch no mockeado: ${String(url)}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(await client.callTool({ name: 'mutate_brl', arguments: { ops: [
+			{ op: 'delete', date: '2026-09-23', entryId: missingId },
+			{ op: 'add', date: '2026-09-23', text: 'Válida' }
+		] } }));
+		expect((bodyOf(fetchSpy, '/api/batch').ops as unknown[])).toHaveLength(1);
+		expect(text).toContain('1/2 operación(es) aceptadas.');
+		expect(text).toMatch(/\[0\] delete: El registro.*no tiene ninguna entrada/);
+		expect(text).toContain('Resultado en la app: 1 aplicadas.');
 	});
 
 	it('mutate_brl: una op inválida y un campo de más no tumban el lote; la válida se ejecuta', async () => {
 		const fetchSpy = vi.fn(async (url: string | URL) => {
-			if (String(url).includes('/api/mutations')) {
-				return jsonResponse({ ok: true, outcome: 'applied', outcomes: ['applied'] });
+			if (String(url).includes('/api/batch')) {
+				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, materialization: 'applied' }] });
 			}
 			throw new Error(`fetch no mockeado: ${String(url)}`);
 		});

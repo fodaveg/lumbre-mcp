@@ -527,9 +527,10 @@ avisos de la app:
 segunda línea. Los `notices` del lote (por ejemplo, «la lista destino estaba
 borrada y la tarea fue a la Bandeja») salen en `avisos de la app`. Contra un
 servidor que aún no manda `materialization`, cada op sale «sin confirmar»,
-nunca «aplicada». `mutate_brl` informa igual con el `outcome` de
-`/api/mutations` (que añade `sin objetivo` para un id que la app no
-encuentra). Antes de esta fecha las tres tools respondían solo «encoladas» y
+nunca «aplicada». `mutate_brl` usa el mismo informe de `/api/batch`; un `noop`
+puede significar que el objetivo desapareció entre la comprobación de existencia
+y el drenaje, y se muestra como «sin efecto» sin atribuirle una causa concreta.
+Antes de esta fecha las tres tools respondían solo «encoladas» y
 un no-op o un fallo del drenaje se leía como éxito. Tus dispositivos ven el
 cambio cuando sincronizan. Las que mutan una tarea necesitan su `taskId` — resuélvelo
 antes con `list_tasks`. Diseño completo en `PHASE2.md` (ya implementado; el
@@ -778,7 +779,8 @@ Fase 2.
   `GET /api/brl/:date` NO lleva ids a propósito (es la nota que lee el
   usuario, no un formato de máquina).
 - `mutate_brl({ ops })` — añade, reescribe o borra una o varias entradas de
-  golpe (`ops`, máx. 200). Como `mutate_tasks`, su schema expuesto es laxo
+  golpe (`ops`, máx. 200) en un `POST /api/batch` y un drenaje. Como
+  `mutate_tasks`, su schema expuesto es laxo
   (`op` es un string y se admiten campos de más): una op inválida se reporta
   por posición y las demás se ejecutan.
   Cada elemento es `{ op: "add"|"update"|"delete", date, ... }`:

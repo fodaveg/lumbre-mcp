@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { LumbreApiError, listBrlEntries, mutateTask } from '../lumbre-client.js';
+import { LumbreApiError, listBrlEntries, runBatch } from '../lumbre-client.js';
 import { errorResult, formatOpShapeError, formatOutcomeReport, OUTCOME_NOTE, textResult } from './shared.js';
 /**
  * Las dos tools de BRL (`list_brl_entries` y `mutate_brl`) son el espejo, para
@@ -174,18 +174,12 @@ export function registerBrlTools(server, ctx) {
     }, async (input) => {
         const rawOps = input.ops;
         const results = [];
-        // Resultado REAL de cada op aceptada y avisos de la app (MC1 del audit
-        // de paridad, 23 sep 2026): `/api/mutations` devuelve `outcome`, y hasta
-        // entonces se tiraba — un `not-found` salía como éxito.
+        // `/api/batch` valida cada op y drena el lote una sola vez. Su
+        // `materialization` es menos preciso que el `outcome` de una mutación
+        // suelta: `noop` no distingue un objetivo desaparecido de un no-op.
         const outcomes = [];
-        const notices = [];
-        const record = (index, id, res) => {
-            results.push({ index, ok: true, id });
-            outcomes.push({ index, op: String(rawOps[index].op), outcome: res.outcome ?? 'unconfirmed' });
-            for (const n of res.notices)
-                if (!notices.includes(n))
-                    notices.push(n);
-        };
+        const batchOps = [];
+        const originalIndexes = [];
         for (let i = 0; i < rawOps.length; i++) {
             const raw = rawOps[i];
             const parsed = mutateBrlStrictOpSchema.safeParse(raw);
@@ -196,11 +190,10 @@ export function registerBrlTools(server, ctx) {
             const op = parsed.data;
             try {
                 if (op.op === 'add') {
-                    // Id PRE-GENERADO aquí, igual que `add_brl_entry` (idempotencia de
-                    // creación si el lote se reabre tras un fallo, ver `createBrlEntry`
-                    // en el repo principal).
+                    // Id pre-generado: el servidor reusa este id si reabre el lote.
                     const entryId = randomUUID();
-                    const res = await mutateTask(ctx.config, {
+                    batchOps.push({
+                        type: 'mutate',
                         taskId: entryId,
                         kind: 'createBrlEntry',
                         payload: {
@@ -209,24 +202,21 @@ export function registerBrlTools(server, ctx) {
                             ...(op.time !== undefined ? { time: op.time } : {})
                         }
                     });
-                    record(i, entryId, res);
                 }
                 else if (op.op === 'update') {
                     await requireBrlEntryExists(op.date, op.entryId);
-                    const res = await mutateTask(ctx.config, {
+                    batchOps.push({
+                        type: 'mutate',
                         taskId: op.entryId,
                         kind: 'updateBrlEntry',
                         payload: { entry: `${op.kind === 'thought' ? '=' : '-'} ${op.text}` }
                     });
-                    ctx.brlCache.invalidate(op.date, op.entryId);
-                    record(i, op.entryId, res);
                 }
                 else {
                     await requireBrlEntryExists(op.date, op.entryId);
-                    const res = await mutateTask(ctx.config, { taskId: op.entryId, kind: 'removeBrlEntry', payload: {} });
-                    ctx.brlCache.invalidate(op.date, op.entryId);
-                    record(i, op.entryId, res);
+                    batchOps.push({ type: 'mutate', taskId: op.entryId, kind: 'removeBrlEntry', payload: {} });
                 }
+                originalIndexes.push(i);
             }
             catch (err) {
                 results.push({
@@ -236,12 +226,45 @@ export function registerBrlTools(server, ctx) {
                 });
             }
         }
+        let notices = [];
+        if (batchOps.length > 0) {
+            try {
+                const response = await runBatch(ctx.config, batchOps);
+                if (response.results.length !== batchOps.length ||
+                    response.results.some((result, index) => result.index !== index)) {
+                    throw new LumbreApiError('Lumbre devolvió un informe incompleto para el batch BRL.');
+                }
+                notices = response.notices;
+                response.results.forEach((result, batchIndex) => {
+                    const index = originalIndexes[batchIndex];
+                    if (!result.ok) {
+                        results.push({ index, ok: false, error: result.error ?? 'error desconocido' });
+                        return;
+                    }
+                    results.push({ index, ok: true, id: batchOps[batchIndex].taskId });
+                    outcomes.push({ index, op: String(rawOps[index].op), outcome: result.materialization ?? 'unconfirmed' });
+                });
+            }
+            catch (err) {
+                return errorResult(err);
+            }
+            finally {
+                // El drenaje pudo cambiar o borrar una entrada aunque la respuesta
+                // se perdiera: la próxima lectura debe volver al servidor.
+                for (const op of rawOps) {
+                    if (typeof op.entryId === 'string')
+                        ctx.brlCache.invalidate(String(op.date), op.entryId);
+                }
+            }
+        }
         const okCount = results.filter((r) => r.ok).length;
         const idLines = results
             .filter((r) => r.ok)
+            .sort((a, b) => a.index - b.index)
             .map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: id ${r.id}`);
         const failureLines = results
             .filter((r) => !r.ok)
+            .sort((a, b) => a.index - b.index)
             .map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: ${r.error}`);
         let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) aceptadas.`;
         const outcomeReport = formatOutcomeReport(outcomes, notices);
