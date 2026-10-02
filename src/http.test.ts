@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { request as httpRequest, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isAllowedHostname, MAX_MCP_BODY_BYTES } from './http.js';
 
 /**
@@ -68,6 +69,20 @@ describe('GET /healthz', () => {
 });
 
 describe('POST /mcp — auth fail-closed', () => {
+	it('un verbo HTTP no permitido queda etiquetado con texto fijo en el log', async () => {
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const res = await fetch(`${baseUrl}/mcp`, { method: 'DELETE' });
+			expect(res.status).toBe(405);
+			await res.text();
+			const lines = errorLog.mock.calls.map((args) => args.join(' '));
+			expect(lines).toContain('[lumbre-mcp-http] OTHER /mcp 405');
+			expect(lines.join('\n')).not.toContain('DELETE');
+		} finally {
+			errorLog.mockRestore();
+		}
+	});
+
 	it('sin Authorization: 401 con cuerpo JSON-RPC de error', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, {
 			method: 'POST',
@@ -145,6 +160,53 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// no es de este lote, ya existía antes). Techo 26.700 (2026-10-02: medido
 		// 26.468 en `index.test.ts` + ~1%), el mismo que allí.
 		expect(JSON.stringify(body.result.tools).length).toBeLessThan(26700);
+	});
+
+	it('el log solo identifica métodos MCP conocidos y nunca copia un method arbitrario del body', async () => {
+		const marker = 'FAKE_SECRET_SHOULD_NOT_APPEAR_IN_LOGS';
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			for (const method of [marker, 'initialize', 'tools/list']) {
+				const res = await fetch(`${baseUrl}/mcp`, {
+					method: 'POST',
+					headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
+					body: JSON.stringify(method === 'initialize' ? initializeBody() : method === 'tools/list' ? toolsListBody() : {
+						jsonrpc: '2.0', id: 99, method, params: {}
+					})
+				});
+				expect(res.status).toBe(200);
+				await res.text();
+			}
+			const lines = errorLog.mock.calls.map((args) => args.join(' '));
+			expect(lines.join('\n')).not.toContain(marker);
+			expect(lines).toContain('[lumbre-mcp-http] POST /mcp unknown 200');
+			expect(lines).toContain('[lumbre-mcp-http] POST /mcp initialize 200');
+			expect(lines).toContain('[lumbre-mcp-http] POST /mcp tools/list 200');
+		} finally {
+			errorLog.mockRestore();
+		}
+	});
+
+	it('un error interno del SDK no vuelca su mensaje al log', async () => {
+		const marker = 'FAKE_SECRET_FROM_SDK_ERROR';
+		const handleRequest = vi.spyOn(StreamableHTTPServerTransport.prototype, 'handleRequest')
+			.mockRejectedValueOnce(new Error(marker));
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const res = await fetch(`${baseUrl}/mcp`, {
+				method: 'POST',
+				headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
+				body: JSON.stringify(initializeBody())
+			});
+			expect(res.status).toBe(500);
+			await res.text();
+			const lines = errorLog.mock.calls.map((args) => args.join(' '));
+			expect(lines).toContain('[lumbre-mcp-http] error interno');
+			expect(lines.join('\n')).not.toContain(marker);
+		} finally {
+			handleRequest.mockRestore();
+			errorLog.mockRestore();
+		}
 	});
 
 	it('cada petición es un McpServer NUEVO (stateless): dos peticiones seguidas, ninguna arrastra estado de la otra', async () => {

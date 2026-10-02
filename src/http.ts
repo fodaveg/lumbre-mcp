@@ -248,12 +248,21 @@ function readBody(req: IncomingMessage): Promise<string> {
 	});
 }
 
-/** Solo para el log — nunca vuelca el body ni el token, solo el nombre del
- *  método JSON-RPC (o `batch(N)` si es una petición en lote). */
+/** Solo para el log: los nombres conocidos son literales propios, nunca texto
+ *  arbitrario del body (que podría contener una credencial). */
+const LOGGABLE_MCP_METHODS = new Set([
+	'initialize',
+	'ping',
+	'notifications/initialized',
+	'tools/list',
+	'tools/call'
+]);
+
 function describeMethod(body: unknown): string {
 	if (Array.isArray(body)) return `batch(${body.length})`;
 	if (body && typeof body === 'object' && typeof (body as { method?: unknown }).method === 'string') {
-		return (body as { method: string }).method;
+		const method = (body as { method: string }).method;
+		return LOGGABLE_MCP_METHODS.has(method) ? method : 'unknown';
 	}
 	return 'unknown';
 }
@@ -280,7 +289,7 @@ async function handleMcpRequest(
 ): Promise<void> {
 	if (req.method !== 'POST') {
 		sendJsonRpcError(res, 405, -32000, `Method not allowed. Modo stateless: solo POST ${routeLabel}.`);
-		logRequest(`${req.method ?? '?'} ${routeLabel}`, 405);
+		logRequest(`OTHER ${routeLabel}`, 405);
 		return;
 	}
 
@@ -412,8 +421,8 @@ async function handleMcpRequest(
 	try {
 		await mcpServer.connect(transport);
 		await transport.handleRequest(req, res, parsedBody);
-	} catch (err) {
-		console.error('[lumbre-mcp-http] error interno:', err instanceof Error ? err.message : String(err));
+	} catch {
+		console.error('[lumbre-mcp-http] error interno');
 		if (!res.headersSent) sendJsonRpcError(res, 500, -32603, 'Internal server error');
 	} finally {
 		logRequest(`POST ${routeLabel} ${methodLabel}`, res.statusCode);
