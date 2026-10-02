@@ -673,7 +673,6 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
  */
 export function registerBatchTool(server, ctx) {
     const mutateTasksTool = server.registerTool('mutate_tasks', {
-        annotations: { destructiveHint: false },
         description: `Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
             `set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
             `clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +

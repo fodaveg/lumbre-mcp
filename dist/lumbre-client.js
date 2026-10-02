@@ -48,11 +48,12 @@ export const ATTACHMENT_TIMEOUT_MS = 120_000;
  * un `fetch` ignora la señal. Temporizador normal (`setTimeout`) y no
  * `AbortSignal.timeout` para poder controlarlo con temporizadores falsos.
  */
-async function withTimeout(ms, fn) {
+async function withTimeout(ms, fn, isWrite = false) {
     const controller = new AbortController();
     let timedOut = false;
     let timer;
-    const timeoutError = () => new LumbreApiError(`Lumbre no respondió en ${Math.round(ms / 1000)} s.`);
+    const timeoutError = () => new LumbreApiError(`Lumbre no respondió en ${Math.round(ms / 1000)} s.` +
+        (isWrite ? ' La escritura pudo aplicarse: compruébalo antes de reintentar.' : ''));
     const expired = new Promise((_, reject) => {
         timer = setTimeout(() => {
             timedOut = true;
@@ -76,7 +77,8 @@ async function withTimeout(ms, fn) {
     }
 }
 async function request(config, path, init = {}) {
-    return withTimeout(REQUEST_TIMEOUT_MS, (signal) => requestOnce(config, path, init, signal));
+    const isWrite = init.method !== undefined && init.method.toUpperCase() !== 'GET';
+    return withTimeout(REQUEST_TIMEOUT_MS, (signal) => requestOnce(config, path, init, signal), isWrite);
 }
 async function requestOnce(config, path, init, signal) {
     const url = `${config.baseUrl.replace(/\/$/, '')}${path}`;
@@ -749,7 +751,7 @@ export const ATTACHMENT_CONTENT_TYPE_HEADER = 'x-lumbre-content-type';
  * comprueba en `lumbre-client.test.ts`), solo cambia DÓNDE viaja el mime.
  */
 export async function uploadAttachment(config, input) {
-    return withTimeout(ATTACHMENT_TIMEOUT_MS, (signal) => uploadAttachmentOnce(config, input, signal));
+    return withTimeout(ATTACHMENT_TIMEOUT_MS, (signal) => uploadAttachmentOnce(config, input, signal), true);
 }
 async function uploadAttachmentOnce(config, input, signal) {
     const params = new URLSearchParams({ taskId: input.taskId });

@@ -167,14 +167,18 @@ function taskStateLabel(t) {
         return 'cancelada';
     return t.done ? 'hecha' : 'pendiente';
 }
+/** Longitud (tras trim) de la nota de una tarea referenciada. Servidor NUEVO
+ *  (pedimos `notes=length`): viene en `notesLength` y `notes` es null.
+ *  Servidor VIEJO (ignora `notes=length`): manda `notes` enteras y no hay
+ *  `notesLength` — se mide el texto. Compartida por `noteHint` y `refCounts`. */
+function refNoteLength(t) {
+    return typeof t.notesLength === 'number' ? t.notesLength : (t.notes?.trim().length ?? 0);
+}
 /** Sufijo `✎N ↻DDmmm` si la tarea referenciada TIENE nota, o `''` si no —
  *  el dato con el que se decide si vale la pena traérsela con `get_task`. El
  *  texto de la nota NUNCA se vuelca aquí (ver la cabecera del módulo). */
 function noteHint(t) {
-    // Servidor NUEVO (pedimos `notes=length`): la longitud viene en `notesLength`
-    // y `notes` es null. Servidor VIEJO (ignora `notes=length`): manda `notes`
-    // enteras y no hay propiedad `notesLength` — se mide el texto como antes.
-    const length = typeof t.notesLength === 'number' ? t.notesLength : (t.notes?.trim().length ?? 0);
+    const length = refNoteLength(t);
     if (length === 0)
         return '';
     return ` ${formatNoteMarker(length, t.notesUpdatedAt ?? null)}`;
@@ -251,7 +255,7 @@ export function refCounts(resolution) {
                 broken++;
             else {
                 live++;
-                if ((task.notes?.trim() ?? '') !== '')
+                if (refNoteLength(task) > 0)
                     withNotes++;
             }
         }
