@@ -291,15 +291,20 @@ vistas del conector (estado interno, no datos del usuario en Lumbre).
   827a7878) — el MISMO marcador que usa `list_tasks` para una nota sin leer
   (tamaño en chars + fecha de la última edición): nunca vuelca la nota entera
   aquí, que es un listado de MUCHOS destinos; léela íntegra con `get_list`.
-  Servidores anteriores a esta feature (sin `notes`/`notesUpdatedAt` en la
-  respuesta) simplemente no muestran marcador, sin romper nada.
+  Pide `notes=length` (R6): la app manda solo `notesLength`, sin el texto de
+  las notas. Contra una app anterior (que ignora el parámetro y manda `notes`
+  entera) la longitud se mide en cliente y el resultado es el mismo. Servidores
+  anteriores a esta feature (sin `notes`/`notesUpdatedAt` en la respuesta)
+  simplemente no muestran marcador, sin romper nada.
 - `get_list({ listId })` — devuelve el detalle completo de UN proyecto o área:
   nombre, tipo (proyecto/área), padre, estado (cierre/aparcado/fecha, cuando
   el servidor los trae) y recuento de tareas, seguidos de su nota ÍNTEGRA y
   verbatim (2026-09-16, tarea 827a7878) — útil para leerla ANTES de
   reescribirla con `organize({ op: "set_list_notes" })`, que la reemplaza
   entera. Da error explícito si el `listId` no existe entre los proyectos/áreas
-  visibles del usuario.
+  visibles del usuario. Pide `listId=<id>` (R6) para bajar solo esa lista con
+  la nota íntegra (404 de la app = «no existe»); contra una app anterior, que
+  ignora el parámetro, filtra por id en cliente con el mismo resultado.
 - `get_list_links({ listId })` — lee los vínculos configurados para un proyecto o área
   (vía `GET /api/list-links?listId=`), con su URL y metadata completa. Puede
   devolver destinos `obsidian://` y notas Hebra con URL
@@ -812,13 +817,15 @@ salen en `list_tasks`. Escritura: `register_habit` (registra una ocurrencia),
 más abajo. Lectura:
 
 - `list_habits({ includeArchived? })` — enumera tus hábitos por `GET
-  /api/export` (mismo token que `list_tasks`, pero límite MÁS ESTRICTO: **10
-  peticiones/min**, porque vuelca la cuenta ENTERA — no la llames en bucle).
+  /api/habits` (R9: mismo token que `list_tasks` y su mismo límite, **120
+  peticiones/min**; devuelve solo `habits` y `habitLog`). Contra una app
+  anterior a R9 (404) cae a `GET /api/export`, que vuelca la cuenta ENTERA con
+  límite MÁS ESTRICTO de **10 peticiones/min**.
   Por hábito: `id`, `nombre`, `clase` (`registro`|`cadencia`|`contador`) y si
   está `archivedAt` (epoch ms). Por defecto solo los vivos; `includeArchived:
   true` incluye los archivados, con su fecha. Añade además las **últimas 3
   ocurrencias** (fecha) de cada hábito, a coste CERO: `habitLog` viaja en la
-  MISMA respuesta del export, así que enseñarlas no cuesta una petición
+  MISMA respuesta, así que enseñarlas no cuesta una petición
   aparte — más de 3 ya es un caso para leer el export entero, no esta tool.
   Un servidor que aún no manda `habitLog` no rompe: el listado sale igual,
   sin esa línea.

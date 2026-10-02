@@ -562,8 +562,12 @@ function listNotesUpdatedAtIso(notesUpdatedAt: number | null | undefined): strin
  * no expone `notes` (compatibilidad con uno anterior a la tarea 827a7878).
  */
 function listNoteMarkerSuffix(l: LumbreListSummary): string {
-	if (!l.notes || l.notes.trim() === '') return '';
-	return ` ${formatNoteMarker(l.notes.trim().length, listNotesUpdatedAtIso(l.notesUpdatedAt))}`;
+	// `notesLength` (R6, `?notes=length`) manda sobre `notes`: con app nueva el
+	// texto ni viaja. Sin esa clave (app vieja o listado completo) se mide `notes`.
+	const length =
+		'notesLength' in l ? (l.notesLength ?? 0) : l.notes && l.notes.trim() !== '' ? l.notes.trim().length : 0;
+	if (length <= 0) return '';
+	return ` ${formatNoteMarker(length, listNotesUpdatedAtIso(l.notesUpdatedAt))}`;
 }
 
 /**

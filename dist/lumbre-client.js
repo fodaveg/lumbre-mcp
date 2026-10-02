@@ -234,12 +234,51 @@ export function parseListNoteUrl(raw) {
  * recién creado (por la app o por `create_list`) no aparece en ningún
  * sitio hasta que se le añade la primera tarea (bug real, b00303b5).
  */
-export async function listLists(config) {
-    const body = await request(config, '/api/tasks?includeLists=1');
+export async function listLists(config, opts = {}) {
+    const path = opts.notes === 'length' ? '/api/tasks?includeLists=1&notes=length' : '/api/tasks?includeLists=1';
+    const body = await request(config, path);
     if (!body || typeof body !== 'object' || !Array.isArray(body.lists)) {
-        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1.');
+        throw new LumbreApiError(`Lumbre devolvió una respuesta inesperada para ${path}.`);
     }
-    return body.lists;
+    const lists = body.lists;
+    if (opts.notes !== 'length')
+        return lists;
+    // Compatibilidad con una app anterior a R6: ignora `notes=length` y manda el
+    // texto. Se calcula `notesLength` en cliente y se descarta el texto, para que
+    // el resultado observable sea el mismo con app nueva y vieja.
+    return lists.map((l) => {
+        if ('notesLength' in l)
+            return l;
+        const { notes, ...rest } = l;
+        return {
+            ...rest,
+            notes: null,
+            ...(typeof notes === 'string' ? { notesLength: notes.trim().length } : {})
+        };
+    });
+}
+/**
+ * Un solo proyecto o área con su nota ÍNTEGRA (R6: `GET /api/tasks?includeLists=1&listId=`),
+ * o `null` si no existe. App nueva: 404 «Lista no encontrada» → `null`. App
+ * anterior a R6: ignora `listId` y manda todas las listas; se filtra por id en
+ * cliente. En ambos casos el llamador ve lo mismo.
+ */
+export async function getListById(config, listId) {
+    const path = `/api/tasks?includeLists=1&listId=${encodeURIComponent(listId)}`;
+    let body;
+    try {
+        body = await request(config, path);
+    }
+    catch (err) {
+        if (err instanceof LumbreApiError && err.status === 404)
+            return null;
+        throw err;
+    }
+    if (!body || typeof body !== 'object' || !Array.isArray(body.lists)) {
+        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1&listId=.');
+    }
+    const lists = body.lists;
+    return lists.find((l) => l.id === listId) ?? null;
 }
 /**
  * `GET /api/list-links?listId=`: lee los vínculos configurados para UN proyecto o área.
@@ -870,6 +909,31 @@ export async function listHabitsExport(config) {
     const body = await request(config, '/api/export');
     if (!body || typeof body !== 'object' || !Array.isArray(body.habits)) {
         throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/export.');
+    }
+    const habitLogRaw = body.habitLog;
+    return {
+        habits: body.habits,
+        habitLog: Array.isArray(habitLogRaw) ? habitLogRaw : []
+    };
+}
+/**
+ * `GET /api/habits` (R9): `{ habits, habitLog }` con la misma forma que esas
+ * claves en `/api/export`, sin bajar la cuenta entera; misma credencial que
+ * `GET /api/tasks` y límite 120/min. Si la app es anterior a R9 (404), cae a
+ * `listHabitsExport` como antes (límite 10/min).
+ */
+export async function listHabits(config) {
+    let body;
+    try {
+        body = await request(config, '/api/habits');
+    }
+    catch (err) {
+        if (err instanceof LumbreApiError && err.status === 404)
+            return listHabitsExport(config);
+        throw err;
+    }
+    if (!body || typeof body !== 'object' || !Array.isArray(body.habits)) {
+        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/habits.');
     }
     const habitLogRaw = body.habitLog;
     return {

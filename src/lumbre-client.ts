@@ -527,6 +527,13 @@ export interface LumbreListSummary {
 	 *  feature (tarea 827a7878) — a diferencia de `LumbreTask.notes`, que
 	 *  siempre trae texto o `null`, aquí solo puede faltar la CLAVE. */
 	notes?: string | null;
+	/** Longitud (tras trim) de la nota viva con `?notes=length` (R6): entonces
+	 *  `notes` llega `null` y esta clave lleva el tamaño (`null` si no hay nota
+	 *  viva). Ausente con una app anterior a R6 o sin pedir `notes=length`;
+	 *  `listLists` la RELLENA en cliente cuando la app vieja manda el texto,
+	 *  así que el formateador solo mira esta clave. Compruébala con
+	 *  `'notesLength' in l`, no con `!== undefined`. */
+	notesLength?: number | null;
 	/** Epoch ms de la última edición de la nota (derivado del HLC de su celda
 	 *  CRDT, mismo origen que `LumbreTask.notesUpdatedAt` pero en epoch ms en
 	 *  vez de ISO — contrato de la tarea 827a7878), o `null` si la nota nunca
@@ -642,12 +649,51 @@ export interface UnlinkListNoteResult {
  * recién creado (por la app o por `create_list`) no aparece en ningún
  * sitio hasta que se le añade la primera tarea (bug real, b00303b5).
  */
-export async function listLists(config: LumbreConfig): Promise<LumbreListSummary[]> {
-	const body = await request(config, '/api/tasks?includeLists=1');
+export async function listLists(
+	config: LumbreConfig,
+	opts: { notes?: 'length' } = {}
+): Promise<LumbreListSummary[]> {
+	const path = opts.notes === 'length' ? '/api/tasks?includeLists=1&notes=length' : '/api/tasks?includeLists=1';
+	const body = await request(config, path);
 	if (!body || typeof body !== 'object' || !Array.isArray((body as { lists?: unknown }).lists)) {
-		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1.');
+		throw new LumbreApiError(`Lumbre devolvió una respuesta inesperada para ${path}.`);
 	}
-	return (body as { lists: LumbreListSummary[] }).lists;
+	const lists = (body as { lists: LumbreListSummary[] }).lists;
+	if (opts.notes !== 'length') return lists;
+	// Compatibilidad con una app anterior a R6: ignora `notes=length` y manda el
+	// texto. Se calcula `notesLength` en cliente y se descarta el texto, para que
+	// el resultado observable sea el mismo con app nueva y vieja.
+	return lists.map((l) => {
+		if ('notesLength' in l) return l;
+		const { notes, ...rest } = l;
+		return {
+			...rest,
+			notes: null,
+			...(typeof notes === 'string' ? { notesLength: notes.trim().length } : {})
+		};
+	});
+}
+
+/**
+ * Un solo proyecto o área con su nota ÍNTEGRA (R6: `GET /api/tasks?includeLists=1&listId=`),
+ * o `null` si no existe. App nueva: 404 «Lista no encontrada» → `null`. App
+ * anterior a R6: ignora `listId` y manda todas las listas; se filtra por id en
+ * cliente. En ambos casos el llamador ve lo mismo.
+ */
+export async function getListById(config: LumbreConfig, listId: string): Promise<LumbreListSummary | null> {
+	const path = `/api/tasks?includeLists=1&listId=${encodeURIComponent(listId)}`;
+	let body: unknown;
+	try {
+		body = await request(config, path);
+	} catch (err) {
+		if (err instanceof LumbreApiError && err.status === 404) return null;
+		throw err;
+	}
+	if (!body || typeof body !== 'object' || !Array.isArray((body as { lists?: unknown }).lists)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1&listId=.');
+	}
+	const lists = (body as { lists: LumbreListSummary[] }).lists;
+	return lists.find((l) => l.id === listId) ?? null;
 }
 
 /**
@@ -1764,6 +1810,32 @@ export async function listHabitsExport(
 	const body = await request(config, '/api/export');
 	if (!body || typeof body !== 'object' || !Array.isArray((body as { habits?: unknown }).habits)) {
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/export.');
+	}
+	const habitLogRaw = (body as { habitLog?: unknown }).habitLog;
+	return {
+		habits: (body as { habits: LumbreHabit[] }).habits,
+		habitLog: Array.isArray(habitLogRaw) ? (habitLogRaw as LumbreHabitLogEntry[]) : []
+	};
+}
+
+/**
+ * `GET /api/habits` (R9): `{ habits, habitLog }` con la misma forma que esas
+ * claves en `/api/export`, sin bajar la cuenta entera; misma credencial que
+ * `GET /api/tasks` y límite 120/min. Si la app es anterior a R9 (404), cae a
+ * `listHabitsExport` como antes (límite 10/min).
+ */
+export async function listHabits(
+	config: LumbreConfig
+): Promise<{ habits: LumbreHabit[]; habitLog: LumbreHabitLogEntry[] }> {
+	let body: unknown;
+	try {
+		body = await request(config, '/api/habits');
+	} catch (err) {
+		if (err instanceof LumbreApiError && err.status === 404) return listHabitsExport(config);
+		throw err;
+	}
+	if (!body || typeof body !== 'object' || !Array.isArray((body as { habits?: unknown }).habits)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/habits.');
 	}
 	const habitLogRaw = (body as { habitLog?: unknown }).habitLog;
 	return {

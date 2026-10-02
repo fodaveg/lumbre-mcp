@@ -836,6 +836,96 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 		expect(text).toContain('- notas:\nLínea uno.\nLínea dos con más detalle.');
 	});
 
+	it('app nueva (R6): list_lists pide notes=length, recibe solo notesLength y pinta el marcador', async () => {
+		const SECRET = 'TEXTO-QUE-NO-DEBE-VIAJAR';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				lists: [
+					{ id: LIST_ID, name: 'Con nota', taskCount: 2, notes: null, notesLength: 43 },
+					{ id: '44444444-4444-4444-8444-444444444444', name: 'Sin nota', taskCount: 0, notes: null, notesLength: null }
+				]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_lists', arguments: {} });
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?includeLists=1&notes=length');
+		expect(text).toContain(`Con nota — 2 tareas (listId: ${LIST_ID}) ✎43`);
+		expect(text).not.toMatch(/Sin nota.*✎/);
+		expect(text).not.toContain(SECRET);
+	});
+
+	it('app vieja (ignora notes=length y manda el texto): list_lists mide la longitud en cliente y no vuelca la nota', async () => {
+		const note = 'Una nota de proyecto con algo de sustancia.';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ lists: [{ id: LIST_ID, name: 'Con nota', taskCount: 2, notes: `  ${note}  ` }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_lists', arguments: {} });
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+
+		expect(text).toContain(`Con nota — 2 tareas (listId: ${LIST_ID}) ✎43`);
+		expect(text).not.toContain(note);
+	});
+
+	it('app nueva (R6): get_list pide listId=<id> y conserva el texto exacto de la nota', async () => {
+		const note = 'Línea uno.\n\n  Línea dos con sangría.';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ lists: [{ id: LIST_ID, name: 'Una', taskCount: 1, notes: note }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+
+		expect(fetchSpy.mock.calls[0][0]).toBe(`https://lumbre.test/api/tasks?includeLists=1&listId=${LIST_ID}`);
+		expect(text).toContain(`- notas:\n${note}`);
+	});
+
+	it('app nueva (R6): get_list con id inexistente (404 «Lista no encontrada») da el mismo error de siempre', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ message: 'Lista no encontrada' }), {
+				status: 404,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		expect(result.isError).toBe(true);
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+		expect(text).toContain(LIST_ID);
+		expect(text).toMatch(/no está entre los proyectos\/áreas/);
+	});
+
+	it('app vieja: get_list ignora el listId del servidor y filtra por id en cliente', async () => {
+		const OTRA = '55555555-5555-4555-8555-555555555555';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				lists: [
+					{ id: OTRA, name: 'Otra', taskCount: 9, notes: 'no soy yo' },
+					{ id: LIST_ID, name: 'Mía', taskCount: 1, notes: 'la nota mía' }
+				]
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		const text = ((result as { content: { text: string }[] }).content[0]).text;
+
+		expect(text).toContain('- nombre: Mía');
+		expect(text).toContain('la nota mía');
+		expect(text).not.toContain('no soy yo');
+	});
+
 	it('get_list da error claro si el listId no existe', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ lists: [] }));
 		vi.stubGlobal('fetch', fetchSpy);
@@ -3213,7 +3303,42 @@ describe('list_habits — lectura vía GET /api/export (MC6)', () => {
 		tasks: []
 	};
 
-	it('pide GET /api/export con el mismo Bearer que list_tasks, y solo los vivos por defecto', async () => {
+	it('app anterior a R9 (GET /api/habits da 404): cae a GET /api/export y lista igual', async () => {
+		const fetchSpy = vi.fn().mockImplementation(async (url: string) =>
+			url.endsWith('/api/habits')
+				? new Response(JSON.stringify({ message: 'Not found' }), {
+						status: 404,
+						headers: { 'content-type': 'application/json' }
+					})
+				: jsonResponse(EXPORT_BODY)
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: {} });
+
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy.mock.calls.map((c) => c[0])).toEqual([
+			'https://lumbre.test/api/habits',
+			'https://lumbre.test/api/export'
+		]);
+		expect(resultText(result)).toContain('Ejercicio (cadencia)');
+	});
+
+	it('un error distinto de 404 en /api/habits NO cae al export', async () => {
+		const fetchSpy = vi
+			.fn()
+			.mockResolvedValue(new Response('boom', { status: 500, headers: { 'content-type': 'text/plain' } }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'list_habits', arguments: {} });
+
+		expect(result.isError).toBe(true);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('pide GET /api/habits con el mismo Bearer que list_tasks, y solo los vivos por defecto', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(EXPORT_BODY));
 		vi.stubGlobal('fetch', fetchSpy);
 		const client = await buildClient();
@@ -3222,7 +3347,7 @@ describe('list_habits — lectura vía GET /api/export (MC6)', () => {
 
 		expect(result.isError).not.toBe(true);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
-		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/export');
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/habits');
 		expect(fetchSpy.mock.calls[0][1]).toMatchObject({
 			headers: { authorization: `Bearer ${TEST_CONFIG.token}` }
 		});

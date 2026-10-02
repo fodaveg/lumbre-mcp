@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { getListLinks, linkListNote, listLists, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
+import { getListById, getListLinks, linkListNote, listLists, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, textResult } from './shared.js';
 const listNoteTargetInputSchema = {
@@ -27,7 +27,7 @@ export function registerListTools(server, ctx) {
         inputSchema: {}
     }, async () => {
         try {
-            const lists = await listLists(ctx.config);
+            const lists = await listLists(ctx.config, { notes: 'length' });
             return textResult(formatListSummaries(lists));
         }
         catch (err) {
@@ -61,8 +61,7 @@ export function registerListTools(server, ctx) {
         }
     }, async (input) => {
         try {
-            const lists = await listLists(ctx.config);
-            const list = lists.find((l) => l.id === input.listId);
+            const list = await getListById(ctx.config, input.listId);
             if (!list)
                 return errorResult(listNotFoundError(input.listId));
             return textResult(formatListDetail(list));
