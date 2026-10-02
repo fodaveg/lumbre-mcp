@@ -545,7 +545,9 @@ async function runOpsBatch(
 
 	const idsToCheck = collectExistenceCheckIds(validated);
 	const existing: Map<string, LumbreTask> =
-		idsToCheck.length > 0 ? await findTasksByIds(ctx.config, idsToCheck) : new Map();
+		// `notesQuery: 'none'` (R2 del audit de rendimiento): la existencia y la
+		// validación local solo leen metadatos, nunca el texto de la nota.
+		idsToCheck.length > 0 ? await findTasksByIds(ctx.config, idsToCheck, { notesQuery: 'none' }) : new Map();
 	// Cuatro ops aplican (o pueden aplicar) sobre una tarea ARCHIVADA, que
 	// `findTasksByIds` normal (arriba) no ve: `update` con `recurrence: null`
 	// (apagar una semilla que sigue generando, ver `clearArchivedSeedRecurrence`
@@ -575,6 +577,7 @@ async function runOpsBatch(
 	}
 	if (archivedLookupIds.length > 0) {
 		const archived = await findTasksByIds(ctx.config, [...new Set(archivedLookupIds)], {
+			notesQuery: 'none',
 			includeArchived: true
 		});
 		for (const [id, task] of archived) existing.set(id, task);
@@ -587,7 +590,7 @@ async function runOpsBatch(
 	const seedIds = collectSeriesSeedIds(validated, existing);
 	const seeds: Map<string, LumbreTask> =
 		seedIds.length > 0
-			? await findTasksByIds(ctx.config, seedIds, { includeArchived: true })
+			? await findTasksByIds(ctx.config, seedIds, { includeArchived: true, notesQuery: 'none' })
 			: new Map();
 	const built = buildBatchFromOps(validated, seeds.size > 0 ? new Map([...seeds, ...existing]) : existing);
 	// `create_list` no tiene validación local NI de existencia hoy (no

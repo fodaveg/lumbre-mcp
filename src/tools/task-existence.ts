@@ -42,7 +42,9 @@ export async function requireTaskExists(ctx: ToolCtx, taskId: string, opts: Subt
 		assertTaskUsable(cached, taskId, opts);
 		return;
 	}
-	const task = await findTaskById(ctx.config, taskId);
+	// `notes=none`: la existencia no lee la nota (R2 del audit de rendimiento).
+	// Lo que entra en `taskCache` solo lo lee `assertTaskUsable` (`parentId`).
+	const task = await findTaskById(ctx.config, taskId, { notesQuery: 'none' });
 	if (task) ctx.taskCache.set(task);
 	assertTaskUsable(task, taskId, opts);
 }

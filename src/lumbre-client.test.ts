@@ -791,6 +791,19 @@ describe('includeArchived — contrato GET /api/tasks', () => {
 			'https://lumbre.test/api/tasks?id=task-1&includeArchived=true'
 		);
 	});
+
+	it('findTaskById reenvía `notes=` cuando se pide (la existencia no necesita la nota)', async () => {
+		const fetchSpy = vi.fn().mockImplementation(() =>
+			Promise.resolve(
+				new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+			)
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		await findTaskById(config, 'task-1', { notesQuery: 'none' });
+
+		expect(fetchSpy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?id=task-1&notes=none');
+	});
 });
 
 describe('runBatch', () => {

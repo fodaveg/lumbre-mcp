@@ -153,23 +153,28 @@ export async function resolveRefs(
 	resolution.refListIds = listIds;
 	if (taskIds.length === 0 && listIds.length === 0) return resolution;
 
-	if (taskIds.length > 0) {
+	// Las dos ramas son independientes: se lanzan a la vez (R3 del audit de
+	// rendimiento) y cada una captura su propio fallo, así que una caída de la
+	// una no tumba la otra.
+	const taskBranch = async (): Promise<void> => {
+		if (taskIds.length === 0) return;
 		// Solo uuids y solo hasta el tope del endpoint: un id con otra forma o de
 		// más devolvería 400 y dejaría sin resolver TODO el lote.
 		const askable = taskIds.filter((id) => UUID_RE.test(id)).slice(0, MAX_REF_IDS);
-		if (askable.length > 0) {
-			try {
-				resolution.tasks = await findTasksByIds(config, askable, {
-					includeArchived: opts.includeArchived
-				});
-				for (const id of askable) resolution.checkedTasks.add(id);
-			} catch {
-				// Best-effort: sin comprobar → «sin resolver», nunca «rota».
-			}
+		if (askable.length === 0) return;
+		try {
+			// `notes=length`: solo se pinta el marcador `✎N`, nunca el texto.
+			resolution.tasks = await findTasksByIds(config, askable, {
+				includeArchived: opts.includeArchived,
+				notesQuery: 'length'
+			});
+			for (const id of askable) resolution.checkedTasks.add(id);
+		} catch {
+			// Best-effort: sin comprobar → «sin resolver», nunca «rota».
 		}
-	}
-
-	if (listIds.length > 0) {
+	};
+	const listBranch = async (): Promise<void> => {
+		if (listIds.length === 0) return;
 		try {
 			const lists = await listLists(config);
 			for (const l of lists) {
@@ -183,7 +188,8 @@ export async function resolveRefs(
 		} catch {
 			// Best-effort — ver arriba.
 		}
-	}
+	};
+	await Promise.all([taskBranch(), listBranch()]);
 
 	return resolution;
 }
@@ -200,9 +206,13 @@ function taskStateLabel(t: LumbreTask): string {
  *  el dato con el que se decide si vale la pena traérsela con `get_task`. El
  *  texto de la nota NUNCA se vuelca aquí (ver la cabecera del módulo). */
 function noteHint(t: LumbreTask): string {
-	const trimmed = t.notes?.trim() ?? '';
-	if (trimmed === '') return '';
-	return ` ${formatNoteMarker(trimmed.length, t.notesUpdatedAt ?? null)}`;
+	// Servidor NUEVO (pedimos `notes=length`): la longitud viene en `notesLength`
+	// y `notes` es null. Servidor VIEJO (ignora `notes=length`): manda `notes`
+	// enteras y no hay propiedad `notesLength` — se mide el texto como antes.
+	const length =
+		typeof t.notesLength === 'number' ? t.notesLength : (t.notes?.trim().length ?? 0);
+	if (length === 0) return '';
+	return ` ${formatNoteMarker(length, t.notesUpdatedAt ?? null)}`;
 }
 
 function tagHint(t: LumbreTask): string {

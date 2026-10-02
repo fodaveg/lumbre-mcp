@@ -117,7 +117,7 @@ describe('resolveRefs — coste en peticiones', () => {
 		const spy = mockFetchSequence([[task({ id: ID_A }), task({ id: ID_B, content: 'B' })]]);
 		await resolveRefs(config, [`[[task:${ID_A}|x]] [[task:${ID_B}|y]] [[task:${ID_A}|x]]`]);
 		expect(spy).toHaveBeenCalledTimes(1);
-		expect(spy.mock.calls[0][0]).toBe(`https://lumbre.test/api/tasks?ids=${ID_A}%2C${ID_B}`);
+		expect(spy.mock.calls[0][0]).toBe(`https://lumbre.test/api/tasks?ids=${ID_A}%2C${ID_B}&notes=length`);
 	});
 
 	it('includeArchived se propaga a `?ids=` para no declarar rota una referencia archivada', async () => {
@@ -132,7 +132,7 @@ describe('resolveRefs — coste en peticiones', () => {
 		});
 
 		expect(spy.mock.calls[0][0]).toBe(
-			`https://lumbre.test/api/tasks?ids=${ID_B}&includeArchived=true`
+			`https://lumbre.test/api/tasks?ids=${ID_B}&notes=length&includeArchived=true`
 		);
 		expect(renderRefs(`[[task:${ID_B}|Etiqueta vieja]]`, resolution)).toBe(
 			`→tarea[pendiente] "Dependencia archivada ACTUAL" id:${ID_B}`
@@ -163,6 +163,45 @@ describe('resolveRefs — coste en peticiones', () => {
 		expect(renderRefs(`[[list:${LIST_ID}|Nombre viejo]]`, resolution)).toBe(
 			`→proyecto/área "Proyecto ACTUAL" #propio,heredados:#heredado id:${LIST_ID}`
 		);
+	});
+
+	it('el marcador ✎N sale de `notesLength` (servidor nuevo) o del texto (servidor viejo)', async () => {
+		const withNote = '2026-07-20T09:00:00.000Z';
+		mockFetchSequence([
+			[task({ id: ID_A, notes: null, notesLength: 42, notesUpdatedAt: withNote })]
+		]);
+		const fresh = await resolveRefs(config, [`[[task:${ID_A}|x]]`]);
+		expect(renderRefs(`[[task:${ID_A}|x]]`, fresh)).toContain('✎42');
+
+		mockFetchSequence([[task({ id: ID_A, notes: 'nota entera', notesUpdatedAt: withNote })]]);
+		const legacy = await resolveRefs(config, [`[[task:${ID_A}|x]]`]);
+		expect(renderRefs(`[[task:${ID_A}|x]]`, legacy)).toContain('✎11');
+	});
+
+	it('tareas y listas se piden a la vez y el fallo de una rama no tumba la otra', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		const spy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('includeLists=1')) {
+				await gate;
+				return new Response(JSON.stringify({ lists: [{ id: LIST_ID, name: 'Proyecto', taskCount: 1 }] }), {
+					status: 200,
+					headers: { 'content-type': 'application/json' }
+				});
+			}
+			return new Response('boom', { status: 500 });
+		});
+		vi.stubGlobal('fetch', spy);
+
+		const pending = resolveRefs(config, [`[[task:${ID_A}|x]] [[list:${LIST_ID}|y]]`]);
+		// Con la rama de listas colgada, la de tareas ya ha salido a la red.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(spy).toHaveBeenCalledTimes(2);
+		release();
+		const resolution = await pending;
+
+		expect(resolution.checkedTasks.size).toBe(0); // la de tareas falló: sin comprobar
+		expect(resolution.lists.get(LIST_ID)).toBe('Proyecto'); // la de listas sigue
 	});
 
 	it('solo referencias a listas: NO se pide `?ids=`', async () => {
@@ -196,7 +235,7 @@ describe('resolveRefs — coste en peticiones', () => {
 	it('un id que no es uuid no se manda (un solo elemento inválido daría 400 para TODO el lote)', async () => {
 		const spy = mockFetchSequence([[task({ id: ID_A })]]);
 		const resolution = await resolveRefs(config, [`[[task:${ID_A}|ok]] [[task:no-es-uuid|raro]]`]);
-		expect(spy.mock.calls[0][0]).toBe(`https://lumbre.test/api/tasks?ids=${ID_A}`);
+		expect(spy.mock.calls[0][0]).toBe(`https://lumbre.test/api/tasks?ids=${ID_A}&notes=length`);
 		expect(renderRefs(`[[task:no-es-uuid|raro]]`, resolution)).toBe('→tarea[sin resolver] id:no-es-uuid');
 	});
 

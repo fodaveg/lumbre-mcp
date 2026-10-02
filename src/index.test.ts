@@ -568,7 +568,7 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		};
 		const fetchSpy = vi.fn(async (url: string | URL) => {
 			const value = String(url);
-			if (value.includes(`ids=${REFERENCED_ID}&includeArchived=true`)) return jsonResponse([seed]);
+			if (value.includes(`ids=${REFERENCED_ID}&notes=none&includeArchived=true`)) return jsonResponse([seed]);
 			if (value.includes(`ids=${TASK_ID}`)) return jsonResponse([occurrence]);
 			if (value.endsWith('/api/batch')) {
 				return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true }] });
@@ -639,7 +639,7 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		);
 		expect(fetchSpy.mock.calls.map((call) => String(call[0]))).toEqual([
 			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`,
-			`https://lumbre.test/api/tasks?ids=${TASK_ID}`
+			`https://lumbre.test/api/tasks?ids=${TASK_ID}&notes=none`
 		]);
 	});
 
@@ -681,7 +681,7 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		expect(result.isError).not.toBe(true);
 		expect(fetchSpy.mock.calls.map((call) => String(call[0]))).toEqual([
 			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`,
-			`https://lumbre.test/api/tasks?ids=${REFERENCED_ID}&includeArchived=true`
+			`https://lumbre.test/api/tasks?ids=${REFERENCED_ID}&notes=length&includeArchived=true`
 		]);
 		expect(text).toContain(`→tarea[hecha] "Dependencia archivada ACTUAL" id:${REFERENCED_ID}`);
 		expect(text).not.toContain('→tarea[ROTA]');

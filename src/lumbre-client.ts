@@ -710,9 +710,10 @@ export async function unlinkListNote(
 export async function findTaskById(
 	config: LumbreConfig,
 	taskId: string,
-	opts: { includeArchived?: boolean } = {}
+	opts: { includeArchived?: boolean; notesQuery?: 'full' | 'length' | 'none' } = {}
 ): Promise<LumbreTask | undefined> {
 	const params = new URLSearchParams({ id: taskId });
+	if (opts.notesQuery) params.set('notes', opts.notesQuery);
 	if (opts.includeArchived) params.set('includeArchived', 'true');
 	const body = await request(config, `/api/tasks?${params.toString()}`);
 	if (!Array.isArray(body)) {
