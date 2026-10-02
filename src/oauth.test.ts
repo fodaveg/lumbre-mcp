@@ -1419,6 +1419,32 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
 	});
 
+	it('resolveAccessToken no clona el store en cada petición (R10) y no contamina la caché', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const tokens = await exchangeCode(baseUrl, code);
+		const access = String(tokens.access_token);
+		expect(await oauth.resolveAccessToken(access)).toBe(UPSTREAM_TOKEN);
+
+		const cloneSpy = vi.spyOn(globalThis, 'structuredClone');
+		try {
+			for (let i = 0; i < 5; i++) expect(await oauth.resolveAccessToken(access)).toBe(UPSTREAM_TOKEN);
+			expect(cloneSpy).not.toHaveBeenCalled();
+		} finally {
+			cloneSpy.mockRestore();
+		}
+
+		// Un escritor sigue trabajando sobre su copia: revocar se ve en el acto.
+		expect((await fetch(`${baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: access, client_id: CLIENT_ID })
+		})).status).toBe(200);
+		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
+	});
+
 	it('una lectura en vuelo NO pisa una escritura que termina antes (caché por generación)', async () => {
 		/**
 		 * La carrera: `ensureReady` lanza su lectura del disco, y mientras esa
