@@ -194,7 +194,10 @@ en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
   `MAX_SUBTASKS`/`MAX_SUBTASK_LEN`; el conector los rechaza en voz alta).
   Un campo desconocido es un error, no se descarta en
   silencio.
-- `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura). Acota
+- `list_tasks` — lee tus tareas (vía `GET /api/tasks`, solo lectura, con
+  `limit=500` SIEMPRE: antes no mandaba límite y la app cortaba en 200 sin
+  avisar; si llegan exactamente 500, la cabecera añade «⚠ resultado cortado en
+  500: acota con list, section o scope»). Acota
   por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
   fecha), `overdue` o `all`; puede incluir completadas con `includeDone`.
   `includeArchived: true` amplía el mismo filtro a tareas archivadas — se
@@ -229,7 +232,8 @@ en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
   `${XDG_STATE_HOME:-~/.local/state}/lumbre-mcp/notes-seen.json` (conector
   stdio local; el transporte HTTP remoto usa un fichero POR CUENTA,
   `notes-seen-<id>.json`, `<id>` derivado del token y nunca la credencial en
-  sí — dos cuentas nunca comparten huella), comparación EXACTA, sin ventana—,
+  sí — dos cuentas nunca comparten huella; los ficheros de cuentas inactivas
+  se podan como mucho cada 10 min), comparación EXACTA, sin ventana—,
   o si se tocó dentro de `notesRecentHours`, default 24h,
   cuando aún no hay huella —bootstrap, solo la 1ª vez que el MCP ve esa
   tarea—) o como marcador `✎N ↻DDmmm` con su tamaño en chars Y la fecha de la
@@ -250,10 +254,12 @@ en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
   es una consulta de precisión APARTE, SIN estado y con exclusividad de
   criterio: ignora `notes`, `@done`/`#done` y la huella local por
   completo — íntegra SOLO si `notesUpdatedAt` es igual o posterior a esa
-  fecha, marcador el resto (incluida una tarea `@done` con nota vieja); la
+  fecha, marcador el resto (incluida una tarea `@done` con nota vieja; va en
+  las mismas dos fases que `'auto'`, así que solo baja el texto de las notas
+  editadas desde esa fecha); la
   cabecera lo declara (`tocadas desde 2026-07-20`). Úsalo para "qué ha
   cambiado desde X", no para lectura normal (para eso, el default `'auto'`).
-  Internamente, `'auto'` pide las notas EN DOS FASES (perf, 2026-08-25 —
+  Internamente, `'auto'` (y `notesSince`) piden las notas EN DOS FASES (perf, 2026-08-25 —
   medido contra datos reales: de un `scope=all` de 542 KB, 307 KB —56,6%—
   eran texto de notas que la mayoría de las veces se tiraban en local): fase 1,
   `GET /api/tasks?notes=length` (cada tarea trae `notesLength` en vez del
@@ -338,8 +344,11 @@ en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
 - `read_attachment({ attachment_id })` — descarga los BYTES de un adjunto de
   una tarea (vía `GET /api/attachments/:id`, sácalo del campo `attachments`
   de `list_tasks`/`get_task`). Si es una imagen, se devuelve para verla
-  directamente; para cualquier otro tipo (PDF, etc.) solo trae su metadata —
-  no hay forma de leer su contenido con esta tool.
+  directamente (hasta 3,5 MiB; una imagen mayor devuelve texto con tipo,
+  tamaño y motivo, sin descargarla); para cualquier otro tipo (PDF, etc.) NO
+  se descarga: devuelve tipo y tamaño desde `content-length` (o «tamaño
+  desconocido») — no hay forma de leer su contenido con esta tool. El tope de
+  25 MiB es solo el de la SUBIDA.
 - `add_attachment({ taskId, file_path?, content_base64?, filename? })` — sube
   un fichero y lo deja adjunto y **enlazado** a una tarea (vía
   `POST /api/attachments?taskId=`). `taskId` puede ser el de una
@@ -433,8 +442,10 @@ viejo — y una referencia rota era **indistinguible** de una viva. Desde
   nota referenciada **no** se vuelca en el listado (sería recursivo, dispara el
   tamaño de la respuesta y hay ciclos posibles: A→B y B→A).
 - Coste: **cero** peticiones extra si el lote no tiene referencias; UNA
-  (`GET /api/tasks?ids=`, con todos los ids de golpe, tope 200) si las tiene; y
-  una segunda (`?includeLists=1`) solo si además hay referencias a proyectos o áreas. Nunca
+  (`GET /api/tasks?ids=…&notes=length`, con todos los ids de golpe, tope 200: solo
+  hace falta el tamaño de la nota para el marcador) si las tiene; y una segunda
+  (`?includeLists=1`) solo si además hay referencias a proyectos o áreas, en
+  PARALELO con la primera. Nunca
   una petición por referencia. Si esa llamada falla, la referencia sale como
   `sin resolver` (nunca como rota) y el listado se devuelve igual.
 - La cabecera del listado resume lo que hay (`refs: 2 vivas · 1 con nota ✎ …`).
@@ -520,7 +531,8 @@ documento se conserva como referencia del porqué, y nombra las tools sueltas
 de entonces).
 
 Todas VALIDAN antes de encolar que el `taskId` EXISTE entre las tareas
-visibles del usuario (una llamada extra a `GET /api/tasks`) y lo informan como
+visibles del usuario (una llamada extra a `GET /api/tasks`, con `notes=none`
+porque la existencia no lee la nota) y lo informan como
 fallo de ESA op si no, sin llegar a encolarla (si se APLICÓ lo dice después
 `materialization`, ver arriba). Antes de este chequeo, un `taskId` mal transcrito se encolaba igual
 y la mutación se perdía en silencio al drenar (`/api/mutations` no valida
@@ -1036,6 +1048,12 @@ LUMBRE_TOKEN=tu-token node dist/index.js
 (no imprime nada por stdout salvo el protocolo MCP; los errores de arranque
 van a stderr).
 
+## Timeouts
+
+Cada petición a la app espera como mucho 30 s, y la subida y la descarga de
+adjuntos 120 s; pasado ese tiempo la tool devuelve «Lumbre no respondió en N
+s.» en vez de colgarse.
+
 ## Transporte HTTP remoto (`mcp.lumbre.pro`)
 
 Además del stdio de arriba (un proceso local por cliente, token fijo por
@@ -1122,7 +1140,7 @@ con su cuenta escrita en el código):
 | Intentos FALLIDOS de `/mcp` | 30 por minuto e IP (429) | Solo cuentan los que acaban en 401. Un cliente real recibe UNO, el de descubrimiento; las ráfagas de decenas de llamadas autenticadas no gastan nada |
 | `/authorize` | 30/min por IP, 10/min por `client_id`, 60/min global (429) | Cada `/authorize` válido crea un registro real en `app.lumbre.pro`. El uso real son unas pocas autorizaciones a la hora |
 | Formulario de `/token` y `/revoke` | 16 KiB (413) | Un `grant_type=refresh_token` completo no llega a 1 KiB |
-| Descarga de un adjunto | 25 MiB | El mismo tope AUTORITATIVO que al subir: si nada puede subir más, nada legítimo baja más |
+| Descarga de un adjunto | 3,5 MiB (imagen) | `read_attachment` solo descarga imágenes y hasta ese tope (un base64 mayor no cabe en el contexto); el de 25 MiB es solo el de la SUBIDA |
 
 Al pasarse del tope de cuerpo la conexión se corta, pero no de golpe: se deja
 de procesar y se drena unos segundos para que el 413 llegue entero (si se

@@ -183,7 +183,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 				'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
 				'`notes` decide qué notas trae cada tarea (criterio completo en ese campo; ' +
 				'la cabecera avisa de las no leídas). ' +
-				'`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha.',
+				'`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha. ' +
+				'Máx. 500 tareas; la cabecera avisa del corte.',
 
 			inputSchema: {
 				scope: z

@@ -84,7 +84,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 			description:
 				'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
 				'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
-				'devuelve solo su metadata — no hay forma de leer su contenido con esta tool.',
+				'devuelve solo su metadata, sin descargarlo. Imágenes hasta 3,5 MiB.',
 			inputSchema: {
 				attachment_id: z
 					.string()
