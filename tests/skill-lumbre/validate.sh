@@ -55,8 +55,10 @@ node --check "$test_dir/run-forward-pilot.mjs"
 node --check "$test_dir/test-forward-pilot-verifier.mjs"
 node --check "$test_dir/test-subagent-manager.mjs"
 node --check "$test_dir/validate-evidence.mjs"
+node --check "$test_dir/validate-tool-names.mjs"
 node --check "$test_dir/verify-forward-pilot.mjs"
 node "$test_dir/validate-evidence.mjs"
+node "$test_dir/validate-tool-names.mjs"
 
 if [ "$mode" = full ] && [ "$pilot_available" = 1 ]; then
   node "$test_dir/verify-forward-pilot.mjs" \
@@ -70,4 +72,10 @@ if [ "$pilot_available" = 1 ]; then
   node "$test_dir/run-forward-pilot.mjs" --check-candidate
 fi
 
-printf '%s\n' "lumbre skill repository validation: ok"
+if [ "$pilot_available" = 1 ]; then
+  printf '%s\n' "lumbre skill repository validation: ok"
+else
+  # «ok» a secas solo si el piloto se verificó: aquí no se verificó, y el
+  # veredicto lo dice en vez de acreditar una skill que el piloto no cubre.
+  printf '%s\n' "lumbre skill repository validation: ok (sin piloto: evidencia histórica no verificable)"
+fi
