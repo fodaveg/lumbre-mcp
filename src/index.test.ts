@@ -501,7 +501,7 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 		expect(result.isError).not.toBe(true);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(fetchSpy.mock.calls[0][0]).toBe(
-			'https://lumbre.test/api/tasks?scope=all&includeDone=true&includeArchived=true&notes=none'
+			'https://lumbre.test/api/tasks?scope=all&includeDone=true&includeArchived=true&limit=500&notes=none'
 		);
 	});
 
@@ -4240,6 +4240,89 @@ describe('list_tasks({notes:"auto"}) — notas en dos fases (perf, 2026-08-25)',
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		const text = textOf(result as { content: { type: string; text?: string }[] });
 		expect(text).toContain(`✎${MARKER_NOTE_LEN}`);
+	});
+
+	it('notesSince, servidor NUEVO: fase 1 notes=length + fase 2 SOLO con las editadas desde la fecha', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?ids=')) return jsonResponse([doneTask({ notes: FULL_TEXT })]);
+			if (u.includes('/api/tasks?')) {
+				return jsonResponse([
+					doneTask({ notesLength: FULL_TEXT.trim().length, notesUpdatedAt: '2026-09-20T00:00:00.000Z' }),
+					markerTask({ notesLength: MARKER_NOTE_LEN })
+				]);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: { notesSince: '2026-09-01' } });
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+
+		const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
+		expect(urls).toHaveLength(2);
+		const phase1Url = urls.find((u) => !u.includes('ids='))!;
+		const phase2Url = urls.find((u) => u.includes('ids='))!;
+		expect(phase1Url).toContain('notes=length');
+		expect(phase1Url).toContain('limit=500');
+		expect(phase2Url).toContain(`ids=${DONE_ID}`);
+		expect(phase2Url).not.toContain(MARKER_ID);
+		expect(phase2Url).toContain('notes=full');
+		expect(text).toContain(FULL_TEXT.trim());
+		expect(text).toContain(`✎${MARKER_NOTE_LEN}`);
+	});
+
+	it('notesSince, fase 2 fallida: repliegue a MARCADOR con la longitud de la fase 1', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?ids=')) return new Response('boom', { status: 500 });
+			if (u.includes('/api/tasks?')) {
+				return jsonResponse([
+					doneTask({ notesLength: FULL_TEXT.trim().length, notesUpdatedAt: '2026-09-20T00:00:00.000Z' })
+				]);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: { notesSince: '2026-09-01' } });
+		expect(result.isError).not.toBe(true);
+		const text = textOf(result as { content: { type: string; text?: string }[] });
+		expect(text).not.toContain(FULL_TEXT.trim().slice(0, 50));
+		expect(text).toContain(`✎${FULL_TEXT.trim().length}`);
+	});
+
+	it('notesSince, servidor VIEJO (notas enteras sin `notesLength`): UNA petición', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes('/api/tasks?')) {
+				return jsonResponse([doneTask({ notes: FULL_TEXT, notesUpdatedAt: '2026-09-20T00:00:00.000Z' })]);
+			}
+			throw new Error(`fetch no mockeado en este test: ${u}`);
+		});
+		const client = await buildClient(fetchSpy);
+
+		const result = await client.callTool({ name: 'list_tasks', arguments: { notesSince: '2026-09-01' } });
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(textOf(result as { content: { type: string; text?: string }[] })).toContain(FULL_TEXT.trim());
+	});
+
+	it('todas las ramas de list_tasks mandan limit=500 y 500 resultados llevan el aviso de corte', async () => {
+		const many = Array.from({ length: 500 }, (_, i) =>
+			markerTask({ id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, content: `t${i}`, notes: null })
+		);
+		const fetchSpy = vi.fn(async (_url: string | URL) => jsonResponse(many));
+		const client = await buildClient(fetchSpy);
+
+		for (const args of [{ notes: 'none' }, {}, { notes: 'full' }, { notes: 'preview' }]) {
+			fetchSpy.mockClear();
+			const result = await client.callTool({ name: 'list_tasks', arguments: args });
+			const first = String(fetchSpy.mock.calls[0]?.[0]);
+			expect(first).toContain('limit=500');
+			expect(textOf(result as { content: { type: string; text?: string }[] })).toContain(
+				'resultado cortado en 500: acota con list, section o scope'
+			);
+		}
 	});
 
 	it('fase 2 no trae la tarea (borrada entre medias): repliegue a MARCADOR, nunca a medias ni vacía', async () => {

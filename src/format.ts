@@ -13,6 +13,7 @@ import {
 	type AutoNotesResult,
 	type NotesMode
 } from './notes.js';
+import { LIST_TASKS_LIMIT } from './lumbre-client.js';
 import { refCounts, renderRefs, type RefResolution } from './refs.js';
 import { formatTags } from './tag-format.js';
 
@@ -495,7 +496,14 @@ export function formatTaskList(
 	// añadir ruido repetido línea a línea.
 	const legend = listLegend(tasks);
 	const refsLine = refsHeaderLine(opts.refs);
+	// El servidor corta en `LIST_TASKS_LIMIT` tras ordenar y no avisa: con
+	// exactamente esa cuenta puede haber más fuera del resultado.
+	const truncatedLine =
+		tasks.length === LIST_TASKS_LIMIT
+			? `⚠ resultado cortado en ${LIST_TASKS_LIMIT}: acota con list, section o scope`
+			: null;
 	const prefixLines = [
+		...(truncatedLine ? [truncatedLine] : []),
 		...(notesHeaderLine ? [notesHeaderLine] : []),
 		...(refsLine ? [refsLine] : []),
 		...legend

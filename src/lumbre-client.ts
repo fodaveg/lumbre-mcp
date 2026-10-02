@@ -400,6 +400,12 @@ export async function addTask(config: LumbreConfig, input: AddTaskInput): Promis
 	return { notices: readNotices(body) };
 }
 
+/** Tope de `?limit=` de `GET /api/tasks` (`MAX_LIMIT` en el servidor; sin
+ *  `limit` aplica 200 y corta EN SILENCIO tras ordenar). `list_tasks` lo pide
+ *  siempre; si el resultado llega con exactamente esta cuenta, puede haber
+ *  más tareas fuera (ver `formatTaskList`). */
+export const LIST_TASKS_LIMIT = 500;
+
 /** `GET /api/tasks`: lee las tareas del usuario dueño del token. */
 export async function listTasks(config: LumbreConfig, input: ListTasksInput): Promise<LumbreTask[]> {
 	const params = new URLSearchParams();

@@ -742,7 +742,12 @@ export function computeNotesSinceRender(tasks: LumbreTask[], since: Date): AutoN
 	let fullCount = 0;
 	let markerCount = 0;
 	for (const t of withNotes) {
-		const decision = decideNotesSinceRender(t.notes as string, t.notesUpdatedAt, since);
+		// Con `notes=length` (fase 1 de `list_tasks`, servidor NUEVO) no hay
+		// texto: la longitud sale de `notesLength` (`noteLengthOf`).
+		const decision = {
+			...decideNotesSinceRender(t.notes ?? '', t.notesUpdatedAt, since),
+			length: noteLengthOf(t)
+		};
 		perTask.set(t.id, decision);
 		if (decision.kind === 'full') fullCount++;
 		else markerCount++;

@@ -4,6 +4,7 @@ import {
 	addTask,
 	findTaskById,
 	findTasksByIds,
+	LIST_TASKS_LIMIT,
 	listTasks,
 	reservedStatusTagsError,
 	reservedStatusTagsIn,
@@ -265,13 +266,10 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 							)
 						);
 					}
-					// Consulta de precisión, siempre con las notas ENTERAS (sin
-					// `notesQuery`, ver el JSDoc de `computeNotesSinceRender`): no es el
-					// camino que optimiza esta feature, así que se queda con el
-					// comportamiento de siempre.
-					const tasks = await listTasks(ctx.config, input);
-					ctx.taskCache.setAll(tasks);
-					const autoRender = computeNotesSinceRender(tasks, since);
+					// Mismo flujo de dos fases que `auto` (R5 del audit de rendimiento):
+					// fase 1 con `notes=length`, fase 2 solo con las tareas cuya nota se
+					// editó desde `since`; el criterio sigue siendo SOLO la marca.
+					const { list: tasks, autoRender } = await listTasksNotesSinceTwoPhase(input, since);
 					const refs = await resolveRefs(ctx.config, refTexts(tasks, 'auto', autoRender), {
 						includeArchived: input.includeArchived
 					});
@@ -291,7 +289,11 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					// El texto no se usa para nada: una sola petición, ahorro máximo —
 					// un servidor VIEJO ignora `notes=none` y todo sigue funcionando
 					// igual, solo que sin ahorrar.
-					const tasks = await listTasks(ctx.config, { ...input, notesQuery: 'none' });
+					const tasks = await listTasks(ctx.config, {
+						...input,
+						notesQuery: 'none',
+						limit: LIST_TASKS_LIMIT
+					});
 					ctx.taskCache.setAll(tasks);
 					const refs = await resolveRefs(ctx.config, refTexts(tasks, notesMode), {
 						includeArchived: input.includeArchived
@@ -317,7 +319,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 				// 'preview'/'full': notas enteras de siempre, sin optimizar ('full'
 				// las necesita TODAS íntegras, 'preview' las trunca aquí mismo a
 				// partir del texto completo).
-				const tasks = await listTasks(ctx.config, input);
+				const tasks = await listTasks(ctx.config, { ...input, limit: LIST_TASKS_LIMIT });
 				ctx.taskCache.setAll(tasks);
 				if (notesMode === 'full') {
 					// Íntegra en 'full' también cuenta como SURFACEADA — misma huella
@@ -373,7 +375,11 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 	async function listTasksAutoTwoPhase(
 		input: Parameters<typeof listTasks>[1] & { notesRecentHours?: number }
 	): Promise<{ list: LumbreTask[]; autoRender: Awaited<ReturnType<typeof computeAutoNotesRender>> }> {
-		const phase1 = await listTasks(ctx.config, { ...input, notesQuery: 'length' });
+		const phase1 = await listTasks(ctx.config, {
+			...input,
+			notesQuery: 'length',
+			limit: LIST_TASKS_LIMIT
+		});
 		const isNewServer = phase1.some((t) => 'notesLength' in t);
 
 		if (!isNewServer) {
@@ -392,6 +398,49 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			ctx.notesSeenStore
 		);
 
+		const list = await fillFullNotesPhase2(phase1, autoRender, input.includeArchived);
+		ctx.taskCache.setAll(list);
+		return { list, autoRender };
+	}
+
+	/**
+	 * `list_tasks({notesSince})` en dos fases (R5 del audit de rendimiento):
+	 * misma mecánica que `listTasksAutoTwoPhase` (fase 1 `notes=length`,
+	 * detección de servidor viejo, fase 2 `ids=` solo de las íntegras, repliegue
+	 * a marcador), pero la decisión es SOLO la marca (`computeNotesSinceRender`,
+	 * sin huella local ni `@done`): íntegras = notas editadas desde `since`.
+	 */
+	async function listTasksNotesSinceTwoPhase(
+		input: Parameters<typeof listTasks>[1],
+		since: Date
+	): Promise<{ list: LumbreTask[]; autoRender: AutoNotesResult }> {
+		const phase1 = await listTasks(ctx.config, {
+			...input,
+			notesQuery: 'length',
+			limit: LIST_TASKS_LIMIT
+		});
+		const autoRender = computeNotesSinceRender(phase1, since);
+		if (!phase1.some((t) => 'notesLength' in t)) {
+			// Servidor VIEJO: ya mandó las notas enteras, coste CERO de repliegue.
+			ctx.taskCache.setAll(phase1);
+			return { list: phase1, autoRender };
+		}
+		const list = await fillFullNotesPhase2(phase1, autoRender, input.includeArchived);
+		ctx.taskCache.setAll(list);
+		return { list, autoRender };
+	}
+
+	/**
+	 * Fase 2 compartida: trae el texto SOLO de las tareas que `autoRender`
+	 * marcó íntegras y lo pega en la lista. Repliega a marcador (muta
+	 * `autoRender`) las que no lleguen — ver la GARANTÍA en el JSDoc de
+	 * `listTasksAutoTwoPhase`.
+	 */
+	async function fillFullNotesPhase2(
+		phase1: LumbreTask[],
+		autoRender: AutoNotesResult,
+		includeArchived: boolean | undefined
+	): Promise<LumbreTask[]> {
 		const fullIds = phase1
 			.filter((t) => autoRender.perTask.get(t.id)?.kind === 'full')
 			.map((t) => t.id);
@@ -400,7 +449,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			try {
 				fullTasksById = await findTasksByIds(ctx.config, fullIds, {
 					notesQuery: 'full',
-					includeArchived: input.includeArchived
+					includeArchived
 				});
 			} catch {
 				// La fase 2 falló DEL TODO (red, 5xx…): `fullTasksById` se queda
@@ -410,7 +459,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			}
 		}
 
-		const list = phase1.map((t) => {
+		return phase1.map((t) => {
 			const decision = autoRender.perTask.get(t.id);
 			if (decision?.kind !== 'full') return t;
 			const full = fullTasksById.get(t.id);
@@ -426,9 +475,6 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			}
 			return { ...t, notes: full.notes };
 		});
-
-		ctx.taskCache.setAll(list);
-		return { list, autoRender };
 	}
 
 	const getTaskTool = server.registerTool(
