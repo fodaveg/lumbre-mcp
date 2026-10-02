@@ -1398,7 +1398,9 @@ export class OAuthService {
         try {
             const hash = digest(token);
             const now = this.now();
-            const store = await this.loadStore();
+            // Solo lectura: sin clonar el store entero en cada petición (ver
+            // `loadStoreReadOnly`).
+            const store = await this.loadStoreReadOnly();
             const grant = store.grants.find((item) => matchesHash(item.accessHash, hash));
             if (!grant ||
                 grant.provider !== 'lumbre-web' ||
@@ -1585,19 +1587,35 @@ export class OAuthService {
      * devuelve el estado vigente, nunca el viejo.
      */
     async loadStore() {
+        return structuredClone(await this.loadStoreShared());
+    }
+    /**
+     * Lo mismo que `loadStore` pero SIN copia (R10 del audit de rendimiento:
+     * `resolveAccessToken` clonaba el store entero en CADA petición `/mcp`).
+     * Devuelve la referencia de la caché, tipada como solo lectura: el único
+     * llamante es un camino que solo lee (`find` + campos). Es seguro porque
+     * todo escritor pasa por `loadStore` (copia privada) y la caché solo se
+     * SUSTITUYE (`adoptStore`), nunca se muta en sitio: una referencia ya
+     * entregada sigue siendo un estado coherente, a lo sumo anterior a una
+     * escritura posterior. NO usar desde un mutador.
+     */
+    async loadStoreReadOnly() {
+        return this.loadStoreShared();
+    }
+    async loadStoreShared() {
         const cached = this.cachedStore;
         if (cached)
-            return structuredClone(cached);
+            return cached;
         const generation = this.storeGeneration;
         const store = await this.readStore();
         if (generation !== this.storeGeneration) {
             const current = this.cachedStore;
             // Sin caché vigente (alguien la invalidó) se relee, pero tampoco se
             // adopta: quien invalidó manda.
-            return current ? structuredClone(current) : await this.readStore();
+            return current ?? (await this.readStore());
         }
         this.cachedStore = store;
-        return structuredClone(store);
+        return store;
     }
     async readStore() {
         try {

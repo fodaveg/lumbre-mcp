@@ -3,16 +3,16 @@ import { z } from 'zod';
 import { LumbreApiError, listBrlEntries, mutateTask } from '../lumbre-client.js';
 import { errorResult, formatOpShapeError, formatOutcomeReport, OUTCOME_NOTE, textResult } from './shared.js';
 /**
- * Las cuatro tools de BRL (`list_brl_entries` + los tres verbos) son el espejo,
- * para el REGISTRO, de lo que `list_tasks`/`add_task`/`update_task`/
- * `delete_task` son para las tareas. Dos avisos que valen para las cuatro:
+ * Las dos tools de BRL (`list_brl_entries` y `mutate_brl`) son el espejo, para
+ * el REGISTRO, de lo que `list_tasks` y `mutate_tasks` son para las tareas. Dos
+ * avisos que valen para las dos:
  *
  *  - El registro NO son tareas. Una entrada `-`/`=` es un apunte de diario del
  *    día ("he comprado el pan", "igual conviene madrugar"), no algo que hacer:
  *    no se completa, no se reprograma y no sale en `list_tasks`. Si lo que el
  *    usuario quiere es algo que hacer, la tool es `add_task`.
  *  - El add-on puede estar APAGADO en la cuenta; entonces las cuatro fallan con
- *    un error explícito y no se encola nada.
+ *    un error explícito y no se aplica nada.
  *
  * `update_brl_entry`/`delete_brl_entry` necesitan el id de la entrada, y la
  * ÚNICA forma de conseguirlo es `list_brl_entries` (la nota completa en
@@ -31,8 +31,8 @@ const BRL_DATE = 'Día del registro, YYYY-MM-DD';
  * `mutate_tasks` con la suya. `mutateBrlOpSchema` (EXPUESTO, más abajo): un
  * objeto plano con los 5 campos que usan las 3 ops, todos opcionales salvo
  * `op`/`date` (`date` es obligatorio en las 3, así que no gana nada quedando
- * opcional). A diferencia de `mutateTasksOpSchema` (16 ops, 22 campos), aquí
- * el ahorro de aplanar es pequeño — 3 ops con casi los mismos 2-3 campos cada
+ * opcional). A diferencia de `mutateTasksOpSchema` (el plano de las ops de
+ * tarea), aquí el ahorro de aplanar es pequeño — 3 ops con casi los mismos 2-3 campos cada
  * una— así que el peso real de este schema sale de medirlo (ver el test de
  * superficie en `index.test.ts`), no se asume solo por copiar el patrón.
  */
@@ -65,9 +65,7 @@ export const mutateBrlStrictOpSchema = z.discriminatedUnion('op', [
 ]);
 export const mutateBrlOpSchema = z
     .object({
-    op: z
-        .enum(['add', 'update', 'delete'])
-        .describe('Operación a ejecutar — contrato por-op en la description de `ops`'),
+    op: z.string().describe('add, update o delete — contrato por-op en la description de `ops`'),
     date: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -84,7 +82,7 @@ export const mutateBrlOpSchema = z
         .optional()
         .describe('Hora "HH:MM" (24h) — solo add; sin ella, hora del reloj si `date` es hoy')
 })
-    .strict();
+    .passthrough();
 /**
  * Familia «BRL» (add-on experimental): `list_brl_entries`/`mutate_brl`.
  * Extraída de `index.ts` tal cual (tarea de partir el servidor en
@@ -122,6 +120,7 @@ export function registerBrlTools(server, ctx) {
             'es de otro día?). Resuélvelo de nuevo con list_brl_entries. No se ha encolado nada.');
     }
     const listBrlEntriesTool = server.registerTool('list_brl_entries', {
+        annotations: { readOnlyHint: true },
         description: 'Lee el registro (BRL) de un día: entradas `-` (nota) y `=` (pensamiento), con id y hora. ' +
             'Única forma de obtener el id que pide mutate_brl (ops update/delete). No son tareas.',
         inputSchema: {
@@ -158,12 +157,11 @@ export function registerBrlTools(server, ctx) {
      * inválida o `entryId` inexistente) no aborta las siguientes.
      */
     const mutateBrlTool = server.registerTool('mutate_brl', {
-        description: `Vía PREFERENTE (y desde el 2026-08-27, ÚNICA — sustituye a add/update/delete_brl_entry) ` +
-            `para VARIAS entradas del registro (BRL) de golpe: añade, reescribe o borra en una sola ` +
-            `llamada. Contrato por-op en la description de \`ops\`. Éxito PARCIAL: una op inválida no ` +
-            `bloquea las demás — el resultado detalla qué falló por posición y el \`id\` de cada \`add\` ` +
-            `encolado. La op \`delete\` es DELICADA: sin deshacer — confírmala con el usuario antes. ` +
-            `${OUTCOME_NOTE}`,
+        annotations: { destructiveHint: true },
+        description: `Añade, reescribe o borra entradas del registro (BRL), varias de golpe. Contrato ` +
+            `por-op en la description de \`ops\`. Éxito PARCIAL: una op inválida no bloquea las ` +
+            `demás — el resultado detalla qué falló por posición y el \`id\` de cada \`add\` creado. ` +
+            `La op \`delete\`: Sin deshacer: confirma con el usuario antes. ${OUTCOME_NOTE}`,
         inputSchema: {
             ops: z
                 .array(mutateBrlOpSchema)
@@ -245,7 +243,7 @@ export function registerBrlTools(server, ctx) {
         const failureLines = results
             .filter((r) => !r.ok)
             .map((r) => `  [${r.index}] ${String(rawOps[r.index].op)}: ${r.error}`);
-        let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) encoladas.`;
+        let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) aceptadas.`;
         const outcomeReport = formatOutcomeReport(outcomes, notices);
         if (outcomeReport !== '')
             summary += `\n${outcomeReport}`;

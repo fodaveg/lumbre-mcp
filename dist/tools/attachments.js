@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { deleteAttachment, getAttachment, uploadAttachment } from '../lumbre-client.js';
+import { deleteAttachment, getAttachment, MAX_IMAGE_ATTACHMENT_BYTES, uploadAttachment } from '../lumbre-client.js';
 import { decodeBase64Attachment, readLocalAttachment } from '../attachments.js';
 import { requireTaskExists } from './task-existence.js';
 import { errorResult, textResult } from './shared.js';
@@ -64,9 +64,10 @@ const SUBTASK_ATTACHMENTS = { allowSubtask: true };
  */
 export function registerAttachmentTools(server, ctx) {
     const readAttachmentTool = server.registerTool('read_attachment', {
+        annotations: { readOnlyHint: true },
         description: 'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
             'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
-            'devuelve solo su metadata — no hay forma de leer su contenido con esta tool.',
+            'devuelve solo su metadata, sin descargarlo. Imágenes hasta 3,5 MiB.',
         inputSchema: {
             attachment_id: z
                 .string()
@@ -75,25 +76,31 @@ export function registerAttachmentTools(server, ctx) {
         }
     }, async (input) => {
         try {
-            const { contentType, bytes } = await getAttachment(ctx.config, input.attachment_id);
-            if (contentType.startsWith('image/')) {
+            const { contentType, size, bytes, skipped } = await getAttachment(ctx.config, input.attachment_id);
+            if (bytes !== undefined) {
                 return {
                     content: [
                         { type: 'image', data: bytes.toString('base64'), mimeType: contentType }
                     ]
                 };
             }
-            return textResult(`Adjunto ${input.attachment_id}: tipo "${contentType}", ${bytes.length} bytes. No es una ` +
-                'imagen, así que esta tool no puede mostrar su contenido (solo lo descarga en el ' +
-                'servidor MCP; no hay forma de mostrártelo a partir de aquí).');
+            const sizeLabel = size === null ? 'tamaño desconocido' : `${size} bytes`;
+            if (skipped === 'image-too-large') {
+                return textResult(`Adjunto ${input.attachment_id}: imagen "${contentType}", ${sizeLabel}. Supera el tope de ` +
+                    `${MAX_IMAGE_ATTACHMENT_BYTES / (1024 * 1024)} MiB para devolverla como imagen (un base64 ` +
+                    'mayor no cabe como imagen en el contexto del modelo), así que no se ha descargado.');
+            }
+            return textResult(`Adjunto ${input.attachment_id}: tipo "${contentType}", ${sizeLabel}. No es una ` +
+                'imagen, así que esta tool no puede mostrar su contenido (no se ha descargado: ' +
+                'no hay forma de mostrártelo a partir de aquí).');
         }
         catch (err) {
             return errorResult(err);
         }
     });
     const addAttachmentTool = server.registerTool('add_attachment', {
-        description: 'Sube un fichero y lo deja adjunto a una tarea o subtarea (SÍNCRONA, a diferencia de add_task/' +
-            'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
+        annotations: { destructiveHint: false },
+        description: 'Sube un fichero y lo deja adjunto a una tarea o subtarea (al responder ya está enlazado). Acepta EXACTAMENTE una de dos vías — ' +
             '`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
             'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
             'devuelve un error explicativo, nunca intenta leer tu disco. `content_base64` funciona ' +
@@ -172,31 +179,19 @@ export function registerAttachmentTools(server, ctx) {
         }
     });
     const deleteAttachmentTool = server.registerTool('delete_attachment', {
+        annotations: { destructiveHint: true },
         description: 'Elimina un adjunto de Lumbre por su id (ver `attachments` en get_task/list_tasks). ' +
-            'Es una operación DESTRUCTIVA y sin deshacer desde el MCP: úsala solo con autorización ' +
-            'clara. El éxito confirma que el adjunto ya no está disponible para esa cuenta.',
+            'Sin deshacer: confirma con el usuario antes.',
         inputSchema: {
             attachment_id: z
                 .string()
                 .guid()
                 .describe('Id del adjunto que se va a eliminar (ver get_task/list_tasks)')
-        },
-        outputSchema: {
-            deleted: z.literal(true),
-            attachment_id: z.string().guid()
         }
     }, async (input) => {
         try {
             await deleteAttachment(ctx.config, input.attachment_id);
-            return {
-                content: [
-                    {
-                        type: 'text',
-                        text: `Adjunto ${input.attachment_id} eliminado de Lumbre. La operación no se puede deshacer desde el MCP.`
-                    }
-                ],
-                structuredContent: { deleted: true, attachment_id: input.attachment_id }
-            };
+            return textResult(`Adjunto ${input.attachment_id} eliminado de Lumbre. La operación no se puede deshacer desde el MCP.`);
         }
         catch (err) {
             return errorResult(err);

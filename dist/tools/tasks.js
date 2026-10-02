@@ -1,19 +1,9 @@
 import { z } from 'zod';
-import { addTask, findTaskById, findTasksByIds, listTasks, reservedStatusTagsError, reservedStatusTagsIn, taskNotFoundError } from '../lumbre-client.js';
+import { addTask, findTaskById, findTasksByIds, LIST_TASKS_LIMIT, listTasks, reservedStatusTagsError, reservedStatusTagsIn, taskNotFoundError } from '../lumbre-client.js';
 import { formatTaskFull, formatTaskList } from '../format.js';
 import { resolveRefs } from '../refs.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, hasNotes, parseNotesSince, recordNotesSeen } from '../notes.js';
 import { errorResult, formatOutcomeReport, recurrenceSchema, subtasksSchema, tagSchema, textResult } from './shared.js';
-/**
- * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
- * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
- * `.describe()` de ambos campos en `list_tasks`), si no `'auto'` (default
- * nuevo). Función PURA — sin red — para poder testear el alias sin mockear
- * `fetch` (mismo patrón que `mutateTasksOpSchema`/`buildBatchFromOps`).
- */
-export function effectiveNotesMode(input) {
-    return input.notes ?? (input.fullNotes ? 'full' : 'auto');
-}
 /**
  * Alcance EFECTIVO de `list_tasks`, el que va en la cabecera de
  * `formatTaskList` — tiene que ser el mismo default que aplica el SERVIDOR
@@ -62,27 +52,32 @@ export function refTexts(tasks, notesMode, autoRender) {
  */
 export function registerTaskTools(server, ctx) {
     const addTaskTool = server.registerTool('add_task', {
+        annotations: { destructiveHint: false },
         description: 'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
             '"recuérdame", "añade a mi proyecto/área". La respuesta trae los avisos de la app (p. ej. si la ' +
-            'colocó en otro sitio). ' +
+            'colocó en otro sitio) pero NO el id de la tarea: si lo necesitas, usa la op add_task de ' +
+            'mutate_tasks, que sí lo devuelve. ' +
             '`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
         inputSchema: {
-            text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
+            text: z
+                .string()
+                .min(1)
+                .max(2000)
+                .describe('Texto de la tarea. Se guarda TAL CUAL: no interpreta fecha, hora, prioridad, "!"/"!!", ' +
+                '"cada …", $Lista ni #tags; usa esos campos en su lugar'),
             list: z
                 .string()
                 .max(200)
                 .optional()
-                .describe('Nombre del proyecto o área destino (se crea como proyecto si no existe). El texto se ' +
-                'guarda TAL CUAL — no interpreta fecha, hora, prioridad, "!"/"!!", "cada …", $Lista ni ' +
-                '#tags, usa esos campos en su lugar. Con `list` o un `listId` existente, va a esa lista. ' +
-                'Sin `list`/`listId` ni `date`: texto solo aterriza en "hoy"; con priority/deadline/' +
+                .describe('Nombre del proyecto o área destino (se crea como proyecto si no existe). Sin ' +
+                '`list`/`listId` ni `date`: texto solo aterriza en "hoy"; con priority/deadline/' +
                 'subtasks/tags, en la Bandeja de entrada. `recurrence` sin `date` aterriza hoy.'),
             listId: z
                 .string()
                 .guid()
                 .optional()
                 .describe('Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
-                'de list_tasks. Si se omite, se usa `list` por nombre (se crea si no existe).'),
+                'de list_lists.'),
             section: z
                 .string()
                 .max(200)
@@ -126,13 +121,15 @@ export function registerTaskTools(server, ctx) {
         }
     });
     const listTasksTool = server.registerTool('list_tasks', {
+        annotations: { readOnlyHint: true },
         description: 'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
             'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
             'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
             'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
-            '`notes` decide qué notas trae cada tarea (criterio completo en ese campo;' +
-            'GARANTÍA: nunca un texto recortado a medias; la cabecera avisa de las no leídas). ' +
-            '`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha.',
+            '`notes` decide qué notas trae cada tarea (criterio completo en ese campo; ' +
+            'la cabecera avisa de las no leídas). ' +
+            '`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha. ' +
+            'Máx. 500 tareas; la cabecera avisa del corte.',
         inputSchema: {
             scope: z
                 .enum(['today', 'week', 'upcoming', 'inbox', 'someday', 'overdue', 'all'])
@@ -153,8 +150,8 @@ export function registerTaskTools(server, ctx) {
             section: z
                 .string()
                 .optional()
-                .describe('Nombre (case-insensitive) de una sección dentro de `list` a filtrar (Fase B, ' +
-                'proyectos/áreas); combinado con `list`, solo casa una sección de ESE destino'),
+                .describe('Nombre (case-insensitive) de una sección dentro de `list` a filtrar; ' +
+                'combinado con `list`, solo casa una sección de ESE destino'),
             includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
             includeArchived: z
                 .boolean()
@@ -170,13 +167,9 @@ export function registerTaskTools(server, ctx) {
                 '"✎N ↻fecha" con su tamaño y la fecha de la última edición — GARANTÍA: nunca un ' +
                 'recorte a medias. "none": sin notas. "preview": recorte legado a ~240 chars, ' +
                 'colapsado a una línea. "full": todas íntegras y verbatim para TODO el lote ' +
-                '(equivale a fullNotes:true) — útil si vas a reeditar con la op update (que ' +
+                '— útil si vas a reeditar con la op update (que ' +
                 'REEMPLAZA la nota entera). Para una sola tarea concreta, mejor get_task. Se ignora ' +
                 'si mandas `notesSince`.'),
-            fullNotes: z
-                .boolean()
-                .optional()
-                .describe('DEPRECATED, alias de notes:"full" (se ignora si `notes` viene informado).'),
             notesRecentHours: z
                 .number()
                 .positive()
@@ -189,8 +182,8 @@ export function registerTaskTools(server, ctx) {
                 .min(10)
                 .optional()
                 .describe('Consulta de precisión, SIN estado: "YYYY-MM-DD" o ISO completo — íntegra SOLO si la ' +
-                'nota se editó desde esa fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`/' +
-                '`fullNotes`, @done/#done y la huella local por completo (mezclar criterios haría ' +
+                'nota se editó desde esa fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`, ' +
+                '@done/#done y la huella local por completo (mezclar criterios haría ' +
                 'la consulta impredecible): úsalo para "qué ha cambiado desde X", no para lectura ' +
                 'normal.')
         }
@@ -201,13 +194,10 @@ export function registerTaskTools(server, ctx) {
                 if (!since) {
                     return errorResult(new Error(`notesSince inválido: "${input.notesSince}" (usa "YYYY-MM-DD" o ISO 8601 completo).`));
                 }
-                // Consulta de precisión, siempre con las notas ENTERAS (sin
-                // `notesQuery`, ver el JSDoc de `computeNotesSinceRender`): no es el
-                // camino que optimiza esta feature, así que se queda con el
-                // comportamiento de siempre.
-                const tasks = await listTasks(ctx.config, input);
-                ctx.taskCache.setAll(tasks);
-                const autoRender = computeNotesSinceRender(tasks, since);
+                // Mismo flujo de dos fases que `auto` (R5 del audit de rendimiento):
+                // fase 1 con `notes=length`, fase 2 solo con las tareas cuya nota se
+                // editó desde `since`; el criterio sigue siendo SOLO la marca.
+                const { list: tasks, autoRender } = await listTasksNotesSinceTwoPhase(input, since);
                 const refs = await resolveRefs(ctx.config, refTexts(tasks, 'auto', autoRender), {
                     includeArchived: input.includeArchived
                 });
@@ -218,12 +208,16 @@ export function registerTaskTools(server, ctx) {
                     refs
                 }));
             }
-            const notesMode = effectiveNotesMode(input);
+            const notesMode = input.notes ?? 'auto';
             if (notesMode === 'none') {
                 // El texto no se usa para nada: una sola petición, ahorro máximo —
                 // un servidor VIEJO ignora `notes=none` y todo sigue funcionando
                 // igual, solo que sin ahorrar.
-                const tasks = await listTasks(ctx.config, { ...input, notesQuery: 'none' });
+                const tasks = await listTasks(ctx.config, {
+                    ...input,
+                    notesQuery: 'none',
+                    limit: LIST_TASKS_LIMIT
+                });
                 ctx.taskCache.setAll(tasks);
                 const refs = await resolveRefs(ctx.config, refTexts(tasks, notesMode), {
                     includeArchived: input.includeArchived
@@ -245,7 +239,7 @@ export function registerTaskTools(server, ctx) {
             // 'preview'/'full': notas enteras de siempre, sin optimizar ('full'
             // las necesita TODAS íntegras, 'preview' las trunca aquí mismo a
             // partir del texto completo).
-            const tasks = await listTasks(ctx.config, input);
+            const tasks = await listTasks(ctx.config, { ...input, limit: LIST_TASKS_LIMIT });
             ctx.taskCache.setAll(tasks);
             if (notesMode === 'full') {
                 // Íntegra en 'full' también cuenta como SURFACEADA — misma huella
@@ -295,7 +289,11 @@ export function registerTaskTools(server, ctx) {
      *    disfrazada de "sin nota".
      */
     async function listTasksAutoTwoPhase(input) {
-        const phase1 = await listTasks(ctx.config, { ...input, notesQuery: 'length' });
+        const phase1 = await listTasks(ctx.config, {
+            ...input,
+            notesQuery: 'length',
+            limit: LIST_TASKS_LIMIT
+        });
         const isNewServer = phase1.some((t) => 'notesLength' in t);
         if (!isNewServer) {
             ctx.taskCache.setAll(phase1);
@@ -303,6 +301,40 @@ export function registerTaskTools(server, ctx) {
             return { list: phase1, autoRender };
         }
         const autoRender = await computeAutoNotesRender(phase1, { windowHours: input.notesRecentHours }, ctx.notesSeenStore);
+        const list = await fillFullNotesPhase2(phase1, autoRender, input.includeArchived);
+        ctx.taskCache.setAll(list);
+        return { list, autoRender };
+    }
+    /**
+     * `list_tasks({notesSince})` en dos fases (R5 del audit de rendimiento):
+     * misma mecánica que `listTasksAutoTwoPhase` (fase 1 `notes=length`,
+     * detección de servidor viejo, fase 2 `ids=` solo de las íntegras, repliegue
+     * a marcador), pero la decisión es SOLO la marca (`computeNotesSinceRender`,
+     * sin huella local ni `@done`): íntegras = notas editadas desde `since`.
+     */
+    async function listTasksNotesSinceTwoPhase(input, since) {
+        const phase1 = await listTasks(ctx.config, {
+            ...input,
+            notesQuery: 'length',
+            limit: LIST_TASKS_LIMIT
+        });
+        const autoRender = computeNotesSinceRender(phase1, since);
+        if (!phase1.some((t) => 'notesLength' in t)) {
+            // Servidor VIEJO: ya mandó las notas enteras, coste CERO de repliegue.
+            ctx.taskCache.setAll(phase1);
+            return { list: phase1, autoRender };
+        }
+        const list = await fillFullNotesPhase2(phase1, autoRender, input.includeArchived);
+        ctx.taskCache.setAll(list);
+        return { list, autoRender };
+    }
+    /**
+     * Fase 2 compartida: trae el texto SOLO de las tareas que `autoRender`
+     * marcó íntegras y lo pega en la lista. Repliega a marcador (muta
+     * `autoRender`) las que no lleguen — ver la GARANTÍA en el JSDoc de
+     * `listTasksAutoTwoPhase`.
+     */
+    async function fillFullNotesPhase2(phase1, autoRender, includeArchived) {
         const fullIds = phase1
             .filter((t) => autoRender.perTask.get(t.id)?.kind === 'full')
             .map((t) => t.id);
@@ -311,7 +343,7 @@ export function registerTaskTools(server, ctx) {
             try {
                 fullTasksById = await findTasksByIds(ctx.config, fullIds, {
                     notesQuery: 'full',
-                    includeArchived: input.includeArchived
+                    includeArchived
                 });
             }
             catch {
@@ -321,7 +353,7 @@ export function registerTaskTools(server, ctx) {
                 // listado entero por un fallo que solo afecta al TEXTO de la nota.
             }
         }
-        const list = phase1.map((t) => {
+        return phase1.map((t) => {
             const decision = autoRender.perTask.get(t.id);
             if (decision?.kind !== 'full')
                 return t;
@@ -338,10 +370,9 @@ export function registerTaskTools(server, ctx) {
             }
             return { ...t, notes: full.notes };
         });
-        ctx.taskCache.setAll(list);
-        return { list, autoRender };
     }
     const getTaskTool = server.registerTool('get_task', {
+        annotations: { readOnlyHint: true },
         description: 'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
             'proyecto o área/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
             'obtener el id de una subtarea. `includeArchived` permite recuperarla si está archivada. ' +
