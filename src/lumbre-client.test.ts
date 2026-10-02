@@ -2265,6 +2265,35 @@ describe('timeouts de red (R4)', () => {
 		await expect(pending).rejects.toBeInstanceOf(LumbreApiError);
 	});
 
+	it('un GET dice solo que no respondió; un POST y la subida avisan de que la escritura pudo aplicarse', async () => {
+		const uncertain = 'La escritura pudo aplicarse: compruébalo antes de reintentar.';
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', hangingFetch());
+
+		const get = listTasks(config, {}).catch((e: Error) => e.message);
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(await get).toBe('Lumbre no respondió en 30 s.');
+
+		const post = addTask(config, { text: 'x' } as Parameters<typeof addTask>[1]).catch((e: Error) => e.message);
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(await post).toBe(`Lumbre no respondió en 30 s. ${uncertain}`);
+
+		const upload = uploadAttachment(config, {
+			taskId: 't',
+			filename: 'a.txt',
+			mime: 'text/plain',
+			bytes: Buffer.from('x')
+		}).catch((e: Error) => e.message);
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(await upload).toBe(`Lumbre no respondió en 120 s. ${uncertain}`);
+
+		const download = getAttachment(config, '33333333-3333-4333-8333-333333333333').catch(
+			(e: Error) => e.message
+		);
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(await download).toBe('Lumbre no respondió en 120 s.');
+	});
+
 	it('la descarga de un adjunto sin respuesta falla a los 120 s', async () => {
 		vi.useFakeTimers();
 		vi.stubGlobal('fetch', hangingFetch());

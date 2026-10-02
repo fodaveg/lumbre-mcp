@@ -347,11 +347,19 @@ export const ATTACHMENT_TIMEOUT_MS = 120_000;
  * un `fetch` ignora la señal. Temporizador normal (`setTimeout`) y no
  * `AbortSignal.timeout` para poder controlarlo con temporizadores falsos.
  */
-async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withTimeout<T>(
+	ms: number,
+	fn: (signal: AbortSignal) => Promise<T>,
+	isWrite = false
+): Promise<T> {
 	const controller = new AbortController();
 	let timedOut = false;
 	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeoutError = () => new LumbreApiError(`Lumbre no respondió en ${Math.round(ms / 1000)} s.`);
+	const timeoutError = () =>
+		new LumbreApiError(
+			`Lumbre no respondió en ${Math.round(ms / 1000)} s.` +
+				(isWrite ? ' La escritura pudo aplicarse: compruébalo antes de reintentar.' : '')
+		);
 	const expired = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => {
 			timedOut = true;
@@ -373,7 +381,8 @@ async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T
 }
 
 async function request(config: LumbreConfig, path: string, init: RequestInit = {}): Promise<unknown> {
-	return withTimeout(REQUEST_TIMEOUT_MS, (signal) => requestOnce(config, path, init, signal));
+	const isWrite = init.method !== undefined && init.method.toUpperCase() !== 'GET';
+	return withTimeout(REQUEST_TIMEOUT_MS, (signal) => requestOnce(config, path, init, signal), isWrite);
 }
 
 async function requestOnce(
@@ -1263,7 +1272,7 @@ export async function uploadAttachment(
 	config: LumbreConfig,
 	input: { taskId: string; filename: string; mime: string; bytes: Buffer }
 ): Promise<UploadedAttachment> {
-	return withTimeout(ATTACHMENT_TIMEOUT_MS, (signal) => uploadAttachmentOnce(config, input, signal));
+	return withTimeout(ATTACHMENT_TIMEOUT_MS, (signal) => uploadAttachmentOnce(config, input, signal), true);
 }
 
 async function uploadAttachmentOnce(
