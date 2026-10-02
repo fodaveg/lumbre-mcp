@@ -5,7 +5,7 @@ import { formatListDetail, formatListLinks, formatListSummaries } from '../forma
 import { errorResult, textResult, type ToolCtx } from './shared.js';
 
 const listNoteTargetInputSchema = {
-	listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)'),
+	listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)'),
 	url: z
 		.string()
 		.trim()
@@ -27,6 +27,7 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 	const listListsTool = server.registerTool(
 		'list_lists',
 		{
+			annotations: { readOnlyHint: true },
 			description:
 				'Enumera TODOS los proyectos y áreas con su recuento de tareas, incluidos los ' +
 				'vacíos (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacío de ' +
@@ -47,11 +48,12 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 	const getListLinksTool = server.registerTool(
 		'get_list_links',
 		{
+			annotations: { readOnlyHint: true },
 			description:
 				'Lee los vínculos de un proyecto o área por listId (URL, kind y metadata). ' +
 				'No abre el destino. Vacío si no tiene vínculos.',
 			inputSchema: {
-				listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
+				listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)')
 			}
 		},
 		async (input) => {
@@ -67,13 +69,14 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 	const getListTool = server.registerTool(
 		'get_list',
 		{
+			annotations: { readOnlyHint: true },
 			description:
 				'Devuelve el detalle completo de UN proyecto o área por su listId: nombre, tipo (proyecto/área), ' +
 					'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas y la nota ' +
-					'ÍNTEGRA y verbatim — útil antes de reescribirla con mutate_tasks({op:"set_list_notes"}), que la ' +
+					'ÍNTEGRA y verbatim — útil antes de reescribirla con organize({op:"set_list_notes"}), que la ' +
 					'reemplaza entera. Error si el listId no existe.',
 			inputSchema: {
-				listId: z.string().guid().describe('Id del proyecto o área (ver list_lists o list_tasks)')
+				listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)')
 			}
 		},
 		async (input) => {
@@ -91,6 +94,7 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 	const linkListNoteTool = server.registerTool(
 		'link_list_note',
 		{
+			annotations: { destructiveHint: false, idempotentHint: true },
 			description:
 				'Vincula de forma síncrona e idempotente una nota de Obsidian o Hebra con un proyecto o área. ' +
 				'Guarda enlace e identidad de la nota; no lee ni copia su contenido.',
@@ -112,6 +116,7 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 	const unlinkListNoteTool = server.registerTool(
 		'unlink_list_note',
 		{
+			annotations: { destructiveHint: false, idempotentHint: true },
 			description:
 				'Desvincula de forma síncrona e idempotente una nota de Obsidian o Hebra de un proyecto o área. ' +
 				'`removed=false` confirma que el vínculo ya no estaba registrado.',

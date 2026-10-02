@@ -79,6 +79,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 	const readAttachmentTool = server.registerTool(
 		'read_attachment',
 		{
+			annotations: { readOnlyHint: true },
 			description:
 				'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
 				'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
@@ -114,9 +115,9 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 	const addAttachmentTool = server.registerTool(
 		'add_attachment',
 		{
+			annotations: { destructiveHint: false },
 			description:
-				'Sube un fichero y lo deja adjunto a una tarea o subtarea (SÍNCRONA, a diferencia de add_task/' +
-				'mutate_tasks: ya está enlazado al responder). Acepta EXACTAMENTE una de dos vías — ' +
+				'Sube un fichero y lo deja adjunto a una tarea o subtarea (al responder ya está enlazado). Acepta EXACTAMENTE una de dos vías — ' +
 				'`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
 				'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
 				'devuelve un error explicativo, nunca intenta leer tu disco. `content_base64` funciona ' +
@@ -213,33 +214,23 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 	const deleteAttachmentTool = server.registerTool(
 		'delete_attachment',
 		{
+			annotations: { destructiveHint: true },
 			description:
 				'Elimina un adjunto de Lumbre por su id (ver `attachments` en get_task/list_tasks). ' +
-				'Es una operación DESTRUCTIVA y sin deshacer desde el MCP: úsala solo con autorización ' +
-				'clara. El éxito confirma que el adjunto ya no está disponible para esa cuenta.',
+				'Sin deshacer: confirma con el usuario antes.',
 			inputSchema: {
 				attachment_id: z
 					.string()
 					.guid()
 					.describe('Id del adjunto que se va a eliminar (ver get_task/list_tasks)')
-			},
-			outputSchema: {
-				deleted: z.literal(true),
-				attachment_id: z.string().guid()
 			}
 		},
 		async (input) => {
 			try {
 				await deleteAttachment(ctx.config, input.attachment_id);
-				return {
-					content: [
-						{
-							type: 'text' as const,
-							text: `Adjunto ${input.attachment_id} eliminado de Lumbre. La operación no se puede deshacer desde el MCP.`
-						}
-					],
-					structuredContent: { deleted: true as const, attachment_id: input.attachment_id }
-				};
+				return textResult(
+					`Adjunto ${input.attachment_id} eliminado de Lumbre. La operación no se puede deshacer desde el MCP.`
+				);
 			} catch (err) {
 				return errorResult(err);
 			}

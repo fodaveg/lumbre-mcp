@@ -34,17 +34,6 @@ import {
 } from './shared.js';
 
 /**
- * Modo efectivo de `notes` para `list_tasks`: `input.notes` si vino
- * informado, si no `'full'` cuando `fullNotes: true` (alias legado, ver el
- * `.describe()` de ambos campos en `list_tasks`), si no `'auto'` (default
- * nuevo). Función PURA — sin red — para poder testear el alias sin mockear
- * `fetch` (mismo patrón que `mutateTasksOpSchema`/`buildBatchFromOps`).
- */
-export function effectiveNotesMode(input: { notes?: NotesMode; fullNotes?: boolean }): NotesMode {
-	return input.notes ?? (input.fullNotes ? 'full' : 'auto');
-}
-
-/**
  * Alcance EFECTIVO de `list_tasks`, el que va en la cabecera de
  * `formatTaskList` — tiene que ser el mismo default que aplica el SERVIDOR
  * (ver el JSDoc de `ListTasksInput.list` en `lumbre-client.ts`: sin `scope`
@@ -98,22 +87,29 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 	const addTaskTool = server.registerTool(
 		'add_task',
 		{
+			annotations: { destructiveHint: false },
 			description:
 				'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
 				'"recuérdame", "añade a mi proyecto/área". La respuesta trae los avisos de la app (p. ej. si la ' +
-				'colocó en otro sitio). ' +
+				'colocó en otro sitio) pero NO el id de la tarea: si lo necesitas, usa la op add_task de ' +
+				'mutate_tasks, que sí lo devuelve. ' +
 				'`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
 			inputSchema: {
-				text: z.string().min(1).max(2000).describe('Texto de la tarea (obligatorio)'),
+				text: z
+					.string()
+					.min(1)
+					.max(2000)
+					.describe(
+						'Texto de la tarea. Se guarda TAL CUAL: no interpreta fecha, hora, prioridad, "!"/"!!", ' +
+							'"cada …", $Lista ni #tags; usa esos campos en su lugar'
+					),
 				list: z
 					.string()
 					.max(200)
 					.optional()
 					.describe(
-						'Nombre del proyecto o área destino (se crea como proyecto si no existe). El texto se ' +
-							'guarda TAL CUAL — no interpreta fecha, hora, prioridad, "!"/"!!", "cada …", $Lista ni ' +
-							'#tags, usa esos campos en su lugar. Con `list` o un `listId` existente, va a esa lista. ' +
-							'Sin `list`/`listId` ni `date`: texto solo aterriza en "hoy"; con priority/deadline/' +
+						'Nombre del proyecto o área destino (se crea como proyecto si no existe). Sin ' +
+							'`list`/`listId` ni `date`: texto solo aterriza en "hoy"; con priority/deadline/' +
 							'subtasks/tags, en la Bandeja de entrada. `recurrence` sin `date` aterriza hoy.'
 					),
 				listId: z
@@ -122,7 +118,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.optional()
 					.describe(
 						'Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
-							'de list_tasks. Si se omite, se usa `list` por nombre (se crea si no existe).'
+							'de list_lists.'
 					),
 				section: z
 					.string()
@@ -178,13 +174,14 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 	const listTasksTool = server.registerTool(
 		'list_tasks',
 		{
+			annotations: { readOnlyHint: true },
 			description:
 				'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
 				'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
 				'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
 				'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
-				'`notes` decide qué notas trae cada tarea (criterio completo en ese campo;' +
-				'GARANTÍA: nunca un texto recortado a medias; la cabecera avisa de las no leídas). ' +
+				'`notes` decide qué notas trae cada tarea (criterio completo en ese campo; ' +
+				'la cabecera avisa de las no leídas). ' +
 				'`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha.',
 
 			inputSchema: {
@@ -210,8 +207,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.string()
 					.optional()
 					.describe(
-						'Nombre (case-insensitive) de una sección dentro de `list` a filtrar (Fase B, ' +
-							'proyectos/áreas); combinado con `list`, solo casa una sección de ESE destino'
+						'Nombre (case-insensitive) de una sección dentro de `list` a filtrar; ' +
+							'combinado con `list`, solo casa una sección de ESE destino'
 					),
 				includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
 				includeArchived: z
@@ -231,14 +228,10 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 							'"✎N ↻fecha" con su tamaño y la fecha de la última edición — GARANTÍA: nunca un ' +
 							'recorte a medias. "none": sin notas. "preview": recorte legado a ~240 chars, ' +
 							'colapsado a una línea. "full": todas íntegras y verbatim para TODO el lote ' +
-							'(equivale a fullNotes:true) — útil si vas a reeditar con la op update (que ' +
+							'— útil si vas a reeditar con la op update (que ' +
 							'REEMPLAZA la nota entera). Para una sola tarea concreta, mejor get_task. Se ignora ' +
 							'si mandas `notesSince`.'
 					),
-				fullNotes: z
-					.boolean()
-					.optional()
-					.describe('DEPRECATED, alias de notes:"full" (se ignora si `notes` viene informado).'),
 				notesRecentHours: z
 					.number()
 					.positive()
@@ -254,8 +247,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.optional()
 					.describe(
 						'Consulta de precisión, SIN estado: "YYYY-MM-DD" o ISO completo — íntegra SOLO si la ' +
-							'nota se editó desde esa fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`/' +
-							'`fullNotes`, @done/#done y la huella local por completo (mezclar criterios haría ' +
+							'nota se editó desde esa fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`, ' +
+							'@done/#done y la huella local por completo (mezclar criterios haría ' +
 							'la consulta impredecible): úsalo para "qué ha cambiado desde X", no para lectura ' +
 							'normal.'
 					)
@@ -292,7 +285,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					);
 				}
 
-				const notesMode = effectiveNotesMode(input);
+				const notesMode: NotesMode = input.notes ?? 'auto';
 
 				if (notesMode === 'none') {
 					// El texto no se usa para nada: una sola petición, ahorro máximo —
@@ -441,6 +434,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 	const getTaskTool = server.registerTool(
 		'get_task',
 		{
+			annotations: { readOnlyHint: true },
 			description:
 				'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
 				'proyecto o área/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +

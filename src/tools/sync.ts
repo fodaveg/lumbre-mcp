@@ -56,6 +56,7 @@ export function registerSyncTools(server: McpServer, ctx: ToolCtx) {
 	const refreshSyncTool = server.registerTool(
 		'refresh_sync',
 		{
+			annotations: { destructiveHint: false, idempotentHint: true },
 			description:
 				'Fuerza el flush de sync de Lumbre. NO hace falta llamarla por una mutación hecha con ' +
 				'ESTE MCP: cuando la tool de escritura responde, el servidor ya la ha aplicado y la ' +

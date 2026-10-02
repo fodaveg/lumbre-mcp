@@ -16,10 +16,10 @@ export function registerHabitTools(server: McpServer, ctx: ToolCtx) {
 	const listHabitsTool = server.registerTool(
 		'list_habits',
 		{
+			annotations: { readOnlyHint: true },
 			description:
-				'Enumera tus hábitos (id, nombre, clase, archivado) con sus últimas ocurrencias, vía ' +
-				'GET /api/export — mismo token que list_tasks, pero límite MÁS ESTRICTO (10/min: vuelca la ' +
-				'cuenta entera). Por defecto solo los vivos; `includeArchived` los incluye. Para registrar una ' +
+				'Enumera tus hábitos (id, nombre, clase, archivado) con sus últimas ocurrencias. ' +
+				'Límite MÁS ESTRICTO (10/min: vuelca la cuenta entera). Por defecto solo los vivos; `includeArchived` los incluye. Para registrar una ' +
 				'ocurrencia, usa mutate_tasks({op:"register_habit"}).',
 			inputSchema: {
 				includeArchived: z.boolean().optional().describe('Incluir hábitos archivados; default false')

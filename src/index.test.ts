@@ -27,7 +27,6 @@ let organizeOpSchema: z.ZodTypeAny;
 let organizeStrictOpSchema: z.ZodTypeAny;
 let mutateBrlOpSchema: z.ZodTypeAny;
 let mutateBrlStrictOpSchema: z.ZodTypeAny;
-let effectiveNotesMode: (input: { notes?: NotesMode; fullNotes?: boolean }) => NotesMode;
 let effectiveScopeLabel: (input: { scope?: string; list?: string }) => string;
 let refTexts: (
 	tasks: { id: string; content: string; notes: string | null }[],
@@ -47,7 +46,6 @@ beforeAll(async () => {
 	organizeStrictOpSchema = indexModule.organizeStrictOpSchema;
 	mutateBrlOpSchema = indexModule.mutateBrlOpSchema;
 	mutateBrlStrictOpSchema = indexModule.mutateBrlStrictOpSchema;
-	effectiveNotesMode = indexModule.effectiveNotesMode;
 	effectiveScopeLabel = indexModule.effectiveScopeLabel as typeof effectiveScopeLabel;
 	refTexts = indexModule.refTexts as typeof refTexts;
 
@@ -159,19 +157,52 @@ describe('tools/list — superficie completa', () => {
 		}
 	});
 
-	it('delete_attachment declara destrucción sin deshacer y una salida estructurada', () => {
+	it('delete_attachment declara «sin deshacer» y no tiene `outputSchema` (como las otras 16)', () => {
 		const tool = tools.find((candidate) => candidate.name === 'delete_attachment')!;
-		expect(tool.description).toMatch(/DESTRUCTIVA.*sin deshacer/i);
-		const output = tool.outputSchema as {
-			properties?: Record<string, { type?: string; const?: unknown }>;
-			required?: string[];
-		};
-		expect(output.properties?.deleted).toMatchObject({ const: true });
-		expect(output.properties?.attachment_id).toMatchObject({ type: 'string' });
-		expect(output.required).toEqual(expect.arrayContaining(['deleted', 'attachment_id']));
+		expect(tool.description).toMatch(/sin deshacer/i);
+		for (const t of tools) expect(t).not.toHaveProperty('outputSchema');
 	});
 
-	it('techo de bytes de las 16 tools: no crece sin que alguien se entere', () => {
+	it('`annotations`: fija qué tools son de solo lectura, cuáles destructivas y cuáles idempotentes', () => {
+		const READ_ONLY = [
+			'get_list',
+			'get_list_links',
+			'get_task',
+			'list_brl_entries',
+			'list_habits',
+			'list_lists',
+			'list_tasks',
+			'read_attachment'
+		];
+		const DESTRUCTIVE = ['delete_attachment', 'mutate_brl', 'organize'];
+		const IDEMPOTENT = ['link_list_note', 'refresh_sync', 'unlink_list_note'];
+		const ann = (t: (typeof tools)[number]) =>
+			(t.annotations ?? {}) as { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean };
+		expect(tools.filter((t) => ann(t).readOnlyHint === true).map((t) => t.name).sort()).toEqual(READ_ONLY);
+		expect(tools.filter((t) => ann(t).destructiveHint === true).map((t) => t.name).sort()).toEqual(DESTRUCTIVE);
+		expect(tools.filter((t) => ann(t).idempotentHint === true).map((t) => t.name).sort()).toEqual(IDEMPOTENT);
+		// Las 6 de escritura no destructiva lo declaran explícitamente (el default MCP es true).
+		for (const name of ['add_task', 'mutate_tasks', 'add_attachment', 'link_list_note', 'unlink_list_note', 'refresh_sync']) {
+			expect(ann(tools.find((t) => t.name === name)!).destructiveHint).toBe(false);
+		}
+	});
+
+	it('el aviso de borrado es la MISMA frase en organize, mutate_brl y delete_attachment', () => {
+		for (const name of ['organize', 'mutate_brl', 'delete_attachment']) {
+			expect(tools.find((t) => t.name === name)!.description).toContain(
+				'Sin deshacer: confirma con el usuario antes.'
+			);
+		}
+	});
+
+	it('`list_tasks` ya no expone `fullNotes`', () => {
+		const schema = tools.find((t) => t.name === 'list_tasks')!.inputSchema as {
+			properties: Record<string, unknown>;
+		};
+		expect(schema.properties).not.toHaveProperty('fullNotes');
+	});
+
+	it('techo de bytes de las 17 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -317,8 +348,11 @@ describe('tools/list — superficie completa', () => {
 		// mismo commit y compensa lo nuevo. Con `hebra://note/<uuid>` admitido
 		// junto a las otras dos formas en la `.describe()` de `url`
 		// (`link_list_note`/`unlink_list_note` comparten schema, así que el
-		// coste es doble): 26.748 (+42). Techo = medido + ~5%.
-		const CHAR_CEILING = 26800;
+		// coste es doble): 26.748 (+42).
+		// Re-medido el 2026-10-02 (audit: `annotations` en las 17 tools; fuera
+		// `fullNotes`, `outputSchema` de `delete_attachment` y las prosas
+		// duplicadas): 26.468 (−280). Techo = medido + ~1% (26.700).
+		const CHAR_CEILING = 26700;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -414,13 +448,15 @@ describe('tools/list — superficie completa', () => {
 		expect(tools.find((t) => t.name === 'organize')!.description).toMatch(/^Reorganiza y borra:/);
 	});
 
-	it('`mutate_brl` expone las 3 ops (add/update/delete)', () => {
+	it('`mutate_brl` expone `op` como string libre (no enum) y nombra las 3 ops (add/update/delete)', () => {
 		const mutateBrl = tools.find((t) => t.name === 'mutate_brl');
 		expect(mutateBrl).toBeDefined();
 		const opsSchema = (mutateBrl!.inputSchema as { properties?: Record<string, unknown> }).properties?.ops as
-			| { items?: { properties?: { op?: { enum?: string[] } } } }
+			| { description?: string; items?: { properties?: { op?: { type?: string; enum?: string[] } } } }
 			| undefined;
-		expect(opsSchema?.items?.properties?.op?.enum?.sort()).toEqual(['add', 'delete', 'update']);
+		expect(opsSchema?.items?.properties?.op?.type).toBe('string');
+		expect(opsSchema?.items?.properties?.op?.enum).toBeUndefined();
+		for (const op of ['add:', 'update:', 'delete:']) expect(opsSchema?.description).toContain(op);
 	});
 });
 
@@ -599,7 +635,7 @@ describe('includeArchived — wiring de las tools al contrato HTTP', () => {
 
 		const mutationText = (mutation as { content: { type: string; text?: string }[] }).content[0];
 		expect(mutationText.type === 'text' ? mutationText.text : '').toContain(
-			'0/1 operación(es) encoladas.'
+			'0/1 operación(es) aceptadas.'
 		);
 		expect(fetchSpy.mock.calls.map((call) => String(call[0]))).toEqual([
 			`https://lumbre.test/api/tasks?id=${TASK_ID}&includeArchived=true`,
@@ -1596,7 +1632,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 
 		expect(result.isError).not.toBe(true);
 		expect(batchCalls(fetchSpy)).toHaveLength(1);
-		expect(resultText(result)).toContain('2/2 operación(es) encoladas.');
+		expect(resultText(result)).toContain('2/2 operación(es) aceptadas.');
 	});
 
 	it('update con recurrence:null viaja tal cual a /api/batch (apaga la regla, también de una semilla archivada)', async () => {
@@ -1655,7 +1691,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		};
 		expect(body.ops).toEqual([{ type: 'mutate', taskId, kind: 'restore', payload: {} }]);
 		const text = resultText(result);
-		expect(text).toContain('1/1 operación(es) encoladas.');
+		expect(text).toContain('1/1 operación(es) aceptadas.');
 		expect(text).not.toMatch(/fallaron/);
 	});
 
@@ -1728,7 +1764,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 			ops: { taskId: string; kind: string; payload: Record<string, unknown> }[];
 		};
 		expect(body.ops[0]).toEqual({ type: 'mutate', taskId, kind: 'unarchive', payload: {} });
-		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
+		expect(resultText(result)).toContain('1/1 operación(es) aceptadas.');
 	});
 
 	it('delete sobre una tarea ARCHIVADA: la comprobación de existencia también la encuentra con includeArchived', async () => {
@@ -1747,7 +1783,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		const result = await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'delete', taskId }] } });
 
 		expect(result.isError).not.toBe(true);
-		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
+		expect(resultText(result)).toContain('1/1 operación(es) aceptadas.');
 		expect(resultText(result)).not.toMatch(/fallaron/);
 	});
 
@@ -2086,7 +2122,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(result.isError).not.toBe(true);
 		expect(batchCalls(fetchSpy)).toHaveLength(1);
 		const text = resultText(result);
-		expect(text).toContain('2/2 operación(es) encoladas.');
+		expect(text).toContain('2/2 operación(es) aceptadas.');
 		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
 	});
 
@@ -2107,7 +2143,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 			}
 		});
 		const mutateText = resultText(enMutateTasks);
-		expect(mutateText).toContain('1/2 operación(es) encoladas.');
+		expect(mutateText).toContain('1/2 operación(es) aceptadas.');
 		expect(mutateText).toContain(
 			'[1] delete: la op "delete" no existe en mutate_tasks; está en organize'
 		);
@@ -2148,7 +2184,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		});
 
 		const text = resultText(result);
-		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain('1/2 operación(es) aceptadas.');
 		expect(text).toContain('[1] complete: complete: campo(s) que no aplican a "complete": bogusField');
 		// Solo la op válida llega a /api/batch — la de forma inválida nunca toca red.
 		expect(batchCalls(fetchSpy)).toHaveLength(1);
@@ -2192,7 +2228,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 
 		expect(batchCalls(fetchSpy)).toHaveLength(1);
 		const text = resultText(result);
-		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain('1/2 operación(es) aceptadas.');
 		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
 		expect(text).toContain('[1] set_list_notes: kind de mutación desconocido: setListNotes');
 	});
@@ -2219,7 +2255,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(result.isError).not.toBe(true);
 		expect(batchCalls(fetchSpy)).toHaveLength(0);
 		const text = resultText(result);
-		expect(text).toContain('0/1 operación(es) encoladas.');
+		expect(text).toContain('0/1 operación(es) aceptadas.');
 		expect(text).toContain('[0] create_list:');
 	});
 });
@@ -2323,7 +2359,7 @@ describe('set_parent — anidar y desanidar una tarea', () => {
 			{ type: 'mutate', taskId: TASK_ID, kind: 'setParent', payload: { parentId: PARENT_ID } }
 		]);
 		const text = resultText(result);
-		expect(text).toContain('1/1 operación(es) encoladas.');
+		expect(text).toContain('1/1 operación(es) aceptadas.');
 		expect(text).toContain('Resultado en la app: 1 aplicadas.');
 	});
 
@@ -2415,7 +2451,7 @@ describe('set_parent — anidar y desanidar una tarea', () => {
 			})
 		);
 
-		expect(text).toContain('0/1 operación(es) encoladas.');
+		expect(text).toContain('0/1 operación(es) aceptadas.');
 		expect(text).toMatch(/\[0\] set_parent: .*parentId/);
 		expect(batchCalls(fetchSpy)).toHaveLength(0);
 	});
@@ -2445,7 +2481,7 @@ describe('set_parent — anidar y desanidar una tarea', () => {
 			})
 		);
 
-		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain('1/2 operación(es) aceptadas.');
 		expect(text).toContain(`[0] set_parent: set_parent: la tarea madre ${PARENT_ID} no está entre las tareas`);
 		expect(batchOps(fetchSpy)).toEqual([{ type: 'mutate', taskId: TASK_ID, kind: 'complete', payload: { done: true } }]);
 	});
@@ -2494,7 +2530,7 @@ describe('set_parent — anidar y desanidar una tarea', () => {
 			})
 		);
 
-		expect(text).toContain('0/1 operación(es) encoladas.');
+		expect(text).toContain('0/1 operación(es) aceptadas.');
 		expect(text).toContain(`1 fallaron:\n  [0] set_parent: ${reason}`);
 	});
 
@@ -2920,7 +2956,7 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		});
 		const text = resultText(result);
 		expect(result.isError).not.toBe(true);
-		expect(text).toContain('1/2 operación(es) encoladas.');
+		expect(text).toContain('1/2 operación(es) aceptadas.');
 		expect(text).toMatch(/\[0\] update: .*habit/);
 	});
 
@@ -2943,6 +2979,33 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		);
 		expect(text).toContain('Resultado en la app: 0 aplicadas, 1 sin objetivo.');
 		expect(text).toMatch(/\[0\] add: sin efecto: la app no encontró el objetivo/);
+	});
+
+	it('mutate_brl: una op inválida y un campo de más no tumban el lote; la válida se ejecuta', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/mutations')) {
+				return jsonResponse({ ok: true, outcome: 'applied', outcomes: ['applied'] });
+			}
+			throw new Error(`fetch no mockeado: ${String(url)}`);
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'mutate_brl',
+			arguments: {
+				ops: [
+					{ op: 'borrar', date: '2026-09-23' },
+					{ op: 'add', date: '2026-09-23', text: 'Con campo de más', raro: true },
+					{ op: 'add', date: '2026-09-23', text: 'Apunte válido' }
+				]
+			}
+		});
+		const text = resultText(result);
+		expect(result.isError).not.toBe(true);
+		expect(text).toContain('1/3 operación(es) aceptadas.');
+		expect(text).toMatch(/\[0\] borrar:/);
+		expect(text).toMatch(/\[1\] add:/);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -3016,21 +3079,19 @@ describe('mutate_brl — las 3 `op` siguen aceptándose (esquema estricto intern
 		});
 	}
 
-	it('op desconocida: ambos schemas la rechazan', () => {
+	it('op desconocida: el EXPUESTO la deja pasar (para reportarla por posición) y el ESTRICTO la rechaza', () => {
 		const bogus = { op: 'not_a_real_op', date: '2026-08-27' };
-		expect(mutateBrlOpSchema.safeParse(bogus).success).toBe(false);
+		expect(mutateBrlOpSchema.safeParse(bogus).success).toBe(true);
 		expect(mutateBrlStrictOpSchema.safeParse(bogus).success).toBe(false);
 	});
 
-	it('campo con nombre desconocido (typo): el schema EXPUESTO ya lo rechaza (`.strict()`)', () => {
-		const result = mutateBrlOpSchema.safeParse({
-			op: 'add',
-			date: '2026-08-27',
-			text: 'x',
-			// `kindd` no es ninguno de los 5 campos conocidos — typo de `kind`.
-			kindd: 'note'
-		});
-		expect(result.success).toBe(false);
+	it('campo desconocido u `op` inválida: el schema EXPUESTO los deja pasar y el ESTRICTO los rechaza', () => {
+		const typo = { op: 'add', date: '2026-08-27', text: 'x', kindd: 'note' };
+		expect(mutateBrlOpSchema.safeParse(typo).success).toBe(true);
+		expect(mutateBrlStrictOpSchema.safeParse(typo).success).toBe(false);
+		const bogusOp = { op: 'not_a_real_op', date: '2026-08-27' };
+		expect(mutateBrlOpSchema.safeParse(bogusOp).success).toBe(true);
+		expect(mutateBrlStrictOpSchema.safeParse(bogusOp).success).toBe(false);
 	});
 });
 
@@ -3138,31 +3199,6 @@ describe('list_habits — lectura vía GET /api/export (MC6)', () => {
 
 		const result = await client.callTool({ name: 'list_habits', arguments: {} });
 		expect(result.isError).toBe(true);
-	});
-});
-
-describe('effectiveNotesMode — resuelve el modo de notas de list_tasks (con el alias legado)', () => {
-	it('sin `notes` ni `fullNotes` → "auto" (nuevo default)', () => {
-		expect(effectiveNotesMode({})).toBe('auto');
-	});
-
-	it('`notes` explícito manda, sea cual sea', () => {
-		expect(effectiveNotesMode({ notes: 'none' })).toBe('none');
-		expect(effectiveNotesMode({ notes: 'preview' })).toBe('preview');
-		expect(effectiveNotesMode({ notes: 'full' })).toBe('full');
-		expect(effectiveNotesMode({ notes: 'auto' })).toBe('auto');
-	});
-
-	it('`fullNotes: true` sigue equivaliendo a "full" (back-compat, sin `notes`)', () => {
-		expect(effectiveNotesMode({ fullNotes: true })).toBe('full');
-	});
-
-	it('`fullNotes: false` no cambia el default ("auto")', () => {
-		expect(effectiveNotesMode({ fullNotes: false })).toBe('auto');
-	});
-
-	it('`notes` explícito GANA a `fullNotes` si ambos vienen', () => {
-		expect(effectiveNotesMode({ notes: 'none', fullNotes: true })).toBe('none');
 	});
 });
 
@@ -3444,7 +3480,7 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 			name: 'mutate_tasks',
 			arguments: { ops: [{ op: 'reschedule', taskId: SUB_ID, date: '2026-01-01' }] }
 		});
-		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
+		expect(resultText(result)).toContain('1/1 operación(es) aceptadas.');
 		expect(mutationBodies(fetchSpy)).toEqual([
 			{ type: 'mutate', taskId: SUB_ID, kind: 'reschedule', payload: { date: '2026-01-01' } }
 		]);
@@ -3457,7 +3493,7 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 			name: 'mutate_tasks',
 			arguments: { ops: [{ op: 'reschedule', taskId: SUB_ID, date: null }] }
 		});
-		expect(resultText(result)).toContain('1/1 operación(es) encoladas.');
+		expect(resultText(result)).toContain('1/1 operación(es) aceptadas.');
 		// La propiedad que importa: la mutación VIAJA. Antes se cortaba aquí y
 		// nunca se mandaba.
 		expect(mutationBodies(fetchSpy)).toEqual([
@@ -3475,7 +3511,7 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 			name: 'organize',
 			arguments: { ops: [{ op: 'move_to_list', taskId: SUB_ID, listId: PARENT_ID }] }
 		});
-		expect(resultText(result)).toContain('0/1 operación(es) encoladas.');
+		expect(resultText(result)).toContain('0/1 operación(es) aceptadas.');
 		expect(resultText(result)).toContain('SUBTAREA');
 		expect(mutationBodies(fetchSpy)).toEqual([]);
 	});
@@ -3504,7 +3540,7 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 			}
 		});
 		const text = resultText(result);
-		expect(text).toContain('2/5 operación(es) encoladas.');
+		expect(text).toContain('2/5 operación(es) aceptadas.');
 		expect(text).toMatch(/«esperando» no existe en una subtarea/);
 		expect(text).toMatch(/archiva su tarea madre/);
 		expect(text).toMatch(/recurrence no aplica/);
@@ -3972,7 +4008,7 @@ describe('delete_attachment — elimina un adjunto existente (DESTRUCTIVO)', () 
 		vi.unstubAllGlobals();
 	});
 
-	it('camino feliz: llama DELETE con Bearer y devuelve texto más structuredContent', async () => {
+	it('camino feliz: llama DELETE con Bearer y devuelve solo texto', async () => {
 		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
 			expect(String(url)).toBe(`https://lumbre.test/api/attachments/${ATTACHMENT_ID}`);
 			expect(init?.method).toBe('DELETE');
@@ -3990,7 +4026,7 @@ describe('delete_attachment — elimina un adjunto existente (DESTRUCTIVO)', () 
 		});
 
 		expect(result.isError).not.toBe(true);
-		expect(result.structuredContent).toEqual({ deleted: true, attachment_id: ATTACHMENT_ID });
+		expect(result.structuredContent).toBeUndefined();
 		const first = (result.content as { type: string; text?: string }[])[0];
 		expect(first?.type === 'text' ? first.text : '').toMatch(/eliminado.*no se puede deshacer/i);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);

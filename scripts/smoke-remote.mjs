@@ -31,8 +31,8 @@ const issuer = url ? new URL(url).origin : undefined;
 const resource = issuer ? `${issuer}/mcp` : undefined;
 const scope = 'lumbre:mcp';
 
-// Techo de bytes de `tools/list` para las 16 tools reales — MISMA fuente que
-// `src/index.test.ts` ("techo de bytes de las 16 tools", `CHAR_CEILING`):
+// Techo de bytes de `tools/list` para las 17 tools reales — MISMA fuente que
+// `src/index.test.ts` ("techo de bytes de las 17 tools", `CHAR_CEILING`):
 // medido 21.346 tras retirar las nueve tools sueltas de mutación individual y
 // partir el lote en `mutate_tasks`/`organize` (2026-09-19, tarea 6f62c877);
 // antes, 26.757 con 24 tools, 27.110 al añadir `get_list` (2026-09-16, tarea
@@ -58,7 +58,9 @@ const scope = 'lumbre:mcp';
 // deriva de arriba, medida en el smoke de ese deploy.
 // 2026-09-24 (MC7, tarea 8eee8c72): 6 ops nuevas repartidas en las mismas 17
 // tools, 25.558 caracteres; el test sube su techo a 26.800.
-const CHAR_CEILING = 26800;
+// 2026-10-02 (audit, annotations): medido 26.468 en `index.test.ts`; techo
+// medido + ~1% = 26.700, el mismo en los tres sitios.
+const CHAR_CEILING = 26700;
 const EXPECTED_TOOL_COUNT = 17;
 
 if (!url) {

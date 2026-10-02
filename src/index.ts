@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -15,7 +16,7 @@ import { registerBatchTool } from './tools/batch.js';
 // Reexportadas tal cual: `index.test.ts` las importa directamente de
 // `index.js` (guardarraíl de superficie expuesta, ver su JSDoc).
 export { mutateBrlOpSchema, mutateBrlStrictOpSchema } from './tools/brl.js';
-export { effectiveNotesMode, effectiveScopeLabel, refTexts } from './tools/tasks.js';
+export { effectiveScopeLabel, refTexts } from './tools/tasks.js';
 export {
 	mutateTasksOpSchema,
 	mutateTasksStrictOpSchema,
@@ -89,7 +90,7 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * estado: solo la marca decide, ignorando @done/huella — "qué cambió desde
  * X". `'none'` omite las notas, `'preview'` es el recorte legado a ~240
  * chars (ya no es el default), `'full'` las deja íntegras para TODO el lote
- * (`fullNotes: true` sigue siendo su alias). `get_task(taskId)` devuelve una
+ * .`get_task(taskId)` devuelve una
  * única tarea completa (notas verbatim + `createdAt` + lista/sección) —
  * pensado para reeditar una nota con `mutate_tasks({op:"update"})` (que la
  * REEMPLAZA entera) sin destruir lo que un marcador/preview no traía.
@@ -104,13 +105,27 @@ import { EXISTENCE_CACHE_TTL_MS, getExistenceCachesForToken } from './existence-
  * solo si hay referencias a listas) y CERO si el lote no tiene referencias.
  */
 
+/**
+ * Versión que anuncia el servidor, leída de `package.json` (un nivel por
+ * encima de `src/` y de `dist/`; el Dockerfile lo copia a `/app`). Si no se
+ * pudiera leer, cae a `0.0.0` en vez de impedir el arranque.
+ */
+const PACKAGE_VERSION: string = (() => {
+	try {
+		const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+		return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+	} catch {
+		return '0.0.0';
+	}
+})();
+
 function loadConfig(): LumbreConfig {
 	const token = process.env.LUMBRE_TOKEN?.trim();
 	if (!token) {
 		console.error(
 			'[lumbre-mcp] Falta LUMBRE_TOKEN. Configúralo en el bloque `env` de tu ' +
 				'mcpServers (Ajustes → email entrante en Lumbre para conseguirlo). ' +
-				'Sin él, ninguna tool puede autenticarse — ver mcp/README.md.'
+				'Sin él, ninguna tool puede autenticarse — ver README.md.'
 		);
 		process.exit(1);
 	}
@@ -163,9 +178,8 @@ export interface CreateServerOptions {
 	 * `delete_attachment`; con cualquier otro valor (incluido `undefined`, el
 	 * default), las 17 de siempre. Existe para que David pueda tener el
 	 * conector remoto (17 tools) Y un conector local de adjuntos a la vez sin
-	 * duplicar las 17 en el contexto de cada sesión (`tools/list` pesa ~24 KB
-	 * de JSON; dos
-	 * copias son dos veces ese coste, y el modelo encima tendría que acertar
+	 * duplicar las 17 en el contexto de cada sesión (`tools/list` pesa
+	 * unos 26 KB de JSON; dos copias son dos veces ese coste, y el modelo encima tendría que acertar
 	 * cuál de los dos `add_task`/`list_tasks` usar). `main()` la lee de
 	 * `LUMBRE_MCP_TOOLSET` (env); `http.ts` NUNCA la pasa — el conector
 	 * remoto sigue exponiendo las 17 siempre, pase lo que pase con la env del
@@ -183,10 +197,10 @@ export interface CreateServerOptions {
  * `opts.toolset === 'attachments'` (ver su JSDoc arriba), en cuyo caso solo
  * quedan `add_attachment`/`read_attachment`/`delete_attachment` — las demás
  * se registran igual
- * (para no bifurcar cada una de las 13 llamadas a `registerTool` con un
- * `if`) y se retiran acto seguido con `.remove()`, ANTES de que este
- * `McpServer` se conecte a ningún transporte: ningún cliente llega a ver el
- * estado intermedio de "16 registradas".
+ * (para no bifurcar cada llamada a `registerTool` con un `if`) y se retiran
+ * acto seguido con `.remove()`, ANTES de que este `McpServer` se conecte a
+ * ningún transporte: ningún cliente llega a ver el estado intermedio con
+ * todas registradas.
  *
  * `taskCache`/`brlCache` (cachés cortas de existencia, ver
  * `existence-cache.ts`) salen del registro de MÓDULO indexado por
@@ -204,7 +218,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	const localFilesystem = opts.localFilesystem ?? true;
 	const toolset = opts.toolset ?? 'all';
 
-	const server = new McpServer({ name: 'lumbre-mcp', version: '0.1.0' });
+	const server = new McpServer({ name: 'lumbre-mcp', version: PACKAGE_VERSION });
 
 	// Contexto explícito para las familias YA migradas a `src/tools/` (ver el
 	// JSDoc de `ToolCtx`) — crece según avanza la partición de este fichero.
@@ -263,12 +277,11 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	const { refreshSyncTool } = registerSyncTools(server, ctx);
 
 	// Modo acotado (`toolset === 'attachments'`, ver `CreateServerOptions`):
-	// retira las 13 tools que NO son `add_attachment`/`read_attachment`/
+	// retira las tools que NO son `add_attachment`/`read_attachment`/
 	// `delete_attachment` — TODAS se registraron arriba igual (para no bifurcar
-	// cada una de las 13 llamadas a `registerTool` con un `if`), así que aquí
-	// solo se deshace lo
-	// que sobra, ANTES de que `server` se conecte a ningún transporte: ningún
-	// cliente llega a ver el `tools/list` de 16 en el intermedio.
+	// cada llamada a `registerTool` con un `if`), así que aquí solo se deshace
+	// lo que sobra, ANTES de que `server` se conecte a ningún transporte:
+	// ningún cliente llega a ver el `tools/list` intermedio.
 	if (toolset === 'attachments') {
 		for (const tool of [
 			addTaskTool,

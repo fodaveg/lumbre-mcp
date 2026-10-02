@@ -276,7 +276,7 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 		.strict()
 ]);
 
-/** Formas ESTRICTAS de las 9 ops de `organize` (ver el JSDoc de arriba): las
+/** Formas ESTRICTAS de las 10 ops de `organize` (ver el JSDoc de arriba): las
  *  8 que tenían en `mutate_tasks` antes del reparto, byte a byte, más
  *  `set_list_kind` (MC6). */
 export const organizeStrictOpSchema = z.discriminatedUnion('op', [
@@ -697,7 +697,7 @@ async function runOpsBatch(
 
 	const failureLines = failures.map((f) => `  [${f.index}] ${opNameAt(f.index)}: ${f.error}`);
 	const idLines = succeededWithId.map((s) => `  [${s.index}] ${opNameAt(s.index)}: id ${s.id}`);
-	let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) encoladas.`;
+	let summary = `Lumbre: ${okCount}/${rawOps.length} operación(es) aceptadas.`;
 	const outcomeReport = formatOutcomeReport(outcomes, notices);
 	if (outcomeReport !== '') summary += `\n${outcomeReport}`;
 	if (idLines.length > 0) summary += `\nids asignados:\n${idLines.join('\n')}`;
@@ -718,16 +718,17 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 	const mutateTasksTool = server.registerTool(
 		'mutate_tasks',
 		{
+			annotations: { destructiveHint: false },
 			description:
 				`Opera sobre UNA TAREA, en lote: add_task, complete, cancel, update, reschedule, ` +
 				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
 				`clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +
 				`unarchive (visibilidad, no ciclo de vida), skip_occurrence (salta una ocurrencia de una ` +
 				`serie) y set_parent. Vía ÚNICA para mutar una tarea ` +
-				`y preferente para varias de golpe: resuelve existencias y encola en ` +
+				`y preferente para varias de golpe: resuelve existencias y ejecuta en ` +
 				`UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
 				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
-				`cada add_task encolada. ${OUTCOME_NOTE}`,
+				`cada add_task creada. ${OUTCOME_NOTE}`,
 			inputSchema: {
 				ops: z
 					.array(mutateTasksOpSchema)
@@ -736,8 +737,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
-							'priority, date, deadline, time, recurrence, subtasks, notes, tags] (text se guarda tal ' +
-							'cual, sin interpretar fechas ni #etiquetas; usa date/tags/priority) · complete: taskId* ' +
+							'priority, date, deadline, time, recurrence, subtasks, notes, tags] (text literal, sin ' +
+							'interpretar fechas ni #etiquetas) · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
 							'en una semilla archivada), deadline, reminders (deadline/reminders/recurrence PROHIBIDOS sobre ' +
@@ -774,11 +775,12 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 	const organizeTool = server.registerTool(
 		'organize',
 		{
+			annotations: { destructiveHint: true },
 			description:
 				`Reorganiza y borra: delete (tarea), remove_section, create_list, nest_list, rename_list, ` +
 				`remove_list, set_list_notes, move_to_list, set_list_kind, delete_habit. Vía ÚNICA para ` +
-				`proyectos, áreas y secciones, y la única que borra. ACCIONES DELICADAS: sin deshacer — confirma con el usuario antes de ` +
-				`borrar. Mismo lote y mismo éxito PARCIAL que mutate_tasks, con el listId de cada ` +
+				`proyectos, áreas y secciones, y la única que borra. Sin deshacer: confirma con el usuario antes. ` +
+				`Mismo lote y mismo éxito PARCIAL que mutate_tasks, con el listId de cada ` +
 				`create_list; para encadenar en el MISMO lote, dale tú ese listId (uuid v4). ${OUTCOME_NOTE}`,
 			inputSchema: {
 				ops: z
