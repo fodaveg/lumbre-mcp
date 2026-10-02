@@ -64,40 +64,6 @@ function gitRevision(revision) {
   return result.stdout.trim();
 }
 
-function readRevisionFile(revision, path) {
-  const result = spawnSync(
-    "git",
-    ["show", `${revision}:skills/lumbre/${path}`],
-    { cwd: repoRoot, encoding: "utf8" },
-  );
-  if (result.status !== 0) throw new Error(`cannot read ${path} at ${revision}`);
-  return result.stdout;
-}
-
-function callHistoricalExport(revision, exportName, input) {
-  const librarySource = readRevisionFile(
-    revision,
-    "scripts/forward-pilot-lib.mjs",
-  );
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(librarySource).toString("base64")}`;
-  const driver = `
-    const input = JSON.parse(await new Promise((resolve) => {
-      let raw = "";
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (chunk) => raw += chunk);
-      process.stdin.on("end", () => resolve(raw));
-    }));
-    const module = await import(${JSON.stringify(moduleUrl)});
-    process.stdout.write(JSON.stringify(module[${JSON.stringify(exportName)}](input)));
-  `;
-  const result = spawnSync(process.execPath, ["--input-type=module", "-e", driver], {
-    input: JSON.stringify(input),
-    encoding: "utf8",
-  });
-  if (result.status !== 0) throw new Error(result.stderr.trim());
-  return JSON.parse(result.stdout);
-}
-
 function preregisteredCandidateSha() {
   const head = gitRevision("HEAD");
   if (gitRevision(`${head}^`) === preregistration.baseSha) return head;
@@ -876,33 +842,32 @@ try {
     );
   }
 
-  const forgedHistorical = structuredClone(publishedEvidence);
-  forgedHistorical.environment.cases[0].request = "INSTRUCCION SABOTEADA";
-  forgedHistorical.hashes.evaluationEnvironmentSha256 = sha256(
-    JSON.stringify(forgedHistorical.environment),
+  const forgedEnvironment = structuredClone(baseline.evidence);
+  forgedEnvironment.environment.cases[0].request = "INSTRUCCION SABOTEADA";
+  forgedEnvironment.hashes.evaluationEnvironmentSha256 = sha256(
+    JSON.stringify(forgedEnvironment.environment),
   );
-  const historicalBundle = Object.fromEntries(
-    forgedHistorical.isolationAudit.bundleFiles.map((path) => [
+  const currentBundle = Object.fromEntries(
+    forgedEnvironment.isolationAudit.bundleFiles.map((path) => [
       path,
-      readRevisionFile(forgedHistorical.candidateParentSha, path),
+      readFileSync(join(skillDir, path), "utf8"),
     ]),
   );
-  const forgedEnvelope = callHistoricalExport(
-    forgedHistorical.candidateParentSha,
-    "buildEvaluationEnvelope",
-    { environment: forgedHistorical.environment, bundleContents: historicalBundle },
-  );
-  forgedHistorical.hashes.evaluationEnvelopeSha256 = sha256(forgedEnvelope);
-  const forgedPath = join(tempDir, "forged-historical.json");
+  const forgedEnvelope = buildEvaluationEnvelope({
+    environment: forgedEnvironment.environment,
+    bundleContents: currentBundle,
+  });
+  forgedEnvironment.hashes.evaluationEnvelopeSha256 = sha256(forgedEnvelope);
+  const forgedPath = join(tempDir, "forged-environment.json");
   writeFileSync(
-    join(tempDir, forgedHistorical.isolationAudit.eventLogFile),
-    publishedEvents,
+    join(tempDir, forgedEnvironment.isolationAudit.eventLogFile),
+    baseline.raw,
   );
   writeFileSync(
-    join(tempDir, forgedHistorical.isolationAudit.envelopeFile),
+    join(tempDir, forgedEnvironment.isolationAudit.envelopeFile),
     forgedEnvelope,
   );
-  writeFileSync(forgedPath, `${JSON.stringify(forgedHistorical)}\n`);
+  writeFileSync(forgedPath, `${JSON.stringify(forgedEnvironment)}\n`);
   const forgedCheck = spawnSync(
     process.execPath,
     [verifier, "--integrity-only", forgedPath],
@@ -915,11 +880,14 @@ try {
     )
   ) {
     throw new Error(
-      `historical environment forgery was not rejected correctly: ${forgedCheck.stderr}`,
+      `environment forgery was not rejected correctly: ${forgedCheck.stderr}`,
     );
   }
 
-  const forgedReceipt = structuredClone(publishedEvidence);
+  const forgedReceipt = structuredClone(baseline.evidence);
+  const forgedReceiptState = { raw: baseline.raw };
+  getCase(forgedReceipt, "P02").devState = "@wip";
+  syncCasesToEventLog(forgedReceipt, forgedReceiptState);
   forgedReceipt.captureStatus = "accepted";
   forgedReceipt.verification = {
     accepted: true,
@@ -930,17 +898,11 @@ try {
   const forgedReceiptPath = join(tempDir, "forged-receipt.json");
   writeFileSync(
     join(tempDir, forgedReceipt.isolationAudit.eventLogFile),
-    publishedEvents,
+    forgedReceiptState.raw,
   );
   writeFileSync(
     join(tempDir, forgedReceipt.isolationAudit.envelopeFile),
-    readFileSync(
-      join(
-        dirname(publishedEvidencePath),
-        forgedReceipt.isolationAudit.envelopeFile,
-      ),
-      "utf8",
-    ),
+    baseline.envelope,
   );
   writeFileSync(forgedReceiptPath, `${JSON.stringify(forgedReceipt)}\n`);
   const forgedReceiptCheck = spawnSync(
