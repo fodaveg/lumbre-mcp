@@ -23,6 +23,11 @@ const expectedEvidence = [
   "forward-prompts.md",
   "source-variants.md",
 ];
+const currentCaptureFiles = [
+  "forward-pilot-current.envelope.txt",
+  "forward-pilot-current.events.jsonl",
+  "forward-pilot-current.json",
+];
 
 function invariant(name, condition, detail) {
   if (!condition) throw new Error(`${name}: ${detail}`);
@@ -45,9 +50,16 @@ const evidenceFiles = readdirSync(evidenceDir, { withFileTypes: true })
   .filter((entry) => entry.isFile())
   .map((entry) => entry.name)
   .sort();
+const presentCurrentCaptureFiles = currentCaptureFiles.filter((name) => evidenceFiles.includes(name));
+invariant(
+  "CURRENT_CAPTURE_IS_COMPLETE",
+  presentCurrentCaptureFiles.length === 0 || presentCurrentCaptureFiles.length === currentCaptureFiles.length,
+  `partial current capture: ${presentCurrentCaptureFiles.join(", ")}`,
+);
 invariant(
   "REPO_ONLY_EVIDENCE_INVENTORY",
-  JSON.stringify(evidenceFiles) === JSON.stringify(expectedEvidence),
+  JSON.stringify(evidenceFiles) ===
+    JSON.stringify([...expectedEvidence, ...presentCurrentCaptureFiles].sort()),
   `unexpected inventory: ${evidenceFiles.join(", ")}`,
 );
 
@@ -58,7 +70,7 @@ const publicReferenceFiles = readdirSync(join(skillDir, "references"), {
   .map((entry) => entry.name);
 invariant(
   "EVIDENCE_NOT_INSTALLED_AS_REFERENCE",
-  publicReferenceFiles.every((name) => !expectedEvidence.includes(name)),
+  publicReferenceFiles.every((name) => ![...expectedEvidence, ...currentCaptureFiles].includes(name)),
   "repo-only evidence leaked into the installed reference index",
 );
 
@@ -140,6 +152,7 @@ const publishedArtifacts = [
   "forward-pilot-evidence.envelope.txt",
   "forward-pilot-evidence.events.jsonl",
   "forward-pilot-evidence.json",
+  ...presentCurrentCaptureFiles,
 ].map((name) => read(join(evidenceDir, name))).join("\n");
 invariant(
   "PUBLISHED_EVIDENCE_HAS_NO_PRIVATE_PATHS",

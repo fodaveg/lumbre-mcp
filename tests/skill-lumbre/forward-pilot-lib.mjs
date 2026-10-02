@@ -19,6 +19,8 @@ export const OPERATIONAL_FILES = [
   "references/development.md",
   "references/project-release.md",
   "references/mcp-safe-operations.md",
+  "references/attachments-and-connection.md",
+  "references/subagents.md",
 ];
 
 export const ALLOWED_OPERATIONS = [
@@ -31,7 +33,7 @@ export const ALLOWED_OPERATIONS = [
   "ask_clarification",
   "create_task",
   "cancel_task",
-  "update_task_tags",
+  "update_task_content",
   "delegate_tests",
   "verify_task",
   "propose_triage",
@@ -111,8 +113,8 @@ const fixtures = {
   P02: "task-p02 está en @wip; el listado trae preview y la lectura íntegra contiene el feedback completo.",
   P03: "list_lists contiene X; list_tasks para su id devuelve una colección vacía.",
   P04: "Hay un snapshot legible; el cambio pudo hacerse en la app y ya llegó al servidor. refresh_sync solo fuerza su flush y no escribe datos nuevos.",
-  P05: "Borrador: content='Planificar semana', listId='list-personal'. El conector acepta recurrence='weekly:monday' sin fecha ni hora.",
-  P06: "La única tarea contextual es task-p06, pendiente y ajena a desarrollo.",
+  P05: "Borrador: content='Planificar semana'. list_lists ofrece la lista Personal con id list-personal, adecuada para esta tarea. El conector acepta recurrence='weekly:monday' sin fecha ni hora.",
+  P06: "La única tarea contextual es task-p06, pendiente y ajena a desarrollo; su id está resuelto y no se cambia su content ni notes.",
   P07: "La tarea de desarrollo contextual es task-p07, pendiente, sin estado de agente y con id resuelto.",
   P08: "task-p08 está en @acked. La superficie tests pertenece a agente-tests y el checkbox está sin marcar.",
   P09: "task-a y task-b describen autorización; task-c y task-d describen documentación. Conservan secciones conceptuales distintas.",
@@ -175,8 +177,11 @@ ${JSON.stringify(environment.allowedOperations)}.
 
 firstUsefulAction debe ser exactamente la primera operación de operationSequence.
 Respeta el orden exigido por la skill: primero obtén los datos necesarios, después
-propón o muta y verifica siempre después de la escritura.
-Antes de mutar una tarea existente o delegar sobre ella incluye get_task_full. Si una
+propón o muta y comprueba el resultado por operación. verify_task representa leer el
+resultado "aplicada" sin aviso; no implica otra llamada get_task_full. P05 primero
+enumera listas para resolver listId. P06 puede cancelar con el id ya resuelto sin
+get_task_full, pues no reemplaza content ni notes. Antes de reemplazar content o
+notes, o de delegar sobre una tarea existente, incluye get_task_full. Si una
 petición abierta exige vista previa y confirmación, operationSequence se detiene en
 propose_triage y no incluye todavía escrituras.
 Una lectura no carga desarrollo solo porque la tarea tenga estado de agente. Verifica

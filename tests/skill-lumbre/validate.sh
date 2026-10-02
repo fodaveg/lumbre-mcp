@@ -29,20 +29,22 @@ git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1 || {
   exit 1
 }
 
-# El piloto conductual capturado se ancla a candidateParentSha. Cuando ese
-# commit ya no existe en este repositorio (histórico perdido, ver
-# docs/lumbre-skill-consolidation.md), los tres pasos que lo resuelven se
-# omiten: el piloto es evidencia informativa post-publicación, no un gate
-# (docs/lumbre-skill-optimization.md).
-candidate_parent_sha=$(node -p \
-  "JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).candidateParentSha" \
-  "$evidence_dir/forward-pilot-evidence.json")
+# El piloto vigente se verifica por su SHA. La captura histórica queda como
+# fixture independiente y no acredita la skill actual.
+current_evidence="$evidence_dir/forward-pilot-current.json"
 pilot_available=1
-git -C "$repo_root" cat-file -e "${candidate_parent_sha}^{commit}" >/dev/null 2>&1 \
-  || pilot_available=0
+if [ -f "$current_evidence" ]; then
+  candidate_parent_sha=$(node -p \
+    "JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).candidateParentSha" \
+    "$current_evidence")
+  git -C "$repo_root" cat-file -e "${candidate_parent_sha}^{commit}" >/dev/null 2>&1 \
+    || pilot_available=0
+else
+  pilot_available=0
+fi
 
 if [ "$pilot_available" = 0 ]; then
-  pilot_warning="pilot histórico no verificable: el commit ${candidate_parent_sha} no existe en este repositorio; el piloto es evidencia informativa (docs/lumbre-skill-optimization.md) y se omiten verify-forward-pilot --integrity-only, test-forward-pilot-verifier y run-forward-pilot --check-candidate; recaptura pendiente"
+  pilot_warning="piloto actual aún sin captura verificable; la evidencia histórica no acredita la skill vigente"
   printf '%s\n' "$pilot_warning" >&2
   if [ "$require_pilot" = 1 ]; then
     exit 1
@@ -62,7 +64,7 @@ node "$test_dir/validate-tool-names.mjs"
 
 if [ "$mode" = full ] && [ "$pilot_available" = 1 ]; then
   node "$test_dir/verify-forward-pilot.mjs" \
-    --integrity-only "$evidence_dir/forward-pilot-evidence.json"
+    --integrity-only "$current_evidence"
 fi
 if [ "$pilot_available" = 1 ]; then
   node "$test_dir/test-forward-pilot-verifier.mjs"
@@ -73,9 +75,7 @@ if [ "$pilot_available" = 1 ]; then
 fi
 
 if [ "$pilot_available" = 1 ]; then
-  printf '%s\n' "lumbre skill repository validation: ok"
+  printf '%s\n' "lumbre skill repository validation: ok (piloto actual: integridad verificada; veredicto conductual en evidencia)"
 else
-  # «ok» a secas solo si el piloto se verificó: aquí no se verificó, y el
-  # veredicto lo dice en vez de acreditar una skill que el piloto no cubre.
-  printf '%s\n' "lumbre skill repository validation: ok (sin piloto: evidencia histórica no verificable)"
+  printf '%s\n' "lumbre skill repository validation: ok (sin piloto actual)"
 fi

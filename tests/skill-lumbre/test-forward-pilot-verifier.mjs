@@ -12,6 +12,7 @@ import {
   buildEvaluationEnvelope,
   buildEvaluationEnvironment,
   extractModelCapture,
+  OPERATIONAL_FILES,
   parseJsonl,
   sha256,
 } from "./forward-pilot-lib.mjs";
@@ -63,40 +64,6 @@ function gitRevision(revision) {
   return result.stdout.trim();
 }
 
-function readRevisionFile(revision, path) {
-  const result = spawnSync(
-    "git",
-    ["show", `${revision}:skills/lumbre/${path}`],
-    { cwd: repoRoot, encoding: "utf8" },
-  );
-  if (result.status !== 0) throw new Error(`cannot read ${path} at ${revision}`);
-  return result.stdout;
-}
-
-function callHistoricalExport(revision, exportName, input) {
-  const librarySource = readRevisionFile(
-    revision,
-    "scripts/forward-pilot-lib.mjs",
-  );
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(librarySource).toString("base64")}`;
-  const driver = `
-    const input = JSON.parse(await new Promise((resolve) => {
-      let raw = "";
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (chunk) => raw += chunk);
-      process.stdin.on("end", () => resolve(raw));
-    }));
-    const module = await import(${JSON.stringify(moduleUrl)});
-    process.stdout.write(JSON.stringify(module[${JSON.stringify(exportName)}](input)));
-  `;
-  const result = spawnSync(process.execPath, ["--input-type=module", "-e", driver], {
-    input: JSON.stringify(input),
-    encoding: "utf8",
-  });
-  if (result.status !== 0) throw new Error(result.stderr.trim());
-  return JSON.parse(result.stdout);
-}
-
 function preregisteredCandidateSha() {
   const head = gitRevision("HEAD");
   if (gitRevision(`${head}^`) === preregistration.baseSha) return head;
@@ -139,6 +106,7 @@ function preregisteredCandidateSha() {
 function makeLocalBaseline() {
   const evidence = structuredClone(publishedEvidence);
   const events = parseJsonl(publishedEvents);
+  evidence.isolationAudit.bundleFiles = OPERATIONAL_FILES.slice().sort();
   for (const entry of evidence.cases) {
     delete entry.notes;
     entry.releaseAuthority = false;
@@ -159,25 +127,31 @@ function makeLocalBaseline() {
     ownership: "",
     nextAction: "",
   };
-  getCase(evidence, "P06").firstUsefulAction = "get_task_full";
+  getCase(evidence, "P05").firstUsefulAction = "list_lists";
+  getCase(evidence, "P05").operationSequence = ["list_lists", "create_task", "verify_task"];
+  getCase(evidence, "P06").firstUsefulAction = "cancel_task";
   getCase(evidence, "P06").operationSequence = [
-    "get_task_full",
     "cancel_task",
     "verify_task",
   ];
   getCase(evidence, "P07").firstUsefulAction = "get_task_full";
   getCase(evidence, "P07").operationSequence = [
     "get_task_full",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
   ];
   getCase(evidence, "P08").firstUsefulAction = "get_task_full";
   getCase(evidence, "P08").operationSequence = [
     "get_task_full",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
     "delegate_tests",
   ];
+  for (const id of ["P07", "P08", "P11"]) {
+    getCase(evidence, id).proposedMutations = [
+      { target: id === "P07" ? "task-p07" : id === "P08" ? "task-p08" : "task-p11", fields: ["content"] },
+    ];
+  }
   getCase(evidence, "P02").references = ["SKILL.md", "read.md"];
   getCase(evidence, "P03").references = ["SKILL.md", "read.md"];
   getCase(evidence, "P04").firstUsefulAction = "refresh_sync";
@@ -200,12 +174,12 @@ function makeLocalBaseline() {
     "get_task_full",
     "read_repo_workflow",
     "prepare_candidate",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
     "implement_candidate",
     "gate_candidate",
     "review_candidate",
-    "update_task_tags",
+    "update_task_content",
     "verify_task",
     "handoff_release",
   ];
@@ -359,14 +333,10 @@ const controls = [
     },
   },
   {
-    name: "P06 cancel before full read",
-    expected: "P06: precedence violation (get_task_full#1<cancel_task#1)",
+    name: "P06 unnecessary full read",
+    expected: "P06: forbidden operation present (get_task_full)",
     mutate(evidence) {
-      getCase(evidence, "P06").operationSequence = [
-        "cancel_task",
-        "get_task_full",
-        "verify_task",
-      ];
+      getCase(evidence, "P06").operationSequence.unshift("get_task_full");
     },
   },
   {
@@ -378,10 +348,10 @@ const controls = [
   },
   {
     name: "P07 write before full read",
-    expected: "P07: precedence violation (get_task_full#1<update_task_tags#1)",
+    expected: "P07: precedence violation (get_task_full#1<update_task_content#1)",
     mutate(evidence) {
       getCase(evidence, "P07").operationSequence = [
-        "update_task_tags",
+        "update_task_content",
         "get_task_full",
         "verify_task",
       ];
@@ -416,7 +386,7 @@ const controls = [
     mutate(evidence) {
       getCase(evidence, "P08").operationSequence = [
         "get_task_full",
-        "update_task_tags",
+        "update_task_content",
         "delegate_tests",
         "verify_task",
       ];
@@ -666,27 +636,27 @@ const controls = [
 const precedenceEdges = [
   ["P03", "list_lists", 1, "list_tasks", 1],
   ["P04", "refresh_sync", 1, "read_snapshot", 1],
+  ["P05", "list_lists", 1, "create_task", 1],
   ["P05", "create_task", 1, "verify_task", 1],
-  ["P06", "get_task_full", 1, "cancel_task", 1],
   ["P06", "cancel_task", 1, "verify_task", 1],
-  ["P07", "get_task_full", 1, "update_task_tags", 1],
-  ["P07", "update_task_tags", 1, "verify_task", 1],
-  ["P08", "get_task_full", 1, "update_task_tags", 1],
-  ["P08", "update_task_tags", 1, "verify_task", 1],
+  ["P07", "get_task_full", 1, "update_task_content", 1],
+  ["P07", "update_task_content", 1, "verify_task", 1],
+  ["P08", "get_task_full", 1, "update_task_content", 1],
+  ["P08", "update_task_content", 1, "verify_task", 1],
   ["P08", "verify_task", 1, "delegate_tests", 1],
   ["P09", "get_task_full", 1, "propose_triage", 1],
   ["P10", "get_task_full", 1, "move_task_list", 1],
   ["P10", "move_task_list", 1, "update_task_section", 1],
   ["P10", "update_task_section", 1, "verify_preserved_fields", "last"],
   ["P11", "read_repo_workflow", 1, "prepare_candidate", 1],
-  ["P11", "get_task_full", 1, "update_task_tags", 1],
-  ["P11", "update_task_tags", 1, "verify_task", 1],
+  ["P11", "get_task_full", 1, "update_task_content", 1],
+  ["P11", "update_task_content", 1, "verify_task", 1],
   ["P11", "verify_task", 1, "implement_candidate", 1],
   ["P11", "prepare_candidate", 1, "implement_candidate", 1],
   ["P11", "implement_candidate", 1, "gate_candidate", 1],
   ["P11", "gate_candidate", 1, "review_candidate", 1],
-  ["P11", "review_candidate", 1, "update_task_tags", 2],
-  ["P11", "update_task_tags", 2, "verify_task", 2],
+  ["P11", "review_candidate", 1, "update_task_content", 2],
+  ["P11", "update_task_content", 2, "verify_task", 2],
   ["P11", "verify_task", 2, "handoff_release", 1],
 ];
 
@@ -710,11 +680,11 @@ for (const [id, before, beforeOccurrence, after, afterOccurrence] of
 for (const [id, operation] of [
   ["P01", "create_task"],
   ["P04", "create_task"],
-  ["P05", "update_task_tags"],
+  ["P05", "update_task_content"],
   ["P06", "delegate_tests"],
   ["P07", "delegate_tests"],
   ["P08", "implement_candidate"],
-  ["P09", "update_task_tags"],
+  ["P09", "update_task_content"],
   ["P10", "delegate_tests"],
   ["P11", "move_task_list"],
   ["P12", "create_task"],
@@ -733,7 +703,7 @@ for (const [id, operation, occurrence] of [
   ["P04", "refresh_sync", 1],
   ["P04", "read_snapshot", 1],
   ["P05", "verify_task", 1],
-  ["P06", "get_task_full", 1],
+  ["P05", "list_lists", 1],
   ["P07", "get_task_full", 1],
   ["P08", "get_task_full", 1],
   ["P09", "get_task_full", 1],
@@ -758,7 +728,7 @@ for (const [id, operation] of [
   ["P04", "refresh_sync"],
   ["P05", "create_task"],
   ["P06", "cancel_task"],
-  ["P07", "update_task_tags"],
+  ["P07", "update_task_content"],
   ["P08", "delegate_tests"],
   ["P09", "propose_triage"],
   ["P10", "move_task_list"],
@@ -872,33 +842,32 @@ try {
     );
   }
 
-  const forgedHistorical = structuredClone(publishedEvidence);
-  forgedHistorical.environment.cases[0].request = "INSTRUCCION SABOTEADA";
-  forgedHistorical.hashes.evaluationEnvironmentSha256 = sha256(
-    JSON.stringify(forgedHistorical.environment),
+  const forgedEnvironment = structuredClone(baseline.evidence);
+  forgedEnvironment.environment.cases[0].request = "INSTRUCCION SABOTEADA";
+  forgedEnvironment.hashes.evaluationEnvironmentSha256 = sha256(
+    JSON.stringify(forgedEnvironment.environment),
   );
-  const historicalBundle = Object.fromEntries(
-    forgedHistorical.isolationAudit.bundleFiles.map((path) => [
+  const currentBundle = Object.fromEntries(
+    forgedEnvironment.isolationAudit.bundleFiles.map((path) => [
       path,
-      readRevisionFile(forgedHistorical.candidateParentSha, path),
+      readFileSync(join(skillDir, path), "utf8"),
     ]),
   );
-  const forgedEnvelope = callHistoricalExport(
-    forgedHistorical.candidateParentSha,
-    "buildEvaluationEnvelope",
-    { environment: forgedHistorical.environment, bundleContents: historicalBundle },
-  );
-  forgedHistorical.hashes.evaluationEnvelopeSha256 = sha256(forgedEnvelope);
-  const forgedPath = join(tempDir, "forged-historical.json");
+  const forgedEnvelope = buildEvaluationEnvelope({
+    environment: forgedEnvironment.environment,
+    bundleContents: currentBundle,
+  });
+  forgedEnvironment.hashes.evaluationEnvelopeSha256 = sha256(forgedEnvelope);
+  const forgedPath = join(tempDir, "forged-environment.json");
   writeFileSync(
-    join(tempDir, forgedHistorical.isolationAudit.eventLogFile),
-    publishedEvents,
+    join(tempDir, forgedEnvironment.isolationAudit.eventLogFile),
+    baseline.raw,
   );
   writeFileSync(
-    join(tempDir, forgedHistorical.isolationAudit.envelopeFile),
+    join(tempDir, forgedEnvironment.isolationAudit.envelopeFile),
     forgedEnvelope,
   );
-  writeFileSync(forgedPath, `${JSON.stringify(forgedHistorical)}\n`);
+  writeFileSync(forgedPath, `${JSON.stringify(forgedEnvironment)}\n`);
   const forgedCheck = spawnSync(
     process.execPath,
     [verifier, "--integrity-only", forgedPath],
@@ -911,11 +880,14 @@ try {
     )
   ) {
     throw new Error(
-      `historical environment forgery was not rejected correctly: ${forgedCheck.stderr}`,
+      `environment forgery was not rejected correctly: ${forgedCheck.stderr}`,
     );
   }
 
-  const forgedReceipt = structuredClone(publishedEvidence);
+  const forgedReceipt = structuredClone(baseline.evidence);
+  const forgedReceiptState = { raw: baseline.raw };
+  getCase(forgedReceipt, "P02").devState = "@wip";
+  syncCasesToEventLog(forgedReceipt, forgedReceiptState);
   forgedReceipt.captureStatus = "accepted";
   forgedReceipt.verification = {
     accepted: true,
@@ -926,17 +898,11 @@ try {
   const forgedReceiptPath = join(tempDir, "forged-receipt.json");
   writeFileSync(
     join(tempDir, forgedReceipt.isolationAudit.eventLogFile),
-    publishedEvents,
+    forgedReceiptState.raw,
   );
   writeFileSync(
     join(tempDir, forgedReceipt.isolationAudit.envelopeFile),
-    readFileSync(
-      join(
-        dirname(publishedEvidencePath),
-        forgedReceipt.isolationAudit.envelopeFile,
-      ),
-      "utf8",
-    ),
+    baseline.envelope,
   );
   writeFileSync(forgedReceiptPath, `${JSON.stringify(forgedReceipt)}\n`);
   const forgedReceiptCheck = spawnSync(
