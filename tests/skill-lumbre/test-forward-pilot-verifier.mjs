@@ -636,8 +636,8 @@ const controls = [
 const precedenceEdges = [
   ["P03", "list_lists", 1, "list_tasks", 1],
   ["P04", "refresh_sync", 1, "read_snapshot", 1],
+  ["P05", "list_lists", 1, "create_task", 1],
   ["P05", "create_task", 1, "verify_task", 1],
-  ["P06", "get_task_full", 1, "cancel_task", 1],
   ["P06", "cancel_task", 1, "verify_task", 1],
   ["P07", "get_task_full", 1, "update_task_content", 1],
   ["P07", "update_task_content", 1, "verify_task", 1],
@@ -703,7 +703,7 @@ for (const [id, operation, occurrence] of [
   ["P04", "refresh_sync", 1],
   ["P04", "read_snapshot", 1],
   ["P05", "verify_task", 1],
-  ["P06", "get_task_full", 1],
+  ["P05", "list_lists", 1],
   ["P07", "get_task_full", 1],
   ["P08", "get_task_full", 1],
   ["P09", "get_task_full", 1],
