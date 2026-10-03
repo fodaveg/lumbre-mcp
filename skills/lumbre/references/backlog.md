@@ -55,4 +55,5 @@ contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno
 existe.
 
 Los vínculos de un proyecto o área con una nota de Obsidian o Hebra se gestionan con
-`link_list_note` y `unlink_list_note`; solo con petición expresa.
+`link_list_note` y `unlink_list_note`; solo con petición expresa, salvo el vínculo de
+la nota de origen (un audit, una spec) al crear tareas, que hace [daily.md](daily.md).
