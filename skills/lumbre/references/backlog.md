@@ -24,8 +24,9 @@ por encima de un lote, la válvula es un proyecto o un área.
 
 Antes de crear o asignar una sección durante un lote, comprueba si su nombre replica el
 lote o si se está creando una sección por cada lote. Si ocurre, detén la operación: el
-límite del lote pertenece al `#tag`; duplicarlo como sección crea dos ejes para el mismo
-concepto. Una iniciativa puede compartir una sola sección conceptual entre varios lotes.
+límite del lote pertenece a su principal (o al `#tag` si cruza contenedores); duplicarlo
+como sección crea dos ejes para el mismo concepto. Una sección nombra un encargo o
+iniciativa y la comparten sus lotes; es la que crea `daily.md` para un encargo no gordo.
 
 Un área puede actuar como ámbito de proyectos y tareas directas; no tiene progreso ni cierre.
 Los proyectos se pueden anidar entre sí; cada tarea conserva su residencia directa. No anides un área
@@ -47,7 +48,8 @@ ni reestructures un contenedor configurado sin autorización.
 
 Crear un proyecto o un área, convertir uno en otro, borrar un proyecto o área existente, o
 anidar un proyecto de forma que cambie la navegación requiere que la petición autorice
-esa transformación. `organize` crea con `create_list` (`listKind`: `"area"` o
+esa transformación. La excepción es el proyecto nuevo de un encargo gordo al crear sus
+tareas, que [daily.md](daily.md) crea y anida en su principal por defecto. `organize` crea con `create_list` (`listKind`: `"area"` o
 `"project"`) y convierte un contenedor existente con `set_list_kind`. No busques un
 contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno que no
 existe.

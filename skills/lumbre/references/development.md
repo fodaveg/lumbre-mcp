@@ -1,8 +1,9 @@
 # Flujo opcional de desarrollo
 
 Esta extensión usa Lumbre como backlog operativo de desarrollo. Está apagada por defecto.
-Actívalo solo por petición explícita, al continuar o gestionar el trabajo de una tarea
-ya adherida al flujo, o por una regla vigente del repositorio. Leer, resumir o
+Actívalo solo por petición explícita, al crear tareas de trabajo que hará un agente, al
+continuar o gestionar el trabajo de una tarea ya adherida al flujo, o por una regla
+vigente del repositorio. Leer, resumir o
 inspeccionar una tarea sigue en modo lectura aunque ya contenga un estado de desarrollo;
 una lectura incidental nunca reconoce tareas ni carga esta extensión.
 
@@ -35,8 +36,10 @@ Mantén un solo estado de esa familia al transicionar y conserva tags ortogonale
 lote o backlog. El checkbox y la aceptación humana son independientes. El despliegue
 también lo es, salvo que las reglas del proyecto lo incluyan expresamente en `@done`.
 
-Una tarea creada durante un flujo de desarrollo activo puede nacer `@acked`; una tarea
-cotidiana no. El agente puede poner `@acked`, `@wip` y `@done`; `@not-done` es
+Toda tarea que el agente crea para trabajo que hará un agente (código, documentación,
+investigación, revisión) nace en `@acked`, y en `@wip` si se empieza en el acto: quien la
+crea ya tiene conocimiento de ella. Crearla activa esta extensión por sí sola. Una tarea
+cotidiana del usuario (un recado, una cita) nace sin estado. El agente puede poner `@acked`, `@wip` y `@done`; `@not-done` es
 exclusivamente una señal humana. Al recibirla, lee nota y adjuntos, retírala al reabrir
 y no cierres hasta resolver el feedback. El agente nunca completa el checkbox en nombre
 del usuario. Sin esta extensión, distingue cancelada, bloqueada, aplazada y backlog

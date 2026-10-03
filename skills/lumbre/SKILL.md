@@ -32,8 +32,8 @@ Añade solo las extensiones necesarias:
 
 - **Desarrollo**: gestionar trabajo de implementación con estados de agente, lotes,
   evidencia y checkpoints. Está apagado por defecto; se activa por petición
-  explícita, al continuar o gestionar trabajo de una tarea ya adherida al flujo, o
-  por una regla vigente del repo. Leer o resumir esa tarea sigue siendo lectura.
+  explícita, al crear tareas de trabajo que hará un agente, al continuar o gestionar
+  trabajo de una tarea ya adherida al flujo, o por una regla vigente del repo. Leer o resumir esa tarea sigue siendo lectura.
   Lee [references/development.md](references/development.md).
 - **Proyecto/release**: relacionar tareas con git, gates, revisión, documentación o
   despliegue. Lee primero las reglas vivas del repo y después
@@ -58,7 +58,7 @@ Ejemplos rápidos:
 | Selección | Puede mutar |
 |---|---|
 | Lectura | Nada. |
-| Gestión cotidiana | Solo los campos de las tareas solicitadas. |
+| Gestión cotidiana | Solo los campos de las tareas solicitadas y, al crearlas, el proyecto o la sección de destino que fija `daily.md`. |
 | Triaje/backlog | Solo el conjunto y la estructura expresamente indicados. |
 | + Desarrollo | Solo estados y checkpoints del flujo cuando esté activada. |
 | + Proyecto/release | No concede por sí misma mutaciones adicionales en Lumbre. |

@@ -14,27 +14,47 @@ Usa las propiedades nativas de Lumbre para tareas personales u operativas:
 
 Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto es este:
 
-1. **Proyecto más adecuado.** Enumera proyectos y áreas (`list_lists`) y elige el que
-   mejor encaje por nombre y contenido. Solo uno existente: no crees ni inventes un
-   proyecto por inferencia. Si ninguno encaja con claridad, créala sin destino (la app
-   la coloca) y dilo. Manda el destino elegido por `listId` (el de `list_lists`), no por
-   `list`: un nombre mal escrito crea un proyecto nuevo.
-2. **En lote.** Las tareas relacionadas van como una tarea principal que nombra el
-   resultado común y el resto como sus subtareas (`add_task` con `subtasks`). Antes de
-   crear otra principal, busca en ese proyecto una principal abierta del mismo tema: si
-   existe, añade las nuevas como subtareas suyas (`add_subtask`). Una tarea sin
-   relación con nada queda en primer nivel, y puede ser la principal de un lote futuro.
-3. **Id de lo creado.** Si después necesitas el id (añadir subtareas, citarla o cambiar
+1. **Proyecto principal.** Enumera proyectos y áreas (`list_lists`) y elige el que
+   mejor encaje por nombre y contenido: es la lista principal del trabajo. Si ninguno
+   encaja con claridad, crea las tareas sin destino (la app las coloca) y dilo. Manda
+   cada destino por `listId` (el de `list_lists` o el que generaste), no por `list`:
+   un nombre mal escrito crea un proyecto nuevo.
+2. **Tamaño del encargo.** Es **gordo** si suma tres o más lotes, o si el usuario lo
+   trata como un proyecto propio (lo llama proyecto o trae su propia nota o spec). Lo
+   demás no es gordo. Ante la duda, trátalo como no gordo: una sección se promueve
+   después a proyecto sin perder nada.
+   - **Gordo → proyecto nuevo** dentro del principal. Antes, comprueba en `list_lists`
+     que no exista ya uno del mismo encargo; si existe, úsalo. Nómbralo
+     `<proyecto principal> · <resultado>` y créalo con `organize`: `create_list`
+     (`listKind: "project"`) con un `listId` que generes tú y, en la misma llamada,
+     `nest_list` hacia el principal. Si el encargo trae una nota de Obsidian o Hebra,
+     vincúlala con `link_list_note`.
+   - **No gordo → sección nueva** dentro del principal, que nombra el encargo o la
+     iniciativa. Si ya existe una sección de ese mismo encargo, úsala. La sección se
+     crea al pasar `section` en el alta de la primera principal.
+3. **Siempre en lotes.** Cada tarea principal es un lote: una unidad que una persona o
+   un agente puede hacer de principio a fin sin esperar a otra principal en curso, de
+   modo que repartir el trabajo en paralelo sea asignar principales. Su `content`
+   nombra el resultado, sin la palabra «lote»: tener subtareas ya la marca como lote.
+   Las piezas van como subtareas (`add_task` con
+   `subtasks`). Si un lote depende de otro, dilo en su nota. La sección, el deadline,
+   los recordatorios y la repetición van en la principal, porque las subtareas no los
+   admiten. Antes de crear otra principal, busca en ese destino una principal abierta
+   del mismo lote: si existe, añade las piezas nuevas como subtareas suyas
+   (`add_subtask`). Una tarea sin piezas ni relación con nada queda como principal
+   sin subtareas, y puede ser la principal de un lote futuro.
+4. **Id de lo creado.** Si después necesitas el id (añadir subtareas, citarla o cambiar
    su estado), crea con la op `add_task` de `mutate_tasks`, que lo devuelve; la tool
    `add_task` suelta no.
-4. **Subtareas.** Una subtarea nace solo con texto, y los `#tags` escritos en ese texto
+5. **Subtareas.** Una subtarea nace solo con texto, y los `#tags` escritos en ese texto
    se capturan como tags. Después se edita como una tarea completa: fecha con
    `reschedule`; hora, prioridad, notas y tags con `update`; adjuntos con
    `add_attachment`. Sus límites, y cómo leerlas y completarlas, están en «Preservación
    y orden» de [mcp-safe-operations.md](mcp-safe-operations.md).
 
-Lo que el usuario indique (proyecto, tarea suelta, otra agrupación) manda sobre este
-comportamiento. Al terminar, di el proyecto elegido, la principal y sus subtareas.
+Lo que el usuario indique (proyecto, sección, tarea suelta, otra agrupación) manda sobre
+este comportamiento. Al terminar, di si el encargo contó como gordo y por qué, el
+proyecto o la sección de destino, y cada principal con sus subtareas.
 
 ## Otras operaciones de tarea
 
@@ -50,7 +70,9 @@ Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus
   borrado.
 - El registro del día (BRL) se escribe con `mutate_brl`; `delete` es destructiva.
 
-No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`. Expresa una
+No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`, salvo en las
+tareas que creas para trabajo que hará un agente: esas nacen en `@acked` según
+[development.md](development.md), que se carga al crearlas. Expresa una
 tarea bloqueada, aplazada, devuelta a pendiente o enviada al backlog mediante los
 campos nativos disponibles y, cuando haga falta, una nota explícita; no inventes un
 estado de desarrollo.
