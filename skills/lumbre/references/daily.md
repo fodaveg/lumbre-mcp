@@ -65,6 +65,18 @@ este comportamiento. Al terminar, di si el encargo contó como gordo y por qué,
 proyecto o la sección de destino, la nota vinculada si la hay, y cada principal con sus
 subtareas.
 
+## Tareas que el agente crea por su cuenta
+
+Lo que decide el destino es quién pidió la tarea, no de qué trabajo cuelga. Si el usuario
+pide las tareas («haz X», «crea las tareas de este audit»), van al proyecto del trabajo
+según la sección anterior. Si nacen por iniciativa del agente mientras trabaja (al hacer
+X descubre que la sincronización falla por Y), van sin preguntar al proyecto que el
+usuario dedica al trabajo de los agentes (por ejemplo, «Agentes Lumbre»), en su propia
+sección por tema, para no mezclarlas con las del usuario. Usa la sección de ese tema si
+ya existe. Si el usuario no tiene ese proyecto, van al proyecto del trabajo en una
+sección propia de hallazgos del agente, y dilo. Al terminar, nombra cada tarea creada
+así y dónde quedó.
+
 ## Otras operaciones de tarea
 
 Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus campos.
