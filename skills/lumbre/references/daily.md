@@ -42,12 +42,15 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    del mismo lote: si existe, añade las piezas nuevas como subtareas suyas
    (`add_subtask`). Una tarea sin piezas ni relación con nada queda como principal
    sin subtareas, y puede ser la principal de un lote futuro.
-4. **Tareas que salen de un audit.** La nota del audit se vincula con `link_list_note`
-   al proyecto o área donde caen las tareas: el proyecto nuevo del encargo gordo o el
-   principal que contiene la sección. Si el audit solo existe en un fichero temporal,
-   guárdalo antes como nota de Obsidian o Hebra donde el proyecto guarde sus audits y
-   vincula esa nota. Comprueba el vínculo con `get_list_links`. Cualquier otra nota que
-   traiga el encargo (spec, plan) se vincula igual.
+4. **Vincular la nota de Hebra.** Si se crea un proyecto o se añaden tareas que salen
+   de un audit, la nota de Hebra de ese encargo (el audit, la spec o el plan) se
+   vincula con `link_list_note` al proyecto o área donde caen las tareas: el proyecto
+   nuevo del encargo gordo o el principal que contiene la sección. La `url` es el deep
+   link `hebra://note/<uuid>`, con el id que da el MCP de Hebra al buscar o crear la
+   nota, y el `label` es el título de la nota. Si el audit solo existe en un fichero
+   temporal, guárdalo antes como nota nueva de Hebra, en la carpeta donde el proyecto
+   guarde sus audits, y vincula esa nota. Comprueba el
+   vínculo con `get_list_links`.
 5. **Id de lo creado.** Si después necesitas el id (añadir subtareas, citarla o cambiar
    su estado), crea con la op `add_task` de `mutate_tasks`, que lo devuelve; la tool
    `add_task` suelta no.

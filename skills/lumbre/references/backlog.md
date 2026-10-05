@@ -54,6 +54,7 @@ tareas, que [daily.md](daily.md) crea y anida en su principal por defecto. `orga
 contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno que no
 existe.
 
-Los vínculos de un proyecto o área con una nota de Obsidian o Hebra se gestionan con
+Los vínculos de un proyecto o área con una nota de Hebra se gestionan con
 `link_list_note` y `unlink_list_note`; solo con petición expresa, salvo el vínculo de
-la nota de origen (un audit, una spec) al crear tareas, que hace [daily.md](daily.md).
+la nota de origen (un audit, una spec) al crear un proyecto o tareas de un audit, que
+hace [daily.md](daily.md).
