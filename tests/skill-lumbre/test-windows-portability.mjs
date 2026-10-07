@@ -59,6 +59,7 @@ function cloneHead(autocrlf) {
   return dir;
 }
 
+const SKIP = Symbol("skip");
 const cases = [];
 function test(name, fn) {
   cases.push({ name, fn });
@@ -81,6 +82,12 @@ test("1 defecto HOME: manage-subagents con solo USERPROFILE debe planear dentro 
 });
 
 test("1b sin HOME ni USERPROFILE sigue fallando pidiendo --home", () => {
+  // En Windows el hijo de Node recupera USERPROFILE aunque el env no lo lleve
+  // (medido), así que el caso correría contra el perfil real: no se lanza.
+  if (process.platform === "win32") {
+    console.log("skip 1b (win32): el hijo recupera USERPROFILE del sistema; no se puede quitar y correría contra el perfil real");
+    return SKIP;
+  }
   const result = run(managerScript, ["install", "--runtime", "all", "--dry-run"], {
     env: envWithout(),
   });
@@ -115,9 +122,13 @@ test("3 defecto CRLF: un clon con core.autocrlf=true no debe tener \\r en SKILL.
 });
 
 let failed = 0;
+let skipped = 0;
 for (const { name, fn } of cases) {
   try {
-    fn();
+    if (fn() === SKIP) {
+      skipped += 1;
+      continue;
+    }
     console.log(`ok   ${name}`);
   } catch (error) {
     failed += 1;
@@ -129,4 +140,6 @@ if (failed > 0) {
   console.log(`${failed} de ${cases.length} casos fallan`);
   process.exit(1);
 }
-console.log(`windows portability: ok (${cases.length} casos)`);
+console.log(
+  `windows portability: ok (${cases.length - skipped} casos ok, ${skipped} saltados)`,
+);

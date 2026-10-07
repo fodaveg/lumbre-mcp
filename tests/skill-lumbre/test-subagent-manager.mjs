@@ -283,8 +283,16 @@ const scriptPath = resolve(repoRoot, "skills", "lumbre", "scripts", "manage-suba
 const symlinkDir = await mkdtemp(join(tmpdir(), "lumbre-subagents-symlink-"));
 const symlinkHome = await mkdtemp(join(tmpdir(), "lumbre-subagents-symlink-home-"));
 try {
-  const symlinkScript = join(symlinkDir, "manage-subagents.mjs");
-  symlinkSync(scriptPath, symlinkScript);
+  let symlinkScript = join(symlinkDir, "manage-subagents.mjs");
+  if (process.platform === "win32") {
+    // Windows sin modo desarrollador no crea symlinks de fichero (EPERM); la skill
+    // se usa por una junction de directorio, que no pide privilegios.
+    const linkedScripts = join(symlinkDir, "scripts");
+    symlinkSync(dirname(scriptPath), linkedScripts, "junction");
+    symlinkScript = join(linkedScripts, "manage-subagents.mjs");
+  } else {
+    symlinkSync(scriptPath, symlinkScript);
+  }
   const result = spawnSync(
     process.execPath,
     [symlinkScript, "install", "--runtime", "all", "--home", symlinkHome, "--skill-dir", skillDir],
