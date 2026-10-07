@@ -45,6 +45,20 @@ y no cierres hasta resolver el feedback. El agente nunca completa el checkbox en
 del usuario. Sin esta extensión, distingue cancelada, bloqueada, aplazada y backlog
 mediante las superficies nativas.
 
+## Lo que ve el usuario: el tablero
+
+La app tiene una vista opcional, el tablero de agentes, que agrupa las tareas por la
+marca de estado de su título: `@acked` en Aceptadas, `@wip` en En curso, `@done` en
+Hechas y `@not-done` en No hechas (rótulos actuales en castellano; pueden cambiar).
+
+- Una tarea sin marca no aparece en el tablero.
+- El usuario ve cada cambio de marca cuando el agente lo escribe, y un `@wip` olvidado
+  se le muestra como atascado pasado un tiempo. Por eso rige «Cierre: ninguna tarea se
+  queda en `@wip`».
+- `@not-done` llega cuando el usuario devuelve una tarea hecha desde el tablero.
+
+El umbral y la interfaz están en el manual de usuario: <https://lumbre.pro/ayuda/>.
+
 ## Subtareas
 
 Una subtarea es una tarea de pleno derecho (límites y lectura en «Preservación y orden» de
