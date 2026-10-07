@@ -167,3 +167,16 @@ puertos o estado compartido.
 
 Los protocolos de fases, diagnósticos con parada `HECHO`/`NO_REPRO`/
 `BLOQUEADO_POR_DATO` y presupuestos rígidos son perfiles opcionales, no el flujo público.
+
+## Activación por repositorio
+
+Un repositorio puede copiar este bloque a su fichero de instrucciones para agentes. El
+agente lo rellena preguntando al usuario y no lo escribe en un repo sin que se lo pidan.
+
+```markdown
+Este repositorio usa el flujo de desarrollo de Lumbre (skill `lumbre`).
+- Trabajo: proyecto de Lumbre `<proyecto>`.
+- Tareas que el agente crea por su cuenta: proyecto `<proyecto de agentes>`.
+- Audits, specs y planes: `<ruta o carpeta de notas>`.
+- Decisiones: `<fichero o nota donde se registran>`.
+```
