@@ -119,6 +119,21 @@ const PACKAGE_VERSION: string = (() => {
 	}
 })();
 
+/**
+ * Campo `instructions` del `initialize`: lo que un cliente MCP muestra al
+ * modelo al conectar. Máximo 1.024 caracteres (lo fija `index.test.ts`).
+ * Dice qué es el servidor y dónde están las reglas de uso, la instalación de
+ * la skill y el manual; no repite el contrato de las tools.
+ */
+export const SERVER_INSTRUCTIONS =
+	'Servidor MCP de Lumbre, el gestor de tareas: proyectos, áreas, tareas, adjuntos y backlog. ' +
+	'Si tienes la skill `lumbre`, cárgala antes de escribir. ' +
+	'Si no la tienes, las reglas de uso están en ' +
+	'https://raw.githubusercontent.com/fodaveg/lumbre-mcp/main/skills/lumbre/SKILL.md. ' +
+	'La instalación de la skill y de sus subagentes está en ' +
+	'https://raw.githubusercontent.com/fodaveg/lumbre-mcp/main/docs/instalar.md. ' +
+	'El manual de la app está en https://lumbre.pro/ayuda/.';
+
 function loadConfig(): LumbreConfig {
 	const token = process.env.LUMBRE_TOKEN?.trim();
 	if (!token) {
@@ -218,7 +233,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	const localFilesystem = opts.localFilesystem ?? true;
 	const toolset = opts.toolset ?? 'all';
 
-	const server = new McpServer({ name: 'lumbre-mcp', version: PACKAGE_VERSION });
+	const server = new McpServer({ name: 'lumbre-mcp', version: PACKAGE_VERSION }, { instructions: SERVER_INSTRUCTIONS });
 
 	// Contexto explícito para las familias YA migradas a `src/tools/` (ver el
 	// JSDoc de `ToolCtx`) — crece según avanza la partición de este fichero.

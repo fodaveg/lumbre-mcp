@@ -20,6 +20,11 @@ navegador y redirige a Lumbre para autorizar la conexión, sin pegar tokens. Los
 pasos por cliente, la instalación de la skill opcional y la de sus subagentes
 están en [docs/instalar.md](docs/instalar.md).
 
+El servidor anuncia un campo `instructions` en `initialize` (1.024 caracteres como
+máximo): dice qué es el servidor, que cargues la skill `lumbre` si la tienes, y
+dónde están las reglas de uso, la guía de instalación y el manual de la app
+(`https://lumbre.pro/ayuda/`). No añade tools.
+
 ## Qué hace (Fase 1 — crear/leer)
 
 Todas las tools llevan `annotations` de MCP: `readOnlyHint` en las de lectura

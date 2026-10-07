@@ -21,6 +21,7 @@ import type { NotesMode } from './notes.js';
  */
 
 let tools: Tool[];
+let serverInstructions: string | undefined;
 let mutateTasksOpSchema: z.ZodTypeAny;
 let mutateTasksStrictOpSchema: z.ZodTypeAny;
 let organizeOpSchema: z.ZodTypeAny;
@@ -71,6 +72,7 @@ beforeAll(async () => {
 	// lo que un cliente MCP real recibiría por stdio, no un artefacto del
 	// transporte de test.
 	tools = JSON.parse(JSON.stringify(result.tools));
+	serverInstructions = client.getInstructions();
 }, 20000);
 
 // El registro de `taskCache`/`brlCache` (`existence-cache.ts`) es de MÓDULO,
@@ -82,6 +84,16 @@ beforeAll(async () => {
 beforeEach(async () => {
 	const { resetExistenceCacheRegistryForTests } = await import('./existence-cache.js');
 	resetExistenceCacheRegistryForTests();
+});
+
+describe('initialize — campo `instructions`', () => {
+	it('existe, mide 1.024 caracteres o menos y lleva las tres URL', () => {
+		expect(serverInstructions).toBeTypeOf('string');
+		expect(serverInstructions!.length).toBeLessThanOrEqual(1024);
+		expect(serverInstructions).toContain('https://raw.githubusercontent.com/fodaveg/lumbre-mcp/main/skills/lumbre/SKILL.md');
+		expect(serverInstructions).toContain('https://raw.githubusercontent.com/fodaveg/lumbre-mcp/main/docs/instalar.md');
+		expect(serverInstructions).toContain('https://lumbre.pro/ayuda/');
+	});
 });
 
 describe('tools/list — superficie completa', () => {

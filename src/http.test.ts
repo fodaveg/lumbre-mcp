@@ -136,8 +136,12 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 			body: JSON.stringify(initializeBody())
 		});
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as { result: { serverInfo: { name: string } } };
+		const body = (await res.json()) as { result: { serverInfo: { name: string }; instructions?: string } };
 		expect(body.result.serverInfo.name).toBe('lumbre-mcp');
+		// El campo `instructions` también viaja por el transporte HTTP.
+		expect(body.result.instructions).toBeTypeOf('string');
+		expect(body.result.instructions!.length).toBeLessThanOrEqual(1024);
+		expect(body.result.instructions).toContain('https://lumbre.pro/ayuda/');
 	});
 
 	it('tools/list responde con las 17 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
