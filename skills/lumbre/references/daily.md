@@ -18,7 +18,9 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    mejor encaje por nombre y contenido: es la lista principal del trabajo. Si ninguno
    encaja con claridad, crea las tareas sin destino (la app las coloca) y dilo. Manda
    cada destino por `listId` (el de `list_lists` o el que generaste), no por `list`:
-   un nombre mal escrito crea un proyecto nuevo.
+   un nombre mal escrito crea un proyecto nuevo. Un proyecto marcado `[cerrado]` o
+   `[cancelado]` en `list_lists` no se elige como destino de una tarea nueva, salvo que
+   el usuario lo nombre.
 2. **Tamaño del encargo.** Es **gordo** si suma tres o más lotes, o si el usuario lo
    trata como un proyecto propio (lo llama proyecto o trae su propia nota o spec). Lo
    demás no es gordo. Ante la duda, trátalo como no gordo: una sección se promueve

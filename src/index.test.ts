@@ -810,7 +810,117 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 		const result = await client.callTool({ name: 'list_lists', arguments: {} });
 		expect(result.isError).not.toBe(true);
 		const text = ((result as { content: { text: string }[] }).content[0]).text;
-		expect(text).toBe(`Proyectos y áreas (1):\n· Lista vieja — 1 tarea (listId: ${LIST_ID})`);
+		expect(text.split('\n').slice(1)).toEqual([`· Lista vieja — 1 tarea (listId: ${LIST_ID})`]);
+	});
+
+	const textOf = (r: unknown) => (r as { content: { text: string }[] }).content[0].text;
+	const ID_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+	const ID_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+	const ID_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+	const ID_D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+	async function listListsText(lists: unknown[]): Promise<string> {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ lists })));
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'list_lists', arguments: {} });
+		expect(result.isError).not.toBe(true);
+		return textOf(result);
+	}
+
+	it('list_lists marca [cerrado] (hecho), [cancelado] y [área]; el proyecto abierto no lleva marca ni fecha', async () => {
+		const at = Date.parse('2026-09-10T12:00:00.000Z');
+		const text = await listListsText([
+			{ id: ID_A, name: 'Abierto', taskCount: 1, kind: 'project', closure: null },
+			{ id: ID_B, name: 'Hecho', taskCount: 0, kind: 'project', closure: { v: 1, id: 'x', at, as: 'done' } },
+			{ id: ID_C, name: 'Cancelado', taskCount: 0, kind: 'project', closure: { v: 1, id: 'y', at, as: 'cancelled' } },
+			{ id: ID_D, name: 'Zona', taskCount: 0, kind: 'area', closure: null }
+		]);
+		const lines = text.split('\n');
+		expect(lines[0]).toMatch(/\[área\], \[cerrado\]/);
+		expect(lines[1]).toBe(`· Abierto — 1 tarea (listId: ${ID_A})`);
+		expect(lines[2]).toBe(`· Hecho [cerrado] — 0 tareas (listId: ${ID_B})`);
+		expect(lines[3]).toBe(`· Cancelado [cancelado] — 0 tareas (listId: ${ID_C})`);
+		expect(lines[4]).toBe(`· Zona [área] — 0 tareas (listId: ${ID_D})`);
+		expect(text).not.toContain('2026-09-10');
+	});
+
+	it('list_lists pinta cada lista bajo su padre con dos espacios por nivel, en dos niveles y con orden de llegada', async () => {
+		const text = await listListsText([
+			{ id: ID_C, name: 'Nieta', taskCount: 1, kind: 'project', parentListId: ID_B },
+			{ id: ID_A, name: 'Área', taskCount: 0, kind: 'area', parentListId: null },
+			{ id: ID_D, name: 'Otra raíz', taskCount: 0, kind: 'project', parentListId: null },
+			{ id: ID_B, name: 'Hija', taskCount: 2, kind: 'project', parentListId: ID_A }
+		]);
+		expect(text.split('\n').slice(1)).toEqual([
+			`· Área [área] — 0 tareas (listId: ${ID_A})`,
+			`  · Hija — 2 tareas (listId: ${ID_B})`,
+			`    · Nieta — 1 tarea (listId: ${ID_C})`,
+			`· Otra raíz — 0 tareas (listId: ${ID_D})`
+		]);
+	});
+
+	it('list_lists pinta en la raíz una lista cuyo padre no viene en la respuesta', async () => {
+		const text = await listListsText([
+			{ id: ID_A, name: 'Huérfana', taskCount: 1, kind: 'project', parentListId: ID_D }
+		]);
+		expect(text.split('\n').slice(1)).toEqual([`· Huérfana — 1 tarea (listId: ${ID_A})`]);
+	});
+
+	it('list_lists no se cuelga con un ciclo de padres ni con una lista que es su propio padre', async () => {
+		const text = await listListsText([
+			{ id: ID_A, name: 'Uno', taskCount: 0, kind: 'project', parentListId: ID_B },
+			{ id: ID_B, name: 'Dos', taskCount: 0, kind: 'project', parentListId: ID_A },
+			{ id: ID_C, name: 'Yo mismo', taskCount: 0, kind: 'project', parentListId: ID_C }
+		]);
+		const lines = text.split('\n').slice(1);
+		expect(lines).toHaveLength(3);
+		expect(text).toContain('Uno');
+		expect(text).toContain('Dos');
+		expect(text).toContain('Yo mismo');
+	});
+
+	it('get_list pinta un cierre «hecho» con su fecha', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					lists: [
+						{
+							id: LIST_ID,
+							name: 'Terminado',
+							taskCount: 0,
+							kind: 'project',
+							closure: { v: 1, id: 'c1', at: Date.parse('2026-09-10T12:00:00.000Z'), as: 'done' }
+						}
+					]
+				})
+			)
+		);
+		const client = await buildClient();
+		const text = textOf(await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } }));
+		expect(text).toContain('- estado: cerrado (hecho, 2026-09-10T12:00:00.000Z)');
+	});
+
+	it('get_list pinta un cierre «cancelado» con su fecha', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					lists: [
+						{
+							id: LIST_ID,
+							name: 'Descartado',
+							taskCount: 0,
+							kind: 'project',
+							closure: { v: 1, id: 'c2', at: Date.parse('2026-09-11T08:30:00.000Z'), as: 'cancelled' }
+						}
+					]
+				})
+			)
+		);
+		const client = await buildClient();
+		const text = textOf(await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } }));
+		expect(text).toContain('- estado: cerrado (cancelado, 2026-09-11T08:30:00.000Z)');
 	});
 
 	it('get_list devuelve nombre, tipo, padre, estado, recuento y la nota ÍNTEGRA y verbatim', async () => {

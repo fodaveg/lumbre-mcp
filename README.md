@@ -161,7 +161,13 @@ vistas del conector (estado interno, no datos del usuario en Lumbre).
   `[]` tanto si el destino no existe como si existe pero está vacío, `list_lists`
   distingue ambos casos: úsala para comprobar si un proyecto o área existe (p. ej. el
   usuario dice que la acaba de crear) o para resolver su `listId` sin
-  depender de que ya tenga tareas. Sin parámetros. Si un proyecto o área tiene
+  depender de que ya tenga tareas. Sin parámetros. La salida es un ÁRBOL:
+  cada lista va bajo su padre, con dos espacios de sangría por nivel y el orden
+  de llegada entre hermanas (una lista cuyo padre no viene en la respuesta se
+  pinta en la raíz). Las áreas llevan `[área]`; un proyecto cerrado lleva
+  `[cerrado]` (cierre «hecho») o `[cancelado]`, sin fecha y sin reagrupar al
+  final; un proyecto abierto no lleva marca. La cabecera explica las marcas.
+  `get_list` da la fecha del cierre. Si un proyecto o área tiene
   nota, su línea termina con el marcador `✎N ↻DDmmm` (2026-09-16, tarea
   827a7878) — el MISMO marcador que usa `list_tasks` para una nota sin leer
   (tamaño en chars + fecha de la última edición): nunca vuelca la nota entera

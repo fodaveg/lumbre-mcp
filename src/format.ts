@@ -3,6 +3,7 @@ import type {
 	LumbreHabit,
 	LumbreHabitLogEntry,
 	LumbreListLink,
+	LumbreListClosure,
 	LumbreListSummary,
 	LumbreTask,
 	TaskScope
@@ -570,6 +571,21 @@ function listNoteMarkerSuffix(l: LumbreListSummary): string {
 	return ` ${formatNoteMarker(length, listNotesUpdatedAtIso(l.notesUpdatedAt))}`;
 }
 
+/** Lectura única del cierre de un proyecto (`closure.as`): «hecho» o
+ *  «cancelado». La comparten `formatListDetail` (estado) y `list_lists`
+ *  (marca `[cerrado]`/`[cancelado]`) para no duplicar la lógica. */
+function closureLabel(closure: LumbreListClosure): 'hecho' | 'cancelado' {
+	return closure.as === 'done' ? 'hecho' : 'cancelado';
+}
+
+/** Marca de la línea de `list_lists`: `[área]`, `[cerrado]` (cierre «hecho»),
+ *  `[cancelado]`, o `''` (proyecto abierto, sin marca ni fecha). */
+function listKindMark(l: LumbreListSummary): string {
+	if (l.kind === 'area') return ' [área]';
+	if (l.closure) return closureLabel(l.closure) === 'hecho' ? ' [cerrado]' : ' [cancelado]';
+	return '';
+}
+
 /**
  * Formatea el resultado de `list_lists` (`GET /api/tasks?includeLists=1`):
  * TODAS las listas vivas del usuario, con su recuento — INCLUIDAS las de
@@ -577,15 +593,50 @@ function listNoteMarkerSuffix(l: LumbreListSummary): string {
  * del MCP, indistinguible de "no existe"). Si trae nota, la línea termina con
  * el marcador `✎N ↻DDmmm` (`listNoteMarkerSuffix`) — nunca la nota entera,
  * que se lee aparte con `get_list`.
+ *
+ * Salida en ÁRBOL: cada lista va bajo su padre (`parentListId`), con dos
+ * espacios de sangría por nivel y el orden de llegada entre hermanas. Una
+ * lista cuyo padre no viene en la respuesta se pinta en la raíz. Un ciclo de
+ * padres (o una lista que se tiene a sí misma de padre) no cuelga el
+ * formateador: tras recorrer desde las raíces, las listas aún sin pintar se
+ * toman como raíces en su orden de llegada y `visited` corta el bucle.
  */
 export function formatListSummaries(lists: LumbreListSummary[]): string {
 	if (lists.length === 0) return 'Sin proyectos ni áreas.';
-	const header = `Proyectos y áreas (${lists.length}):`;
-	const body = lists.map((l) => {
+	const header =
+		`Proyectos y áreas (${lists.length}): la sangría indica el padre; ` +
+		'marcas [área], [cerrado] (hecho), [cancelado].';
+
+	const ids = new Set(lists.map((l) => l.id));
+	const children = new Map<string, LumbreListSummary[]>();
+	const roots: LumbreListSummary[] = [];
+	for (const l of lists) {
+		const parent = l.parentListId;
+		if (parent && parent !== l.id && ids.has(parent)) {
+			const group = children.get(parent);
+			if (group) group.push(l);
+			else children.set(parent, [l]);
+		} else if (!parent || !ids.has(parent)) {
+			roots.push(l);
+		}
+	}
+
+	const visited = new Set<LumbreListSummary>();
+	const body: string[] = [];
+	const render = (l: LumbreListSummary, depth: number): void => {
+		if (visited.has(l)) return;
+		visited.add(l);
 		const tags = formatTags(l.tags, l.effectiveTags);
 		const suffix = tags.length > 0 ? ` · ${tags.join(', ')}` : '';
-		return `· ${l.name} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} (listId: ${l.id})${suffix}${listNoteMarkerSuffix(l)}`;
-	});
+		body.push(
+			`${'  '.repeat(depth)}· ${l.name}${listKindMark(l)} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} ` +
+				`(listId: ${l.id})${suffix}${listNoteMarkerSuffix(l)}`
+		);
+		for (const child of children.get(l.id) ?? []) render(child, depth + 1);
+	};
+	for (const r of roots) render(r, 0);
+	// Ciclos: sus miembros no cuelgan de ninguna raíz; se pintan en la raíz.
+	for (const l of lists) render(l, 0);
 	return [header, ...body].join('\n');
 }
 
@@ -614,7 +665,7 @@ export function formatListDetail(l: LumbreListSummary): string {
 		const parts: string[] = [];
 		if (l.closure) {
 			const at = new Date(l.closure.at).toISOString();
-			parts.push(`cerrado (${l.closure.as === 'done' ? 'hecho' : 'cancelado'}, ${at})`);
+			parts.push(`cerrado (${closureLabel(l.closure)}, ${at})`);
 		}
 		if (l.someday) parts.push('aparcado');
 		if (l.date) parts.push(`fecha: ${l.date}`);

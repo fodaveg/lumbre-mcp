@@ -150,13 +150,11 @@ describe('nomenclatura de proyectos y áreas', () => {
 	});
 
 	it('el inventario nombra proyectos y áreas sin cambiar listId', () => {
-		expect(
-			formatListSummaries([
-				{ id: '11111111-1111-1111-1111-111111111111', name: 'Casa', taskCount: 0 }
-			])
-		).toBe(
-			'Proyectos y áreas (1):\n· Casa — 0 tareas (listId: 11111111-1111-1111-1111-111111111111)'
-		);
+		const [header, ...lines] = formatListSummaries([
+			{ id: '11111111-1111-1111-1111-111111111111', name: 'Casa', taskCount: 0 }
+		]).split('\n');
+		expect(header).toMatch(/^Proyectos y áreas \(1\):.*\[área\].*\[cerrado\].*\[cancelado\]/);
+		expect(lines).toEqual(['· Casa — 0 tareas (listId: 11111111-1111-1111-1111-111111111111)']);
 		expect(formatListSummaries([])).toBe('Sin proyectos ni áreas.');
 	});
 
