@@ -2,8 +2,9 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const skillDir = resolve(process.argv[2] ?? new URL("..", import.meta.url).pathname);
+const skillDir = resolve(process.argv[2] ?? fileURLToPath(new URL("..", import.meta.url)));
 const referencesDir = join(skillDir, "references");
 const operationalReferences = [
   "attachments-and-connection.md",

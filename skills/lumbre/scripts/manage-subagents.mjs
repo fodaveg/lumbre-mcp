@@ -197,7 +197,7 @@ function parseArgs(argv) {
   const options = {
     command: "install",
     runtime: "all",
-    home: process.env.HOME,
+    home: process.env.HOME ?? process.env.USERPROFILE,
     skillDir: DEFAULT_SKILL_DIR,
     dryRun: false,
     replaceManaged: false,
@@ -223,7 +223,7 @@ function parseArgs(argv) {
 
   invariant(["install", "check"].includes(options.command), "command must be install or check");
   invariant([...RUNTIMES, "all"].includes(options.runtime), "--runtime must be all, claude or codex");
-  invariant(options.home, "HOME is required (or pass --home)");
+  invariant(options.home, "HOME or USERPROFILE is required (or pass --home)");
   invariant(options.skillDir, "--skill-dir requires a path");
   invariant(
     !(options.command === "check" && (options.dryRun || options.replaceManaged || options.replaceUnmanaged)),

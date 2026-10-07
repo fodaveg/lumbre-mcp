@@ -2,8 +2,9 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const skillDir = resolve(process.argv[2] ?? new URL("..", import.meta.url).pathname);
+const skillDir = resolve(process.argv[2] ?? fileURLToPath(new URL("..", import.meta.url)));
 const source = readFileSync(resolve(skillDir, "SKILL.md"), "utf8");
 const match = source.match(/^---\n([\s\S]*?)\n---/);
 if (!match) throw new Error("invalid or missing YAML frontmatter");
