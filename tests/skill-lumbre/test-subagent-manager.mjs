@@ -224,7 +224,8 @@ try {
     0,
   );
   assert.equal(readFileSync(unmanagedPath, "utf8"), renderAgent(definitions, "codex", "lumbre-reader"));
-  assert.equal(statSync(unmanagedPath).mode & 0o777, 0o600);
+  // NTFS no tiene bits de permiso: Node devuelve 0o666 en win32.
+  if (process.platform !== "win32") assert.equal(statSync(unmanagedPath).mode & 0o777, 0o600);
 
   capture = captureIo();
   assert.equal(
