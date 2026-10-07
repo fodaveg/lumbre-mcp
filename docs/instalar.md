@@ -133,8 +133,8 @@ La skill y el MCP se instalan por separado: este paso aporta las instrucciones
 de trabajo al agente, pero no conecta Lumbre. Para autorizar el MCP remoto,
 completa antes los pasos de [Conectar el MCP remoto](#conectar-el-mcp-remoto).
 
-La instalación pública es ligera: incluye el router, ocho referencias operativas
-(las de subagentes y de adjuntos y conexión se leen solo bajo demanda), metadata y una validación estructural pequeña. El historial, los bundles y el
+La instalación pública es ligera: incluye el router, nueve referencias operativas
+(las de subagentes, adjuntos y conexión, y destinos se leen solo bajo demanda), metadata y una validación estructural pequeña. El historial, los bundles y el
 oráculo del piloto permanecen en `tests/skill-lumbre/` dentro del repositorio y no
 se copian a los runtimes. No se ha medido que Claude cargara accidentalmente esos
 artefactos; separarlos elimina el riesgo de enrutamiento y reduce el paquete sin

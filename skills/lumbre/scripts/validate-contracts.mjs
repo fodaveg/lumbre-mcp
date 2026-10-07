@@ -9,6 +9,7 @@ const operationalReferences = [
   "attachments-and-connection.md",
   "backlog.md",
   "daily.md",
+  "destinations.md",
   "development.md",
   "mcp-safe-operations.md",
   "project-release.md",
@@ -61,7 +62,7 @@ const installedReferences = readdirSync(referencesDir, { withFileTypes: true })
   .map((entry) => entry.name)
   .sort();
 invariant(
-  "PUBLIC_REFERENCES_EXACTLY_OPERATIONAL_EIGHT",
+  "PUBLIC_REFERENCES_EXACTLY_OPERATIONAL_NINE",
   JSON.stringify(installedReferences) === JSON.stringify(operationalReferences),
   `expected ${operationalReferences.join(", ")}; found ${installedReferences.join(", ")}`,
 );
@@ -273,6 +274,7 @@ const publicText = [
   safeOperations,
   attachments,
   subagents,
+  read("references/destinations.md"),
 ].join("\n");
 invariant(
   "PUBLIC_SKILL_HAS_NO_USER_PATHS",

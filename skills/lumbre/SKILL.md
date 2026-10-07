@@ -66,6 +66,9 @@ Ejemplos rápidos:
 Si la petición enumera cambios exactos, aplícalos sin ceremonia adicional. Si exige
 inferir alcance o taxonomía, muestra primero una propuesta breve.
 
+Si el encargo produce un documento (audit, spec, plan) o una decisión que hay que guardar,
+lee [references/destinations.md](references/destinations.md).
+
 ## Subagentes opcionales
 
 La skill funciona íntegramente sin subagentes. Solo si el runtime expone alguno de
