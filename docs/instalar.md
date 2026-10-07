@@ -140,3 +140,53 @@ se copian a los runtimes. No se ha medido que Claude cargara accidentalmente eso
 artefactos; separarlos elimina el riesgo de enrutamiento y reduce el paquete sin
 presentar esa hipótesis como un fallo observado.
 
+### Windows
+
+Medido el 2026-10-07 en Windows 11 con Node.js 24, en Windows PowerShell 5.1 y
+en Git Bash (el shell que instala Git for Windows). No se ha probado en
+`cmd.exe`, PowerShell 7 ni WSL.
+
+En Git Bash los bloques de esta guía funcionan tal cual: define `HOME` y
+entiende `test -f` y la continuación de línea con `\`.
+
+En PowerShell esos bloques no se pueden pegar: rechaza la continuación con `\`
+y no tiene `test`. Escribe cada comando en una sola línea:
+
+```powershell
+npx --yes skills add fodaveg/lumbre-mcp -g -y --skill lumbre --agent codex claude-code
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" install --runtime all --dry-run
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" install --runtime all
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" check --runtime all
+```
+
+PowerShell no define la variable de entorno `HOME`; el gestor de subagentes
+usa entonces `USERPROFILE`. Una copia de la skill instalada antes de ese
+arreglo aborta con `HOME is required (or pass --home)`: añade `--home "$HOME"`
+a los tres comandos de `manage-subagents.mjs`.
+
+Para verificar la instalación, las dos líneas deben responder `True`:
+
+```powershell
+Test-Path "$HOME/.agents/skills/lumbre/SKILL.md"
+Test-Path "$HOME/.claude/skills/lumbre/SKILL.md"
+```
+
+En Windows `skills` no crea un enlace simbólico en `~/.claude/skills/lumbre`,
+sino una junction de directorio hacia `~/.agents/skills/lumbre`; sigue habiendo
+una única copia. Se comprueba con:
+
+```powershell
+(Get-Item "$HOME/.claude/skills/lumbre").LinkType
+```
+
+El enlace de último recurso para un Codex antiguo (`ln -sfn`) no se ha medido
+en Windows.
+
+Si trabajas en un clon del repositorio, los validadores `.sh` se ejecutan desde
+Git Bash: en la instalación medida PowerShell no tenía `sh` en el `PATH`. Git
+for Windows trae
+`core.autocrlf=true` y este repositorio fija los finales de línea en LF con
+`.gitattributes`; un clon anterior a ese fichero sale en CRLF y
+`skills/lumbre/scripts/validate.sh` falla con
+`invalid or missing YAML frontmatter`. Vuelve a clonar para obtenerlo en LF.
+
