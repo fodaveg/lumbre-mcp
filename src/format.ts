@@ -661,12 +661,21 @@ export function formatListSummaries(lists: LumbreListSummary[]): string {
  * tareas) se pintan solo cuando existen. `pinned`, `icon` y `color` viajan en
  * la respuesta pero son de PRESENTACIÓN en la app: se omiten a propósito.
  */
-export function formatListDetail(l: LumbreListSummary): string {
+export function formatListDetail(l: LumbreListSummary, parentName?: string | null): string {
 	const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`];
 
 	if (l.kind !== undefined) lines.push(`- tipo: ${l.kind === 'area' ? 'área' : 'proyecto'}`);
 	if (l.parentListId !== undefined) {
-		lines.push(`- padre: ${l.parentListId ?? '(ninguno, de primer nivel)'}`);
+		// `parentName` lo resuelve la tool con una segunda petición; sin él, solo el id.
+		lines.push(
+			`- padre: ${
+				l.parentListId === null
+					? '(ninguno, de primer nivel)'
+					: parentName
+						? `${parentName} (${l.parentListId})`
+						: l.parentListId
+			}`
+		);
 	}
 
 	const stateKnown = l.closure !== undefined || l.someday !== undefined || l.date !== undefined;

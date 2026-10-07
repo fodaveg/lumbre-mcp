@@ -180,7 +180,8 @@ vistas del conector (estado interno, no datos del usuario en Lumbre).
   anteriores a esta feature (sin `notes`/`notesUpdatedAt` en la respuesta)
   simplemente no muestran marcador, sin romper nada.
 - `get_list({ listId })` — devuelve el detalle completo de UN proyecto o área:
-  nombre, tipo (proyecto/área), padre, estado (cierre/aparcado/fecha, cuando
+  nombre, tipo (proyecto/área), padre (`nombre (uuid)`, con una segunda
+  petición solo si hay padre; si falla, se pinta solo el id sin fallar), estado (cierre/aparcado/fecha, cuando
   el servidor los trae), `deadline` y etiquetas (propias y `heredados:`; solo
   cuando existen) y recuento de tareas, seguidos de su nota ÍNTEGRA y
   verbatim (2026-09-16, tarea 827a7878) — útil para leerla ANTES de

@@ -1100,6 +1100,49 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 		expect(text).not.toMatch(/pinned|home|#ff0000/);
 	});
 
+	describe('get_list resuelve el nombre del padre', () => {
+		const call = async (fetchSpy: ReturnType<typeof vi.fn>) => {
+			vi.stubGlobal('fetch', fetchSpy);
+			const client = await buildClient();
+			return textOf(await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } }));
+		};
+		const PARENT_ID = '66666666-6666-4666-8666-666666666666';
+		const child = { id: LIST_ID, name: 'Hija', taskCount: 1, kind: 'project', parentListId: PARENT_ID };
+
+		it('con padre resuelto: «nombre (uuid)» y dos peticiones, la segunda con listId=<padre>', async () => {
+			const fetchSpy = vi.fn().mockImplementation(async (url: string) =>
+				url.includes(`listId=${PARENT_ID}`)
+					? jsonResponse({ lists: [{ id: PARENT_ID, name: 'Madre', taskCount: 0, kind: 'area' }] })
+					: jsonResponse({ lists: [child] })
+			);
+			const text = await call(fetchSpy);
+			expect(text).toContain(`- padre: Madre (${PARENT_ID})`);
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+			expect(fetchSpy.mock.calls[1][0]).toBe(`https://lumbre.test/api/tasks?includeLists=1&listId=${PARENT_ID}`);
+		});
+
+		it('si la petición del padre falla, la tool no falla y pinta el id como antes', async () => {
+			const fetchSpy = vi.fn().mockImplementation(async (url: string) =>
+				url.includes(`listId=${PARENT_ID}`)
+					? new Response('boom', { status: 500, headers: { 'content-type': 'text/plain' } })
+					: jsonResponse({ lists: [child] })
+			);
+			const text = await call(fetchSpy);
+			expect(text).toContain(`- padre: ${PARENT_ID}\n`);
+			expect(text).not.toContain('(66666666');
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+		});
+
+		it('sin padre no hay ninguna petición extra', async () => {
+			const fetchSpy = vi
+				.fn()
+				.mockResolvedValue(jsonResponse({ lists: [{ ...child, parentListId: null }] }));
+			const text = await call(fetchSpy);
+			expect(text).toContain('- padre: (ninguno, de primer nivel)');
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	it('get_list no pinta deadline ni etiquetas cuando no hay (null o vacíos)', async () => {
 		vi.stubGlobal(
 			'fetch',

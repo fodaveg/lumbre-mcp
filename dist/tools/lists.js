@@ -64,7 +64,18 @@ export function registerListTools(server, ctx) {
             const list = await getListById(ctx.config, input.listId);
             if (!list)
                 return errorResult(listNotFoundError(input.listId));
-            return textResult(formatListDetail(list));
+            // Nombre del padre: una segunda petición solo si hay padre. Si falla (o el
+            // padre ya no existe) no falla la tool: se pinta el id, como antes.
+            let parentName = null;
+            if (list.parentListId) {
+                try {
+                    parentName = (await getListById(ctx.config, list.parentListId))?.name ?? null;
+                }
+                catch {
+                    parentName = null;
+                }
+            }
+            return textResult(formatListDetail(list, parentName));
         }
         catch (err) {
             return errorResult(err);
