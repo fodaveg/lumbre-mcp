@@ -1010,11 +1010,20 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 		expect(text).toContain(`- notas:\n${note}`);
 	});
 
-	it('app nueva (R6): get_list con id inexistente (404 «Lista no encontrada») da el mismo error de siempre', async () => {
+	/** Página de error por defecto de SvelteKit (la app no tiene `error.html`):
+	 *  el mensaje va en `<title>` y en el `<h1>`; medido en producción como
+	 *  `text/html` de 1.337 bytes (plantilla de 1.364 con status y mensaje). */
+	const svelteKitErrorPage = (status: number, message: string) =>
+		'<!doctype html>\n<html lang="en">\n\t<head>\n\t\t<meta charset="utf-8" />\n' +
+		`\t\t<title>${message}</title>\n\t</head>\n\t<body>\n\t\t<div class="error">\n` +
+		`\t\t\t<span class="status">${status}</span>\n\t\t\t<div class="message">\n` +
+		`\t\t\t\t<h1>${message}</h1>\n\t\t\t</div>\n\t\t</div>\n\t</body>\n</html>\n`;
+
+	it('app nueva (R6): get_list con id inexistente (404 HTML con «Lista no encontrada») da el mismo error de siempre', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(
-			new Response(JSON.stringify({ message: 'Lista no encontrada' }), {
+			new Response(svelteKitErrorPage(404, 'Lista no encontrada'), {
 				status: 404,
-				headers: { 'content-type': 'application/json' }
+				headers: { 'content-type': 'text/html; charset=utf-8' }
 			})
 		);
 		vi.stubGlobal('fetch', fetchSpy);
@@ -1025,6 +1034,87 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 		const text = ((result as { content: { text: string }[] }).content[0]).text;
 		expect(text).toContain(LIST_ID);
 		expect(text).toMatch(/no está entre los proyectos\/áreas/);
+	});
+
+	it('get_list con un 404 JSON {message:"Lista no encontrada"} también es «no existe»', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(JSON.stringify({ message: 'Lista no encontrada' }), {
+					status: 404,
+					headers: { 'content-type': 'application/json' }
+				})
+			)
+		);
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toMatch(/no está entre los proyectos\/áreas/);
+	});
+
+	it('get_list con un 404 SIN «Lista no encontrada» da un error distinto: URL base equivocada o app sin la ruta', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(svelteKitErrorPage(404, 'Not found'), {
+					status: 404,
+					headers: { 'content-type': 'text/html; charset=utf-8' }
+				})
+			)
+		);
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+		expect(result.isError).toBe(true);
+		const text = textOf(result);
+		expect(text).toMatch(/respondió 404 sin el mensaje/);
+		expect(text).toContain('LUMBRE_BASE_URL');
+		expect(text).not.toMatch(/no está entre los proyectos\/áreas/);
+	});
+
+	it('get_list pinta deadline y etiquetas (propias y heredadas) solo cuando existen', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					lists: [
+						{
+							id: LIST_ID,
+							name: 'Con plazo',
+							taskCount: 1,
+							kind: 'project',
+							deadline: '2026-12-31',
+							tags: ['casa'],
+							effectiveTags: ['casa', 'familia'],
+							pinned: true,
+							icon: 'home',
+							color: '#ff0000'
+						}
+					]
+				})
+			)
+		);
+		const client = await buildClient();
+		const text = textOf(await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } }));
+		expect(text).toContain('- deadline: 2026-12-31');
+		expect(text).toContain('- etiquetas: #casa, heredados:#familia');
+		expect(text).not.toMatch(/pinned|home|#ff0000/);
+	});
+
+	it('get_list no pinta deadline ni etiquetas cuando no hay (null o vacíos)', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					lists: [
+						{ id: LIST_ID, name: 'Sin plazo', taskCount: 0, kind: 'project', deadline: null, tags: [], effectiveTags: [] }
+					]
+				})
+			)
+		);
+		const client = await buildClient();
+		const text = textOf(await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } }));
+		expect(text).not.toContain('deadline');
+		expect(text).not.toContain('etiquetas');
 	});
 
 	it('app vieja: get_list ignora el listId del servidor y filtra por id en cliente', async () => {

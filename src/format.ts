@@ -545,7 +545,12 @@ export function formatTaskList(
  *  827a7878), a diferencia de `LumbreTask.notesUpdatedAt`, que viaja en ISO;
  *  `formatNoteMarker` solo sabe de ISO, así que aquí se convierte antes de
  *  pasárselo. `null` si es ausente/inválido — mismo criterio "desconocido" del
- *  resto del módulo. */
+ *  resto del módulo.
+ *
+ *  HOY la app NO manda `notesUpdatedAt` para listas (`+server.ts`, rama
+ *  `includeLists`: «las listas no tienen esa marca»), así que el marcador de
+ *  una lista sale solo con el tamaño (`✎267`). Se conserva a propósito: tolera
+ *  que la app empiece a mandar el campo sin redesplegar el conector. */
 function listNotesUpdatedAtIso(notesUpdatedAt: number | null | undefined): string | null {
 	if (typeof notesUpdatedAt !== 'number' || !Number.isFinite(notesUpdatedAt)) return null;
 	const d = new Date(notesUpdatedAt);
@@ -651,6 +656,10 @@ export function formatListSummaries(lists: LumbreListSummary[]): string {
  * `LumbreListSummary` por compatibilidad con un servidor anterior a estos
  * campos: cada línea solo se muestra si el campo correspondiente VINO en la
  * respuesta (`!== undefined`), nunca se inventa un valor por defecto.
+ *
+ * `deadline` y las etiquetas (propias y heredadas, mismo idioma que las
+ * tareas) se pintan solo cuando existen. `pinned`, `icon` y `color` viajan en
+ * la respuesta pero son de PRESENTACIÓN en la app: se omiten a propósito.
  */
 export function formatListDetail(l: LumbreListSummary): string {
 	const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`];
@@ -672,9 +681,13 @@ export function formatListDetail(l: LumbreListSummary): string {
 		lines.push(`- estado: ${parts.length > 0 ? parts.join(' · ') : 'activo'}`);
 	}
 
+	if (l.deadline) lines.push(`- deadline: ${l.deadline}`);
+	const tags = formatTags(l.tags, l.effectiveTags);
+	if (tags.length > 0) lines.push(`- etiquetas: ${tags.join(', ')}`);
+
 	lines.push(`- tareas: ${l.taskCount}`);
 
-	if (l.notes && l.notes.trim() !== '') {
+	if (l.notes &&l.notes.trim() !== '') {
 		lines.push(`- notas:\n${notesFull(l.notes)}`);
 	} else {
 		lines.push('- notas: (sin notas)');

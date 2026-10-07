@@ -257,9 +257,13 @@ export async function listLists(config, opts = {}) {
         };
     });
 }
+/** Mensaje con que la app lanza el 404 de `?listId=` inexistente
+ *  (`selectApiLists`, `src/routes/api/tasks/serialize.ts:77` de Lumbre). */
+const LIST_NOT_FOUND_MESSAGE = 'Lista no encontrada';
 /**
  * Un solo proyecto o área con su nota ÍNTEGRA (R6: `GET /api/tasks?includeLists=1&listId=`),
- * o `null` si no existe. App nueva: 404 «Lista no encontrada» → `null`. App
+ * o `null` si no existe. App nueva: 404 con cuerpo «Lista no encontrada» → `null`;
+ * cualquier otro 404 (URL base equivocada, app sin la ruta) es un error. App
  * anterior a R6: ignora `listId` y manda todas las listas; se filtra por id en
  * cliente. En ambos casos el llamador ve lo mismo.
  */
@@ -270,8 +274,17 @@ export async function getListById(config, listId) {
         body = await request(config, path);
     }
     catch (err) {
-        if (err instanceof LumbreApiError && err.status === 404)
-            return null;
+        if (err instanceof LumbreApiError && err.status === 404) {
+            // `request` conserva el cuerpo en `err.message` («Lumbre respondió 404: <cuerpo>»):
+            // JSON `{message}` si la petición negocia JSON, o la página de error HTML de
+            // SvelteKit con el mensaje dentro (`<title>` y `<h1>`). Solo ese mensaje
+            // significa «la lista no existe»; cualquier otro 404 es otra cosa.
+            if (err.message.includes(LIST_NOT_FOUND_MESSAGE))
+                return null;
+            throw new LumbreApiError('La ruta /api/tasks respondió 404 sin el mensaje «Lista no encontrada»: ' +
+                'puede ser un LUMBRE_BASE_URL equivocado o una app sin esa ruta. ' +
+                'No se sabe si el listId existe.', 404);
+        }
         throw err;
     }
     if (!body || typeof body !== 'object' || !Array.isArray(body.lists)) {
