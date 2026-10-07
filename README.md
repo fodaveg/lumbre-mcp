@@ -40,7 +40,7 @@ declaran y quedan con el valor por defecto de la especificación. `list_tasks` y
 vistas del conector (estado interno, no datos del usuario en Lumbre).
 
 - `add_task` — añade una tarea nueva a Lumbre (vía `POST /api/ingest`, el
-  mismo endpoint que usa email-to-task/Atajos de iOS). La app la encola y la
+  mismo endpoint que usan los Atajos de iOS). La app la encola y la
   materializa en el servidor en la misma petición; tus dispositivos la reciben
   al sincronizar. La respuesta reenvía los avisos de la app (`notices`), por
   ejemplo si el proyecto pedido estaba borrado y la tarea fue a la Bandeja.
@@ -893,11 +893,10 @@ difieren.
 ## Conector stdio local (compatibilidad y adjuntos)
 
 Esta vía local es opcional. Úsala para desarrollo, compatibilidad o para adjuntar
-ficheros grandes desde el disco local. Necesitas tu **token de email-to-task**:
-en la app de Lumbre, Ajustes →
-sección de email entrante (el mismo token que usa `task+<token>@…` y
-`/api/ingest`; si aún no lo tienes, la app lo genera la primera vez que
-entras a esa sección).
+ficheros grandes desde el disco local. Necesitas tu **token de la API**: en la
+app de Lumbre, Ajustes → Captura → «Token de la API» (el mismo que usan los
+Atajos y `/api/ingest`). Si aún no tienes uno, pulsa «Generar token»: se
+muestra una sola vez, y generar otro invalida el anterior.
 
 Añade el servidor a tu configuración de MCP de Claude Code (por ejemplo
 `~/.claude.json` o la config de proyecto, según cómo gestiones tus MCP
@@ -910,7 +909,7 @@ servers), apuntando `command`/`args` al `dist/index.js` compilado arriba:
 			"command": "node",
 			"args": ["/ruta/absoluta/a/lumbre-mcp/dist/index.js"],
 			"env": {
-				"LUMBRE_TOKEN": "tu-token-de-email-to-task",
+				"LUMBRE_TOKEN": "tu-token-de-la-api",
 				"LUMBRE_BASE_URL": "https://app.lumbre.pro"
 			}
 		}
@@ -999,7 +998,7 @@ la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
 la config del cliente), así que ante ambigüedad se prefiere la buena en vez
 de fallar o mezclar. El token del path se valida de FORMA antes de usarse
 (32 caracteres hexadecimales **en minúsculas**, la forma del token de
-email-to-task): un segmento que no case — vacío, con más de un tramo, con
+la API): un segmento que no case — vacío, con más de un tramo, con
 caracteres fuera de `[0-9a-f]`, o los mismos 32 dígitos en mayúsculas — se
 trata exactamente como "sin credencial" y responde 401, sin recortes ni
 normalizaciones. Las mayúsculas se rechazan porque el matcher del borde solo
@@ -1079,7 +1078,7 @@ sonda es el healthcheck del contenedor y un 503 ahí lo reiniciaría.
 **El coste de la forma heredada del path**: el token queda guardado en la
 configuración del conector del lado de Anthropic (claude.ai) y visible en
 cualquier registro intermedio que guarde URLs (proxies, logs de acceso de
-terceros por los que pase la conexión). Rotar el token de email-to-task
+terceros por los que pase la conexión). Rotar el token de la API
 obliga a **volver a pegar la URL entera** en la config del conector. Se
 conserva para migrar conectores existentes; las configuraciones nuevas de
 claude.ai deben usar OAuth con la URL limpia.
@@ -1110,7 +1109,7 @@ Cualquier otro valor (o no ponerla) registra las 17, igual que siempre.
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js
 ```
 
-Sustituye `tu-token` por tu token de email-to-task (el mismo de siempre) y la
+Sustituye `tu-token` por tu token de la API (el mismo de siempre) y la
 ruta por la de tu clon compilado (ver "Compilar" más arriba). Con este
 conector enchufado, `add_attachment` en `lumbre-adjuntos` acepta `file_path`
 con normalidad — el error explicativo de arriba solo sale al llamarla desde
