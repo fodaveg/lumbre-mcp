@@ -696,7 +696,7 @@ export function formatListDetail(l: LumbreListSummary, parentName?: string | nul
 
 	lines.push(`- tareas: ${l.taskCount}`);
 
-	if (l.notes &&l.notes.trim() !== '') {
+	if (l.notes && l.notes.trim() !== '') {
 		lines.push(`- notas:\n${notesFull(l.notes)}`);
 	} else {
 		lines.push('- notas: (sin notas)');
