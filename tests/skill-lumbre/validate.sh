@@ -76,6 +76,7 @@ node --check "$test_dir/test-subagent-manager.mjs"
 node --check "$test_dir/validate-evidence.mjs"
 node --check "$test_dir/validate-tool-names.mjs"
 node --check "$test_dir/verify-forward-pilot.mjs"
+node --check "$test_dir/test-windows-portability.mjs"
 node "$test_dir/validate-evidence.mjs"
 node "$test_dir/validate-tool-names.mjs"
 
@@ -96,6 +97,7 @@ if [ "$pilot_available" = 1 ]; then
   trap - EXIT HUP INT TERM
 fi
 node "$test_dir/test-subagent-manager.mjs"
+node "$test_dir/test-windows-portability.mjs"
 
 if [ "$pilot_available" = 1 ]; then
   printf '%s\n' "lumbre skill repository validation: ok (piloto actual: integridad verificada; veredicto conductual en evidencia)"
