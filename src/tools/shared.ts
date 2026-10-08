@@ -204,6 +204,10 @@ export const TASK_OP_TOOL: Record<string, 'mutate_tasks' | 'organize'> = {
 	rename_list: 'organize',
 	remove_list: 'organize',
 	set_list_notes: 'organize',
+	close_project: 'organize',
+	reopen_project: 'organize',
+	set_project_when: 'organize',
+	set_project_deadline: 'organize',
 	move_to_list: 'organize',
 	delete_habit: 'organize'
 };

@@ -623,7 +623,8 @@ las cubría entero). Desde el 2026-09-19 viven en **`organize`**, la tool de
 reorganización y borrado. Mueve una tarea a otro proyecto o área, y
 crea/anida/renombra/borra contenedores con
 `organize({ ops: [{ op: "move_to_list"|"create_list"|"nest_list"|
-"rename_list"|"remove_list"|"set_list_notes"|"set_list_kind", ... }] })` — un solo elemento en `ops` para una
+"rename_list"|"remove_list"|"set_list_notes"|"set_list_kind"|"close_project"|"reopen_project"|
+"set_project_when"|"set_project_deadline", ... }] })` — un solo elemento en `ops` para una
 operación suelta. Mismo informe por op que el resto de Fase 2.
 
 - `move_to_list`: `taskId*`, uno de [`listId`, `list`]. `listId` (id ESTABLE,
@@ -658,6 +659,19 @@ operación suelta. Mismo informe por op que el resto de Fase 2.
 - `set_list_kind`: `listId*`, `listKind*` (`'area'|'project'`) — cambia el tipo
   visible de un proyecto o área EXISTENTE (MC6, 2026-09-24); `create_list.listKind`
   es su equivalente al crear. Identidad y tareas no cambian.
+- `close_project`: `listId*`, `as*` (`'done'|'cancelled'`) — cierra un proyecto
+  (2026-10-08). **Cierra también todo su subárbol abierto**: sus subproyectos abiertos y
+  todas sus tareas abiertas quedan hechos o cancelados con él, y `reopen_project` NO los
+  reabre, así que por API es difícil de deshacer: confirma con el usuario antes.
+- `reopen_project`: `listId*` — reabre SOLO el proyecto nombrado, no sus subproyectos ni
+  sus tareas.
+- `set_project_when`: `listId*`, `when*` (`YYYY-MM-DD`, `'someday'` o `null`, que lo quita).
+- `set_project_deadline`: `listId*`, `deadline*` (`YYYY-MM-DD` o `null`, que la quita).
+
+  Las cuatro viajan como `{ type: "mutate", taskId: listId, kind: "closeProject"|
+  "reopenProject"|"setProjectWhen"|"setProjectDeadline", payload }` y no comprueban
+  existencia de tarea. Si la app las rechaza (Bandeja, área, ya cerrado, fecha inválida…) vuelve
+  `noop` y el aviso llega tal cual en `avisos de la app`; el conector no lo interpreta.
 
 ### Registro del día (BRL — add-on experimental)
 
@@ -743,7 +757,7 @@ en la primera fila y la última de la segunda; `set_parent` llega el
 | tool | ops |
 | --- | --- |
 | `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `set_parent` |
-| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit` |
+| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit`, `close_project`, `reopen_project`, `set_project_when`, `set_project_deadline` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
 encadena con `create_list` por el `listId` generado en el mismo lote (ver
@@ -786,6 +800,10 @@ set_list_notes: listId*, notes* [revive]
 move_to_list: taskId*, uno de [listId, list]
 set_list_kind: listId*, listKind*
 delete_habit: habitId* (sin comprobación de existencia de tarea)
+close_project: listId*, as* ("done"|"cancelled") (cierra también subproyectos y tareas abiertas; reopen_project no los reabre)
+reopen_project: listId*
+set_project_when: listId*, when* (YYYY-MM-DD|"someday"|null)
+set_project_deadline: listId*, deadline* (YYYY-MM-DD|null)
 ```
 
 Un elemento que no encaja en la forma de SU `op` (campo obligatorio ausente,

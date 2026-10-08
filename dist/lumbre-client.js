@@ -993,7 +993,8 @@ export async function runBatch(config, ops) {
  * matriz que aplica `requireTaskExists` (ver el JSDoc de
  * `assertTaskUsable` para el porqué completo). Las ops de PROYECTO/ÁREA/SECCIÓN
  * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
- * `set_list_notes`) y
+ * `set_list_notes`, y desde 2026-10-08 `close_project`/`reopen_project`/
+ * `set_project_when`/`set_project_deadline`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
  * existencia. La PRESENCIA de una clave es la señal de "esta op
  * necesita comprobación de existencia" (ver `collectExistenceCheckIds`/
@@ -1308,6 +1309,19 @@ function translateOp(op) {
                     notes: op.notes,
                     ...(op.revive !== undefined ? { revive: op.revive } : {})
                 }
+            };
+        case 'close_project':
+            return { type: 'mutate', taskId: op.listId, kind: 'closeProject', payload: { as: op.as } };
+        case 'reopen_project':
+            return { type: 'mutate', taskId: op.listId, kind: 'reopenProject', payload: {} };
+        case 'set_project_when':
+            return { type: 'mutate', taskId: op.listId, kind: 'setProjectWhen', payload: { when: op.when } };
+        case 'set_project_deadline':
+            return {
+                type: 'mutate',
+                taskId: op.listId,
+                kind: 'setProjectDeadline',
+                payload: { deadline: op.deadline }
             };
         case 'set_list_kind':
             return {

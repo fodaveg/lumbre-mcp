@@ -368,6 +368,9 @@ describe('tools/list — superficie completa', () => {
 		// Re-medido el 2026-10-02 (audit: `annotations` en las 17 tools; fuera
 		// `fullNotes`, `outputSchema` de `delete_attachment` y las prosas
 		// duplicadas): 26.468 (−280). Techo = medido + ~1% (26.700).
+		// Re-medido el 2026-10-08 (`organize` +4 ops de ciclo de vida de
+		// proyecto; la lista de ops del encabezado de la description se recortó,
+		// ya vive en `ops`): 26.692, sin tocar el techo.
 		const CHAR_CEILING = 26700;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
@@ -457,7 +460,11 @@ describe('tools/list — superficie completa', () => {
 			'set_list_notes',
 			'move_to_list',
 			'set_list_kind',
-			'delete_habit'
+			'delete_habit',
+			'close_project',
+			'reopen_project',
+			'set_project_when',
+			'set_project_deadline'
 		]) {
 			expect(organizeOps).toContain(`${op}:`);
 		}
@@ -1632,6 +1639,31 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				name: 'ajeno'
 			}
 		},
+		// 2026-10-08: ciclo de vida de proyecto (cerrar, reabrir, cuándo, fecha límite).
+		{
+			op: 'close_project',
+			valid: { op: 'close_project', listId: '11111111-1111-1111-1111-111111111111', as: 'done' },
+			missingField: 'as',
+			extraField: { op: 'close_project', listId: '11111111-1111-1111-1111-111111111111', as: 'cancelled', name: 'ajeno' }
+		},
+		{
+			op: 'reopen_project',
+			valid: { op: 'reopen_project', listId: '11111111-1111-1111-1111-111111111111' },
+			missingField: 'listId',
+			extraField: { op: 'reopen_project', listId: '11111111-1111-1111-1111-111111111111', as: 'done' }
+		},
+		{
+			op: 'set_project_when',
+			valid: { op: 'set_project_when', listId: '11111111-1111-1111-1111-111111111111', when: null },
+			missingField: 'when',
+			extraField: { op: 'set_project_when', listId: '11111111-1111-1111-1111-111111111111', when: 'someday', deadline: '2026-12-01' }
+		},
+		{
+			op: 'set_project_deadline',
+			valid: { op: 'set_project_deadline', listId: '11111111-1111-1111-1111-111111111111', deadline: '2026-12-01' },
+			missingField: 'deadline',
+			extraField: { op: 'set_project_deadline', listId: '11111111-1111-1111-1111-111111111111', deadline: null, when: 'someday' }
+		},
 		// MC6 (2026-09-24, paridad UI↔MCP): las 4 ops nuevas.
 		{
 			op: 'set_waiting',
@@ -1768,12 +1800,16 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 		'set_list_notes',
 		'move_to_list',
 		'set_list_kind',
-		'delete_habit'
+		'delete_habit',
+		'close_project',
+		'reopen_project',
+		'set_project_when',
+		'set_project_deadline'
 	]);
 	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
 	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
 
-	it('cubre las 28 operaciones (guardarraíl del propio test; MC7 y set_parent desde el 2026-09-25)', () => {
+	it('cubre las 32 operaciones (guardarraíl del propio test; MC7 y set_parent desde el 2026-09-25)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
@@ -1803,7 +1839,11 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				'archive_habit',
 				'unarchive_habit',
 				'delete_habit',
-				'set_parent'
+				'set_parent',
+				'close_project',
+				'reopen_project',
+				'set_project_when',
+				'set_project_deadline'
 			].sort()
 		);
 	});
@@ -2580,6 +2620,93 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(text).toContain('1/2 operación(es) aceptadas.');
 		expect(text).toContain(`[0] create_list: id ${LIST_ID}`);
 		expect(text).toContain('[1] set_list_notes: kind de mutación desconocido: setListNotes');
+	});
+
+	it.each([
+		['close_project', { as: 'done' }, 'closeProject', { as: 'done' }],
+		['close_project', { as: 'cancelled' }, 'closeProject', { as: 'cancelled' }],
+		['reopen_project', {}, 'reopenProject', {}],
+		['set_project_when', { when: '2026-11-01' }, 'setProjectWhen', { when: '2026-11-01' }],
+		['set_project_when', { when: 'someday' }, 'setProjectWhen', { when: 'someday' }],
+		['set_project_when', { when: null }, 'setProjectWhen', { when: null }],
+		['set_project_deadline', { deadline: '2026-12-01' }, 'setProjectDeadline', { deadline: '2026-12-01' }],
+		['set_project_deadline', { deadline: null }, 'setProjectDeadline', { deadline: null }]
+	])('organize: %s %j viaja como kind:%s con listId en taskId, aplicado y sin comprobar existencia', async (op, fields, kind, payload) => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({
+				ok: true,
+				results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID, materialization: 'applied' }],
+				notices: ['aviso de ejemplo A', 'aviso de ejemplo B']
+			})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const result = await client.callTool({ name: 'organize', arguments: { ops: [{ op, listId: LIST_ID, ...fields }] } });
+
+		expect(result.isError).not.toBe(true);
+		expect(batchCalls(fetchSpy)).toHaveLength(1);
+		const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body)) as { ops: unknown[] };
+		expect(body.ops).toEqual([{ type: 'mutate', taskId: LIST_ID, kind, payload }]);
+		const text = resultText(result);
+		expect(text).toContain('1/1 operación(es) aceptadas.');
+		expect(text).toContain('aviso de ejemplo A');
+		expect(text).toContain('aviso de ejemplo B');
+	});
+
+	it.each(['close_project', 'reopen_project', 'set_project_when', 'set_project_deadline'])(
+		'organize: %s con noop de la app enseña el aviso tal cual',
+		async (op) => {
+			const notice = `texto cualquiera de ejemplo para ${op}`;
+			vi.stubGlobal(
+				'fetch',
+				vi.fn().mockResolvedValue(
+					jsonResponse({
+						ok: true,
+						results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID, materialization: 'noop' }],
+						notices: [notice]
+					})
+				)
+			);
+			const client = await buildClient();
+			const extra =
+				op === 'close_project'
+					? { as: 'done' }
+					: op === 'set_project_when'
+						? { when: null }
+						: op === 'set_project_deadline'
+							? { deadline: null }
+							: {};
+
+			const text = resultText(
+				await client.callTool({ name: 'organize', arguments: { ops: [{ op, listId: LIST_ID, ...extra }] } })
+			);
+
+			expect(text).toMatch(new RegExp(`\\[0\\] ${op}: sin efecto`));
+			expect(text).toContain(`avisos de la app:\n  - ${notice}`);
+		}
+	);
+
+	it.each([
+		['close_project', { as: 'archived' }],
+		['close_project', {}],
+		['set_project_when', {}],
+		['set_project_when', { when: '01/11/2026' }],
+		['set_project_deadline', {}],
+		['set_project_deadline', { deadline: 'someday' }],
+		['reopen_project', { as: 'done' }]
+	])('organize: %s %j con forma inválida sale por posición y no llama a la app', async (op, fields) => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({ name: 'organize', arguments: { ops: [{ op, listId: LIST_ID, ...fields }] } })
+		);
+
+		expect(text).toContain('0/1 operación(es) aceptadas.');
+		expect(text).toContain(`[0] ${op}:`);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it('organize: un create_list con FORMA inválida no tumba el lote, sale por posición', async () => {

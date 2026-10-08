@@ -1440,6 +1440,10 @@ export type MutationKind =
 	| 'renameList'
 	| 'removeList'
 	| 'setListNotes'
+	| 'closeProject'
+	| 'reopenProject'
+	| 'setProjectWhen'
+	| 'setProjectDeadline'
 	| 'registerHabit'
 	| 'createBrlEntry'
 	| 'updateBrlEntry'
@@ -1602,6 +1606,20 @@ export interface SetListNotesMutationPayload {
 	notes: string | null;
 	revive?: boolean;
 }
+/** Ciclo de vida de proyecto (2026-10-08): el id de la lista viaja en
+ *  `MutateTaskInput.taskId`. `closeProject` cierra todo el subárbol abierto;
+ *  `reopenProject` (sin campos) reabre solo la lista nombrada. `null` quita el
+ *  cuándo o la fecha límite. */
+export interface CloseProjectMutationPayload {
+	as: 'done' | 'cancelled';
+}
+export type ReopenProjectMutationPayload = Record<string, never>;
+export interface SetProjectWhenMutationPayload {
+	when: string | null;
+}
+export interface SetProjectDeadlineMutationPayload {
+	deadline: string | null;
+}
 /** Crea una entrada de registro (BRL, add-on experimental): `date` el día al
  *  que pertenece y `entry` su texto —`- …` nota, `= …` pensamiento; sin
  *  marcador es una nota—. El id de la entrada nueva viaja en
@@ -1691,6 +1709,10 @@ export interface MutateTaskInput {
 		| RenameListMutationPayload
 		| RemoveListMutationPayload
 		| SetListNotesMutationPayload
+		| CloseProjectMutationPayload
+		| ReopenProjectMutationPayload
+		| SetProjectWhenMutationPayload
+		| SetProjectDeadlineMutationPayload
 		| RegisterHabitMutationPayload
 		| CreateBrlEntryMutationPayload
 		| UpdateBrlEntryMutationPayload
@@ -2028,6 +2050,15 @@ export type MutateTasksOp =
 	| { op: 'rename_list'; listId: string; name: string }
 	| { op: 'remove_list'; listId: string }
 	| { op: 'set_list_notes'; listId: string; notes: string | null; revive?: boolean }
+	/** Ciclo de vida de un PROYECTO (2026-10-08). `close_project` cierra todo
+	 *  el subárbol ABIERTO (subproyectos y tareas, `closeProjectOp` en la app);
+	 *  `reopen_project` reabre SOLO el nombrado. El rechazo (Bandeja, área,
+	 *  ya cerrado, fecha inválida…) vuelve como `noop` + aviso. `when`/
+	 *  `deadline` `null` lo quitan. */
+	| { op: 'close_project'; listId: string; as: 'done' | 'cancelled' }
+	| { op: 'reopen_project'; listId: string }
+	| { op: 'set_project_when'; listId: string; when: string | null }
+	| { op: 'set_project_deadline'; listId: string; deadline: string | null }
 	/** Cambia el tipo visible de un proyecto o área EXISTENTE (MC6);
 	 *  `create_list.listKind` es su equivalente al CREAR. */
 	| { op: 'set_list_kind'; listId: string; listKind: 'area' | 'project' }
@@ -2105,7 +2136,8 @@ export type MutateTasksOp =
  * matriz que aplica `requireTaskExists` (ver el JSDoc de
  * `assertTaskUsable` para el porqué completo). Las ops de PROYECTO/ÁREA/SECCIÓN
  * (`remove_section`/`create_list`/`nest_list`/`rename_list`/`remove_list`/
- * `set_list_notes`) y
+ * `set_list_notes`, y desde 2026-10-08 `close_project`/`reopen_project`/
+ * `set_project_when`/`set_project_deadline`) y
  * `add_task` NO están aquí: no targetean una tarea, así que no comprueban
  * existencia. La PRESENCIA de una clave es la señal de "esta op
  * necesita comprobación de existencia" (ver `collectExistenceCheckIds`/
@@ -2429,6 +2461,19 @@ function translateOp(op: MutateTasksOp): BatchOp {
 					notes: op.notes,
 					...(op.revive !== undefined ? { revive: op.revive } : {})
 				}
+			};
+		case 'close_project':
+			return { type: 'mutate', taskId: op.listId, kind: 'closeProject', payload: { as: op.as } };
+		case 'reopen_project':
+			return { type: 'mutate', taskId: op.listId, kind: 'reopenProject', payload: {} };
+		case 'set_project_when':
+			return { type: 'mutate', taskId: op.listId, kind: 'setProjectWhen', payload: { when: op.when } };
+		case 'set_project_deadline':
+			return {
+				type: 'mutate',
+				taskId: op.listId,
+				kind: 'setProjectDeadline',
+				payload: { deadline: op.deadline }
 			};
 		case 'set_list_kind':
 			return {

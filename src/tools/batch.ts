@@ -330,6 +330,35 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 			revive: z.boolean().optional()
 		})
 		.strict(),
+	// Ciclo de vida de proyecto (2026-10-08). Sin `restore`: cerrar arrastra el
+	// subárbol y `reopen_project` solo reabre el nombrado.
+	z
+		.object({
+			op: z.literal('close_project'),
+			listId: z.string().guid(),
+			as: z.enum(['done', 'cancelled'])
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('reopen_project'),
+			listId: z.string().guid()
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('set_project_when'),
+			listId: z.string().guid(),
+			when: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.literal('someday'), z.null()])
+		})
+		.strict(),
+	z
+		.object({
+			op: z.literal('set_project_deadline'),
+			listId: z.string().guid(),
+			deadline: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
+		})
+		.strict(),
 	z
 		.object({
 			op: z.literal('move_to_list'),
@@ -461,7 +490,7 @@ export const mutateTasksOpSchema = z
  */
 export const organizeOpSchema = z
 	.object({
-		op: z.string().describe('Operación — las 10 de esta tool, con su contrato, en la description de `ops`'),
+		op: z.string().describe('Operación — las 14 de esta tool, con su contrato, en la description de `ops`'),
 		taskId: z.string().guid().optional().describe('Id de la tarea a borrar o mover — ver list_tasks/get_task'),
 		habitId: z.string().guid().optional().describe('Id del hábito (delete_habit) — ver list_habits'),
 		sectionId: z.string().guid().optional().describe('Id de la sección — ver el campo sectionId de una tarea que viva en ella'),
@@ -481,7 +510,12 @@ export const organizeOpSchema = z
 		color: z.string().max(20).optional().describe('red|amber|green|blue|violet|pink, o un hex libre "#rrggbb"'),
 		icon: z.string().max(16).optional(),
 		revive: z.boolean().optional().describe('true restaura una nota de proyecto o área borrada previamente'),
-		listKind: z.enum(['area', 'project']).optional().describe('create_list/set_list_kind: tipo visible del contenedor')
+		listKind: z.enum(['area', 'project']).optional().describe('create_list/set_list_kind: tipo visible del contenedor'),
+		// `as`/`when`/`deadline` laxos a propósito: el formato lo valida el schema
+		// estricto, por-op, con un mensaje legible y sin tumbar el lote.
+		as: z.string().optional(),
+		when: z.union([z.string(), z.null()]).optional(),
+		deadline: z.union([z.string(), z.null()]).optional()
 	})
 	.passthrough();
 
@@ -779,9 +813,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { destructiveHint: true },
 			description:
-				`Reorganiza y borra: delete (tarea), remove_section, create_list, nest_list, rename_list, ` +
-				`remove_list, set_list_notes, move_to_list, set_list_kind, delete_habit. Vía ÚNICA para ` +
-				`proyectos, áreas y secciones, y la única que borra. Sin deshacer: confirma con el usuario antes. ` +
+				`Reorganiza y borra: tareas (delete), secciones, proyectos, áreas y hábitos (contrato en \`ops\`). ` +
+				`Vía ÚNICA para proyectos, áreas y secciones; la única que borra. Sin deshacer: confirma con el usuario antes. ` +
 				`Mismo lote y mismo éxito PARCIAL que mutate_tasks, con el listId de cada ` +
 				`create_list; para encadenar en el MISMO lote, dale tú ese listId (uuid v4). ${OUTCOME_NOTE}`,
 			inputSchema: {
@@ -796,7 +829,10 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'rename_list: listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* ' +
 							'[revive] · move_to_list: taskId*, uno de [listId, list] · ' +
 							'set_list_kind: listId*, listKind* ("area"|"project") · ' +
-							'delete_habit: habitId* (borra el hábito, sin deshacer)'
+							'delete_habit: habitId* (borra el hábito, sin deshacer) · ' +
+							'close_project: listId*, as* ("done"|"cancelled"; cierra también sus subproyectos y tareas ' +
+							'abiertas; reopen_project no los reabre) · reopen_project: listId* · ' +
+							'set_project_when: listId*, when* (fecha|"someday"|null) · set_project_deadline: listId*, deadline* (fecha|null)'
 					)
 			}
 		},

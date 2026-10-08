@@ -1414,6 +1414,35 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+	it('ciclo de vida de proyecto: traduce a su kind con el listId en taskId, sin comprobar existencia de tarea', () => {
+		const listId = 'l1';
+		const { batchOps, originalIndexes, skipped } = buildBatchFromOps(
+			[
+				{ op: 'close_project', listId, as: 'done' },
+				{ op: 'close_project', listId, as: 'cancelled' },
+				{ op: 'reopen_project', listId },
+				{ op: 'set_project_when', listId, when: '2026-11-01' },
+				{ op: 'set_project_when', listId, when: 'someday' },
+				{ op: 'set_project_when', listId, when: null },
+				{ op: 'set_project_deadline', listId, deadline: '2026-12-01' },
+				{ op: 'set_project_deadline', listId, deadline: null }
+			],
+			new Map()
+		);
+		expect(skipped).toEqual([]);
+		expect(originalIndexes).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+		expect(batchOps).toEqual([
+			{ type: 'mutate', taskId: listId, kind: 'closeProject', payload: { as: 'done' } },
+			{ type: 'mutate', taskId: listId, kind: 'closeProject', payload: { as: 'cancelled' } },
+			{ type: 'mutate', taskId: listId, kind: 'reopenProject', payload: {} },
+			{ type: 'mutate', taskId: listId, kind: 'setProjectWhen', payload: { when: '2026-11-01' } },
+			{ type: 'mutate', taskId: listId, kind: 'setProjectWhen', payload: { when: 'someday' } },
+			{ type: 'mutate', taskId: listId, kind: 'setProjectWhen', payload: { when: null } },
+			{ type: 'mutate', taskId: listId, kind: 'setProjectDeadline', payload: { deadline: '2026-12-01' } },
+			{ type: 'mutate', taskId: listId, kind: 'setProjectDeadline', payload: { deadline: null } }
+		]);
+	});
+
 	it('validación local: `update` sin ningún campo a cambiar se descarta ANTES de comprobar existencia', () => {
 		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 't1' }];
 		// `existing` vacío a propósito: si la validación local no cortara antes,
