@@ -54,6 +54,10 @@ independiente. Para adjuntos o para configurar la conexión, lee además
   `serie:<id de la semilla>`).
 - Antes de borrar, conoce los efectos y confirma el objetivo. Si se elimina una
   sección, verifica que sus tareas se conserven cuando ese sea el contrato.
+- `close_project` (en `organize`) cierra también los subproyectos y las tareas abiertas del
+  proyecto, y `reopen_project` solo reabre el proyecto nombrado. Confirma con el usuario
+  inmediatamente antes de cerrar, como con un borrado, salvo autorización inequívoca para
+  ese proyecto concreto.
 
 ## Consistencia
 

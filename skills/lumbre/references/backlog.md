@@ -54,5 +54,14 @@ tareas, que [daily.md](daily.md) crea y anida en su principal por defecto. `orga
 contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno que no
 existe.
 
+Ciclo de vida de un proyecto, con `organize`: `close_project` (`as`: `"done"` o
+`"cancelled"`), `reopen_project`, `set_project_when` (fecha, `"someday"` o `null`) y
+`set_project_deadline` (fecha o `null`). Cerrar arrastra todo el subárbol abierto: sus
+subproyectos abiertos y todas sus tareas abiertas quedan hechos o cancelados con él, y
+`reopen_project` reabre solo el proyecto nombrado, no los subproyectos ni las tareas. Por eso
+cerrar es difícil de deshacer: confirma con el usuario inmediatamente antes, igual que un
+borrado, salvo autorización inequívoca para ese proyecto concreto. Sigue siendo `aplicada` lo
+único que cuenta como hecho; un `sin efecto` trae su motivo en los `avisos de la app`.
+
 Los vínculos de un proyecto o área con una nota de Hebra (`link_list_note`,
 `unlink_list_note`) siguen [destinations.md](destinations.md).
