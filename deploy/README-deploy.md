@@ -60,6 +60,59 @@ VPS. `/readyz` comparte una sola comprobación concurrente, cacheada cinco
 segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
 `127.0.0.1`.
 
+### Qué guarda el volumen de cada conexión y cuándo se borra
+
+Por cada conexión OAuth hay dos cosas en `/state/lumbre-mcp`: la credencial
+dedicada de Lumbre, cifrada, dentro de `oauth-store.json`, y un fichero de
+huella de notas `notes-seen-<id>.json` (identificadores de tarea, fecha de la
+última edición de su nota y longitud; ni texto de notas ni credencial, y el
+`<id>` es un hash, no el token).
+
+- **Al salir la autorización del almacén** (revocación desde el cliente,
+  refresh reutilizado, credencial inactiva al refrescar, familia caducada a
+  los 30 días) se retira del store y se borra su fichero de huella en la misma
+  operación. Si la revocación nace aquí, la credencial cifrada queda en la
+  outbox hasta el ACK de Lumbre o 30 días.
+- **Barrido de credenciales**: al arrancar el proceso (con el store ya
+  validado) y cada 60 minutos, el relé introspecciona en serie cada credencial
+  que guarda. Solo un `{ "active": false }` explícito de Lumbre (credencial
+  revocada desde la app, cuenta borrada o usuario no activo) purga la
+  autorización, sus tombstones y su huella. Así, revocar en la app o borrar la
+  cuenta se refleja aquí como mucho unos 60 minutos después, **siempre que el
+  contenedor esté en marcha y `app.lumbre.pro` responda**. El barrido también
+  aplica la caducidad de las familias, reintenta la outbox entera y borra las
+  huellas con más de 30 días sin escrituras.
+
+Qué esperar al operarlo:
+
+- Red caída, timeout, 5xx, 429, 401 del canal (el secreto no coincide) o una
+  respuesta fuera de contrato **no purgan nada** y cortan el barrido hasta el
+  ciclo siguiente. Con Lumbre caída o el secreto mal puesto no se borra nada
+  por error, pero tampoco se purga lo revocado hasta que se arregle.
+- Un barrido que purga o descarta algo escribe UNA línea en stderr,
+  `[lumbre-mcp-oauth] barrido de credenciales: …`, con recuentos y nada más
+  (ni tokens, ni identificadores, ni nombres de fichero). Uno que no hace nada
+  no escribe nada. Si un fichero de huella no se pudo borrar, sale otra línea
+  con el recuento, `[lumbre-mcp-oauth] huella de notas: …`.
+- No marca `/readyz` ni reinicia el contenedor: un barrido fallido se
+  reintenta en el siguiente ciclo. No tiene configuración: el intervalo es una
+  constante (`CREDENTIAL_SWEEP_INTERVAL_MS` en `src/http.ts`).
+- Coste hacia Lumbre: una introspección por autorización guardada y hora. La
+  ruta `/introspect` de la app solo limita los intentos con secreto inválido,
+  así que con el secreto correcto no hay límite que gastar.
+
+Límites que se quedan:
+
+- La **conexión antigua por token de la API** (Bearer directo o `/mcp/<token>`)
+  no deja credencial en el relé: el relé no puede saber que el token se rotó o
+  que la cuenta se borró. Su fichero de huella se borra a los 30 días sin
+  escrituras, que ahora aplica el barrido sin depender de que haya tráfico.
+- Un 401 de la app durante una tool no borra nada; lo cubre el barrido.
+- Si el borrado de una huella falla, o una tool en vuelo la reescribe justo
+  después de la retirada, queda un fichero huérfano hasta esos mismos 30 días.
+- Esto borra del volumen en uso. Una copia de `oauth-store.json` hecha antes
+  de la purga conserva lo que tuviera.
+
 ### Un `.env` local nunca acaba en git, en la imagen ni en el servidor
 
 El repo es público y `.env.example` invita a crear un `.env` local con una

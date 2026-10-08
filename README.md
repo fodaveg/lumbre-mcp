@@ -113,8 +113,10 @@ vistas del conector (estado interno, no datos del usuario en Lumbre).
   `${XDG_STATE_HOME:-~/.local/state}/lumbre-mcp/notes-seen.json` (conector
   stdio local; el transporte HTTP remoto usa un fichero POR CUENTA,
   `notes-seen-<id>.json`, `<id>` derivado del token y nunca la credencial en
-  sí — dos cuentas nunca comparten huella; los ficheros de cuentas inactivas
-  se podan como mucho cada 10 min), comparación EXACTA, sin ventana—,
+  sí — dos cuentas nunca comparten huella; el de una autorización OAuth se
+  borra cuando esa autorización sale del relé y el resto caduca a los 30 días
+  sin escrituras, ver «Qué guarda el relé de cada conexión y cuándo lo borra»
+  más abajo), comparación EXACTA, sin ventana—,
   o si se tocó dentro de `notesRecentHours`, default 24h,
   cuando aún no hay huella —bootstrap, solo la 1ª vez que el MCP ve esa
   tarea—) o como marcador `✎N ↻DDmmm` con su tamaño en chars Y la fecha de la
@@ -985,7 +987,8 @@ servidor a servidor, se cifra antes de persistir y nunca aparece en HTML,
 En Codex y claude.ai se configura solo `https://mcp.lumbre.pro/mcp`. El relé cifra la
 credencial upstream con AES-256-GCM y la asocia a access/refresh tokens opacos.
 Antes de emitir o rotar refresh consulta `introspect`; revocación, replay y
-límites de tombstones eliminan la familia local y dejan una revocación cifrada
+límites de tombstones eliminan la familia local, borran su huella de notas y
+dejan una revocación cifrada
 en un outbox durable hasta que Lumbre confirma el ACK idempotente. Los access
 tokens duran una hora. Cada familia refresh tiene una vigencia absoluta de 30
 días: rota en cada uso sin prolongar esa fecha; reutilizar uno antiguo revoca la
@@ -1088,6 +1091,56 @@ preferible a que un fallo transitorio de Lumbre convierta el fichero de estado
 en algo que ya no arranca. No se hace en silencio (queda una línea en el log,
 sin credenciales), y deliberadamente no marca `/readyz` como no listo: esa
 sonda es el healthcheck del contenedor y un 503 ahí lo reiniciaría.
+
+**Qué guarda el relé de cada conexión y cuándo lo borra.** De una conexión
+OAuth el relé guarda dos cosas en su volumen de estado: la credencial dedicada
+de Lumbre, cifrada, dentro de `oauth-store.json`, y un fichero de huella de
+notas `notes-seen-<id>.json` (identificadores de tarea con la fecha de la
+última edición de su nota y su longitud; ni el texto de las notas ni la
+credencial). Las dos se borran así:
+
+- **Al salir la autorización del almacén.** Revocación desde el cliente
+  (`/revoke`), reutilización de un refresh ya usado, credencial que Lumbre
+  declara inactiva al refrescar, o caducidad de la familia a los 30 días: en
+  la misma operación se retira la autorización y se borra su fichero de
+  huella. Cuando la revocación nace en el relé, la credencial cifrada pasa a la
+  outbox de arriba hasta que Lumbre confirma que la revocó (o caduca a los 30
+  días): ahí ya no autoriza nada, solo espera ese acuse.
+- **Barrido periódico.** Lumbre no avisa al relé cuando alguien revoca la
+  conexión desde la app o borra su cuenta, así que el relé pregunta: al
+  arrancar y cada 60 minutos introspecciona, de una en una, cada credencial
+  que guarda. Si Lumbre responde exactamente `{ "active": false }` (credencial
+  revocada, cuenta borrada o usuario no activo), se borran la autorización,
+  sus tombstones y su fichero de huella, sin pasar por la outbox porque ya no
+  queda nada que revocar. El resultado: como mucho unos 60 minutos después de
+  revocar en la app o de borrar la cuenta, **mientras el relé esté en marcha y
+  Lumbre responda**. El mismo barrido aplica la caducidad de las familias y
+  reintenta la outbox, que antes dependían de que llegase otra petición.
+
+Lo que el barrido **no** toma por una orden de borrar: un fallo de red, un
+timeout, un 5xx, un 429, un 401 del canal (secreto mal configurado), una
+respuesta fuera de contrato, o una respuesta activa que corresponde a otra
+credencial. En ninguno de esos casos se borra nada; todos menos el último
+cortan el barrido, que se reintenta en el ciclo siguiente. Con Lumbre caída no
+se purga nada hasta que vuelve. Un barrido que purga o descarta algo deja una
+línea en el log con los recuentos, sin tokens ni identificadores.
+
+Límites que se quedan, y conviene conocer:
+
+- **La conexión antigua por token de la API** (Bearer directo o token en la
+  ruta) no deja ninguna credencial en el relé, así que el relé no puede saber
+  que ese token se rotó o que la cuenta se borró. Su fichero de huella se
+  borra a los 30 días sin escrituras. Eso sí lo garantiza ahora el barrido:
+  antes solo ocurría si otra cuenta guardaba algo.
+- **Un 401 de Lumbre durante una tool no borra nada.** No es una señal lo
+  bastante fiable para destruir una autorización; lo cubre el barrido.
+- **El fichero de huella se borra después de confirmar la escritura del
+  almacén.** Si ese borrado falla, o una tool que estaba en vuelo con esa
+  credencial vuelve a escribirlo justo después, queda un fichero huérfano (sin
+  credencial y sin texto de notas) que cae por la misma caducidad de 30 días.
+- **El barrido vive en el transporte HTTP.** El conector stdio local no tiene
+  almacén OAuth ni lo necesita: su `notes-seen.json` es de la máquina de quien
+  lo usa y el relé nunca lo toca.
 
 **El coste de la forma heredada del path**: el token queda guardado en la
 configuración del conector del lado de Anthropic (claude.ai) y visible en
