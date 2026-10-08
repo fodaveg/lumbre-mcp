@@ -1810,15 +1810,15 @@ export async function listBrlEntries(
 	return (body as { entries: LumbreBrlEntry[] }).entries;
 }
 
-// ── Hábitos v2 (`GET /api/export`, lectura) ─────────────────────────────────
+// ── Hábitos v2 (`GET /api/habits`, lectura) ─────────────────────────────────
 
 /** Clase de un hábito (`docs/36-habitos-v2.md` del repo principal): `registro`
  *  (sí/no), `cadencia` (cada N días) o `contador` (N veces al día). */
 export type LumbreHabitClass = 'registro' | 'cadencia' | 'contador';
 
-/** Un hábito tal como viene en `GET /api/export` (`StoreHabit` del repo
+/** Un hábito tal como viene en `GET /api/habits` (`StoreHabit` del repo
  *  principal, recortado a los campos que expone `list_habits`): id, nombre,
- *  clase y `archivedAt` (epoch ms, o ausente si sigue vivo). El export ya
+ *  clase y `archivedAt` (epoch ms, o ausente si sigue vivo). La ruta ya
  *  excluye los BORRADOS (`deletedAt`, tombstone real) — solo distingue
  *  vivo/archivado, que es lo que decide `includeArchived`. */
 export interface LumbreHabit {
@@ -1838,33 +1838,15 @@ export interface LumbreHabitLogEntry {
 	date: string;
 }
 
-/** `GET /api/export`: vuelca la cuenta ENTERA (tareas, listas, hábitos…) — ver
- *  el JSDoc del endpoint en el repo principal. `list_habits` solo usa
- *  `habits`/`habitLog` de la respuesta; el resto se ignora tal cual llega
- *  (no se valida su forma, evita acoplar este cliente al resto del export).
- *  MISMA auth que `GET /api/tasks` (token personal o concesión MCP), pero un
- *  límite MÁS ESTRICTO (10/min, ver el JSDoc del endpoint): no la llames en
- *  bucle. `habitLog` ausente (servidor que no lo manda) cae a `[]`, nunca un
- *  error — el listado sigue siendo útil sin las últimas ocurrencias. */
-export async function listHabitsExport(
-	config: LumbreConfig
-): Promise<{ habits: LumbreHabit[]; habitLog: LumbreHabitLogEntry[] }> {
-	const body = await request(config, '/api/export');
-	if (!body || typeof body !== 'object' || !Array.isArray((body as { habits?: unknown }).habits)) {
-		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/export.');
-	}
-	const habitLogRaw = (body as { habitLog?: unknown }).habitLog;
-	return {
-		habits: (body as { habits: LumbreHabit[] }).habits,
-		habitLog: Array.isArray(habitLogRaw) ? (habitLogRaw as LumbreHabitLogEntry[]) : []
-	};
-}
-
 /**
- * `GET /api/habits` (R9): `{ habits, habitLog }` con la misma forma que esas
- * claves en `/api/export`, sin bajar la cuenta entera; misma credencial que
- * `GET /api/tasks` y límite 120/min. Si la app es anterior a R9 (404), cae a
- * `listHabitsExport` como antes (límite 10/min).
+ * `GET /api/habits` (R9): `{ habits, habitLog }`; misma credencial que
+ * `GET /api/tasks` y límite 120/min. `habitLog` ausente (servidor que no lo
+ * manda) cae a `[]`, nunca un error: el listado sigue siendo útil sin las
+ * últimas ocurrencias. Un 404 (app anterior a R9) da un error propio, sin
+ * ruta alternativa.
+ *
+ * El conector NO llama a `/api/export` a propósito (2026-10-08): vuelca la
+ * cuenta entera, más de lo que la conexión declara en su consentimiento.
  */
 export async function listHabits(
 	config: LumbreConfig
@@ -1873,7 +1855,12 @@ export async function listHabits(
 	try {
 		body = await request(config, '/api/habits');
 	} catch (err) {
-		if (err instanceof LumbreApiError && err.status === 404) return listHabitsExport(config);
+		if (err instanceof LumbreApiError && err.status === 404) {
+			throw new LumbreApiError(
+				'Esta app de Lumbre no tiene la ruta de hábitos (/api/habits): actualízala o revisa LUMBRE_BASE_URL.',
+				404
+			);
+		}
 		throw err;
 	}
 	if (!body || typeof body !== 'object' || !Array.isArray((body as { habits?: unknown }).habits)) {

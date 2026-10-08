@@ -7,8 +7,8 @@ import { errorResult, textResult, type ToolCtx } from './shared.js';
 /**
  * Familia «hábitos» (MC6, 2026-09-24): `list_habits`, la única tool de esta
  * familia — lee hábitos y su historial vía `GET /api/habits` (R9: mismo auth
- * y límite 120/min que `list_tasks`; una app anterior cae a `/api/export`,
- * 10/min, ver `listHabits`). Escritura (`register_habit`) vive en `mutate_tasks`
+ * y límite 120/min que `list_tasks`; una app anterior a R9 da un error
+ * legible, ver `listHabits`). Escritura (`register_habit`) vive en `mutate_tasks`
  * (`tools/batch.ts`), no aquí — mismo criterio que el resto del MCP: lectura y
  * mutación de un dominio en tools distintas.
  */

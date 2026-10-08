@@ -282,7 +282,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	const { listBrlEntriesTool, mutateBrlTool } = registerBrlTools(server, ctx);
 
 	// Familia «hábitos» (`src/tools/habits.ts`, MC6 2026-09-24): `list_habits`,
-	// lectura vía `GET /api/export`. Igual que BRL, un add-on de otro dominio
+	// lectura vía `GET /api/habits`. Igual que BRL, un add-on de otro dominio
 	// que no son tareas — se registra justo después por el mismo motivo.
 	const { listHabitsTool } = registerHabitTools(server, ctx);
 

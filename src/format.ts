@@ -722,10 +722,9 @@ export function formatListLinks(listId: string, links: LumbreListLink[]): string
 
 /** Cuántas últimas ocurrencias de `habitLog` mostrar por hábito en
  *  `list_habits` (MC6 — hábitos, 2026-09-24): coste CERO (`habitLog` viaja en
- *  la MISMA respuesta de `GET /api/export`, no hace falta pedirlo aparte);
+ *  la MISMA respuesta de `GET /api/habits`, no hace falta pedirlo aparte);
  *  3 basta para responder «¿lo hice estos días?» sin inflar la respuesta en
- *  una cuenta con mucho historial — más que eso ya es un caso para leer el
- *  export entero, no esta tool. */
+ *  una cuenta con mucho historial. */
 const HABIT_LOG_RECENT_COUNT = 3;
 
 /**

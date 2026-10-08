@@ -14,7 +14,7 @@ import {
 	findTasksByIds,
 	getListLinks,
 	linkListNote,
-	listHabitsExport,
+	listHabits,
 	listLists,
 	listTasks,
 	LumbreApiError,
@@ -387,8 +387,34 @@ describe('listLists', () => {
 	});
 });
 
-describe('listHabitsExport (MC6)', () => {
-	it('manda GET /api/export con el mismo Bearer y devuelve habits/habitLog', async () => {
+describe('listHabits (MC6)', () => {
+	it('un 404 de /api/habits lanza LumbreApiError propio (404) y no pide otra ruta', async () => {
+		const fetchSpy = vi.fn().mockImplementation(
+			async () =>
+				new Response(JSON.stringify({ message: 'Not found' }), {
+					status: 404,
+					headers: { 'content-type': 'application/json' }
+				})
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const err = await listHabits(config).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(LumbreApiError);
+		expect((err as LumbreApiError).status).toBe(404);
+		expect((err as LumbreApiError).message).toContain('/api/habits');
+		expect((err as LumbreApiError).message).toContain('LUMBRE_BASE_URL');
+		expect((err as LumbreApiError).message).not.toContain('export');
+		expect(fetchSpy.mock.calls.map((c) => c[0])).toEqual(['https://lumbre.test/api/habits']);
+	});
+
+	it('un 500 de /api/habits se propaga con su estado', async () => {
+		mockFetchJson({ message: 'boom' }, 500);
+		const err = await listHabits(config).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(LumbreApiError);
+		expect((err as LumbreApiError).status).toBe(500);
+	});
+
+	it('manda GET /api/habits con el mismo Bearer y devuelve habits/habitLog', async () => {
 		const habits = [{ id: 'h1', nombre: 'Ejercicio', clase: 'cadencia' as const }];
 		const habitLog = [{ id: 'l1', habitId: 'h1', date: '2026-09-24' }];
 		const fetchSpy = vi.fn().mockResolvedValue(
@@ -399,23 +425,23 @@ describe('listHabitsExport (MC6)', () => {
 		);
 		vi.stubGlobal('fetch', fetchSpy);
 
-		const result = await listHabitsExport(config);
+		const result = await listHabits(config);
 		expect(result).toEqual({ habits, habitLog });
 
 		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-		expect(url).toBe('https://lumbre.test/api/export');
+		expect(url).toBe('https://lumbre.test/api/habits');
 		expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
 	});
 
 	it('sin `habitLog` en la respuesta: cae a [] en vez de fallar', async () => {
 		mockFetchJson({ habits: [] });
-		const result = await listHabitsExport(config);
+		const result = await listHabits(config);
 		expect(result).toEqual({ habits: [], habitLog: [] });
 	});
 
 	it('respuesta sin `habits` (array) lanza LumbreApiError', async () => {
 		mockFetchJson({ not: 'habits' });
-		await expect(listHabitsExport(config)).rejects.toThrow(/inesperada/);
+		await expect(listHabits(config)).rejects.toThrow(/inesperada/);
 	});
 });
 

@@ -3729,9 +3729,9 @@ describe('mutate_brl — las 3 `op` siguen aceptándose (esquema estricto intern
 	});
 });
 
-/** `list_habits` (MC6, 2026-09-24): lectura vía `GET /api/export` — ver
- *  `tools/habits.ts`/`listHabitsExport` en `lumbre-client.ts`. */
-describe('list_habits — lectura vía GET /api/export (MC6)', () => {
+/** `list_habits` (MC6, 2026-09-24): lectura vía `GET /api/habits` — ver
+ *  `tools/habits.ts`/`listHabits` en `lumbre-client.ts`. */
+describe('list_habits — lectura vía GET /api/habits (MC6)', () => {
 	function jsonResponse(body: unknown): Response {
 		return new Response(JSON.stringify(body), {
 			status: 200,
@@ -3775,29 +3775,27 @@ describe('list_habits — lectura vía GET /api/export (MC6)', () => {
 		tasks: []
 	};
 
-	it('app anterior a R9 (GET /api/habits da 404): cae a GET /api/export y lista igual', async () => {
-		const fetchSpy = vi.fn().mockImplementation(async (url: string) =>
-			url.endsWith('/api/habits')
-				? new Response(JSON.stringify({ message: 'Not found' }), {
-						status: 404,
-						headers: { 'content-type': 'application/json' }
-					})
-				: jsonResponse(EXPORT_BODY)
+	it('GET /api/habits da 404: error legible y NINGUNA petición a /api/export', async () => {
+		const fetchSpy = vi.fn().mockImplementation(
+			async () =>
+				new Response(JSON.stringify({ message: 'Not found' }), {
+					status: 404,
+					headers: { 'content-type': 'application/json' }
+				})
 		);
 		vi.stubGlobal('fetch', fetchSpy);
 		const client = await buildClient();
 
 		const result = await client.callTool({ name: 'list_habits', arguments: {} });
 
-		expect(result.isError).not.toBe(true);
-		expect(fetchSpy.mock.calls.map((c) => c[0])).toEqual([
-			'https://lumbre.test/api/habits',
-			'https://lumbre.test/api/export'
-		]);
-		expect(resultText(result)).toContain('Ejercicio (cadencia)');
+		expect(result.isError).toBe(true);
+		expect(fetchSpy.mock.calls.map((c) => c[0])).toEqual(['https://lumbre.test/api/habits']);
+		const text = resultText(result);
+		expect(text).toContain('/api/habits');
+		expect(text).not.toContain('export');
 	});
 
-	it('un error distinto de 404 en /api/habits NO cae al export', async () => {
+	it('un error distinto de 404 en /api/habits se propaga y no pide nada más', async () => {
 		const fetchSpy = vi
 			.fn()
 			.mockResolvedValue(new Response('boom', { status: 500, headers: { 'content-type': 'text/plain' } }));

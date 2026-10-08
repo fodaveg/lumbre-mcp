@@ -730,14 +730,14 @@ más abajo. Lectura:
 - `list_habits({ includeArchived? })` — enumera tus hábitos por `GET
   /api/habits` (R9: mismo token que `list_tasks` y su mismo límite, **120
   peticiones/min**; devuelve solo `habits` y `habitLog`). Contra una app
-  anterior a R9 (404) cae a `GET /api/export`, que vuelca la cuenta ENTERA con
-  límite MÁS ESTRICTO de **10 peticiones/min**.
+  anterior a R9 (404) da un error legible: actualiza la app o revisa
+  `LUMBRE_BASE_URL`.
   Por hábito: `id`, `nombre`, `clase` (`registro`|`cadencia`|`contador`) y si
   está `archivedAt` (epoch ms). Por defecto solo los vivos; `includeArchived:
   true` incluye los archivados, con su fecha. Añade además las **últimas 3
   ocurrencias** (fecha) de cada hábito, a coste CERO: `habitLog` viaja en la
   MISMA respuesta, así que enseñarlas no cuesta una petición
-  aparte — más de 3 ya es un caso para leer el export entero, no esta tool.
+  aparte.
   Un servidor que aún no manda `habitLog` no rompe: el listado sale igual,
   sin esa línea.
 
