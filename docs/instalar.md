@@ -164,6 +164,20 @@ usa entonces `USERPROFILE`. Una copia de la skill instalada antes de ese
 arreglo aborta con `HOME is required (or pass --home)`: añade `--home "$HOME"`
 a los tres comandos de `manage-subagents.mjs`.
 
+En la app de escritorio de Claude el conector puede llegar con un prefijo que no
+es ninguno de los tres por defecto: el 7 oct 2026 se vio `mcp__<uuid>__` en
+Windows, y los subagentes arrancaban sin ninguna tool. Mira el nombre completo
+de una tool de Lumbre en tu sesión (por ejemplo `mcp__<uuid>__list_tasks`) y
+pasa ese prefijo junto a los tres habituales, en una sola línea:
+
+```powershell
+node "$HOME/.agents/skills/lumbre/scripts/manage-subagents.mjs" install --runtime claude --replace-managed --claude-tool-prefix mcp__lumbre__ --claude-tool-prefix mcp__claude_ai_Lumbre__ --claude-tool-prefix mcp__claude_ai_lumbre__ --claude-tool-prefix mcp__<uuid>__
+```
+
+No está medido si ese identificador cambia al reconectar el conector ni si pasa
+igual en la app de escritorio de macOS. Si cambia, repite el comando con el
+nuevo. Sin subagentes la skill funciona igual: solo son un reparto opcional.
+
 Para verificar la instalación, las dos líneas deben responder `True`:
 
 ```powershell

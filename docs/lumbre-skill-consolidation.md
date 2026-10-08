@@ -154,6 +154,17 @@ Además, `tests/skill-lumbre/validate-tool-names.mjs` contrasta los nombres de t
 y parámetros de la skill con `src/tools/`; la evidencia repo-only de este documento sigue
 describiendo la baseline, no la skill de hoy.
 
+**Nota (2026-10-08).** Se mantiene la decisión del 2 oct: el piloto queda como evidencia
+histórica y no se recaptura. Desde entonces la skill ha seguido cambiando (el 7 oct ganó la
+referencia `destinations.md`; el 8 oct, las ops de proyecto de `organize`), y recapturar
+tras cada cambio exige correr modelos. Por eso `OPERATIONAL_FILES` de
+`tests/skill-lumbre/forward-pilot-lib.mjs` conserva sus ocho referencias y NO incluye
+`destinations.md`: esa lista describe el candidato capturado, y tocarla a mano invalidaría
+la evidencia que acredita. `validate.sh` termina hoy en `validation: ok (sin piloto actual)`
+y con `--require-pilot` falla a propósito. Lo que acredita cada cambio de la skill son los
+validadores estructurales (`skills/lumbre/scripts/validate.sh`, `validate-tool-names.mjs`,
+`test-subagent-manager.mjs`, `test-windows-portability.mjs`).
+
 La evaluación confirmó también que las contradicciones de `@acked`, revisión y definición
 de «entrega» siguen abiertas. Eso es el resultado esperado de esta fase de unión; resolverlas
 corresponde a la optimización y sus pruebas de comportamiento.
