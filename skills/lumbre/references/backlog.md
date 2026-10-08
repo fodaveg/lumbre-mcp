@@ -61,7 +61,11 @@ subproyectos abiertos y todas sus tareas abiertas quedan hechos o cancelados con
 `reopen_project` reabre solo el proyecto nombrado, no los subproyectos ni las tareas. Por eso
 cerrar es difícil de deshacer: confirma con el usuario inmediatamente antes, igual que un
 borrado, salvo autorización inequívoca para ese proyecto concreto. Sigue siendo `aplicada` lo
-único que cuenta como hecho; un `sin efecto` trae su motivo en los `avisos de la app`.
+único que cuenta como hecho. El motivo de un rechazo llega en los `avisos de la app` con el
+prefijo estable `[project-rejected:<motivo>]` (`inbox`, `area`, `already-closed`,
+`invalid-date`, `invalid-closure`, `not-closed`); un `sin efecto` sin ningún aviso significa
+que ese `listId` no existe. Un `close_project` aplicado trae `[project-closed:tasks=N,projects=M]`:
+dile al usuario esos dos recuentos, tareas cerradas y proyectos cerrados.
 
 Los vínculos de un proyecto o área con una nota de Hebra (`link_list_note`,
 `unlink_list_note`) siguen [destinations.md](destinations.md).

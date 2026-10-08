@@ -2636,7 +2636,7 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 			jsonResponse({
 				ok: true,
 				results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID, materialization: 'applied' }],
-				notices: ['aviso de ejemplo A', 'aviso de ejemplo B']
+				notices: [CLOSED_NOTICE]
 			})
 		);
 		vi.stubGlobal('fetch', fetchSpy);
@@ -2650,14 +2650,104 @@ describe('mutate_tasks/organize — lote, encadenado intra-lote y frontera entre
 		expect(body.ops).toEqual([{ type: 'mutate', taskId: LIST_ID, kind, payload }]);
 		const text = resultText(result);
 		expect(text).toContain('1/1 operación(es) aceptadas.');
-		expect(text).toContain('aviso de ejemplo A');
-		expect(text).toContain('aviso de ejemplo B');
+		expect(text).toContain(`avisos de la app:\n  - ${CLOSED_NOTICE}`);
+	});
+
+	const CLOSED_NOTICE =
+		'[project-closed:tasks=2,projects=2] Proyecto cerrado. Tareas cerradas: 2. Proyectos cerrados: 2.';
+	const REJECTED_NOTICE =
+		'[project-rejected:already-closed] «closeProject» no se aplicó al proyecto (motivo: already-closed).';
+	const PROJECT_NOOP_LINE =
+		'sin efecto: la app la rechazó (motivo en «avisos de la app», prefijo [project-rejected:…]) o, si no hay aviso para ella, ese listId no existe';
+
+	it.each([
+		['close_project', { as: 'done' }],
+		['reopen_project', {}],
+		['set_project_when', { when: null }],
+		['set_project_deadline', { deadline: null }]
+	])('organize: %s con noop SIN avisos dice que la app la rechazó o que el listId no existe', async (op, fields) => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID, materialization: 'noop' }]
+				})
+			)
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({ name: 'organize', arguments: { ops: [{ op, listId: LIST_ID, ...fields }] } })
+		);
+
+		expect(text).toContain(`  [0] ${op}: ${PROJECT_NOOP_LINE}`);
+		expect(text).not.toContain('avisos de la app:\n');
+	});
+
+	it('organize: lote applied, applied, noop con los dos avisos en la raíz los enseña tal cual', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					ok: true,
+					results: [
+						{ index: 0, type: 'mutate', ok: true, id: LIST_ID, materialization: 'applied' },
+						{ index: 1, type: 'mutate', ok: true, id: LIST_ID, materialization: 'applied' },
+						{ index: 2, type: 'mutate', ok: true, id: LIST_ID, materialization: 'noop' }
+					],
+					notices: [CLOSED_NOTICE, REJECTED_NOTICE]
+				})
+			)
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({
+				name: 'organize',
+				arguments: {
+					ops: [
+						{ op: 'set_project_deadline', listId: LIST_ID, deadline: '2026-12-01' },
+						{ op: 'close_project', listId: LIST_ID, as: 'done' },
+						{ op: 'close_project', listId: LIST_ID, as: 'done' }
+					]
+				}
+			})
+		);
+
+		expect(text).toContain('3/3 operación(es) aceptadas.');
+		expect(text).toContain('2 aplicadas');
+		expect(text).toContain(`sin aplicar:\n  [2] close_project: ${PROJECT_NOOP_LINE}`);
+		expect(text).not.toContain('[0] set_project_deadline: sin efecto');
+		expect(text).toContain(`avisos de la app:\n  - ${CLOSED_NOTICE}\n  - ${REJECTED_NOTICE}`);
+	});
+
+	it('organize: un noop de una op que NO es de proyecto conserva el texto genérico', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				jsonResponse({
+					ok: true,
+					results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID, materialization: 'noop' }]
+				})
+			)
+		);
+		const client = await buildClient();
+
+		const text = resultText(
+			await client.callTool({ name: 'organize', arguments: { ops: [{ op: 'remove_list', listId: LIST_ID }] } })
+		);
+
+		expect(text).toContain(
+			'[0] remove_list: sin efecto: la app no cambió nada (ya estaba así, o el objetivo no admite el cambio)'
+		);
+		expect(text).not.toContain('[project-rejected');
 	});
 
 	it.each(['close_project', 'reopen_project', 'set_project_when', 'set_project_deadline'])(
 		'organize: %s con noop de la app enseña el aviso tal cual',
 		async (op) => {
-			const notice = `texto cualquiera de ejemplo para ${op}`;
+			const notice = REJECTED_NOTICE.replace(/closeProject/, op);
 			vi.stubGlobal(
 				'fetch',
 				vi.fn().mockResolvedValue(

@@ -670,8 +670,14 @@ operación suelta. Mismo informe por op que el resto de Fase 2.
 
   Las cuatro viajan como `{ type: "mutate", taskId: listId, kind: "closeProject"|
   "reopenProject"|"setProjectWhen"|"setProjectDeadline", payload }` y no comprueban
-  existencia de tarea. Si la app las rechaza (Bandeja, área, ya cerrado, fecha inválida…) vuelve
-  `noop` y el aviso llega tal cual en `avisos de la app`; el conector no lo interpreta.
+  existencia de tarea. Si la app las rechaza vuelve `noop`, y el motivo llega en
+  `avisos de la app` con un prefijo estable (el resto del texto va localizado):
+  `[project-rejected:<motivo>]`, con motivo `inbox`, `area`, `already-closed`,
+  `invalid-date`, `invalid-closure` o `not-closed`. Un `close_project` aplicado devuelve
+  `[project-closed:tasks=N,projects=M]` con cuántas tareas y proyectos cerró. Un `noop`
+  SIN aviso significa que ese `listId` no existe (no sale como `not-found`). El conector
+  pasa los avisos tal cual, sin parsearlos ni emparejarlos con la op (en un lote llegan
+  sin índice); su línea de «sin aplicar» es un texto fijo que remite a ellos.
 
 ### Registro del día (BRL — add-on experimental)
 

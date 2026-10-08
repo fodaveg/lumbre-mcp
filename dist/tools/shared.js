@@ -63,6 +63,25 @@ const OUTCOME_DETAIL = {
     unconfirmed: 'encolada; este servidor no dice si se aplicó, relee para comprobarlo'
 };
 /**
+ * `noop` de las cuatro ops de ciclo de vida de proyecto (2026-10-08). La app
+ * rechaza con un aviso `[project-rejected:<motivo>]`, o devuelve `noop` SIN
+ * aviso si el `listId` no existe. Como los avisos del lote llegan sin índice
+ * de op, el conector no los empareja: texto fijo que remite a ellos.
+ */
+const PROJECT_NOOP_DETAIL = 'sin efecto: la app la rechazó (motivo en «avisos de la app», prefijo [project-rejected:…]) o, si no hay aviso para ella, ese listId no existe';
+const PROJECT_LIFECYCLE_OPS = new Set([
+    'close_project',
+    'reopen_project',
+    'set_project_when',
+    'set_project_deadline'
+]);
+/** Texto de «sin aplicar» de una op: el genérico de `OUTCOME_DETAIL`, salvo el `noop` de las ops de proyecto. */
+function outcomeDetail(e) {
+    if (e.outcome === 'noop' && PROJECT_LIFECYCLE_OPS.has(e.op))
+        return PROJECT_NOOP_DETAIL;
+    return OUTCOME_DETAIL[e.outcome];
+}
+/**
  * Bloque del informe con el resultado REAL de las ops aceptadas y los avisos
  * de la app (MC1 del audit de paridad, 23 sep 2026: hasta entonces los tres
  * informes decían «encoladas» y el modelo leía un no-op o un fallo del
@@ -87,7 +106,7 @@ export function formatOutcomeReport(entries, notices) {
         const notApplied = entries
             .filter((e) => e.outcome !== 'applied')
             .sort((a, b) => a.index - b.index)
-            .map((e) => `  [${e.index}] ${e.op}: ${OUTCOME_DETAIL[e.outcome]}`);
+            .map((e) => `  [${e.index}] ${e.op}: ${outcomeDetail(e)}`);
         if (notApplied.length > 0)
             lines.push(`sin aplicar:\n${notApplied.join('\n')}`);
         const appliedWithCaveat = entries
