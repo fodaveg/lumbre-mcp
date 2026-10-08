@@ -50,7 +50,7 @@ function toolsListBody(id = 2) {
 beforeAll(async () => {
 	const { createHttpApp } = await import('./http.js');
 	const app = createHttpApp('https://app.lumbre.test');
-	server = app.listen(0);
+	server = app.listen(0, '127.0.0.1');
 	await new Promise<void>((resolve) => server.once('listening', resolve));
 	const port = (server.address() as AddressInfo).port;
 	baseUrl = `http://127.0.0.1:${port}`;
@@ -424,7 +424,7 @@ describe('POST /mcp — el 401 de una tool según el modo de autenticación (tar
 		vi.spyOn(oauth, 'resolveAccessToken').mockResolvedValue('upstream-token-revocado');
 
 		const oauthApp = createHttpApp('https://app.lumbre.test', oauth);
-		const oauthServer = oauthApp.listen(0);
+		const oauthServer = oauthApp.listen(0, '127.0.0.1');
 		await new Promise<void>((resolve) => oauthServer.once('listening', resolve));
 		const oauthBaseUrl = `http://127.0.0.1:${(oauthServer.address() as AddressInfo).port}`;
 

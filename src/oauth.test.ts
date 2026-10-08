@@ -37,7 +37,7 @@ async function listen(oauth: OAuthService): Promise<string> {
 	// era lentitud suya). Subirlo aquí quita esa carrera; no cambia nada del
 	// servidor real, que este helper solo lo usa el test.
 	server.keepAliveTimeout = 60_000;
-	server.listen(0);
+	server.listen(0, '127.0.0.1');
 	servers.push(server);
 	await new Promise<void>((resolve, reject) => {
 		if (server.listening) resolve();
