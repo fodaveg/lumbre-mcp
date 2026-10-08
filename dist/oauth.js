@@ -3,6 +3,7 @@ import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/prom
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BackchannelError, LUMBRE_OAUTH_CALLBACK, LumbreBackchannel, isValidRequestId } from './lumbre-oauth-backchannel.js';
+import { forgetAccountNotesSeen, pruneStaleAccountNotesSeen } from './notes.js';
 export const OAUTH_ISSUER = 'https://mcp.lumbre.pro';
 export const OAUTH_RESOURCE = `${OAUTH_ISSUER}/mcp`;
 export const OAUTH_SCOPE = 'lumbre:mcp';
@@ -366,6 +367,25 @@ function decrypt(value, key, context) {
     decipher.setAuthTag(Buffer.from(value.tag, 'base64url'));
     return Buffer.concat([decipher.update(Buffer.from(value.ciphertext, 'base64url')), decipher.final()]).toString('utf8');
 }
+/**
+ * ¿Es el MISMO valor cifrado? Compara el sobre (iv, tag y texto cifrado), no
+ * el contenido: sirve para comprobar dentro de un mutador que la entrada del
+ * almacén sigue siendo la que se leyó antes de un `await`. No necesita tiempo
+ * constante: los dos lados salen de nuestro propio almacén, ninguno lo
+ * presenta quien llama.
+ */
+function sameEncryptedValue(a, b) {
+    return a.iv === b.iv && a.tag === b.tag && a.ciphertext === b.ciphertext;
+}
+/**
+ * Credenciales upstream que el almacén tiene EN USO: las de los grants y las
+ * de los códigos pendientes de canje. La outbox no cuenta a propósito: ahí la
+ * credencial ya no autoriza nada, solo espera a que Lumbre confirme su
+ * revocación.
+ */
+function heldCredentials(store) {
+    return [...store.grants, ...store.authorizationCodes].map(({ credentialId, clientId, resource, scope, upstream }) => ({ credentialId, clientId, resource, scope, upstream }));
+}
 function validEncryptedValue(value) {
     if (!value || typeof value !== 'object')
         return false;
@@ -600,6 +620,8 @@ export class OAuthService {
      * DESPUÉS y pisarla; ver la carrera explicada en `loadStore`.
      */
     storeGeneration = 0;
+    /** Hay un `sweepInactiveCredentials` en curso; ver ahí por qué solo uno. */
+    sweepInFlight = false;
     constructor(options = {}) {
         this.stateDir = options.stateDir ?? defaultStateDir();
         this.fetchFn = options.fetch ?? globalThis.fetch;
@@ -1150,23 +1172,51 @@ export class OAuthService {
         if (credentialId)
             await this.flushRevocationOutbox(credentialId);
     }
+    /**
+     * Pregunta a Lumbre por una credencial y devuelve su estado SIN aplanarlo
+     * (ver `CredentialState`). Un fallo del backchannel sale tal cual, como
+     * `BackchannelError`: aquí no se decide qué significa no haber podido
+     * saberlo, eso es cosa de cada llamante.
+     *
+     * Existe separada de `introspectCredential` porque sus dos llamantes
+     * necesitan cosas distintas del mismo dato. El canje y el refresh solo
+     * preguntan "¿puedo seguir emitiendo tokens con esto?", y ahí `mismatch`
+     * vale lo mismo que `inactive`: no. El barrido pregunta "¿puedo DESTRUIR
+     * esta autorización?", y ahí solo vale un `inactive` explícito: una
+     * respuesta por otra credencial es una anomalía de Lumbre, no una orden de
+     * borrar.
+     */
+    async credentialState(credential, upstreamToken) {
+        const result = await this.backchannel.introspect(upstreamToken);
+        // `=== false` y no `!result.active`: el backchannel ya valida la forma
+        // exacta, pero quien decide una purga no se apoya en que un valor raro
+        // resulte ser falsy.
+        if (result.active === false)
+            return 'inactive';
+        if (result.active !== true ||
+            result.credentialId !== credential.credentialId ||
+            result.clientId !== credential.clientId ||
+            result.resource !== credential.resource ||
+            result.scope !== credential.scope) {
+            return 'mismatch';
+        }
+        return 'active';
+    }
+    /**
+     * Versión del canje de código y del refresh: ¿sigue valiendo esta
+     * credencial para emitir tokens? Mismo comportamiento de siempre: un fallo
+     * del backchannel es un 503 `temporarily_unavailable` (no se rota ni se
+     * revoca nada), y tanto `inactive` como `mismatch` son un "no".
+     */
     async introspectCredential(credential, upstreamToken) {
-        let result;
+        let state;
         try {
-            result = await this.backchannel.introspect(upstreamToken);
+            state = await this.credentialState(credential, upstreamToken);
         }
         catch (error) {
             throw this.backchannelOAuthError(error, 'temporarily_unavailable');
         }
-        if (!result.active)
-            return false;
-        if (result.credentialId !== credential.credentialId ||
-            result.clientId !== credential.clientId ||
-            result.resource !== credential.resource ||
-            result.scope !== credential.scope) {
-            return false;
-        }
-        return true;
+        return state === 'active';
     }
     async issueGrant(code, codeHash, res) {
         const accessToken = opaque(ACCESS_PREFIX);
@@ -1502,6 +1552,282 @@ export class OAuthService {
                 this.readinessInFlight = undefined;
         }
     }
+    /**
+     * Barrido periódico: lo que este relé guarda de una credencial que Lumbre
+     * ya no reconoce se borra aquí, sin esperar a que el cliente vuelva.
+     *
+     * POR QUÉ HACE FALTA. Lumbre no avisa al relé cuando alguien revoca la
+     * conexión desde la app o borra su cuenta. Hasta ahora el relé solo se
+     * enteraba cuando el cliente refrescaba; si el cliente no volvía (que es lo
+     * normal tras borrar una cuenta), la credencial cifrada y la huella de
+     * notas se quedaban hasta que caducaba la familia (30 días) y, encima, la
+     * poda solo corría si OTRA petición escribía en el almacén.
+     *
+     * QUÉ HACE, en orden y de una en una (nunca en paralelo contra Lumbre):
+     *   1. La poda de siempre (`mutateStore`): familias y códigos caducados
+     *      pasan a la outbox. Así la caducidad deja de depender del tráfico.
+     *   2. Por cada grant: introspección. Si Lumbre responde un `active: false`
+     *      EXPLÍCITO, se purga (`purgeInactiveGrant`) y su huella de notas se
+     *      va con él.
+     *   3. Por cada pendiente de la outbox: el `flush` de siempre; y si sigue
+     *      ahí y Lumbre declara inactiva su credencial, se retira (ya no hay
+     *      nada que revocar).
+     *   4. La caducidad de 30 días de las huellas de notas, que cubre lo que
+     *      este relé no puede saber (ver `pruneStaleAccountNotesSeen`).
+     *
+     * QUÉ NO PURGA NUNCA. Destruir una autorización no tiene vuelta atrás (la
+     * persona tendría que volver a conectar), así que la única señal que vale
+     * es que Lumbre conteste, con 2xx y dentro de contrato, exactamente
+     * `{ "active": false }`. Cualquier otra cosa es "no pude saberlo":
+     *   · red caída, timeout, 5xx o 429 (`BackchannelError('transient')`);
+     *   · 401/403 del canal (secreto mal configurado) o cualquier otro 4xx, y
+     *     un cuerpo fuera de contrato (`BackchannelError('invalid')`);
+     *   · una respuesta activa que corresponde a OTRA credencial (`mismatch`).
+     * Los dos primeros grupos CORTAN el barrido entero: si Lumbre no contesta
+     * algo utilizable a una, no lo va a hacer a la siguiente, y seguir sería
+     * martillear una app caída (o gastar su límite de intentos) sin poder
+     * decidir nada. Se reintenta en el siguiente ciclo. `mismatch` no corta
+     * (Lumbre sí contesta), solo deja esa credencial como estaba.
+     *
+     * Ojo, esto es MÁS estricto que el refresh a propósito: allí un `mismatch`
+     * revoca la familia (el cliente está delante y puede reautorizar); aquí
+     * nadie ha pedido nada, así que ante la duda no se toca.
+     *
+     * UNO A LA VEZ. Si el anterior sigue en curso (Lumbre lenta), este no hace
+     * nada: dos barridos solapados solo duplicarían las llamadas a Lumbre. No
+     * hace falta para la integridad del almacén (de eso se encarga la cola de
+     * `mutateStore`), es por no multiplicar el tráfico.
+     *
+     * No lanza: un barrido fallido no puede tumbar el proceso ni marcar
+     * `/readyz` (que no lo consulta). Devuelve recuentos y deja UNA línea en
+     * stderr solo si purgó o descartó algo, sin nada que identifique a nadie.
+     */
+    async sweepInactiveCredentials() {
+        const result = {
+            skipped: false,
+            aborted: false,
+            purgedGrants: 0,
+            retiredOutboxItems: 0,
+            undetermined: 0,
+            prunedNotesFiles: 0
+        };
+        if (this.sweepInFlight)
+            return { ...result, skipped: true };
+        this.sweepInFlight = true;
+        try {
+            try {
+                await this.sweepStoredCredentials(result);
+            }
+            catch {
+                // Un fallo que no es de Lumbre (el almacén no se pudo leer o
+                // escribir, la clave no carga): tampoco se sigue. Lo ya purgado
+                // antes del fallo queda contado y purgado.
+                result.aborted = true;
+            }
+            // La caducidad de las huellas no depende de Lumbre: se aplica aunque
+            // el barrido se haya cortado.
+            result.prunedNotesFiles = await pruneStaleAccountNotesSeen(this.now(), { force: true });
+        }
+        finally {
+            this.sweepInFlight = false;
+        }
+        if (result.purgedGrants > 0 || result.retiredOutboxItems > 0 || result.prunedNotesFiles > 0) {
+            // Solo recuentos. Ni token, ni `credentialId`, ni `familyId`, ni el
+            // nombre de un fichero de huella (que es un hash de la credencial).
+            console.error(`[lumbre-mcp-oauth] barrido de credenciales: ${result.purgedGrants} autorización(es) purgada(s) ` +
+                `por credencial inactiva en Lumbre, ${result.retiredOutboxItems} revocación(es) pendiente(s) retirada(s), ` +
+                `${result.prunedNotesFiles} huella(s) de notas caducada(s)` +
+                (result.aborted ? '; cortado antes de terminar, sigue en el siguiente ciclo' : ''));
+        }
+        return result;
+    }
+    /** Pasos 1 a 3 de `sweepInactiveCredentials`. Marca `aborted` y vuelve en
+     *  cuanto Lumbre no contesta algo utilizable. */
+    async sweepStoredCredentials(result) {
+        await this.mutateStore(() => false);
+        const key = await this.key();
+        for (const grant of (await this.loadStore()).grants) {
+            let upstreamToken;
+            try {
+                upstreamToken = decrypt(grant.upstream, key, grantContext(grant.clientId, grant.resource, grant.scope));
+            }
+            catch {
+                // No se puede preguntar por una credencial que no se descifra, y
+                // sin preguntar no se purga. (`/readyz` ya canta este estado.)
+                result.undetermined += 1;
+                continue;
+            }
+            let state;
+            try {
+                state = await this.credentialState(grant, upstreamToken);
+            }
+            catch {
+                result.aborted = true;
+                return;
+            }
+            if (state === 'mismatch')
+                result.undetermined += 1;
+            if (state !== 'inactive')
+                continue;
+            if (await this.purgeInactiveGrant(grant))
+                result.purgedGrants += 1;
+        }
+        for (const item of (await this.loadStore()).revocationOutbox) {
+            await this.flushRevocationOutbox(item.credentialId);
+            const stillQueued = (await this.loadStoreReadOnly()).revocationOutbox.some((candidate) => candidate.credentialId === item.credentialId);
+            if (!stillQueued)
+                continue;
+            let upstreamToken;
+            try {
+                upstreamToken = decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope));
+            }
+            catch {
+                result.undetermined += 1;
+                continue;
+            }
+            let state;
+            try {
+                state = await this.credentialState(item, upstreamToken);
+            }
+            catch {
+                result.aborted = true;
+                return;
+            }
+            if (state === 'mismatch')
+                result.undetermined += 1;
+            // Activa (o no se sabe de quién es): sigue habiendo algo que revocar
+            // en Lumbre, así que la pendiente se queda y se reintenta.
+            if (state !== 'inactive')
+                continue;
+            if (await this.retireSettledRevocation(item))
+                result.retiredOutboxItems += 1;
+        }
+    }
+    /**
+     * Retira del almacén TODO lo de una autorización cuya credencial Lumbre
+     * acaba de declarar inactiva: el grant, las tombstones de su familia y,
+     * por si acaso, cualquier código pendiente o pendiente de revocación con
+     * esa misma credencial (`normalizeStore` ya impide que coexistan con el
+     * grant; el filtro está para que la purga no dependa de ese invariante).
+     *
+     * NO pasa por la outbox, a diferencia de `revokeFamily`. La outbox existe
+     * para credenciales que siguen VIVAS en Lumbre y hay que revocar allí; esta
+     * ya no lo está, lo ha dicho Lumbre. Encolarla dejaría la credencial
+     * cifrada en disco hasta que un `revoke` innecesario confirmase (o hasta 30
+     * días si Lumbre se cae justo después), que es exactamente lo que este
+     * barrido viene a quitar. Aquí todo sale en UNA escritura.
+     *
+     * Vuelve a comprobar DENTRO del mutador que el grant sigue ahí y con la
+     * misma credencial: entre la introspección y este punto ha habido un
+     * `await`, y el cliente pudo revocar, o la familia caducar. Si ya no está,
+     * no se hace nada y se devuelve `false` (quien lo retiró ya se encargó de
+     * su huella). Una rotación por refresh NO cuenta como cambio: es la misma
+     * credencial, y sigue inactiva.
+     *
+     * La huella de notas la borra `mutateStore` al confirmar la escritura, como
+     * en cualquier otra retirada (ver `forgetNotesSeenOfRetired`).
+     */
+    async purgeInactiveGrant(seen) {
+        let purged = false;
+        await this.mutateStore((store) => {
+            const grant = store.grants.find((item) => item.familyId === seen.familyId &&
+                item.credentialId === seen.credentialId &&
+                sameEncryptedValue(item.upstream, seen.upstream));
+            if (!grant)
+                return false;
+            this.removeFamily(store, grant.familyId);
+            store.authorizationCodes = store.authorizationCodes.filter((item) => item.credentialId !== grant.credentialId);
+            store.revocationOutbox = store.revocationOutbox.filter((item) => item.credentialId !== grant.credentialId);
+            purged = true;
+            return true;
+        });
+        return purged;
+    }
+    /** Retira de la outbox una pendiente cuya credencial Lumbre ya declara
+     *  inactiva. Misma comprobación dentro del mutador que
+     *  `purgeInactiveGrant`: si un `flush` concurrente ya la quitó, `false`. */
+    async retireSettledRevocation(seen) {
+        let retired = false;
+        await this.mutateStore((store) => {
+            const before = store.revocationOutbox.length;
+            store.revocationOutbox = store.revocationOutbox.filter((item) => !(item.credentialId === seen.credentialId && sameEncryptedValue(item.upstream, seen.upstream)));
+            retired = store.revocationOutbox.length !== before;
+            return retired;
+        });
+        return retired;
+    }
+    /**
+     * Borra la huella de notas (`notes-seen-<id>.json`, `notes.ts`) de cada
+     * credencial que `before` tenía en uso y `store` ya no. Lo llama
+     * `mutateStore` y SOLO él: es el único sitio por el que algo sale del
+     * almacén, así que colgarlo de ahí cubre todos los caminos de una vez
+     * (`/revoke`, replay de un refresh, credencial inactiva al refrescar o al
+     * canjear, caducidad de la familia o del código, la purga del barrido) y
+     * también el que se añada mañana sin acordarse de esto.
+     *
+     * EL ORDEN, que es la decisión de seguridad: primero se confirma la
+     * escritura del almacén (`rename`), DESPUÉS se borra el fichero. Los dos
+     * fallos a medias posibles no pesan igual:
+     *   · Al revés (fichero primero) y falla la escritura: el grant sigue vivo
+     *     (y con él una credencial que puede seguir activa en Lumbre) pero ya
+     *     sin su huella. Se habría destruido un dato de una autorización que
+     *     sigue en pie, por una retirada que no ocurrió.
+     *   · Así (almacén primero) y falla el borrado, o el proceso muere entre
+     *     los dos pasos: queda un fichero huérfano de una autorización que ya
+     *     no existe. No contiene la credencial ni texto de ninguna nota (son
+     *     identificadores de tarea con una fecha y una longitud), nadie puede
+     *     volver a leerlo ni a escribirlo desde fuera, y NO se queda para
+     *     siempre: deja de escribirse y el barrido lo borra a los 30 días.
+     * Entre perder de más y tardar de más, se elige tardar. Por eso el borrado
+     * va tras el `rename` y no espera al `fsync` del directorio: si ese último
+     * paso falla, el grant ya salió del fichero igualmente.
+     *
+     * SOLO SI NADIE MÁS LA USA. El nombre del fichero sale del TOKEN, no del
+     * `credentialId`. La relación es una credencial por autorización
+     * (`normalizeStore` rechaza un `credentialId` repetido), pero si Lumbre
+     * entregase el mismo token a dos autorizaciones, borrar al irse la primera
+     * le quitaría la huella a la segunda. Así que se comparan los tokens
+     * descifrados de lo que QUEDA, y si no se puede descifrar lo que queda no
+     * se borra nada: sin saber, no se destruye.
+     *
+     * No lanza: la escritura del almacén ya está confirmada y un fallo aquí no
+     * puede convertirse en el fallo de la operación que la pidió. Lo que no se
+     * pudo borrar se dice en stderr con un recuento, sin nombres.
+     *
+     * LÍMITE CONOCIDO: una tool en vuelo con esa credencial en el instante de
+     * la retirada puede volver a escribir el fichero después de este borrado.
+     * Es el mismo huérfano de arriba y cae por la misma red de 30 días.
+     */
+    async forgetNotesSeenOfRetired(before, store) {
+        const held = heldCredentials(store);
+        const heldIds = new Set(held.map((item) => item.credentialId));
+        const retired = before.filter((item) => !heldIds.has(item.credentialId));
+        if (retired.length === 0)
+            return;
+        let failed = 0;
+        try {
+            const key = await this.key();
+            const heldTokens = new Set(held.map((item) => decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope))));
+            for (const item of retired) {
+                try {
+                    const upstreamToken = decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope));
+                    if (heldTokens.has(upstreamToken))
+                        continue;
+                    await forgetAccountNotesSeen(upstreamToken);
+                }
+                catch {
+                    failed += 1;
+                }
+            }
+        }
+        catch {
+            failed = retired.length;
+        }
+        if (failed > 0) {
+            console.error(`[lumbre-mcp-oauth] huella de notas: ${failed} fichero(s) de autorizaciones retiradas sin borrar; ` +
+                'caducan a los 30 días sin escrituras');
+        }
+    }
     async key() {
         if (this.encryptionKey)
             return this.encryptionKey;
@@ -1678,8 +2004,14 @@ export class OAuthService {
         let failure;
         let changed = false;
         this.writeQueue = this.writeQueue.then(async () => {
+            // Para `forgetNotesSeenOfRetired`: qué credenciales había en uso
+            // antes de esta pasada, y el estado que llegó a quedar en disco.
+            let heldBefore = [];
+            let written;
             try {
                 const store = await this.loadStore();
+                // Antes de la poda y del mutador: las dos cosas retiran grants.
+                heldBefore = heldCredentials(store);
                 const now = this.now();
                 let housekeeping = false;
                 const expiredGrants = store.grants.filter((grant) => grant.refreshExpiresAt <= now);
@@ -1733,6 +2065,7 @@ export class OAuthService {
                     // la copia privada de esta pasada (ver `loadStore`), así que
                     // nadie más tiene una referencia a ella.
                     this.adoptStore(store);
+                    written = store;
                     await this.persistenceStep?.('store-renamed');
                     await syncDirectory(dirname(this.storePath()));
                     await this.persistenceStep?.('state-directory-synced');
@@ -1749,6 +2082,14 @@ export class OAuthService {
                 this.invalidateStore();
                 failure = error;
             }
+            // Toda credencial que acaba de salir del almacén se lleva su huella
+            // de notas. Va DESPUÉS de confirmar el `rename` (nunca antes: ver el
+            // orden en `forgetNotesSeenOfRetired`), aunque un paso posterior haya
+            // fallado, y dentro de la cola: ninguna otra escritura puede colarse
+            // entre el estado que se acaba de escribir y la comprobación de que
+            // nadie más usa esa credencial.
+            if (written)
+                await this.forgetNotesSeenOfRetired(heldBefore, written);
         });
         await this.writeQueue;
         if (failure)

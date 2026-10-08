@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,10 +12,12 @@ import {
 	decideAutoNoteRender,
 	decideNotesSinceRender,
 	DEFAULT_NOTES_RECENT_HOURS,
+	forgetAccountNotesSeen,
 	hasDoneTag,
 	hasNotes,
 	loadNotesSeenState,
 	parseNotesSince,
+	pruneStaleAccountNotesSeen,
 	recordNotesSeen,
 	saveNotesSeenState,
 	touchNotesSeen,
@@ -924,7 +927,7 @@ describe('createAccountNotesSeenStore — limpieza best-effort de cuentas viejas
 		await utimes(join(dir, oldFileName as string), fortyDaysAgo, fortyDaysAgo);
 
 		// Un `save` cualquiera dispara la poda (ver JSDoc de
-		// `pruneStaleAccountFiles`) — se usa el store reciente para no tocar el
+		// `pruneStaleAccountNotesSeen`) — se usa el store reciente para no tocar el
 		// viejo directamente.
 		clockMs += 11 * 60 * 1000;
 		await recentStore.save(touchNotesSeen(await recentStore.load(), 'entrada-reciente-2', 4, '2026-07-02T00:00:00.000Z'));
@@ -963,5 +966,72 @@ describe('createAccountNotesSeenStore — limpieza best-effort de cuentas viejas
 	it('un directorio SIN ningún fichero de cuenta no revienta la poda (best-effort)', async () => {
 		const store = createAccountNotesSeenStore('token-cuenta-sola');
 		await expect(store.save(touchNotesSeen({}, 'x', 1, '2026-07-01T00:00:00.000Z'))).resolves.toBeUndefined();
+	});
+});
+
+describe('forgetAccountNotesSeen: la huella de UNA credencial que sale del almacén OAuth', () => {
+	/** Nombre en disco de la huella de `token`, derivado aquí por separado: si
+	 *  `accountFileName` cambiara de forma, este test canta en vez de seguir
+	 *  borrando "el fichero que toque". */
+	function fileNameOf(token: string): string {
+		return `notes-seen-${createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16)}.json`;
+	}
+
+	it('borra SOLO el fichero de esa credencial y devuelve true; el de otra cuenta y el de stdio siguen', async () => {
+		const dir = join(stateDir, 'lumbre-mcp');
+		await createAccountNotesSeenStore('token-que-se-va').save(touchNotesSeen({}, 'a', 4, '2026-07-01T00:00:00.000Z'));
+		await createAccountNotesSeenStore('token-que-se-queda').save(touchNotesSeen({}, 'b', 4, '2026-07-01T00:00:00.000Z'));
+		await saveNotesSeenState(touchNotesSeen({}, 'stdio', 4, '2026-07-01T00:00:00.000Z'));
+		expect(await readdir(dir)).toContain(fileNameOf('token-que-se-va'));
+
+		await expect(forgetAccountNotesSeen('token-que-se-va')).resolves.toBe(true);
+
+		const names = await readdir(dir);
+		expect(names).not.toContain(fileNameOf('token-que-se-va'));
+		expect(names).toContain(fileNameOf('token-que-se-queda'));
+		expect(names).toContain('notes-seen.json');
+	});
+
+	it('sin fichero (o sin directorio de estado) no lanza y devuelve false', async () => {
+		await expect(forgetAccountNotesSeen('token-que-nunca-guardo-nada')).resolves.toBe(false);
+		await createAccountNotesSeenStore('otro-token').save(touchNotesSeen({}, 'a', 4, '2026-07-01T00:00:00.000Z'));
+		await expect(forgetAccountNotesSeen('token-que-nunca-guardo-nada')).resolves.toBe(false);
+		// Borrar dos veces la misma tampoco es un error: la segunda no borra nada.
+		await expect(forgetAccountNotesSeen('otro-token')).resolves.toBe(true);
+		await expect(forgetAccountNotesSeen('otro-token')).resolves.toBe(false);
+	});
+});
+
+describe('pruneStaleAccountNotesSeen: la caducidad de 30 días sin depender de un `save`', () => {
+	it('con `force` borra lo caducado aunque acabe de correr otra poda, cuenta lo borrado y no toca nada más', async () => {
+		const dir = join(stateDir, 'lumbre-mcp');
+		const nowMs = Date.now();
+		// Este `save` ya dispara una poda y deja puesto el freno de 10 minutos.
+		await createAccountNotesSeenStore('token-reciente', { now: () => nowMs }).save(
+			touchNotesSeen({}, 'reciente', 4, '2026-07-01T00:00:00.000Z')
+		);
+		const old = new Date(nowMs - 40 * 24 * 60 * 60 * 1000);
+		const stale = ['notes-seen-0123456789abcdef.json', 'notes-seen-fedcba9876543210.json'];
+		// Ficheros que NO son huella por cuenta: igual de viejos, y se quedan.
+		const untouched = ['notes-seen.json', 'oauth-store.json', 'oauth.key', 'notes-seen-NOHEX.json'];
+		for (const name of [...stale, ...untouched]) {
+			await writeFile(join(dir, name), '{}');
+			await utimes(join(dir, name), old, old);
+		}
+
+		// Sin `force`, el freno por proceso sigue mandando: no se borra nada.
+		await expect(pruneStaleAccountNotesSeen(nowMs + 1_000)).resolves.toBe(0);
+		expect(await readdir(dir)).toEqual(expect.arrayContaining(stale));
+
+		await expect(pruneStaleAccountNotesSeen(nowMs + 2_000, { force: true })).resolves.toBe(2);
+
+		const names = await readdir(dir);
+		for (const name of stale) expect(names).not.toContain(name);
+		for (const name of untouched) expect(names).toContain(name);
+		expect(names.filter((name) => /^notes-seen-[0-9a-f]{16}\.json$/.test(name))).toHaveLength(1);
+	});
+
+	it('sin directorio de estado no lanza y devuelve 0', async () => {
+		await expect(pruneStaleAccountNotesSeen(Date.now(), { force: true })).resolves.toBe(0);
 	});
 });

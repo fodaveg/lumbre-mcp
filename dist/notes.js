@@ -314,41 +314,58 @@ function accountFileName(token) {
     return `notes-seen-${accountId(token)}.json`;
 }
 /** Reconoce el nombre de un fichero de huella POR CUENTA
- *  (`notes-seen-<16 hex>.json`) — usado solo por `pruneStaleAccountFiles`
+ *  (`notes-seen-<16 hex>.json`) — usado solo por `pruneStaleAccountNotesSeen`
  *  para no tocar `notes-seen.json` (el fichero único de stdio, SIN sufijo,
  *  no matchea este patrón) ni ningún otro fichero del mismo directorio (p.
  *  ej. el store OAuth de `oauth.ts`). */
 const ACCOUNT_FILE_PATTERN = /^notes-seen-[0-9a-f]{16}\.json$/;
-/** Ventana de limpieza de `pruneStaleAccountFiles` — una cuenta que lleva un
+/** Ventana de limpieza de `pruneStaleAccountNotesSeen` — una cuenta que lleva un
  *  mes sin usar el transporte HTTP (token rotado, dispositivo retirado…) ya
  *  no necesita su huella; por debajo de esta ventana se conserva aunque el
  *  cap de `MAX_STATE_ENTRIES` de su fichero nunca se llegue a tocar. */
 const ACCOUNT_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-/** Intervalo mínimo entre dos podas (`pruneStaleAccountFiles`) en el mismo
- *  proceso: la ventana de borrado es de 30 días, no hace falta mirar el
- *  directorio en cada guardado. */
+/** Intervalo mínimo entre dos podas (`pruneStaleAccountNotesSeen`) disparadas
+ *  por un guardado en el mismo proceso: la ventana de borrado es de 30 días,
+ *  no hace falta mirar el directorio en cada guardado. */
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
 /** Última poda por directorio de estado (clave = `stateDir()`), en memoria. */
 const lastPruneAtMs = new Map();
 /**
  * Poda best-effort de ficheros de huella POR CUENTA con más de
- * `ACCOUNT_FILE_MAX_AGE_MS` sin escribirse (`mtime`) — se dispara al final
- * de cada `save` de `createAccountNotesSeenStore` (no hay temporizador de
- * fondo: un relé HTTP con tráfico real ya escribe a menudo, así que no hace
- * falta uno). NUNCA borra `notes-seen.json` (el fichero sin sufijo, ver
- * `ACCOUNT_FILE_PATTERN`) ni lanza si falla (directorio ilegible,
- * `stat`/`unlink` con permisos raros…): como el resto de este fichero, la
- * limpieza es un extra, no una garantía — en el peor caso, el fichero de una
- * cuenta abandonada se queda ahí un poco más.
+ * `ACCOUNT_FILE_MAX_AGE_MS` sin escribirse (`mtime`). Devuelve cuántos borró.
+ * NUNCA borra `notes-seen.json` (el fichero sin sufijo, ver
+ * `ACCOUNT_FILE_PATTERN`) ni ningún otro fichero del directorio, y no lanza
+ * si falla (directorio ilegible, `stat`/`unlink` con permisos raros…): como
+ * el resto de este fichero, la limpieza es un extra, no una garantía — en el
+ * peor caso, el fichero de una cuenta abandonada se queda ahí un poco más.
+ *
+ * Tiene DOS llamantes, y por eso el freno es opcional:
+ *
+ * 1. El final de cada `save` de `createAccountNotesSeenStore`, con el freno
+ *    de `PRUNE_INTERVAL_MS` puesto: cada guardado hacía `readdir` + `stat` de
+ *    los ficheros de TODAS las cuentas.
+ * 2. El barrido periódico de credenciales del relé
+ *    (`OAuthService.sweepInactiveCredentials`, `oauth.ts`), con
+ *    `force: true`. Hasta que existió ese barrido, los 30 días dependían de
+ *    que OTRA cuenta guardase algo: en un relé con una sola persona que deja
+ *    de usarlo, nadie volvía a escribir y su fichero no caducaba nunca. El
+ *    barrido corre una vez por hora, así que ahí el freno de 10 minutos no
+ *    ahorra nada y solo podría hacer que se saltase su pasada.
+ *
+ * `nowMs` se compara con el `mtime` del fichero, que es reloj de pared del
+ * sistema de ficheros: un reloj inyectado que no lo sea (los tests de
+ * `oauth.ts` usan relojes pequeños) da edades negativas y, por tanto, no
+ * borra nada. Ese es el lado seguro del error.
  */
-async function pruneStaleAccountFiles(nowMs) {
+export async function pruneStaleAccountNotesSeen(nowMs, opts = {}) {
+    let removed = 0;
     try {
         const dir = stateDir();
-        // Máximo una poda cada `PRUNE_INTERVAL_MS` por proceso y directorio: cada
-        // `save` hacía `readdir` + `stat` de los ficheros de TODAS las cuentas.
+        // Máximo una poda cada `PRUNE_INTERVAL_MS` por proceso y directorio,
+        // salvo que quien llama pida saltarse el freno (ver el JSDoc).
         const last = lastPruneAtMs.get(dir);
-        if (last !== undefined && nowMs - last < PRUNE_INTERVAL_MS)
-            return;
+        if (!opts.force && last !== undefined && nowMs - last < PRUNE_INTERVAL_MS)
+            return 0;
         lastPruneAtMs.set(dir, nowMs);
         const names = await readdir(dir);
         for (const name of names) {
@@ -357,8 +374,10 @@ async function pruneStaleAccountFiles(nowMs) {
             const filePath = join(dir, name);
             try {
                 const info = await stat(filePath);
-                if (nowMs - info.mtimeMs > ACCOUNT_FILE_MAX_AGE_MS)
+                if (nowMs - info.mtimeMs > ACCOUNT_FILE_MAX_AGE_MS) {
                     await unlink(filePath);
+                    removed += 1;
+                }
             }
             catch {
                 // Un fichero que desaparece/no se puede leer entre el `readdir` y
@@ -368,6 +387,38 @@ async function pruneStaleAccountFiles(nowMs) {
     }
     catch {
         // Best-effort — ver JSDoc de arriba (p. ej. directorio aún no creado).
+    }
+    return removed;
+}
+/**
+ * Borra el fichero de huella de UNA credencial (`notes-seen-<id>.json`, el
+ * mismo `accountFileName` que usa `createAccountNotesSeenStore`). Devuelve
+ * `true` si había fichero y se borró, `false` si no existía.
+ *
+ * La llama `oauth.ts` cuando una autorización sale del almacén OAuth
+ * (revocación, replay, credencial inactiva, caducidad de la familia): desde
+ * ese momento nadie puede volver a presentar esa credencial, así que su
+ * huella ya no sirve para nada y es un dato de una cuenta que pidió irse.
+ *
+ * El nombre se deriva del token IGUAL que al escribir, y el token no sale de
+ * aquí: ni al disco, ni a un log, ni al mensaje de un error (el `unlink` que
+ * falle lleva la ruta, que solo contiene el hash).
+ *
+ * A diferencia del resto de este módulo, un fallo que NO sea "no existe"
+ * (permisos, E/S) se propaga: aquí quien llama necesita saber que el fichero
+ * sigue en disco para dejarlo dicho, en vez de dar por borrado algo que no lo
+ * está. La red de seguridad en ese caso es `pruneStaleAccountNotesSeen`: el
+ * fichero huérfano deja de escribirse y cae a los 30 días.
+ */
+export async function forgetAccountNotesSeen(token) {
+    try {
+        await unlink(join(stateDir(), accountFileName(token)));
+        return true;
+    }
+    catch (error) {
+        if (error.code === 'ENOENT')
+            return false;
+        throw error;
     }
 }
 /**
@@ -397,9 +448,16 @@ async function pruneStaleAccountFiles(nowMs) {
  * llamada. Separar por cuenta conserva ese ahorro (cada cuenta sigue
  * teniendo SU huella persistente) sin el problema de mezclar cuentas.
  *
- * Cada `save` dispara, de paso, `pruneStaleAccountFiles` — best-effort, ver
- * su JSDoc — como mucho una vez cada 10 min por proceso. `opts.now` es el
- * reloj inyectable (solo para tests).
+ * Cada `save` dispara, de paso, `pruneStaleAccountNotesSeen` — best-effort,
+ * ver su JSDoc — como mucho una vez cada 10 min por proceso. `opts.now` es
+ * el reloj inyectable (solo para tests).
+ *
+ * El fichero de una credencial OAuth no espera a esa caducidad: lo borra
+ * `forgetAccountNotesSeen` en cuanto su autorización sale del almacén. Los 30
+ * días quedan para lo que el relé no puede saber: la conexión antigua por
+ * token de la API (Bearer directo o token en la ruta) no guarda credencial
+ * aquí, así que si ese token se rota o la cuenta se borra, su fichero solo
+ * deja de escribirse.
  */
 export function createAccountNotesSeenStore(token, opts = {}) {
     const now = opts.now ?? Date.now;
@@ -408,7 +466,7 @@ export function createAccountNotesSeenStore(token, opts = {}) {
         load: () => readStateFile(filename),
         save: async (state) => {
             await writeStateFileAtomic(filename, state);
-            await pruneStaleAccountFiles(now());
+            await pruneStaleAccountNotesSeen(now());
         }
     };
 }

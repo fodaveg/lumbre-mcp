@@ -485,6 +485,66 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
         res.end('Not found');
     });
 }
+/**
+ * Cada cuánto pregunta el relé a Lumbre por las credenciales que guarda
+ * (`OAuthService.sweepInactiveCredentials`). Es el retraso máximo entre que
+ * alguien revoca la conexión desde la app (o borra su cuenta) y que aquí
+ * desaparecen su credencial cifrada y su huella de notas, siempre que el relé
+ * esté en marcha y Lumbre responda.
+ *
+ * Una hora: es lo que dura un access token (`ACCESS_TTL_MS` en `oauth.ts`),
+ * así que el barrido no deja una autorización muerta más tiempo del que ya la
+ * dejaba viva el propio token. Y el coste es una introspección por
+ * autorización guardada (1-3 cuentas reales, un puñado de llamadas a la
+ * hora), en serie.
+ */
+export const CREDENTIAL_SWEEP_INTERVAL_MS = 60 * 60_000;
+const NODE_SWEEP_TIMERS = {
+    setInterval: (run, ms) => setInterval(run, ms),
+    clearInterval: (timer) => clearInterval(timer)
+};
+/**
+ * Programa el barrido de credenciales del relé: uno YA (el almacén tiene que
+ * estar listo: se llama tras `ensureReady`) y luego uno por intervalo.
+ * Devuelve la función que lo para; también se para solo cuando `server` emite
+ * `close`.
+ *
+ * Vive aquí y no dentro de `OAuthService` porque es ciclo de vida del
+ * PROCESO, no lógica OAuth: el servicio sabe barrer, quien lo arranca decide
+ * cuándo. Por eso tampoco lo llama `createHttpApp`: los tests levantan esa app
+ * a decenas y un barrido de fondo en cada una hablaría con un backchannel que
+ * no esperan. El transporte stdio (`index.ts`) no lo lleva: no tiene almacén
+ * OAuth, ni credenciales de nadie que barrer.
+ *
+ * `unref()`: el temporizador no mantiene vivo el proceso, así que no retrasa
+ * un apagado. Un barrido que falle no puede tumbar el proceso ni tocar
+ * `/readyz`: `sweepInactiveCredentials` ya no lanza, y si aun así lo hiciera
+ * se queda en una línea de texto fijo (sin el mensaje del error, que podría
+ * llevar una ruta o un dato de una credencial) y se reintenta en el ciclo
+ * siguiente. Si el anterior sigue en curso, el propio servicio se lo salta.
+ */
+export function startCredentialSweep(server, oauth, options = {}) {
+    const timers = options.timers ?? NODE_SWEEP_TIMERS;
+    const run = () => {
+        // Dentro del ejecutor de una promesa: la llamada sale ya, y tanto un
+        // rechazo como una excepción síncrona acaban en el mismo `catch`.
+        void new Promise((resolve) => resolve(oauth.sweepInactiveCredentials())).catch(() => {
+            console.error('[lumbre-mcp-oauth] barrido de credenciales: falló; se reintenta en el siguiente ciclo');
+        });
+    };
+    const timer = timers.setInterval(run, options.intervalMs ?? CREDENTIAL_SWEEP_INTERVAL_MS);
+    timer.unref();
+    let stopped = false;
+    const stop = () => {
+        if (stopped)
+            return;
+        stopped = true;
+        timers.clearInterval(timer);
+    };
+    server.once('close', stop);
+    run();
+    return stop;
+}
 // Arranca el listener solo si este módulo es el entrypoint del proceso
 // (`node dist/http.js`) — importarlo desde un test (`createHttpApp`) no debe
 // abrir un puerto real.
@@ -495,6 +555,8 @@ if (isMainModule) {
     const oauth = createOAuthService();
     void oauth.ensureReady().then(() => {
         const app = createHttpApp(baseUrl, oauth);
+        // Con el almacén ya validado: barrido de arranque y luego cada hora.
+        startCredentialSweep(app, oauth);
         app.listen(port, () => {
             console.error(`[lumbre-mcp-http] escuchando en :${port} (relé hacia ${baseUrl})`);
         });

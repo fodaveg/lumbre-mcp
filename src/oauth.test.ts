@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { request as httpRequest, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHttpApp } from './http.js';
+import { createAccountNotesSeenStore, saveNotesSeenState, touchNotesSeen } from './notes.js';
 import { OAuthService, OAUTH_CALLBACK, OAUTH_ISSUER, OAUTH_RESOURCE, OAUTH_RESOURCE_METADATA, OAUTH_SCOPE } from './oauth.js';
 
 const CLIENT_ID = 'https://claude.ai/.well-known/oauth-client/lumbre';
@@ -262,11 +263,18 @@ async function refresh(baseUrl: string, token: string, overrides: Record<string,
 afterEach(async () => {
 	await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
 	await Promise.all(stateDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+	delete process.env.XDG_STATE_HOME;
 });
 
-beforeEach(() => {
+beforeEach(async () => {
 	process.env.LUMBRE_MCP_BACKCHANNEL_SECRET = BACKCHANNEL_SECRET;
 	delete process.env.LUMBRE_APP_BASE_URL;
+	// La huella de notas vive en `XDG_STATE_HOME/lumbre-mcp` (`notes.ts`), no en
+	// el `stateDir` que se le pasa a `OAuthService`. Desde que una autorización
+	// que sale del almacén se lleva su fichero de huella, CUALQUIER test que
+	// revoque algo acaba haciendo un `unlink` ahí: sin esto caería en el
+	// directorio de estado real de quien corre los tests.
+	process.env.XDG_STATE_HOME = await newStateDir();
 });
 
 describe('OAuth 2.1 para claude.ai', () => {
@@ -1855,5 +1863,656 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(source).not.toMatch(
 			/\.(?:codeHash|accessHash|refreshHash|hash)\s*[!=]==\s*[A-Za-z_$]|[!=]==\s*\w+\.(?:codeHash|accessHash|refreshHash|hash)\b/
 		);
+	});
+});
+
+// ── Purga de autorizaciones: huella de notas y barrido de credenciales ──────
+
+interface StoredState {
+	grants: Array<{ credentialId: string; familyId: string }>;
+	usedRefreshTokens: Array<{ familyId: string }>;
+	authorizationCodes: unknown[];
+	revocationOutbox: Array<{ credentialId: string }>;
+}
+
+async function readStoredState(stateDir: string): Promise<StoredState> {
+	return JSON.parse(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')) as StoredState;
+}
+
+/** Directorio de la huella de notas: el `XDG_STATE_HOME` temporal del
+ *  `beforeEach`, nunca el de la máquina. */
+function notesDir(): string {
+	return join(process.env.XDG_STATE_HOME!, 'lumbre-mcp');
+}
+
+/** Nombre en disco de la huella de una credencial, derivado AQUÍ por separado
+ *  de `notes.ts`: así el test comprueba que se borra el fichero de ESA
+ *  credencial y no "alguno". */
+function notesFileOf(token: string): string {
+	return `notes-seen-${createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16)}.json`;
+}
+
+/** Escribe la huella de `token` con el mismo store que usa `http.ts`. */
+async function seedNotesFile(token: string): Promise<string> {
+	await createAccountNotesSeenStore(token).save(touchNotesSeen({}, 'tarea-con-nota', 4, '2026-07-01T00:00:00.000Z'));
+	const name = notesFileOf(token);
+	expect(await readdir(notesDir())).toContain(name);
+	return name;
+}
+
+async function notesFiles(): Promise<string[]> {
+	return (await readdir(notesDir()).catch(() => [] as string[])).filter((name) => name.startsWith('notes-seen')).sort();
+}
+
+async function issueTokens(baseUrl: string): Promise<{ access: string; refresh: string }> {
+	const { code } = await authorize(baseUrl);
+	const issued = await exchangeCode(baseUrl, code);
+	return { access: String(issued.access_token), refresh: String(issued.refresh_token) };
+}
+
+async function rotate(baseUrl: string, refreshToken: string): Promise<{ access: string; refresh: string }> {
+	const response = await refresh(baseUrl, refreshToken);
+	expect(response.status).toBe(200);
+	const body = (await response.json()) as { access_token: string; refresh_token: string };
+	return { access: body.access_token, refresh: body.refresh_token };
+}
+
+async function revokeFromClient(baseUrl: string, token: string): Promise<Response> {
+	return await fetch(`${baseUrl}/revoke`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ token, client_id: CLIENT_ID })
+	});
+}
+
+type OAuthFetchOverrides = NonNullable<Parameters<typeof oauthFetch>[0]>;
+
+/**
+ * Lumbre simulada con VARIAS credenciales: cada canje devuelve una distinta y
+ * la introspección responde por cada una (`inactive` marca las que la app
+ * declara inactivas: revocadas allí, de una cuenta borrada o de un usuario
+ * desactivado, que desde el relé son indistinguibles).
+ */
+function credentialFarm() {
+	let counter = 0;
+	/** token upstream → credentialId, en orden de emisión. */
+	const credentials = new Map<string, string>();
+	const inactive = new Set<string>();
+	const base: OAuthFetchOverrides = {
+		exchangeBody: () => {
+			counter += 1;
+			const credentialId = `22222222-2222-4222-8222-${String(counter).padStart(12, '0')}`;
+			const accessToken = (counter + 10).toString(16).repeat(64);
+			credentials.set(accessToken, credentialId);
+			return { credentialId, accessToken, tokenType: 'Bearer', resource: OAUTH_RESOURCE, scope: OAUTH_SCOPE };
+		},
+		introspectBody: (body: Record<string, unknown>) => {
+			const token = String(body.accessToken);
+			if (inactive.has(token)) return { active: false };
+			return {
+				active: true,
+				credentialId: credentials.get(token),
+				clientId: CLIENT_ID,
+				resource: OAUTH_RESOURCE,
+				scope: OAUTH_SCOPE
+			};
+		}
+	};
+	return {
+		credentials,
+		inactive,
+		fetch: (overrides: OAuthFetchOverrides = {}) => oauthFetch({ ...base, ...overrides })
+	};
+}
+
+/** Dos autorizaciones de dos credenciales distintas, cada una con su huella. */
+async function seedTwoGrants() {
+	const stateDir = await newStateDir();
+	const farm = credentialFarm();
+	const baseUrl = await listen(new OAuthService({ stateDir, fetch: farm.fetch() }));
+	const grants = [await issueTokens(baseUrl), await issueTokens(baseUrl)];
+	const tokens = [...farm.credentials.keys()];
+	expect(tokens).toHaveLength(2);
+	const files = [await seedNotesFile(tokens[0]!), await seedNotesFile(tokens[1]!)];
+	return {
+		stateDir,
+		farm,
+		baseUrl,
+		grants,
+		tokens,
+		files,
+		storeText: await readFile(join(stateDir, 'oauth-store.json'), 'utf8')
+	};
+}
+
+describe('una autorización que sale del almacén se lleva su huella de notas', () => {
+	it('`/revoke` del cliente borra la huella que escribió ESA credencial; la outbox se vacía con el ACK como antes', async () => {
+		const stateDir = await newStateDir();
+		let revokeCalls = 0;
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
+		});
+		const baseUrl = await listen(oauth);
+		const { access } = await issueTokens(baseUrl);
+
+		// La huella la escribe el camino REAL: una tool por `/mcp` con el bearer
+		// OAuth, que `http.ts` resuelve a la credencial upstream. Así el test
+		// ata el nombre del fichero a esa credencial, y no a una suposición.
+		const originalFetch = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const target = String(url);
+			if (target.startsWith(baseUrl)) return await originalFetch(url, init);
+			if (target.includes('/api/tasks')) {
+				return new Response(JSON.stringify([{
+					id: '55555555-5555-5555-5555-555555555555',
+					content: 'tarea con nota',
+					notes: 'una nota cualquiera para que se guarde huella',
+					notesUpdatedAt: '2026-07-20T00:00:00.000Z',
+					done: false, priority: null, date: null, deadline: null, list: null,
+					createdAt: new Date().toISOString(), parentId: null
+				}]), { status: 200, headers: { 'content-type': 'application/json' } });
+			}
+			throw new Error(`fetch no mockeado en este test: ${target}`);
+		}));
+		try {
+			const listed = await fetch(`${baseUrl}/mcp`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					accept: 'application/json, text/event-stream',
+					authorization: `Bearer ${access}`
+				},
+				body: JSON.stringify({
+					jsonrpc: '2.0', id: 1, method: 'tools/call',
+					params: { name: 'list_tasks', arguments: { scope: 'all' } }
+				})
+			});
+			expect(listed.status).toBe(200);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(await notesFiles()).toEqual([notesFileOf(UPSTREAM_TOKEN)]);
+
+		expect((await revokeFromClient(baseUrl, access)).status).toBe(200);
+
+		expect(await notesFiles()).toEqual([]);
+		const stored = await readStoredState(stateDir);
+		expect(stored.grants).toEqual([]);
+		expect(stored.revocationOutbox).toEqual([]);
+		expect(revokeCalls).toBe(1);
+	});
+
+	it('`/revoke` con Lumbre caída: la huella se borra igual y la revocación upstream queda en la outbox', async () => {
+		const stateDir = await newStateDir();
+		const { access } = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+		const downBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch({ revokeStatus: 503 }) }));
+
+		expect((await revokeFromClient(downBase, access)).status).toBe(200);
+
+		expect(await notesFiles()).not.toContain(file);
+		const stored = await readStoredState(stateDir);
+		expect(stored.grants).toEqual([]);
+		expect(stored.revocationOutbox.map((item) => item.credentialId)).toEqual([CREDENTIAL_ID]);
+	});
+
+	it('refresh con la credencial inactiva en Lumbre: se va la familia y también su huella', async () => {
+		const stateDir = await newStateDir();
+		const issued = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+		const inactiveBase = await listen(new OAuthService({
+			stateDir, fetch: oauthFetch({ introspectBody: { active: false } })
+		}));
+
+		expect((await refresh(inactiveBase, issued.refresh)).status).toBe(400);
+
+		expect(await notesFiles()).not.toContain(file);
+		expect((await readStoredState(stateDir)).grants).toEqual([]);
+	});
+
+	it('reutilizar un refresh ya usado revoca la familia y borra su huella', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const baseUrl = await listen(oauth);
+		const issued = await issueTokens(baseUrl);
+		const rotated = await rotate(baseUrl, issued.refresh);
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+		// Rotar NO es salir del almacén: la huella sigue tras la rotación.
+		expect(await notesFiles()).toContain(file);
+
+		expect((await refresh(baseUrl, issued.refresh)).status).toBe(400);
+
+		expect(await notesFiles()).not.toContain(file);
+		expect((await readStoredState(stateDir)).grants).toEqual([]);
+		expect(await oauth.resolveAccessToken(rotated.access)).toBeUndefined();
+	});
+
+	it('la caducidad de la familia (30 días) retira el grant y borra su huella en la siguiente poda', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 3_000_000;
+		const now = () => currentTime;
+		await issueTokens(await listen(new OAuthService({
+			stateDir, fetch: oauthFetch({ requestBody: pendingRequestBody(currentTime) }), now
+		})));
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+
+		// Un día antes de caducar, la poda no toca ni el grant ni la huella.
+		currentTime += 29 * 24 * 60 * 60_000;
+		await new OAuthService({ stateDir, fetch: oauthFetch(), now }).ensureReady();
+		expect((await readStoredState(stateDir)).grants).toHaveLength(1);
+		expect(await notesFiles()).toContain(file);
+
+		currentTime += 24 * 60 * 60_000 + 1;
+		await new OAuthService({ stateDir, fetch: oauthFetch(), now }).ensureReady();
+		expect((await readStoredState(stateDir)).grants).toEqual([]);
+		expect(await notesFiles()).not.toContain(file);
+	});
+
+	it('la huella NO se borra mientras otra autorización conserve la misma credencial upstream', async () => {
+		// No debería pasar (una credencial por autorización), pero el nombre del
+		// fichero sale del TOKEN: si Lumbre repitiera uno, borrar la huella al
+		// irse la primera autorización se la quitaría a la segunda, que sigue viva.
+		const stateDir = await newStateDir();
+		const sharedToken = 'c'.repeat(64);
+		let counter = 0;
+		let latestCredentialId = '';
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch({
+				exchangeBody: () => {
+					counter += 1;
+					latestCredentialId = `22222222-2222-4222-8222-${String(counter).padStart(12, '0')}`;
+					return {
+						credentialId: latestCredentialId, accessToken: sharedToken, tokenType: 'Bearer',
+						resource: OAUTH_RESOURCE, scope: OAUTH_SCOPE
+					};
+				},
+				introspectBody: () => ({
+					active: true, credentialId: latestCredentialId, clientId: CLIENT_ID,
+					resource: OAUTH_RESOURCE, scope: OAUTH_SCOPE
+				})
+			})
+		});
+		const baseUrl = await listen(oauth);
+		const first = await issueTokens(baseUrl);
+		const second = await issueTokens(baseUrl);
+		const file = await seedNotesFile(sharedToken);
+
+		expect((await revokeFromClient(baseUrl, first.access)).status).toBe(200);
+		expect(await notesFiles()).toContain(file);
+		expect(await oauth.resolveAccessToken(second.access)).toBe(sharedToken);
+
+		expect((await revokeFromClient(baseUrl, second.access)).status).toBe(200);
+		expect(await notesFiles()).not.toContain(file);
+	});
+
+	it('si la huella no se puede borrar, la revocación NO falla y queda dicho en el log con un recuento, sin nombres', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const baseUrl = await listen(oauth);
+		const { access } = await issueTokens(baseUrl);
+		// Un DIRECTORIO con el nombre de la huella: `unlink` falla con algo que
+		// no es "no existe", que es el caso que hay que no tragarse en silencio.
+		const file = notesFileOf(UPSTREAM_TOKEN);
+		await mkdir(join(notesDir(), file), { recursive: true });
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect((await revokeFromClient(baseUrl, access)).status).toBe(200);
+			const lines = errors.mock.calls.map((call) => call.join(' ')).filter((line) => line.includes('huella de notas'));
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toMatch(/^\[lumbre-mcp-oauth\] huella de notas: 1 fichero/);
+			for (const secret of [UPSTREAM_TOKEN, CREDENTIAL_ID, file, 'notes-seen-']) expect(lines[0]).not.toContain(secret);
+		} finally {
+			errors.mockRestore();
+		}
+		// La autorización sí salió: lo que no se pudo borrar no la retiene.
+		expect((await readStoredState(stateDir)).grants).toEqual([]);
+		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
+	});
+
+	it('si la escritura del almacén falla ANTES del rename, el grant sigue y su huella también', async () => {
+		const stateDir = await newStateDir();
+		let sabotage = false;
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch(),
+			persistenceStep: (step) => {
+				if (sabotage && step === 'temporary-file-synced') throw new Error('sabotaje antes de rename');
+			}
+		});
+		const baseUrl = await listen(oauth);
+		const { access } = await issueTokens(baseUrl);
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+
+		sabotage = true;
+		expect((await revokeFromClient(baseUrl, access)).status).toBe(500);
+		expect(await notesFiles()).toContain(file);
+		expect(await oauth.resolveAccessToken(access)).toBe(UPSTREAM_TOKEN);
+
+		sabotage = false;
+		expect((await revokeFromClient(baseUrl, access)).status).toBe(200);
+		expect(await notesFiles()).not.toContain(file);
+	});
+
+	it('si falla un paso POSTERIOR al rename, el grant ya salió del disco y su huella se borra igual', async () => {
+		const stateDir = await newStateDir();
+		let sabotage = false;
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch(),
+			persistenceStep: (step) => {
+				if (sabotage && step === 'store-renamed') throw new Error('sabotaje tras el rename');
+			}
+		});
+		const baseUrl = await listen(oauth);
+		const { access } = await issueTokens(baseUrl);
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+
+		sabotage = true;
+		expect((await revokeFromClient(baseUrl, access)).status).toBe(500);
+		sabotage = false;
+
+		expect((await readStoredState(stateDir)).grants).toEqual([]);
+		expect(await notesFiles()).not.toContain(file);
+	});
+});
+
+describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => {
+	it('una credencial que Lumbre declara inactiva pierde grant, tombstones y huella; la de OTRA credencial activa queda intacta', async () => {
+		const seeded = await seedTwoGrants();
+		let revokeCalls = 0;
+		const oauth = new OAuthService({
+			stateDir: seeded.stateDir,
+			fetch: seeded.farm.fetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
+		});
+		const baseUrl = await listen(oauth);
+		// Una rotación por familia: así las dos tienen una tombstone que mirar.
+		const goneRotated = await rotate(baseUrl, seeded.grants[0]!.refresh);
+		const keptRotated = await rotate(baseUrl, seeded.grants[1]!.refresh);
+		const [goneToken, keptToken] = seeded.tokens as [string, string];
+		const goneCredentialId = seeded.farm.credentials.get(goneToken)!;
+		const keptCredentialId = seeded.farm.credentials.get(keptToken)!;
+		const before = await readStoredState(seeded.stateDir);
+		expect(before.grants).toHaveLength(2);
+		expect(before.usedRefreshTokens).toHaveLength(2);
+		const goneFamily = before.grants.find((grant) => grant.credentialId === goneCredentialId)!.familyId;
+		const keptFamily = before.grants.find((grant) => grant.credentialId === keptCredentialId)!.familyId;
+
+		seeded.farm.inactive.add(goneToken);
+		const result = await oauth.sweepInactiveCredentials();
+
+		expect(result).toMatchObject({
+			skipped: false, aborted: false, purgedGrants: 1, retiredOutboxItems: 0, undetermined: 0
+		});
+		const after = await readStoredState(seeded.stateDir);
+		expect(after.grants.map((grant) => grant.credentialId)).toEqual([keptCredentialId]);
+		expect(after.usedRefreshTokens.map((item) => item.familyId)).toEqual([keptFamily]);
+		expect(JSON.stringify(after)).not.toContain(goneFamily);
+		expect(JSON.stringify(after)).not.toContain(goneCredentialId);
+		// La app ya la declara inactiva: no hay nada que revocar allí, así que
+		// ni se encola en la outbox ni se llama a `/revoke`.
+		expect(after.revocationOutbox).toEqual([]);
+		expect(revokeCalls).toBe(0);
+		const files = await notesFiles();
+		expect(files).not.toContain(seeded.files[0]);
+		expect(files).toContain(seeded.files[1]);
+		expect(await oauth.resolveAccessToken(goneRotated.access)).toBeUndefined();
+		expect((await refresh(baseUrl, goneRotated.refresh)).status).toBe(400);
+		expect(await oauth.resolveAccessToken(keptRotated.access)).toBe(keptToken);
+	});
+
+	it('control negativo: SIN barrido, el grant y la huella de una credencial inactiva siguen ahí', async () => {
+		// Mismo escenario que el test anterior hasta el barrido, que aquí no se
+		// llama: lo que borra es el barrido, no el arranque ni la readiness.
+		const seeded = await seedTwoGrants();
+		seeded.farm.inactive.add(seeded.tokens[0]!);
+		const oauth = new OAuthService({ stateDir: seeded.stateDir, fetch: seeded.farm.fetch() });
+		await listen(oauth);
+
+		await oauth.ensureReady();
+		await oauth.checkReady();
+
+		expect(await readFile(join(seeded.stateDir, 'oauth-store.json'), 'utf8')).toBe(seeded.storeText);
+		expect(await notesFiles()).toEqual([...seeded.files].sort());
+		expect(await oauth.resolveAccessToken(seeded.grants[0]!.access)).toBe(seeded.tokens[0]);
+	});
+
+	it.each([
+		['un 503', { introspectStatus: 503 }],
+		['un 429 (el límite de la ruta en Lumbre)', { introspectStatus: 429 }],
+		['un 401 del canal (secreto mal configurado)', { introspectStatus: 401 }],
+		['una respuesta fuera de contrato (`active:true` sin el resto)', { introspectBody: { active: true } }],
+		['un `active:false` con campos de más', { introspectBody: { active: false, motivo: 'revocada' } }],
+		['un `active` que no es booleano', { introspectBody: { active: 'false' } }]
+	] as Array<[string, OAuthFetchOverrides]>)('con %s no purga NADA y se corta en la primera credencial', async (_label, overrides) => {
+		const seeded = await seedTwoGrants();
+		// Aunque la app las tuviera por inactivas, lo que llega no es un
+		// `{active:false}` limpio con 2xx: no se puede saber, no se purga.
+		for (const token of seeded.tokens) seeded.farm.inactive.add(token);
+		let introspections = 0;
+		const sweeper = new OAuthService({
+			stateDir: seeded.stateDir,
+			fetch: seeded.farm.fetch({ ...overrides, onBackchannel: (path) => { if (path === 'introspect') introspections += 1; } })
+		});
+
+		const result = await sweeper.sweepInactiveCredentials();
+
+		expect(result).toMatchObject({ skipped: false, aborted: true, purgedGrants: 0, retiredOutboxItems: 0 });
+		expect(introspections).toBe(1);
+		expect(await readFile(join(seeded.stateDir, 'oauth-store.json'), 'utf8')).toBe(seeded.storeText);
+		expect(await notesFiles()).toEqual([...seeded.files].sort());
+	});
+
+	it('con un fallo de red o un timeout no purga nada y se corta', async () => {
+		const seeded = await seedTwoGrants();
+		const inner = seeded.farm.fetch();
+		let introspections = 0;
+		const sweeper = new OAuthService({
+			stateDir: seeded.stateDir,
+			fetch: async (input, init) => {
+				if (String(input).endsWith('/introspect')) {
+					introspections += 1;
+					throw new Error('timeout simulado');
+				}
+				return await inner(input, init);
+			}
+		});
+
+		const result = await sweeper.sweepInactiveCredentials();
+
+		expect(result).toMatchObject({ skipped: false, aborted: true, purgedGrants: 0, retiredOutboxItems: 0 });
+		expect(introspections).toBe(1);
+		expect(await readFile(join(seeded.stateDir, 'oauth-store.json'), 'utf8')).toBe(seeded.storeText);
+		expect(await notesFiles()).toEqual([...seeded.files].sort());
+	});
+
+	it.each([
+		['otro `credentialId`', { credentialId: '99999999-9999-4999-8999-999999999999' }],
+		['otro `clientId`', { clientId: 'https://claude.ai/otro-cliente' }],
+		['otro `resource`', { resource: `${OAUTH_ISSUER}/otro` }],
+		['otro `scope`', { scope: 'otro:scope' }]
+	] as Array<[string, Record<string, string>]>)('una introspección activa pero con %s no purga y deja seguir con las demás', async (_label, mismatch) => {
+		const seeded = await seedTwoGrants();
+		let introspections = 0;
+		const sweeper = new OAuthService({
+			stateDir: seeded.stateDir,
+			fetch: seeded.farm.fetch({
+				introspectBody: (body: Record<string, unknown>) => ({
+					active: true,
+					credentialId: seeded.farm.credentials.get(String(body.accessToken)),
+					clientId: CLIENT_ID,
+					resource: OAUTH_RESOURCE,
+					scope: OAUTH_SCOPE,
+					...mismatch
+				}),
+				onBackchannel: (path) => { if (path === 'introspect') introspections += 1; }
+			})
+		});
+
+		const result = await sweeper.sweepInactiveCredentials();
+
+		// No es un fallo del canal (Lumbre respondió dentro de contrato), así
+		// que no corta; pero tampoco es un `active:false`: no se purga.
+		expect(result).toMatchObject({ skipped: false, aborted: false, purgedGrants: 0, undetermined: 2 });
+		expect(introspections).toBe(2);
+		expect(await readFile(join(seeded.stateDir, 'oauth-store.json'), 'utf8')).toBe(seeded.storeText);
+		expect(await notesFiles()).toEqual([...seeded.files].sort());
+	});
+
+	it('un elemento de la outbox cuya credencial Lumbre declara inactiva se retira; si sigue activa o no se sabe, se queda', async () => {
+		const stateDir = await newStateDir();
+		const { access } = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const downBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch({ revokeStatus: 503 }) }));
+		expect((await revokeFromClient(downBase, access)).status).toBe(200);
+		expect((await readStoredState(stateDir)).revocationOutbox).toHaveLength(1);
+
+		// Lumbre no acepta el `revoke` y no se puede introspeccionar: se queda.
+		const unknown = await new OAuthService({
+			stateDir, fetch: oauthFetch({ revokeStatus: 503, introspectStatus: 503 })
+		}).sweepInactiveCredentials();
+		expect(unknown).toMatchObject({ aborted: true, retiredOutboxItems: 0 });
+		expect((await readStoredState(stateDir)).revocationOutbox).toHaveLength(1);
+
+		// Lumbre no acepta el `revoke` y la credencial sigue ACTIVA: se queda,
+		// porque todavía hay algo que revocar.
+		let revokeCalls = 0;
+		const stillActive = await new OAuthService({
+			stateDir,
+			fetch: oauthFetch({ revokeStatus: 503, onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
+		}).sweepInactiveCredentials();
+		expect(stillActive).toMatchObject({ aborted: false, retiredOutboxItems: 0 });
+		expect(revokeCalls).toBe(1);
+		expect((await readStoredState(stateDir)).revocationOutbox).toHaveLength(1);
+
+		// Lumbre la declara inactiva: ya no hay nada que revocar, se retira.
+		const inactive = await new OAuthService({
+			stateDir, fetch: oauthFetch({ revokeStatus: 503, introspectBody: { active: false } })
+		}).sweepInactiveCredentials();
+		expect(inactive).toMatchObject({ aborted: false, purgedGrants: 0, retiredOutboxItems: 1 });
+		expect((await readStoredState(stateDir)).revocationOutbox).toEqual([]);
+	});
+
+	it('borra una huella con más de 30 días aunque nadie guarde nada, y no toca notes-seen.json, oauth-store.json ni oauth.key', async () => {
+		// Como en producción: el almacén OAuth y las huellas comparten directorio.
+		const stateDir = notesDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		await issueTokens(await listen(oauth));
+		const liveFile = await seedNotesFile(UPSTREAM_TOKEN);
+		// La conexión antigua por token de la API: el relé no guarda credencial
+		// suya, así que su huella solo puede caducar por tiempo.
+		const staleFile = await seedNotesFile('token-de-la-api-que-ya-nadie-usa');
+		await saveNotesSeenState(touchNotesSeen({}, 'stdio', 4, '2026-07-01T00:00:00.000Z'));
+		const old = new Date(Date.now() - 40 * 24 * 60 * 60_000);
+		for (const name of [staleFile, 'notes-seen.json', 'oauth-store.json', 'oauth.key']) {
+			await utimes(join(stateDir, name), old, old);
+		}
+
+		const result = await oauth.sweepInactiveCredentials();
+
+		expect(result).toMatchObject({ skipped: false, aborted: false, purgedGrants: 0, prunedNotesFiles: 1 });
+		const names = await readdir(stateDir);
+		expect(names).not.toContain(staleFile);
+		for (const name of [liveFile, 'notes-seen.json', 'oauth-store.json', 'oauth.key']) expect(names).toContain(name);
+	});
+
+	it('dos barridos solapados: el segundo no hace nada', async () => {
+		const stateDir = await newStateDir();
+		await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const inner = oauthFetch();
+		let introspections = 0;
+		const sweeper = new OAuthService({
+			stateDir,
+			fetch: async (input, init) => {
+				if (String(input).endsWith('/introspect')) {
+					introspections += 1;
+					await gate;
+				}
+				return await inner(input, init);
+			}
+		});
+
+		const first = sweeper.sweepInactiveCredentials();
+		await vi.waitFor(() => expect(introspections).toBe(1));
+		const second = await sweeper.sweepInactiveCredentials();
+		expect(second).toMatchObject({ skipped: true, aborted: false, purgedGrants: 0, retiredOutboxItems: 0, prunedNotesFiles: 0 });
+		expect(introspections).toBe(1);
+
+		release();
+		expect(await first).toMatchObject({ skipped: false, aborted: false });
+		// Y el cerrojo se suelta al terminar: el siguiente barrido sí corre.
+		expect(await sweeper.sweepInactiveCredentials()).toMatchObject({ skipped: false });
+		expect(introspections).toBe(2);
+	});
+
+	it('carrera: el cliente revoca entre la introspección y la retirada; el barrido no retira nada ni lanza', async () => {
+		const stateDir = await newStateDir();
+		const { access } = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const file = await seedNotesFile(UPSTREAM_TOKEN);
+		const inner = oauthFetch({ introspectBody: { active: false } });
+		let racingBase = '';
+		let revokedInBetween = 0;
+		const racing = new OAuthService({
+			stateDir,
+			fetch: async (input, init) => {
+				if (String(input).endsWith('/introspect')) {
+					// Justo mientras Lumbre contesta, el cliente revoca por su cuenta.
+					if ((await revokeFromClient(racingBase, access)).status === 200) revokedInBetween += 1;
+				}
+				return await inner(input, init);
+			}
+		});
+		racingBase = await listen(racing);
+
+		const result = await racing.sweepInactiveCredentials();
+
+		expect(revokedInBetween).toBe(1);
+		// El grant ya no estaba cuando el barrido fue a retirarlo: no cuenta
+		// una purga que no hizo, y no falla.
+		expect(result).toMatchObject({ skipped: false, aborted: false, purgedGrants: 0, retiredOutboxItems: 0 });
+		const stored = await readStoredState(stateDir);
+		expect(stored.grants).toEqual([]);
+		expect(stored.revocationOutbox).toEqual([]);
+		expect(await notesFiles()).not.toContain(file);
+	});
+
+	it('el log del barrido da recuentos y nada que identifique: ni token, ni credentialId, ni familyId, ni nombre de fichero', async () => {
+		const seeded = await seedTwoGrants();
+		const before = await readStoredState(seeded.stateDir);
+		seeded.farm.inactive.add(seeded.tokens[0]!);
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const sweeper = new OAuthService({ stateDir: seeded.stateDir, fetch: seeded.farm.fetch() });
+			expect(await sweeper.sweepInactiveCredentials()).toMatchObject({ purgedGrants: 1 });
+			const lines = errors.mock.calls.map((call) => call.join(' '));
+			const sweepLines = lines.filter((line) => line.includes('barrido'));
+			expect(sweepLines).toHaveLength(1);
+			expect(sweepLines[0]).toMatch(/^\[lumbre-mcp-oauth\] /);
+			expect(sweepLines[0]).toMatch(/\b1 autorización/);
+			const everything = lines.join('\n');
+			for (const secret of [
+				...seeded.tokens,
+				...seeded.farm.credentials.values(),
+				...before.grants.map((grant) => grant.familyId),
+				...seeded.files,
+				'notes-seen-'
+			]) {
+				expect(everything).not.toContain(secret);
+			}
+
+			// Un barrido que no purga ni descarta nada no escribe nada.
+			errors.mockClear();
+			expect(await sweeper.sweepInactiveCredentials()).toMatchObject({ purgedGrants: 0, aborted: false });
+			expect(errors).not.toHaveBeenCalled();
+
+			// Tampoco el que se corta por un fallo del canal sin haber purgado.
+			const down = new OAuthService({ stateDir: seeded.stateDir, fetch: seeded.farm.fetch({ introspectStatus: 503 }) });
+			expect(await down.sweepInactiveCredentials()).toMatchObject({ purgedGrants: 0, aborted: true });
+			expect(errors).not.toHaveBeenCalled();
+		} finally {
+			errors.mockRestore();
+		}
 	});
 });

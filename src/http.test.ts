@@ -708,6 +708,118 @@ describe('hostnames de loopback: solo desde loopback', () => {
 	});
 });
 
+describe('barrido periódico de credenciales: programación (startCredentialSweep)', () => {
+	/** Reloj de mentira: guarda el callback y el intervalo, y deja constancia
+	 *  de `unref` y de `clearInterval`, que es lo que hay que comprobar. */
+	function fakeTimers() {
+		const state = {
+			run: undefined as (() => void) | undefined,
+			ms: undefined as number | undefined,
+			unref: 0,
+			cleared: 0
+		};
+		const timer = { unref: () => { state.unref += 1; } };
+		return {
+			state,
+			timers: {
+				setInterval: (run: () => void, ms: number) => {
+					state.run = run;
+					state.ms = ms;
+					return timer;
+				},
+				clearInterval: (handle: unknown) => {
+					if (handle === timer) state.cleared += 1;
+				}
+			}
+		};
+	}
+
+	async function listeningApp(sweep: () => Promise<unknown>) {
+		const { createHttpApp } = await import('./http.js');
+		const { OAuthService } = await import('./oauth.js');
+		const oauth = new OAuthService({ stateDir: await mkdtemp(join(tmpdir(), 'lumbre-mcp-sweep-')) });
+		const spy = vi.spyOn(oauth, 'sweepInactiveCredentials').mockImplementation(sweep as never);
+		const app = createHttpApp('https://app.lumbre.test', oauth);
+		// En 127.0.0.1 y no en `::`: en macOS un `listen(0)` de doble pila puede
+		// recibir un puerto que OTRO proceso ya escucha solo por IPv4, y el
+		// `fetch` a 127.0.0.1 acabaría hablando con ese proceso.
+		app.listen(0, '127.0.0.1');
+		await new Promise<void>((resolve) => app.once('listening', resolve));
+		return { app, oauth, spy };
+	}
+
+	it('lanza un barrido al arrancar y otro por intervalo (60 min por defecto), con unref, y se limpia al cerrar el servidor', async () => {
+		const { startCredentialSweep, CREDENTIAL_SWEEP_INTERVAL_MS } = await import('./http.js');
+		const { app, oauth, spy } = await listeningApp(async () => ({}));
+		const { state, timers } = fakeTimers();
+
+		startCredentialSweep(app, oauth, { timers });
+
+		expect(CREDENTIAL_SWEEP_INTERVAL_MS).toBe(60 * 60_000);
+		expect(spy).toHaveBeenCalledTimes(1); // el del arranque, sin esperar una hora
+		expect(state.ms).toBe(60 * 60_000);
+		expect(state.unref).toBe(1); // no impide apagar el proceso
+		state.run!();
+		state.run!();
+		expect(spy).toHaveBeenCalledTimes(3);
+		expect(state.cleared).toBe(0);
+
+		await new Promise<void>((resolve, reject) => app.close((err) => (err ? reject(err) : resolve())));
+		expect(state.cleared).toBe(1);
+	});
+
+	it('el intervalo es inyectable y la función devuelta lo para sin esperar al cierre', async () => {
+		const { startCredentialSweep } = await import('./http.js');
+		const { app, oauth, spy } = await listeningApp(async () => ({}));
+		const { state, timers } = fakeTimers();
+		try {
+			const stop = startCredentialSweep(app, oauth, { intervalMs: 5_000, timers });
+			expect(state.ms).toBe(5_000);
+			stop();
+			stop(); // parar dos veces no limpia dos veces
+			expect(state.cleared).toBe(1);
+			expect(spy).toHaveBeenCalledTimes(1);
+		} finally {
+			await new Promise<void>((resolve, reject) => app.close((err) => (err ? reject(err) : resolve())));
+		}
+		expect(state.cleared).toBe(1);
+	});
+
+	it('un barrido que falla no tumba el proceso: se anota con un texto fijo y el siguiente ciclo vuelve a intentarlo', async () => {
+		const { startCredentialSweep } = await import('./http.js');
+		const { app, oauth, spy } = await listeningApp(async () => {
+			throw new Error('detalle-interno-que-no-debe-llegar-al-log');
+		});
+		const { state, timers } = fakeTimers();
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			startCredentialSweep(app, oauth, { timers });
+			await vi.waitFor(() => expect(errors).toHaveBeenCalledTimes(1));
+			const line = errors.mock.calls[0]!.join(' ');
+			expect(line).toMatch(/^\[lumbre-mcp-oauth\] barrido de credenciales/);
+			expect(line).not.toContain('detalle-interno');
+			state.run!();
+			expect(spy).toHaveBeenCalledTimes(2);
+			await vi.waitFor(() => expect(errors).toHaveBeenCalledTimes(2));
+			// Y el servidor sigue atendiendo como si nada.
+			expect((await fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/healthz`)).status).toBe(200);
+		} finally {
+			errors.mockRestore();
+			await new Promise<void>((resolve, reject) => app.close((err) => (err ? reject(err) : resolve())));
+		}
+	});
+
+	it('`createHttpApp` por sí solo NO programa ningún barrido: solo lo hace quien arranca el relé', async () => {
+		const { app, spy } = await listeningApp(async () => ({}));
+		try {
+			expect((await fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/healthz`)).status).toBe(200);
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			await new Promise<void>((resolve, reject) => app.close((err) => (err ? reject(err) : resolve())));
+		}
+	});
+});
+
 describe('ruta desconocida', () => {
 	it('404 texto plano', async () => {
 		const res = await fetch(`${baseUrl}/no-existe`);
