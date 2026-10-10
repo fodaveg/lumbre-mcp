@@ -1,0 +1,2 @@
+{"step":"baseline","heapUsedMB":16.233444213867188,"externalMB":3.8798532485961914,"arrayBuffersMB":0.2023000717163086,"rssMB":90.03125,"sockets":0}
+{"step":"500 tools/call concurrentes, upstream 3 s","status":{"200":500},"secs":4.14,"peakRssMBsampled":363.16,"upstream":{"counts":{"/api/tasks":500},"maxInflight":500},"heapUsedMB":29.692291259765625,"externalMB":4.121039390563965,"arrayBuffersMB":0.2539949417114258,"rssMB":378.640625,"sockets":256}

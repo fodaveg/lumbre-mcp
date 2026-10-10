@@ -1,0 +1,1 @@
+{"q":"réplicas","test":"10 /authorize alternando 2 procesos con el mismo volumen","statuses":[302,302,302,302,302,302,302,302,302,302],"pendientesEnDisco":5,"esperado":10}

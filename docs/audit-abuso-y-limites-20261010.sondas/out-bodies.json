@@ -1,0 +1,21 @@
+{"q":"Q2","test":"POST /mcp bearer, 10 MB con Content-Length","status":413,"sentMB":0.81,"ms":6,"note":"respuesta completa"}
+{"q":"Q2","test":"POST /mcp bearer, 10 MB chunked sin Content-Length","status":413,"sentMB":2.81,"ms":2,"note":"respuesta completa"}
+{"q":"Q2","test":"POST /mcp SIN bearer, 10 MB con Content-Length","status":401,"sentMB":0.88,"ms":1,"note":"respuesta completa"}
+{"q":"Q2","test":"POST /mcp SIN bearer, 10 MB chunked","sentMB":0.88,"ms":1,"error":"EPIPE"}
+{"q":"Q2","test":"POST /token 10 MB con Content-Length","status":413,"sentMB":0.81,"ms":1,"note":"respuesta completa"}
+{"q":"Q2","test":"POST /token 10 MB chunked","status":413,"sentMB":0.81,"ms":1,"note":"respuesta completa"}
+{"q":"Q2","test":"POST /revoke 10 MB chunked","status":413,"sentMB":0.81,"ms":1,"note":"respuesta completa"}
+{"q":"Q2","test":"POST /authorize 10 MB chunked","sentMB":1,"ms":1,"error":"EPIPE"}
+{"q":"Q2","test":"POST /register 10 MB","sentMB":1.25,"ms":1,"error":"EPIPE"}
+{"q":"Q2","test":"POST /oauth/lumbre/callback 10 MB chunked","status":405,"sentMB":1,"ms":1,"note":"respuesta completa"}
+{"q":"Q2","test":"tope exacto /mcp: 2 MiB (2097152) con Content-Length","status":400,"sentMB":2,"ms":2,"note":"respuesta completa"}
+{"q":"Q2","test":"tope exacto /mcp: 2 MiB + 1","status":413,"sentMB":0.88,"ms":1,"note":"respuesta completa"}
+{"q":"Q2","test":"tras las subidas","mem":{"heapUsedMB":16.737648010253906,"externalMB":3.8798532485961914,"arrayBuffersMB":0.2023000717163086,"rssMB":106.546875,"sockets":0}}
+{"q":"Q2","test":"JSON \"[[[[…\" de 2 MiB","status":400,"ms":179}
+{"q":"Q3","test":"initialize: ¿mcp-session-id en la respuesta?","status":200,"sessionHeader":null}
+{"q":"Q3","test":"tools/call con mcp-session-id inventado","status":200}
+{"q":"Q3","test":"GET /mcp (stream SSE)","status":405}
+{"q":"Q3","test":"DELETE /mcp","status":405}
+{"q":"batch","test":"1 POST con array de 500 tools/call","bodyBytes":47393,"status":200,"ms":263,"respBytes":1603393,"upstreamCalls":500,"respHead":"[{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"notas: 0 íntegras (@done · cambiadas · tocadas <24h) · 14 con marcador → SIN LEER, usa get_task antes de darlas po"}
+{"q":"batch","test":"repetido","status":200,"ms":149,"upstreamTotal":1001}
+{"mem":{"heapUsedMB":23.626678466796875,"externalMB":4.121039390563965,"arrayBuffersMB":0.2539949417114258,"rssMB":463.671875,"sockets":1}}

@@ -1,0 +1,1 @@
+{"q":"Q7","test":"50 en vuelo + SIGTERM (proceso normal, no PID 1)","inFlightAtSigterm":50,"results":{"ECONNRESET":50},"firstFailMsAfterSigterm":2,"exited":{"code":null,"signal":"SIGTERM","msAfterSigterm":6},"noprodBlocks":0}
