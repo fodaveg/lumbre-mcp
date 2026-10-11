@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createAccountNotesSeenStore } from './notes.js';
 import { createOAuthService, OAUTH_CHALLENGE, stopReceiving } from './oauth.js';
 import { stripToolsListSchema } from './schema-strip.js';
+import { ToolCallLimiter, toolCallLimitsFromEnv } from './tool-call-limiter.js';
 // CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
 // integrado). `createServer(config, opts)` NO cae en los defaults de `opts`
 // enteros: `localFilesystem: false` (ver más abajo) va explícito, y la huella
@@ -81,6 +82,50 @@ const JSON_RPC_PAYLOAD_TOO_LARGE = -32002;
  *  (400) porque el 413 lleva su propio status y su propio código. */
 class PayloadTooLargeError extends Error {
 }
+/**
+ * "Invalid Request" de JSON-RPC 2.0, para un lote (array) de mensajes. El
+ * batching se retiró de la spec MCP en la revisión 2025-06-18 y los clientes
+ * del SDK no lo usan, pero el transporte del SDK 1.30 todavía itera arrays:
+ * medido el 10 oct 2026 (`docs/audit-abuso-y-limites-20261010.md`, hallazgo
+ * 1), UN `POST` de 2 MB con un bearer inventado lanzaba ~21 600 `tools/call`
+ * contra app.lumbre.pro (hasta ~2 500 simultáneas) y subía el RSS a ~860 MB.
+ * Se rechaza entero, no se acota a N: no hay cliente legítimo al que dejar
+ * pasar.
+ */
+const JSON_RPC_INVALID_REQUEST = -32600;
+/** Código propio (rango de servidor, como el -32002 del 413) del 429 por
+ *  tope de `tools/call` en vuelo (`ToolCallLimiter`). */
+const JSON_RPC_TOO_MANY_IN_FLIGHT = -32003;
+function isToolCall(body) {
+    return (!!body &&
+        typeof body === 'object' &&
+        !Array.isArray(body) &&
+        body.method === 'tools/call');
+}
+/**
+ * Tiempos y conexiones del listener (hallazgo 3 del mismo audit). Los
+ * defectos de Node dejaban 300 s para recibir una petición entera
+ * (`requestTimeout`), así que una conexión que manda el cuerpo byte a byte
+ * retenía su socket y su buffer cinco minutos.
+ *
+ *  · `requestTimeout` 60 s: tiempo para RECIBIR la petición entera (no para
+ *    contestarla). El cuerpo legítimo más grande, ~1,4 MB de un
+ *    `add_attachment`, cabe holgado incluso a 0,5 Mbit/s.
+ *  · `headersTimeout` 20 s: para las cabeceras, que son unos cientos de bytes.
+ *  · `connectionsCheckingInterval` 5 s: cada cuánto mira Node esos dos
+ *    plazos (por defecto 30 s, que podía casi duplicarlos).
+ *  · `maxConnections` 256: por encima, Node cierra la conexión nueva en el
+ *    acto. Ocho veces el tope global de `tools/call` en vuelo (32): sobra
+ *    para Caddy, que es el único cliente legítimo, y acota los sockets que
+ *    un cliente puede tener abiertos a la vez.
+ *
+ * El borde tiene sus propios plazos hacia este contenedor
+ * (`deploy/mcp-lumbre-pro.caddy`, `transport http`).
+ */
+export const MCP_REQUEST_TIMEOUT_MS = 60_000;
+export const MCP_HEADERS_TIMEOUT_MS = 20_000;
+export const MCP_CONNECTIONS_CHECK_INTERVAL_MS = 5_000;
+export const MCP_MAX_CONNECTIONS = 256;
 /**
  * Hosts permitidos, tanto para el header `Host` (protección DNS-rebinding
  * mínima: si alguien resuelve `mcp.lumbre.pro` a este proceso desde un
@@ -255,7 +300,7 @@ function logRequest(method, status) {
  * un solo carácter sigue siendo un token que no debe acabar en un log). El
  * body ya lo lee `handleMcpRequest` sin volcarlo tampoco (`describeMethod`).
  */
-async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth) {
+async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth, toolCalls) {
     if (req.method !== 'POST') {
         sendJsonRpcError(res, 405, -32000, `Method not allowed. Modo stateless: solo POST ${routeLabel}.`);
         logRequest(`OTHER ${routeLabel}`, 405);
@@ -339,6 +384,28 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
         logRequest(`POST ${routeLabel}`, 400);
         return;
     }
+    // Un lote JSON-RPC se rechaza ANTES de construir nada: ver
+    // `JSON_RPC_INVALID_REQUEST`.
+    if (Array.isArray(parsedBody)) {
+        sendJsonRpcError(res, 400, JSON_RPC_INVALID_REQUEST, 'Invalid Request: este servidor no admite lotes JSON-RPC; envía un mensaje por petición.');
+        logRequest(`POST ${routeLabel} ${methodLabel}`, 400);
+        return;
+    }
+    // Hueco en el tope de `tools/call` en vuelo, por la credencial que va a
+    // hablar con Lumbre (`token`: la upstream resuelta, no el bearer OAuth,
+    // así que todos los access tokens de una misma conexión cuentan juntos).
+    // Se libera en el `finally` de abajo, cuando `handleRequest` ha
+    // terminado, que es cuando la tool ya no tiene peticiones a la app en
+    // vuelo, aunque el cliente se haya ido antes.
+    let releaseToolCall;
+    if (isToolCall(parsedBody)) {
+        releaseToolCall = toolCalls.tryAcquire(token);
+        if (!releaseToolCall) {
+            sendJsonRpcError(res, 429, JSON_RPC_TOO_MANY_IN_FLIGHT, 'Demasiadas llamadas a herramientas en curso; inténtalo de nuevo en unos segundos.', { 'retry-after': '1' });
+            logRequest(`POST ${routeLabel} ${methodLabel}`, 429);
+            return;
+        }
+    }
     const config = { baseUrl, token, authMode };
     // CONTRATO M1: la única LLAMADA a la factory real de `index.ts`.
     // `localFilesystem: false` — este proceso corre en el VPS compartido, no
@@ -383,6 +450,7 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
             sendJsonRpcError(res, 500, -32603, 'Internal server error');
     }
     finally {
+        releaseToolCall?.();
         logRequest(`POST ${routeLabel} ${methodLabel}`, res.statusCode);
         res.on('close', () => {
             void transport.close();
@@ -395,8 +463,15 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
  * los tests puedan levantarla en un puerto efímero (`app.listen(0)`) sin
  * pisar el `PORT` real.
  */
-export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL, oauth = createOAuthService()) {
-    return createHttpServer((req, res) => {
+export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL, oauth = createOAuthService(), options = {}) {
+    // Un limitador por app (no de módulo): cada test que levanta su app
+    // empieza con el cupo entero.
+    const toolCalls = new ToolCallLimiter(options.toolCallLimits ?? toolCallLimitsFromEnv());
+    const server = createHttpServer({
+        requestTimeout: options.requestTimeoutMs ?? MCP_REQUEST_TIMEOUT_MS,
+        headersTimeout: options.headersTimeoutMs ?? MCP_HEADERS_TIMEOUT_MS,
+        connectionsCheckingInterval: options.connectionsCheckingIntervalMs ?? MCP_CONNECTIONS_CHECK_INTERVAL_MS
+    }, (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost');
         // Cabeceras de seguridad para TODA respuesta de este servidor, puestas
         // en un solo sitio y antes de enrutar. Las rutas OAuth ya traían las
@@ -462,7 +537,7 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             return;
         }
         if (url.pathname === '/mcp') {
-            void handleMcpRequest(req, res, baseUrl, undefined, '/mcp', oauth);
+            void handleMcpRequest(req, res, baseUrl, undefined, '/mcp', oauth, toolCalls);
             return;
         }
         // `/mcp/<token>` (segunda forma, ver el JSDoc de cabecera). Cualquier
@@ -478,12 +553,14 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             const remainder = url.pathname.slice(MCP_PATH_PREFIX.length);
             const isSingleSegment = remainder.length > 0 && !remainder.includes('/');
             const pathToken = isSingleSegment && isWellFormedPathToken(remainder) ? remainder : undefined;
-            void handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>', oauth);
+            void handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>', oauth, toolCalls);
             return;
         }
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('Not found');
     });
+    server.maxConnections = options.maxConnections ?? MCP_MAX_CONNECTIONS;
+    return server;
 }
 /**
  * Cada cuánto pregunta el relé a Lumbre por las credenciales que guarda
