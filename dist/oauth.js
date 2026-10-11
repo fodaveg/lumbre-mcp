@@ -17,6 +17,15 @@ const TRANSACTION_TTL_MS = 10 * 60_000;
 const ACCESS_TTL_MS = 60 * 60_000;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
 const MAX_FORM_BYTES = 16 * 1024;
+/**
+ * Tiempo máximo para recibir el formulario de `/token` o `/revoke` (M3 del
+ * audit de seguridad del 10 oct 2026). Sin él, la lectura heredaba el
+ * `requestTimeout` de Node (300 s): unas pocas conexiones mandando el cuerpo
+ * byte a byte retenían el trabajo durante cinco minutos. El formulario son
+ * unos cientos de bytes y como mucho `MAX_FORM_BYTES`; 10 s le sobran a
+ * cualquier red móvil y acotan lo que cuesta una conexión lenta a propósito.
+ */
+const FORM_READ_TIMEOUT_MS = 10_000;
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_PENDING_ITEMS = 1_000;
 const MAX_CIMD_CACHE_ITEMS = 128;
@@ -221,7 +230,12 @@ export function stopReceiving(req) {
     req.once('error', close);
     req.once('close', close);
 }
-async function readLimitedBody(req, limit = MAX_FORM_BYTES) {
+/**
+ * Lee el cuerpo hasta `limit` bytes y en menos de `timeoutMs`. Pasado el
+ * plazo responde 408 y deja de recibir (`stopReceiving`), igual que al
+ * pasarse de tamaño: lo que siga llegando ya no se guarda ni se espera.
+ */
+async function readLimitedBody(req, limit = MAX_FORM_BYTES, timeoutMs = FORM_READ_TIMEOUT_MS) {
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > limit) {
         stopReceiving(req);
@@ -230,32 +244,47 @@ async function readLimitedBody(req, limit = MAX_FORM_BYTES) {
     return await new Promise((resolve, reject) => {
         const chunks = [];
         let size = 0;
-        let exceeded = false;
+        let settled = false;
+        const fail = (error) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            chunks.length = 0;
+            reject(error);
+        };
+        const timer = setTimeout(() => {
+            stopReceiving(req);
+            fail(new OAuthError('invalid_request', 'El formulario tardó demasiado en llegar.', 408));
+        }, timeoutMs);
+        timer.unref();
         req.on('data', (chunk) => {
+            if (settled)
+                return;
             size += chunk.length;
-            if (size > limit && !exceeded) {
-                exceeded = true;
-                chunks.length = 0;
+            if (size > limit) {
                 stopReceiving(req);
-                reject(new OAuthError('invalid_request', 'Formulario demasiado grande.', 413));
+                fail(new OAuthError('invalid_request', 'Formulario demasiado grande.', 413));
                 return;
             }
-            if (!exceeded)
-                chunks.push(chunk);
+            chunks.push(chunk);
         });
         req.on('end', () => {
-            if (!exceeded)
-                resolve(Buffer.concat(chunks).toString('utf8'));
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(Buffer.concat(chunks).toString('utf8'));
         });
-        req.on('error', reject);
+        req.on('error', fail);
     });
 }
-async function readForm(req) {
+async function readForm(req, timeoutMs) {
     const type = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
     if (type !== 'application/x-www-form-urlencoded') {
         throw new OAuthError('invalid_request', 'Se requiere application/x-www-form-urlencoded.');
     }
-    return new URLSearchParams(await readLimitedBody(req));
+    return new URLSearchParams(await readLimitedBody(req, MAX_FORM_BYTES, timeoutMs));
 }
 function one(params, name, required = true) {
     const values = params.getAll(name);
@@ -595,6 +624,7 @@ export class OAuthService {
     writeQueue = Promise.resolve();
     authorizeBudget;
     failedMcpAttemptsPerMinute;
+    formReadTimeoutMs;
     /**
      * Último estado PERSISTIDO conocido del store, en memoria.
      *
@@ -652,6 +682,7 @@ export class OAuthService {
         };
         this.authorizeBudget = { ...DEFAULT_AUTHORIZE_BUDGET, ...options.authorizeBudget };
         this.failedMcpAttemptsPerMinute = options.failedMcpAttemptsPerMinute ?? DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE;
+        this.formReadTimeoutMs = options.formReadTimeoutMs ?? FORM_READ_TIMEOUT_MS;
     }
     protectedResourceMetadata() {
         return {
@@ -877,19 +908,48 @@ export class OAuthService {
         else
             this.authorizeGlobalWindow = { startedAt: now, count: 1 };
     }
+    /** Límite por ritmo e IP Y ranura de concurrencia, de una vez: para las
+     *  rutas que no leen cuerpo (`/authorize`, el callback). */
     enterPublicEndpoint(req, endpoint) {
-        const remote = this.remoteAddressOf(req);
-        const now = this.now();
-        this.pruneRateWindows(now);
-        const key = `${endpoint}:${remote}`;
-        const limit = this.publicLimits[endpoint];
-        if (this.overRateLimit(key, limit.requestsPerMinute)) {
+        const key = this.checkRateLimit(req, endpoint);
+        this.checkConcurrency(endpoint);
+        this.consumeRateWindow(key, this.now());
+        return this.takeConcurrencySlot(endpoint);
+    }
+    /**
+     * Solo el límite por ritmo e IP, gastándolo. Lo usan `/token` y
+     * `/revoke`, que toman la ranura de concurrencia DESPUÉS de leer el
+     * formulario (`enterConcurrency`): tomarla antes dejaba que unas pocas
+     * conexiones lentas ocuparan las 16 ranuras globales mientras mandaban el
+     * cuerpo, y todos los refresh legítimos recibían 429 (M3 del audit de
+     * seguridad del 10 oct 2026). La lectura ya está acotada en tamaño y en
+     * tiempo (`readLimitedBody`) y no toca el store ni Lumbre, así que no
+     * necesita ranura.
+     */
+    enterRateLimit(req, endpoint) {
+        const key = this.checkRateLimit(req, endpoint);
+        this.consumeRateWindow(key, this.now());
+    }
+    /** Ranura de concurrencia global del endpoint; devuelve cómo soltarla. */
+    enterConcurrency(endpoint) {
+        this.checkConcurrency(endpoint);
+        return this.takeConcurrencySlot(endpoint);
+    }
+    /** ¿Le queda cupo del minuto a esta IP? Lanza 429 si no; no gasta nada. */
+    checkRateLimit(req, endpoint) {
+        this.pruneRateWindows(this.now());
+        const key = `${endpoint}:${this.remoteAddressOf(req)}`;
+        if (this.overRateLimit(key, this.publicLimits[endpoint].requestsPerMinute)) {
             throw new OAuthError('temporarily_unavailable', 'Demasiadas solicitudes; inténtalo de nuevo más tarde.', 429);
         }
-        if (this.inFlight[endpoint] >= limit.concurrent) {
+        return key;
+    }
+    checkConcurrency(endpoint) {
+        if (this.inFlight[endpoint] >= this.publicLimits[endpoint].concurrent) {
             throw new OAuthError('temporarily_unavailable', 'El servidor está ocupado; inténtalo de nuevo.', 429);
         }
-        this.consumeRateWindow(key, now);
+    }
+    takeConcurrencySlot(endpoint) {
         this.inFlight[endpoint] += 1;
         let released = false;
         return () => {
@@ -1105,10 +1165,12 @@ export class OAuthService {
     async handleToken(req, res) {
         let release;
         try {
-            release = this.enterPublicEndpoint(req, 'token');
+            this.enterRateLimit(req, 'token');
             if (req.method !== 'POST')
                 throw new OAuthError('invalid_request', 'Método no permitido.', 405);
-            const form = await readForm(req);
+            // Primero el formulario, después la ranura: ver `enterRateLimit`.
+            const form = await readForm(req, this.formReadTimeoutMs);
+            release = this.enterConcurrency('token');
             const grantType = one(form, 'grant_type');
             if (grantType === 'authorization_code')
                 await this.exchangeCode(form, res);
@@ -1437,10 +1499,12 @@ export class OAuthService {
     async handleRevoke(req, res) {
         let release;
         try {
-            release = this.enterPublicEndpoint(req, 'revoke');
+            this.enterRateLimit(req, 'revoke');
             if (req.method !== 'POST')
                 throw new OAuthError('invalid_request', 'Método no permitido.', 405);
-            const form = await readForm(req);
+            // Primero el formulario, después la ranura: ver `enterRateLimit`.
+            const form = await readForm(req, this.formReadTimeoutMs);
+            release = this.enterConcurrency('revoke');
             const token = one(form, 'token');
             const clientId = one(form, 'client_id');
             const hash = digest(token);

@@ -1704,6 +1704,39 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(chunked.cut).toBe(true);
 	}, 20_000);
 
+	it('un formulario lento no ocupa la ranura de /token y se corta con 408 al vencer el plazo (M3)', async () => {
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch(),
+			publicLimits: { token: { concurrent: 1, requestsPerMinute: 60 } },
+			formReadTimeoutMs: 300
+		}));
+		const url = new URL(`${baseUrl}/token`);
+		// Declara 100 bytes y manda 10: el servidor se queda esperando el resto.
+		const slow = new Promise<{ status: number; elapsed: number }>((resolve, reject) => {
+			const started = Date.now();
+			const request = httpRequest(
+				{
+					hostname: url.hostname, port: url.port, path: '/token', method: 'POST',
+					headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': '100' }
+				},
+				(response) => {
+					response.resume();
+					resolve({ status: response.statusCode ?? 0, elapsed: Date.now() - started });
+				}
+			);
+			request.once('error', reject);
+			request.write('grant_type');
+		});
+		// Con la única ranura de concurrencia, un refresh normal NO recibe 429
+		// mientras el lento sigue mandando: la ranura se toma tras leer.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect((await refresh(baseUrl, 'lm_rt_no-existe')).status).toBe(400);
+		const { status, elapsed } = await slow;
+		expect(status).toBe(408);
+		expect(elapsed).toBeLessThan(5_000);
+	});
+
 	it('la outbox de revocación caduca sus pendientes y no crece sin límite', async () => {
 		const stateDir = await newStateDir();
 		let currentTime = 1_000_000;
