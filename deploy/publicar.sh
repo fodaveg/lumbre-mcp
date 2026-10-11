@@ -20,11 +20,16 @@
 # En el servidor (H4 y H5 de docs/audit-recuperacion-despliegue-20261010.md):
 #   1. etiqueta la imagen que corre como `lumbre-mcp:anterior`;
 #   2. construye `lumbre-mcp:<sha>` con la etiqueta OCI de la revisión;
-#   3. vuelca el log del contenedor saliente a $LUMBRE_MCP_LOG_DIR (Compose lo
-#      borra al recrearlo);
-#   4. levanta `<sha>` y espera a `healthy` con tope;
-#   5. si llega, la etiqueta también como `latest`; si no, vuelca su log y
-#      vuelve a `anterior`, y el script sale con 1.
+#   3. para el contenedor saliente (apagado ordenado) y vuelca su log a
+#      $LUMBRE_MCP_LOG_DIR, con las líneas del apagado (Compose lo borra al
+#      recrearlo);
+#   4. levanta `<sha>` y espera a `healthy` con tope en segundos;
+#   5. si llega, la etiqueta también como `latest`; si el `up` falla o no
+#      llega, vuelca su log y vuelve a `anterior`, y sale con 1.
+# Esa parte corre DESACOPLADA del ssh (`setsid nohup`, con su salida en
+# $LUMBRE_MCP_LOG_DIR/deploy-<fecha>-<sha>.log): si el canal se cae a mitad,
+# el deploy sigue en el servidor y la vuelta atrás también. Desde aquí solo se
+# sigue ese log y se recoge el código de salida que deja.
 # Después, si hay `LUMBRE_TOKEN` en el entorno, corre el smoke remoto.
 #
 # Variables: LUMBRE_MCP_HOST (alias ssh, default `lumbre`), LUMBRE_MCP_DEST
@@ -155,16 +160,34 @@ rsync -rlptz --delete \
 # excluido), así que se retira aquí.
 ssh "$HOST" "chown -R 0:0 $DEST && find $DEST -name .DS_Store -type f -delete"
 
-echo "==> Construyendo, levantando y esperando a healthy (tope ${HEALTH_TIMEOUT} s)"
-ssh "$HOST" bash -s -- "$DEST" "$ENV_FILE" "$SHA" "$HEALTH_TIMEOUT" "$LOG_DIR" <<'REMOTO'
+# La parte del servidor se sube a un directorio de trabajo bajo LOG_DIR y se
+# lanza desacoplada del ssh: si el canal se cae a mitad, ni un SIGHUP ni un
+# EPIPE al escribir la matan, y la vuelta atrás sigue pudiendo ocurrir.
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+WORK="$LOG_DIR/.deploy-$STAMP-${SHA:0:12}"
+DEPLOY_LOG="$LOG_DIR/deploy-$STAMP-$SHA.log"
+echo "==> Subiendo la parte del servidor a $HOST:$WORK"
+ssh "$HOST" "install -d -m 0700 $LOG_DIR $WORK && cat >$WORK/desplegar.sh" <<'REMOTO'
 set -euo pipefail
 DEST="$1"
 ENV_FILE="$2"
 SHA="$3"
 HEALTH_TIMEOUT="$4"
 LOG_DIR="$5"
+WORK="$6"
 NAME=lumbre-mcp
+# El PID para que `publicar.sh` lo siga con `tail --pid`, y el código de
+# salida, escrito de forma atómica, para que lo recoja al terminar.
+echo "$$" >"$WORK/pid"
+# shellcheck disable=SC2329 # la invoca el `trap … EXIT` de abajo
+write_code() {
+	local code=$?
+	echo "$code" >"$WORK/codigo.tmp" && mv "$WORK/codigo.tmp" "$WORK/codigo"
+}
+trap write_code EXIT
 cd "$DEST"
+# Los logs de deploy: los 30 más recientes (el de este, el más nuevo, queda).
+{ ls -1t "$LOG_DIR"/deploy-*.log 2>/dev/null || true; } | tail -n +31 | while read -r old; do rm -f -- "$old"; done
 
 compose() { docker compose --env-file "$ENV_FILE" -f deploy/compose.yml "$@"; }
 
@@ -191,9 +214,11 @@ dump_logs() {
 	{ ls -1t "$LOG_DIR"/*.log.gz 2>/dev/null || true; } | tail -n +31 | while read -r old; do rm -f -- "$old"; done
 }
 
+# El tope es en SEGUNDOS reales (`SECONDS`), no en vueltas: cada vuelta hace
+# dos `docker inspect`, que en un host cargado no tardan cero.
 wait_healthy() {
-	local status restarts i
-	for ((i = 0; i < HEALTH_TIMEOUT; i++)); do
+	local status=desconocido restarts=0 deadline=$((SECONDS + HEALTH_TIMEOUT)) started=$SECONDS
+	while ((SECONDS < deadline)); do
 		status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sin-healthcheck{{end}}' "$NAME" 2>/dev/null || echo ausente)"
 		restarts="$(docker inspect -f '{{.RestartCount}}' "$NAME" 2>/dev/null || echo 0)"
 		[[ "$status" == healthy ]] && return 0
@@ -201,8 +226,21 @@ wait_healthy() {
 		if [[ "$status" == unhealthy || "$restarts" != 0 ]]; then break; fi
 		sleep 1
 	done
-	echo "    estado: $status, reinicios: $restarts, tras $i s" >&2
+	echo "    estado: $status, reinicios: $restarts, tras $((SECONDS - started)) s" >&2
 	return 1
+}
+
+# Para el contenedor (apagado ordenado, ver `src/http-lifecycle.ts`) ANTES de
+# volcar su log: así el volcado lleva también las líneas del apagado.
+stop_and_dump() {
+	local label="$1"
+	docker inspect "$NAME" >/dev/null 2>&1 || return 0
+	docker stop -t 15 "$NAME" >/dev/null || echo "AVISO: docker stop del contenedor $label falló." >&2
+	dump_logs "$label"
+}
+
+docker_ps() {
+	docker ps -a --filter "name=$NAME" --format '{{.Names}}\t{{.Status}}\t{{.Image}}' || true
 }
 
 PREV_IMAGE="$(docker inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
@@ -215,12 +253,12 @@ fi
 echo "==> [servidor] construyendo lumbre-mcp:$SHA"
 LUMBRE_MCP_IMAGE_TAG="$SHA" LUMBRE_MCP_REVISION="$SHA" compose build
 
-dump_logs saliente
+stop_and_dump saliente
 
 echo "==> [servidor] levantando lumbre-mcp:$SHA"
-LUMBRE_MCP_IMAGE_TAG="$SHA" compose up -d --no-build
-
-if wait_healthy; then
+# `up` y la espera en la misma condición: con `set -e`, un `up` que fallara
+# fuera de un `if` mataría el script antes de la vuelta atrás.
+if LUMBRE_MCP_IMAGE_TAG="$SHA" compose up -d --no-build && wait_healthy; then
 	docker tag "lumbre-mcp:$SHA" lumbre-mcp:latest
 	# Solo se conservan la versión nueva, la anterior y las etiquetas fijas:
 	# el disco del VPS va justo (H7).
@@ -230,16 +268,18 @@ if wait_healthy; then
 		docker image rm "lumbre-mcp:$tag" >/dev/null || true
 	done
 	echo "==> [servidor] healthy: lumbre-mcp:$SHA es ahora latest"
-	docker ps --filter "name=$NAME" --format '{{.Names}}\t{{.Status}}\t{{.Image}}'
+	docker_ps
 	exit 0
 fi
 
-echo "ERROR: lumbre-mcp:$SHA no llegó a healthy en $HEALTH_TIMEOUT s." >&2
-dump_logs fallido
+echo "ERROR: lumbre-mcp:$SHA no arrancó o no llegó a healthy en $HEALTH_TIMEOUT s." >&2
+# Si el `up` falló a medias puede no haber contenedor; `stop_and_dump` lo
+# tolera. El saliente ya está parado y sigue disponible como imagen
+# `anterior`.
+stop_and_dump fallido
 if [[ -n "$PREV_IMAGE" ]]; then
 	echo "==> [servidor] volviendo a lumbre-mcp:anterior (${PREV_REV:-sin revisión})" >&2
-	LUMBRE_MCP_IMAGE_TAG=anterior compose up -d --no-build
-	if wait_healthy; then
+	if LUMBRE_MCP_IMAGE_TAG=anterior compose up -d --no-build && wait_healthy; then
 		echo "    la anterior vuelve a estar healthy; latest no se ha movido" >&2
 	else
 		echo "    ¡la anterior TAMPOCO llega a healthy! Revisa el log." >&2
@@ -247,11 +287,43 @@ if [[ -n "$PREV_IMAGE" ]]; then
 else
 	echo "    no había imagen anterior a la que volver" >&2
 fi
-docker ps --filter "name=$NAME" --format '{{.Names}}\t{{.Status}}\t{{.Image}}' >&2
+docker_ps >&2
 exit 1
 REMOTO
 
-ROLLBACK="ssh $HOST 'cd $DEST && LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file $ENV_FILE -f deploy/compose.yml up -d --no-build'"
+echo "==> Construyendo, levantando y esperando a healthy (tope ${HEALTH_TIMEOUT} s); log en $HOST:$DEPLOY_LOG"
+ssh "$HOST" "setsid nohup bash $WORK/desplegar.sh $DEST $ENV_FILE $SHA $HEALTH_TIMEOUT $LOG_DIR $WORK >$DEPLOY_LOG 2>&1 </dev/null &"
+
+# Seguir el log hasta que el proceso remoto termine. Si el ssh se cae, se
+# vuelve a enganchar (sin repetir lo ya visto); el deploy no depende de esto.
+follow() {
+	local from="$1"
+	ssh "$HOST" "for i in \$(seq 1 60); do [ -s $WORK/pid ] && break; sleep 1; done; [ -s $WORK/pid ] || exit 3; tail -n $from -F --pid=\$(cat $WORK/pid) $DEPLOY_LOG 2>/dev/null"
+}
+attempts=0
+from='+1'
+until follow "$from"; do
+	attempts=$((attempts + 1))
+	if ((attempts >= 30)); then
+		echo "ERROR: no consigo seguir el deploy remoto. Sigue en el servidor; su log: $HOST:$DEPLOY_LOG" >&2
+		exit 1
+	fi
+	from='0'
+	sleep 2
+done
+CODE="$(ssh "$HOST" "cat $WORK/codigo 2>/dev/null" || true)"
+if ! [[ "$CODE" =~ ^[0-9]+$ ]]; then
+	echo "ERROR: el deploy remoto terminó sin dejar código de salida; mira $HOST:$DEPLOY_LOG" >&2
+	exit 1
+fi
+ssh "$HOST" "rm -rf $WORK" || true
+if ((CODE != 0)); then
+	echo "ERROR: el deploy remoto salió con $CODE; log completo en $HOST:$DEPLOY_LOG" >&2
+	exit "$CODE"
+fi
+
+# `latest` también vuelve atrás: si no, un `up -d` a mano resucitaría la rota.
+ROLLBACK="ssh $HOST 'cd $DEST && docker tag lumbre-mcp:anterior lumbre-mcp:latest && LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file $ENV_FILE -f deploy/compose.yml up -d --no-build'"
 
 echo
 if [[ -n "${LUMBRE_TOKEN:-}" ]]; then

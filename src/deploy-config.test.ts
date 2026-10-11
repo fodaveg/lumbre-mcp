@@ -12,13 +12,17 @@ const PREVIOUS_SHA = 'beef000000000000000000000000000000000002';
 // registran su invocación en un log en vez de tocar red ni disco real.
 //  · `git` contesta como un árbol limpio en `FAKE_SHA` (`FAKE_GIT_DIRTY=1`
 //    o `FAKE_DIST_DIRTY=1` lo ensucian) y su `archive` es un tar vacío.
-//  · `ssh` responde 0 (permisos 0600 simulados) salvo que `FAKE_REMOTE_MODE`
-//    diga otra cosa; y cuando lo que se le pide es `bash -s`, EJECUTA ese
-//    script aquí, contra el `docker` falso: así se prueba la parte remota
-//    (etiquetas, volcado de logs, espera a healthy, vuelta atrás).
+//  · `ssh` simula los permisos 0600 del secreto (`FAKE_REMOTE_MODE` los
+//    cambia) y no hace el `chown`; todo lo demás lo EJECUTA aquí con `bash
+//    -c`: subir la parte remota, lanzarla desacoplada (con `setsid` falso),
+//    seguir su log (con un `tail --pid` falso, porque el de macOS no lo
+//    tiene) y leer su código. Así se prueba la parte remota de verdad contra
+//    el `docker` falso. `FAKE_FOLLOW_DROPS=1` corta el primer seguimiento,
+//    como un ssh que se cae a mitad.
 //  · `docker` simula un contenedor en marcha con la revisión
 //    `PREVIOUS_SHA` (salvo `FAKE_NO_PREVIOUS=1`), que pasa a healthy salvo si
-//    la etiqueta levantada es `FAKE_BAD_TAG`.
+//    la etiqueta levantada es `FAKE_BAD_TAG`; `FAKE_UP_FAIL_TAG` hace fallar
+//    el `compose up` de esa etiqueta.
 async function createSandbox() {
 	const sandbox = await mkdtemp(join(tmpdir(), 'lumbre-mcp-deploy-test-'));
 	const bin = join(sandbox, 'bin');
@@ -53,8 +57,26 @@ async function createSandbox() {
 		'ssh',
 		[
 			'printf "ssh %s\\n" "$*" >> "$CALL_LOG"',
-			'if [[ "${2:-}" == bash ]]; then shift; exec "$@"; fi',
-			'[[ "${FAKE_REMOTE_MODE:-600}" == 600 ]]'
+			'cmd="$2"',
+			'case "$cmd" in',
+			'*"test -r "*) [[ "${FAKE_REMOTE_MODE:-600}" == 600 ]]; exit $? ;;',
+			'*"chown -R 0:0"*) exit 0 ;;',
+			'*"tail -n "*)',
+			'  if [[ -n "${FAKE_FOLLOW_DROPS:-}" && ! -f "$CALL_LOG.caida" ]]; then',
+			'    touch "$CALL_LOG.caida"; sleep 0.2; exit 255',
+			'  fi ;;',
+			'esac',
+			'exec bash -c "$cmd"'
+		].join('\n')
+	);
+	await fake('setsid', 'exec "$@"');
+	await fake(
+		'tail',
+		[
+			'pid=""; args=()',
+			'for a in "$@"; do case "$a" in --pid=*) pid="${a#--pid=}" ;; -F) ;; *) args+=("$a") ;; esac; done',
+			'if [[ -n "$pid" ]]; then while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done; fi',
+			'exec /usr/bin/tail "${args[@]}"'
 		].join('\n')
 	);
 	await fake(
@@ -63,14 +85,20 @@ async function createSandbox() {
 			'state="$CALL_LOG.estado"',
 			'if [[ "$1" == compose ]]; then',
 			'  printf "docker %s TAG=%s REV=%s\\n" "$*" "${LUMBRE_MCP_IMAGE_TAG:-}" "${LUMBRE_MCP_REVISION:-}" >> "$CALL_LOG"',
-			'  [[ "$*" == *" up "* ]] && echo "${LUMBRE_MCP_IMAGE_TAG:-latest}" > "$state"',
+			'  if [[ "$*" == *" up "* ]]; then',
+			'    [[ "${LUMBRE_MCP_IMAGE_TAG:-}" == "${FAKE_UP_FAIL_TAG:-ninguna}" ]] && exit 1',
+			'    echo "${LUMBRE_MCP_IMAGE_TAG:-latest}" > "$state"',
+			'  fi',
 			'  exit 0',
 			'fi',
 			'printf "docker %s\\n" "$*" >> "$CALL_LOG"',
 			'case "$1 $2 $3" in',
 			'"inspect -f {{.Image}}") [[ -n "${FAKE_NO_PREVIOUS:-}" && ! -f "$state" ]] && exit 1; echo sha256:imagen-previa ;;',
 			`"inspect -f {{index"*) [[ -n "\${FAKE_NO_PREVIOUS:-}" && ! -f "$state" ]] && exit 1; [[ -f "$state" ]] || echo ${PREVIOUS_SHA} ;;`,
-			'"inspect -f {{if"*) if [[ "$(cat "$state" 2>/dev/null)" == "${FAKE_BAD_TAG:-ninguna}" ]]; then echo unhealthy; else echo healthy; fi ;;',
+			'"inspect -f {{if"*) cur="$(cat "$state" 2>/dev/null)"',
+			'  if [[ "$cur" == "${FAKE_BAD_TAG:-ninguna}" ]]; then echo unhealthy',
+			'  elif [[ "$cur" == "${FAKE_STARTING_TAG:-ninguna}" ]]; then echo starting',
+			'  else echo healthy; fi ;;',
 			'"inspect -f {{.RestartCount}}") echo 0 ;;',
 			'"inspect lumbre-mcp ") [[ -n "${FAKE_NO_PREVIOUS:-}" && ! -f "$state" ]] && exit 1; exit 0 ;;',
 			'"logs --timestamps lumbre-mcp") echo "2026-10-11T00:00:00Z [lumbre-mcp-http] tools/call 200" ;;',
@@ -79,7 +107,10 @@ async function createSandbox() {
 			'exit 0'
 		].join('\n')
 	);
-	await fake('node', 'printf "node %s token_en_entorno=%s\\n" "$*" "${LUMBRE_TOKEN:+si}" >> "$CALL_LOG"');
+	await fake(
+		'node',
+		'printf "node %s token_en_entorno=%s\\n" "$*" "${LUMBRE_TOKEN:+si}" >> "$CALL_LOG"; [[ -z "${FAKE_SMOKE_FAIL:-}" ]]'
+	);
 
 	const run = (extraEnv: Record<string, string> = {}) => {
 		// Nunca hereda un LUMBRE_TOKEN real de quien corre los tests: con él,
@@ -100,6 +131,7 @@ async function createSandbox() {
 	const reset = async () => {
 		await writeFile(log, '');
 		await rm(`${log}.estado`, { force: true });
+		await rm(`${log}.caida`, { force: true });
 	};
 
 	return { sandbox, log, logDir, run, reset };
@@ -216,17 +248,25 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 			expect(lines[rsync]).not.toMatch(/ -a| --owner| -o /);
 			expect(lines[indexOf(lines, 'chown -R 0:0')]).toContain('-name .DS_Store -type f -delete');
 
-			// Servidor, en orden: anterior → build con revisión → log → up → healthy → latest.
-			const remote = indexOf(lines, `ssh lumbre bash -s -- `);
-			expect(lines[remote]).toContain(FAKE_SHA);
+			// La parte remota se sube y se lanza desacoplada del ssh.
+			const upload = indexOf(lines, '/desplegar.sh');
+			const launch = indexOf(lines, 'setsid nohup bash ');
+			expect(lines[upload]).toContain('cat >');
+			expect(lines[launch]).toContain(FAKE_SHA);
+			expect(lines[launch]).toMatch(/<\/dev\/null &$/);
+			expect(upload).toBeGreaterThan(rsync);
+			expect(launch).toBeGreaterThan(upload);
+
+			// Servidor, en orden: anterior → build → stop del viejo → su log → up → healthy → latest.
 			const tagPrevious = indexOf(lines, 'docker tag sha256:imagen-previa lumbre-mcp:anterior');
 			const build = indexOf(lines, `build TAG=${FAKE_SHA} REV=${FAKE_SHA}`);
+			const stop = indexOf(lines, 'docker stop -t 15 lumbre-mcp');
 			const logs = indexOf(lines, 'docker logs --timestamps lumbre-mcp');
 			const up = indexOf(lines, `up -d --no-build TAG=${FAKE_SHA}`);
 			const latest = indexOf(lines, `docker tag lumbre-mcp:${FAKE_SHA} lumbre-mcp:latest`);
-			expect(remote).toBeGreaterThan(rsync);
 			expect(build).toBeGreaterThan(tagPrevious);
-			expect(logs).toBeGreaterThan(build);
+			expect(stop).toBeGreaterThan(build);
+			expect(logs).toBeGreaterThan(stop);
 			expect(up).toBeGreaterThan(logs);
 			expect(latest).toBeGreaterThan(up);
 			// Poda: solo las etiquetas por SHA que no son ni la nueva ni la anterior.
@@ -234,10 +274,18 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 			expect(removed).toEqual(['docker image rm lumbre-mcp:0123456789012345678901234567890123456789']);
 
 			// El log del contenedor saliente queda, comprimido y con su revisión.
-			const saved = await readdir(logDir);
+			const entries = await readdir(logDir);
+			const saved = entries.filter((name) => name.endsWith('.log.gz'));
 			expect(saved).toHaveLength(1);
 			expect(saved[0]).toMatch(new RegExp(`^\\d{8}T\\d{6}Z-saliente-${PREVIOUS_SHA.slice(0, 12)}\\.log\\.gz$`));
 			expect(gunzipSync(await readFile(join(logDir, saved[0]!))).toString()).toContain('tools/call 200');
+			// …y el del propio deploy, que es lo que se ha seguido desde aquí.
+			const deployLogs = entries.filter((name) => name.startsWith('deploy-'));
+			expect(deployLogs).toEqual([expect.stringMatching(new RegExp(`^deploy-\\d{8}T\\d{6}Z-${FAKE_SHA}\\.log$`))]);
+			expect(await readFile(join(logDir, deployLogs[0]!), 'utf8')).toContain('[servidor] healthy');
+			expect(result.stdout).toContain('[servidor] healthy');
+			// El directorio de trabajo se retira al recoger el código.
+			expect(entries.some((name) => name.startsWith('.deploy-'))).toBe(false);
 
 			// Sin LUMBRE_TOKEN no hay smoke, y lo dice.
 			expect(lines.some((line) => line.startsWith('node '))).toBe(false);
@@ -252,19 +300,89 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 		try {
 			const result = run({ FAKE_BAD_TAG: FAKE_SHA, LUMBRE_TOKEN: 'tok-que-no-debe-usarse' });
 			expect(result.status).toBe(1);
-			expect(result.stderr).toContain('no llegó a healthy');
+			expect(result.stdout + result.stderr).toContain('no llegó a healthy');
+			expect(result.stderr).toContain('el deploy remoto salió con 1');
 			const lines = await calls(log);
 			const up = indexOf(lines, `up -d --no-build TAG=${FAKE_SHA}`);
+			const stopFailed = lines.findIndex((line, i) => i > up && line === 'docker stop -t 15 lumbre-mcp');
 			const rollback = indexOf(lines, 'up -d --no-build TAG=anterior');
-			expect(rollback).toBeGreaterThan(up);
+			// La fallida se para (y se vuelca) antes de volver a la anterior.
+			expect(stopFailed).toBeGreaterThan(up);
+			expect(rollback).toBeGreaterThan(stopFailed);
 			expect(lines.some((line) => line.includes('lumbre-mcp:latest'))).toBe(false);
 			expect(lines.some((line) => line.startsWith('docker image rm'))).toBe(false);
 			// Sin deploy bueno no se corre el smoke.
 			expect(lines.some((line) => line.startsWith('node '))).toBe(false);
-			const saved = (await readdir(logDir)).sort();
+			const saved = (await readdir(logDir)).filter((name) => name.endsWith('.log.gz'));
 			expect(saved).toHaveLength(2);
 			expect(saved.some((name) => name.includes('-fallido'))).toBe(true);
 			expect(saved.some((name) => name.includes('-saliente-'))).toBe(true);
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('si el `compose up` de la nueva FALLA: no muere con set -e, vuelve a «anterior» y sale con 1', async () => {
+		const { sandbox, log, run } = await createSandbox();
+		try {
+			const result = run({ FAKE_UP_FAIL_TAG: FAKE_SHA });
+			expect(result.status).toBe(1);
+			expect(result.stdout + result.stderr).toContain('no arrancó o no llegó a healthy');
+			expect(result.stdout + result.stderr).toContain('la anterior vuelve a estar healthy');
+			const lines = await calls(log);
+			const up = indexOf(lines, `up -d --no-build TAG=${FAKE_SHA}`);
+			const rollback = indexOf(lines, 'up -d --no-build TAG=anterior');
+			expect(rollback).toBeGreaterThan(up);
+			// Llega al `docker ps` final del script remoto.
+			expect(indexOf(lines, 'docker ps -a --filter name=lumbre-mcp')).toBeGreaterThan(rollback);
+			expect(lines.some((line) => line.includes('lumbre-mcp:latest'))).toBe(false);
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('si el ssh de seguimiento se cae, el deploy sigue en el servidor y su código se recoge igual', async () => {
+		const { sandbox, log, run } = await createSandbox();
+		try {
+			const result = run({ FAKE_FOLLOW_DROPS: '1' });
+			expect(result.status, result.stderr).toBe(0);
+			const lines = await calls(log);
+			const follows = lines.filter((line) => line.includes('tail -n '));
+			// Primer intento desde el principio; el reenganche, sin repetir.
+			expect(follows).toHaveLength(2);
+			expect(follows[0]).toContain('tail -n +1 -F');
+			expect(follows[1]).toContain('tail -n 0 -F');
+			indexOf(lines, `docker tag lumbre-mcp:${FAKE_SHA} lumbre-mcp:latest`);
+			indexOf(lines, '/codigo');
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('el tope de salud es en segundos reales: una que se queda en «starting» se corta a su hora', async () => {
+		const { sandbox, run } = await createSandbox();
+		try {
+			const t0 = Date.now();
+			const result = run({ FAKE_STARTING_TAG: FAKE_SHA, LUMBRE_MCP_HEALTH_TIMEOUT: '2' });
+			const elapsed = Date.now() - t0;
+			expect(result.status).toBe(1);
+			expect(result.stdout + result.stderr).toMatch(/estado: starting, reinicios: 0, tras [23] s/);
+			// Dos segundos de espera, más el arranque del script y la vuelta atrás.
+			expect(elapsed).toBeLessThan(10_000);
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('smoke rojo: sale con 1 y el comando de vuelta atrás devuelve también `latest` a la anterior', async () => {
+		const { sandbox, run } = await createSandbox();
+		try {
+			const result = run({ LUMBRE_TOKEN: 'tok-smoke', FAKE_SMOKE_FAIL: '1' });
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain('el smoke ha fallado');
+			expect(result.stderr).toMatch(
+				/docker tag lumbre-mcp:anterior lumbre-mcp:latest && LUMBRE_MCP_IMAGE_TAG=anterior docker compose .* up -d --no-build/
+			);
 		} finally {
 			await rm(sandbox, { recursive: true, force: true });
 		}
@@ -277,21 +395,26 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 			expect(result.status, result.stderr).toBe(0);
 			const lines = await calls(log);
 			expect(lines.some((line) => line.includes('lumbre-mcp:anterior'))).toBe(false);
+			expect(lines.some((line) => line.startsWith('docker stop'))).toBe(false);
 			indexOf(lines, `docker tag lumbre-mcp:${FAKE_SHA} lumbre-mcp:latest`);
-			await expect(readdir(logDir)).rejects.toMatchObject({ code: 'ENOENT' });
+			expect((await readdir(logDir)).filter((name) => name.endsWith('.log.gz'))).toEqual([]);
 		} finally {
 			await rm(sandbox, { recursive: true, force: true });
 		}
 	});
 
 	it('con LUMBRE_TOKEN corre el smoke, con el token en el entorno y no en la línea de órdenes', async () => {
-		const { sandbox, log, run } = await createSandbox();
+		const { sandbox, log, logDir, run } = await createSandbox();
 		try {
 			const result = run({ LUMBRE_TOKEN: 'tok-smoke-secreto' });
 			expect(result.status, result.stderr).toBe(0);
 			const smoke = (await calls(log)).filter((line) => line.startsWith('node '));
 			expect(smoke).toEqual(['node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp token_en_entorno=si']);
 			expect(await readFile(log, 'utf8')).not.toContain('tok-smoke-secreto');
+			// Ni el log del deploy que queda en el servidor.
+			for (const name of (await readdir(logDir)).filter((entry) => entry.startsWith('deploy-'))) {
+				expect(await readFile(join(logDir, name), 'utf8')).not.toContain('tok-smoke-secreto');
+			}
 		} finally {
 			await rm(sandbox, { recursive: true, force: true });
 		}

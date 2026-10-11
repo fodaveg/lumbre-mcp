@@ -284,12 +284,22 @@ Publica **HEAD**, no el árbol de trabajo:
    ficheros nuevos ya nacen del usuario remoto.
 4. En el servidor: etiqueta la imagen en marcha como `lumbre-mcp:anterior`,
    construye `lumbre-mcp:<sha>` (con `LABEL org.opencontainers.image.revision`
-   = el SHA), guarda el log del contenedor saliente, levanta la nueva y espera
-   a `healthy` (tope `LUMBRE_MCP_HEALTH_TIMEOUT`, 90 s por defecto; el
-   healthcheck comprueba cada 2 s mientras arranca). Si llega, la etiqueta
-   también como `latest` y borra las etiquetas por SHA que no sean la nueva ni
-   la anterior. Si no llega, guarda también el log de la fallida, vuelve a
-   `anterior` y sale con 1; `latest` no se mueve.
+   = el SHA), para el contenedor saliente (`docker stop -t 15`, apagado
+   ordenado) y guarda su log ya con las líneas del apagado, levanta la nueva y
+   espera a `healthy` (tope `LUMBRE_MCP_HEALTH_TIMEOUT` en segundos reales, 90
+   por defecto; el healthcheck comprueba cada 2 s mientras arranca). Si llega,
+   la etiqueta también como `latest` y borra las etiquetas por SHA que no sean
+   la nueva ni la anterior. Si el `up` falla o no llega a healthy, para la
+   fallida, guarda su log, vuelve a `anterior` y sale con 1; `latest` no se
+   mueve.
+
+   Esta parte se sube a `/var/log/lumbre-mcp/.deploy-<fecha>-<sha12>/` y se
+   lanza con `setsid nohup`, desacoplada del ssh, con su salida en
+   `/var/log/lumbre-mcp/deploy-<fecha>-<sha>.log` (los 30 más recientes). Si el
+   canal se cae a mitad, el deploy y la vuelta atrás siguen en el servidor;
+   desde el Mac solo se sigue ese log (`tail --pid`, reenganchándose si el ssh
+   se corta) y se devuelve el código de salida que el script remoto deja al
+   terminar.
 5. Si hay `LUMBRE_TOKEN` en el entorno, corre `scripts/smoke-remote.mjs`
    (el token va por el entorno, no por la línea de órdenes). Si falla, sale con
    1 e imprime el comando para volver a la anterior. Sin token, lo deja
@@ -305,13 +315,16 @@ Volver a la versión anterior a mano (la imagen sigue en el servidor, sin
 recompilar ni red):
 
 ```bash
-ssh lumbre 'cd /srv/lumbre-mcp && LUMBRE_MCP_IMAGE_TAG=anterior \
-  docker compose --env-file /srv/lumbre-mcp.env -f deploy/compose.yml up -d --no-build'
+ssh lumbre 'cd /srv/lumbre-mcp && docker tag lumbre-mcp:anterior lumbre-mcp:latest && \
+  LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file /srv/lumbre-mcp.env -f deploy/compose.yml up -d --no-build'
 ```
 
+El `docker tag` va primero para que `latest` deje de apuntar a la rota: si no,
+un `docker compose up -d` a mano la resucitaría.
+
 **Logs de contenedores anteriores.** Compose recrea el contenedor en cada
-deploy y Docker borra su log con él, así que `publicar.sh` lo guarda antes en
-`/var/log/lumbre-mcp/<fecha UTC>-saliente-<sha12>.log.gz` (y
+deploy y Docker borra su log con él, así que `publicar.sh` lo para y lo guarda
+antes en `/var/log/lumbre-mcp/<fecha UTC>-saliente-<sha12>.log.gz` (y
 `…-fallido.log.gz` si la nueva no llega a healthy), `0600`, conservando los 30
 más recientes. `LUMBRE_MCP_LOG_DIR` cambia el directorio; tiene que quedar
 fuera de `/srv/lumbre-mcp`, que `rsync --delete` vacía. Se leen con
