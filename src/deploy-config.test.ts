@@ -87,6 +87,56 @@ describe('deploy OAuth fail-closed', () => {
 	});
 });
 
+describe('contenedor: memoria, señales e imagen reproducible', () => {
+	/** Valor de una clave del servicio `mcp` (YAML plano, sin anidar). */
+	function serviceKey(compose: string, key: string): string | undefined {
+		return new RegExp(`^    ${key}:\\s*(.+)$`, 'm').exec(compose)?.[1]?.trim();
+	}
+
+	it('compose acota la memoria (límite y reserva) con el límite por encima de la reserva', async () => {
+		const compose = await readFile('deploy/compose.yml', 'utf8');
+		const toMiB = (value: string | undefined) => {
+			const [, amount, unit] = /^(\d+)([mg])$/.exec(value ?? '') ?? [];
+			expect(unit, value).toBeDefined();
+			return Number(amount) * (unit === 'g' ? 1024 : 1);
+		};
+		const limit = toMiB(serviceKey(compose, 'mem_limit'));
+		const reservation = toMiB(serviceKey(compose, 'mem_reservation'));
+		// El peor caso medido con los topes nuevos (32 add_attachment de 1 MiB
+		// en vuelo) fueron ~320 MB de RSS: el límite tiene que dejar margen.
+		expect(limit).toBeGreaterThanOrEqual(384);
+		expect(limit).toBeLessThanOrEqual(1024);
+		expect(reservation).toBeLessThan(limit);
+	});
+
+	it('compose: init como PID 1 y margen de parada sobre el apagado ordenado de 10 s', async () => {
+		const { SHUTDOWN_TIMEOUT_MS } = await import('./http-lifecycle.js');
+		const compose = await readFile('deploy/compose.yml', 'utf8');
+		expect(serviceKey(compose, 'init')).toBe('true');
+		const grace = /^(\d+)s$/.exec(serviceKey(compose, 'stop_grace_period') ?? '')?.[1];
+		expect(grace).toBeDefined();
+		expect(Number(grace) * 1000).toBeGreaterThan(SHUTDOWN_TIMEOUT_MS);
+	});
+
+	it('compose: la imagen se etiqueta por variable y la revisión llega como build-arg', async () => {
+		const compose = await readFile('deploy/compose.yml', 'utf8');
+		expect(serviceKey(compose, 'image')).toBe("'lumbre-mcp:${LUMBRE_MCP_IMAGE_TAG:-latest}'");
+		expect(compose).toContain("REVISION: '${LUMBRE_MCP_REVISION:-desconocida}'");
+		// Healthy en segundos tras arrancar, para que publicar.sh no espere 30 s.
+		expect(compose).toMatch(/^      start_interval: \d+s$/m);
+	});
+
+	it('Dockerfile: base fijada por digest y etiqueta OCI de la revisión al final', async () => {
+		const dockerfile = await readFile('Dockerfile', 'utf8');
+		expect(dockerfile).toMatch(/^FROM node:22-alpine@sha256:[0-9a-f]{64}$/m);
+		expect(dockerfile).not.toMatch(/^FROM node:22-alpine$/m);
+		expect(dockerfile).toContain('ARG REVISION=desconocida');
+		expect(dockerfile).toContain('LABEL org.opencontainers.image.revision=$REVISION');
+		// Después de `npm ci`: si fuera antes, cada deploy invalidaría esa capa.
+		expect(dockerfile.indexOf('ARG REVISION')).toBeGreaterThan(dockerfile.indexOf('RUN npm ci'));
+	});
+});
+
 describe('un .env local no puede acabar en git, en la imagen ni en el servidor', () => {
 	it('.gitignore ignora .env y .env.* pero conserva .env.example versionado', () => {
 		const result = spawnSync('git', ['check-ignore', '-v', '.env', '.env.local', '.env.example'], {

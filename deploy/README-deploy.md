@@ -60,6 +60,95 @@ VPS. `/readyz` comparte una sola comprobación concurrente, cacheada cinco
 segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
 `127.0.0.1`.
 
+### Una sola instancia, y por qué
+
+El relé corre como **un único proceso** y tiene que seguir así: nada de
+`docker compose up --scale`, de un segundo contenedor sobre el mismo volumen ni
+de despliegues azul/verde que dejen dos vivos a la vez. `container_name` fijo ya
+impide `--scale`, y `publicar.sh` recrea el contenedor (para el viejo y luego
+arranca el nuevo), así que nunca hay dos. Lo que se rompería con dos:
+
+- **Se pierden escrituras del store OAuth.** Cada proceso reescribe el fichero
+  entero desde su caché en memoria. Medido el 10 oct 2026
+  (`docs/audit-abuso-y-limites-20261010.md`, hallazgo 5): dos procesos sobre el
+  mismo directorio, 10 `/authorize` alternados, todos 302, y solo 5 pendientes
+  en disco. En la práctica: callbacks que responden «caducada o no existe» y
+  refresh tokens que desaparecen.
+- **Los topes se multiplican.** Los límites de ritmo de OAuth, las ventanas de
+  `/authorize` y el tope de `tools/call` en vuelo son de cada proceso: con N
+  réplicas, N veces el cupo.
+- **Las cachés divergen.** La de existencia de tareas (`src/existence-cache.ts`)
+  y la del store no se invalidan entre procesos.
+
+Si algún día hace falta escalar, antes hay que mover el store a un almacén
+compartido (o poner un lock de fichero y releer antes de cada escritura) y
+llevar los contadores a un sitio común.
+
+### Límites del transporte
+
+Medidos y elegidos el 11 oct 2026 a partir de
+`docs/audit-abuso-y-limites-20261010.md` (hallazgos 1 y 3):
+
+| Límite | Valor | Dónde se cambia | Al pasarse |
+| --- | --- | --- | --- |
+| Lotes JSON-RPC (array) en `/mcp` | no se admiten | — | 400, `-32600` |
+| `tools/call` en vuelo, todo el proceso | 32 | `LUMBRE_MCP_MAX_TOOL_CALLS` | 429, `-32003`, `Retry-After: 1` |
+| `tools/call` en vuelo, misma credencial | 8 | `LUMBRE_MCP_MAX_TOOL_CALLS_PER_BEARER` | 429, ídem |
+| Recibir la petición entera | 60 s | `MCP_REQUEST_TIMEOUT_MS` (`src/http.ts`) | 408 |
+| Recibir las cabeceras | 20 s | `MCP_HEADERS_TIMEOUT_MS` | 408 |
+| Conexiones abiertas a la vez | 64 | `MCP_MAX_CONNECTIONS` | la nueva se cierra en el acto (502 en el borde) |
+| Memoria del contenedor | 512 MB límite, 128 MB reserva | `mem_limit` / `mem_reservation` (`deploy/compose.yml`) | el kernel mata el proceso y `restart` lo levanta |
+
+- **Por qué estos topes de `tools/call`.** El uso real son 1-3 cuentas y un
+  cliente MCP lanza un puñado de tools en paralelo; 32 da para cuatro cuentas
+  con 8 a la vez cada una. El global es el que frena a quien inventa un bearer
+  distinto en cada petición; el de credencial (contada por el hash de la
+  credencial upstream, nunca en claro) impide que una cuenta se coma el cupo de
+  las demás. Lo que no cabe recibe 429 en el acto, sin cola: una cola también
+  retiene memoria, y los clientes ya reintentan. El hueco se devuelve cuando la
+  tool termina con la app, aunque el cliente se haya ido antes.
+- **Cambiarlos.** Las dos variables se leen al arrancar; ponerlas en
+  `/srv/lumbre-mcp.env` (Compose las pasa al contenedor) y recrear el
+  contenedor. Un valor que no sea un entero entre 1 y 10 000 cae al defecto y
+  deja una línea en el log; nunca quita el tope.
+- **Memoria, medida en `node:22-alpine`** con las sondas del audit más una de
+  peor caso: reposo de la sonda ~90 MB (el contenedor real en reposo, 28 MiB
+  en local y 45-69 MiB en producción); 500 `tools/call` concurrentes con el
+  upstream a 3 s, 32 × 200 y el resto 429 o conexión cerrada, ~110 MB;
+  64 cuerpos de 2 MB a medio llegar, ~225 MB; 32 `add_attachment` de 1 MiB en
+  vuelo, ~320 MB de pico, que es el peor caso y lo que fija el límite en 512 MB.
+  `maxConnections` es lo que acota los cuerpos a medio llegar: con 256 eran
+  ~520 MB.
+
+### Arranque fallido y parada
+
+Si el relé no puede arrancar, la línea del log dice la causa, de un conjunto
+fijo y sin el texto del error (un `JSON.parse` fallido copiaría un trozo del
+store):
+
+```
+[lumbre-mcp-http] estado OAuth no disponible (causa: store_json_invalido); listener no iniciado
+```
+
+| Causa | Qué es |
+| --- | --- |
+| `clave_ausente` | hay `oauth-store.json` y falta `oauth.key` |
+| `clave_invalida` | la clave no mide 32 bytes o no descifra el store |
+| `store_json_invalido` | el store no es JSON (truncado o editado a mano) |
+| `store_incoherente` | JSON válido que no cumple el contrato |
+| `store_version` | store provisional v1/v2 |
+| `secreto_backchannel` | `LUMBRE_MCP_BACKCHANNEL_SECRET` falta o no mide 32-512 caracteres |
+| `app_base_url` | `LUMBRE_APP_BASE_URL` no es `https://app.lumbre.pro` |
+| `io:<código>` | error del sistema de ficheros (`io:EACCES`, `io:ENOSPC`…) |
+| `desconocido` | ninguna de las anteriores |
+
+Al parar (`docker stop`, deploy), `init: true` pone un init como PID 1 que
+entrega SIGTERM a Node, y el relé deja de aceptar conexiones, espera a las
+peticiones en vuelo y a la cola de escritura del store, y sale. Si en 10 s no ha
+terminado, corta lo que quede y sale con 1; `stop_grace_period: 15s` deja 5 s
+más antes del SIGKILL de Docker. Medido en local con la imagen: `docker stop`
+tarda menos de un segundo y sale con 0 (antes, 10 s y SIGKILL en cada deploy).
+
 ### Qué guarda el volumen de cada conexión y cuándo se borra
 
 Por cada conexión OAuth hay dos cosas en `/state/lumbre-mcp`: la credencial
