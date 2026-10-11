@@ -1322,6 +1322,90 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(replay.status).toBe(400);
 	});
 
+	it('reutilizar un código ya canjeado revoca la familia emitida con él, también tras reiniciar (B3)', async () => {
+		const stateDir = await newStateDir();
+		let revokeCalls = 0;
+		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } });
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		const storeText = await readFile(join(stateDir, 'oauth-store.json'), 'utf8');
+		expect(storeText).not.toContain(code);
+
+		// Un código cualquiera no toca nada.
+		const restarted = new OAuthService({ stateDir, fetch: fetchFn });
+		const restartedBase = await listen(restarted);
+		const replay = (value: string) => fetch(`${restartedBase}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code', code: value, client_id: CLIENT_ID, redirect_uri: OAUTH_CALLBACK,
+				resource: OAUTH_RESOURCE, code_verifier: VERIFIER
+			})
+		});
+		expect((await replay('lm_code_no-existe')).status).toBe(400);
+		expect(await restarted.resolveAccessToken(String(issued.access_token))).toBe(UPSTREAM_TOKEN);
+		expect(revokeCalls).toBe(0);
+
+		// El código de verdad, otra vez: 400 y la familia entera fuera.
+		const reused = await replay(code);
+		expect(reused.status).toBe(400);
+		expect(((await reused.json()) as { error: string }).error).toBe('invalid_grant');
+		expect(await restarted.resolveAccessToken(String(issued.access_token))).toBeUndefined();
+		expect((await refresh(restartedBase, String(issued.refresh_token))).status).toBe(400);
+		expect(revokeCalls).toBe(1);
+		const after = JSON.parse(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')) as {
+			grants: unknown[]; redeemedCodes: unknown[]; revocationOutbox: unknown[];
+		};
+		expect(after.grants).toEqual([]);
+		expect(after.redeemedCodes).toEqual([]);
+		expect(after.revocationOutbox).toEqual([]);
+	});
+
+	it('el registro de un código canjeado caduca con el código: pasado CODE_TTL ya no revoca nada', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 3_000_000;
+		const fetchFn = oauthFetch({ requestBody: pendingRequestBody(currentTime) });
+		const oauth = new OAuthService({ stateDir, fetch: fetchFn, now: () => currentTime });
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		currentTime += 5 * 60_000 + 1;
+		const late = await fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code', code, client_id: CLIENT_ID, redirect_uri: OAUTH_CALLBACK,
+				resource: OAUTH_RESOURCE, code_verifier: VERIFIER
+			})
+		});
+		expect(late.status).toBe(400);
+		expect(await oauth.resolveAccessToken(String(issued.access_token))).toBe(UPSTREAM_TOKEN);
+	});
+
+	it('el access emitido en la última hora de la familia no la sobrevive (I1)', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 4_000_000;
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch({ requestBody: pendingRequestBody(currentTime) }),
+			now: () => currentTime
+		});
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		expect(issued.expires_in).toBe(3600);
+		// Diez minutos antes del fin de la familia (30 días desde el canje).
+		currentTime += 30 * 24 * 60 * 60_000 - 10 * 60_000;
+		const rotated = await refresh(baseUrl, String(issued.refresh_token));
+		expect(rotated.status).toBe(200);
+		const body = (await rotated.json()) as { access_token: string; expires_in: number };
+		expect(body.expires_in).toBe(600);
+		expect(await oauth.resolveAccessToken(body.access_token)).toBe(UPSTREAM_TOKEN);
+		currentTime += 10 * 60_000;
+		expect(await oauth.resolveAccessToken(body.access_token)).toBeUndefined();
+	});
+
 	it('rechaza resource distinto, client_id fuera de claude.ai y redirects de CIMD', async () => {
 		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
 		expect((await beginAuthorization(baseUrl, { resource: `${OAUTH_ISSUER}/otro` })).status).toBe(400);

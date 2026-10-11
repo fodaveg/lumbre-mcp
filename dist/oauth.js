@@ -15,6 +15,22 @@ const REFRESH_PREFIX = 'lm_rt_';
 const CODE_TTL_MS = 5 * 60_000;
 const TRANSACTION_TTL_MS = 10 * 60_000;
 const ACCESS_TTL_MS = 60 * 60_000;
+/**
+ * Caducidad de un access token recién emitido: una hora, pero nunca más allá
+ * de su familia (I1 del audit de seguridad del 10 oct 2026). Antes, el access
+ * emitido en la última hora de la familia la sobrevivía hasta 1 h, porque
+ * `resolveAccessToken` solo mira `accessExpiresAt` y la poda de la familia
+ * espera a la siguiente escritura o al barrido horario. Se recorta al
+ * emitir, que es un solo sitio, en vez de añadir otra condición al camino
+ * caliente de cada `/mcp`.
+ */
+function accessExpiryFor(now, familyExpiresAt) {
+    return Math.min(now + ACCESS_TTL_MS, familyExpiresAt);
+}
+/** `expires_in` de la respuesta, en segundos enteros y nunca 0. */
+function expiresInSeconds(expiresAt, now) {
+    return Math.max(1, Math.ceil((expiresAt - now) / 1000));
+}
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
 const MAX_FORM_BYTES = 16 * 1024;
 /**
@@ -458,7 +474,8 @@ function normalizeStore(value) {
         !Array.isArray(raw.usedRefreshTokens) ||
         !Array.isArray(raw.authorizationRequests) ||
         !Array.isArray(raw.authorizationCodes) ||
-        !Array.isArray(raw.revocationOutbox)) {
+        !Array.isArray(raw.revocationOutbox) ||
+        (raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes))) {
         throw new Error('store OAuth inválido');
     }
     const grants = raw.grants.map((value) => {
@@ -578,6 +595,15 @@ function normalizeStore(value) {
         }
         return item;
     });
+    const redeemedCodes = (raw.redeemedCodes ?? []).map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('código canjeado OAuth inválido');
+        const item = value;
+        if (typeof item.codeHash !== 'string' || typeof item.familyId !== 'string' || !Number.isFinite(item.expiresAt)) {
+            throw new Error('código canjeado OAuth inválido');
+        }
+        return item;
+    });
     const credentialIds = [
         ...grants.map((item) => item.credentialId),
         ...authorizationCodes.map((item) => item.credentialId),
@@ -586,9 +612,11 @@ function normalizeStore(value) {
     const opaqueHashes = [
         ...grants.flatMap((item) => [item.accessHash, item.refreshHash]),
         ...usedRefreshTokens.map((item) => item.hash),
-        ...authorizationCodes.map((item) => item.codeHash)
+        ...authorizationCodes.map((item) => item.codeHash),
+        ...redeemedCodes.map((item) => item.codeHash)
     ];
     if (authorizationCodes.length > MAX_PENDING_ITEMS ||
+        redeemedCodes.length > MAX_PENDING_ITEMS ||
         new Set(authorizationCodes.map((item) => item.codeHash)).size !== authorizationCodes.length ||
         new Set(credentialIds).size !== credentialIds.length ||
         new Set(opaqueHashes).size !== opaqueHashes.length) {
@@ -600,7 +628,8 @@ function normalizeStore(value) {
         usedRefreshTokens,
         authorizationRequests,
         authorizationCodes,
-        revocationOutbox
+        revocationOutbox,
+        redeemedCodes
     };
 }
 /** Suma uno a la ventana de `key`, creándola si no existe; al crearla expulsa
@@ -1273,9 +1302,17 @@ export class OAuthService {
         const verifier = one(form, 'code_verifier');
         const resource = one(form, 'resource');
         const codeHash = digest(codeValue);
-        const code = (await this.loadStore()).authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash));
-        if (!code)
+        const snapshot = await this.loadStore();
+        const code = snapshot.authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash));
+        if (!code) {
+            // ¿Es un código ya canjeado? Entonces se revoca lo emitido con él
+            // (ver `RedeemedCode`). Se mira antes en la copia leída para que un
+            // código cualquiera no haga cola en `mutateStore`.
+            if (snapshot.redeemedCodes.some((item) => matchesHash(item.codeHash, codeHash) && item.expiresAt > this.now())) {
+                await this.revokeRedeemedCodeFamily(codeHash);
+            }
             throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
+        }
         if (code.expiresAt <= this.now()) {
             await this.retireAuthorizationCode(codeHash);
             throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
@@ -1368,6 +1405,31 @@ export class OAuthService {
         }
         return state === 'active';
     }
+    /**
+     * Revoca la familia emitida con un código ya canjeado (B3). Dentro de un
+     * mutador; devuelve el `credentialId` a vaciar de la outbox, o `undefined`
+     * si no hay nada que revocar (el registro caducó, o la familia ya no
+     * existe: entonces no se toca nada y el registro caduca solo).
+     */
+    revokeRedeemedCodeInStore(store, codeHash, now) {
+        const redeemed = store.redeemedCodes.find((item) => matchesHash(item.codeHash, codeHash) && item.expiresAt > now);
+        if (!redeemed)
+            return undefined;
+        const grant = store.grants.find((item) => item.familyId === redeemed.familyId);
+        if (!grant)
+            return undefined;
+        this.enqueueFamilyRevocation(store, grant);
+        return grant.credentialId;
+    }
+    async revokeRedeemedCodeFamily(codeHash) {
+        let credentialId;
+        await this.mutateStore((store) => {
+            credentialId = this.revokeRedeemedCodeInStore(store, codeHash, this.now());
+            return credentialId !== undefined;
+        });
+        if (credentialId)
+            await this.flushRevocationOutbox(credentialId);
+    }
     async issueGrant(code, codeHash, res) {
         const accessToken = opaque(ACCESS_PREFIX);
         const refreshToken = opaque(REFRESH_PREFIX);
@@ -1375,11 +1437,23 @@ export class OAuthService {
         const now = this.now();
         const familyExpiresAt = now + REFRESH_TTL_MS;
         let issued = false;
+        let replayedCredentialId;
         await this.mutateStore((store) => {
             const storedCode = store.authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash) && item.credentialId === code.credentialId && item.expiresAt > now);
-            if (!storedCode)
-                return false;
+            if (!storedCode) {
+                // Lo canjeó otro entre la lectura y aquí (dos canjes en
+                // carrera): el segundo también es reutilización.
+                replayedCredentialId = this.revokeRedeemedCodeInStore(store, codeHash, now);
+                return replayedCredentialId !== undefined;
+            }
             store.authorizationCodes = store.authorizationCodes.filter((item) => !matchesHash(item.codeHash, codeHash));
+            store.redeemedCodes.push({ codeHash, familyId, expiresAt: storedCode.expiresAt });
+            // Los códigos ya nacen acotados (`MAX_PENDING_ITEMS` y el
+            // presupuesto de `/authorize`), así que esto no debería recortar
+            // nunca; está para que la lista no pueda crecer sin techo.
+            if (store.redeemedCodes.length > MAX_PENDING_ITEMS) {
+                store.redeemedCodes = store.redeemedCodes.slice(-MAX_PENDING_ITEMS);
+            }
             store.grants.push({
                 provider: 'lumbre-web',
                 credentialId: code.credentialId,
@@ -1389,7 +1463,7 @@ export class OAuthService {
                 resource: code.resource,
                 scope: code.scope,
                 accessHash: digest(accessToken),
-                accessExpiresAt: now + ACCESS_TTL_MS,
+                accessExpiresAt: accessExpiryFor(now, familyExpiresAt),
                 refreshHash: digest(refreshToken),
                 refreshExpiresAt: familyExpiresAt,
                 upstream: code.upstream
@@ -1397,9 +1471,18 @@ export class OAuthService {
             issued = true;
             return true;
         });
-        if (!issued)
+        if (!issued) {
+            if (replayedCredentialId)
+                await this.flushRevocationOutbox(replayedCredentialId);
             throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
-        json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: refreshToken, scope: code.scope });
+        }
+        json(res, 200, {
+            access_token: accessToken,
+            token_type: 'Bearer',
+            expires_in: expiresInSeconds(accessExpiryFor(now, familyExpiresAt), now),
+            refresh_token: refreshToken,
+            scope: code.scope
+        });
     }
     async exchangeRefresh(form, res) {
         const refreshToken = one(form, 'refresh_token');
@@ -1433,7 +1516,10 @@ export class OAuthService {
             await this.revokeFamily(grantSnapshot.familyId, grantSnapshot.credentialId);
             throw new OAuthError('invalid_grant', 'La credencial de Lumbre ya no está activa.');
         }
-        const result = { outcome: 'invalid' };
+        const result = {
+            outcome: 'invalid',
+            accessExpiresAt: now
+        };
         await this.mutateStore((store) => {
             const used = store.usedRefreshTokens.find((item) => matchesHash(item.hash, oldHash) && item.expiresAt > now);
             if (used) {
@@ -1470,7 +1556,8 @@ export class OAuthService {
             }
             result.outcome = 'rotated';
             grant.accessHash = digest(accessToken);
-            grant.accessExpiresAt = now + ACCESS_TTL_MS;
+            grant.accessExpiresAt = accessExpiryFor(now, grant.familyExpiresAt);
+            result.accessExpiresAt = grant.accessExpiresAt;
             grant.refreshHash = digest(nextRefresh);
             grant.refreshExpiresAt = nextRefreshExpiresAt;
             return true;
@@ -1480,7 +1567,13 @@ export class OAuthService {
                 await this.flushRevocationOutbox(grantSnapshot.credentialId);
             throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
         }
-        json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: nextRefresh, scope: OAUTH_SCOPE });
+        json(res, 200, {
+            access_token: accessToken,
+            token_type: 'Bearer',
+            expires_in: expiresInSeconds(result.accessExpiresAt, now),
+            refresh_token: nextRefresh,
+            scope: OAUTH_SCOPE
+        });
     }
     /**
      * Guarda la tombstone del refresh que se acaba de rotar. Devuelve `false`
@@ -1512,6 +1605,7 @@ export class OAuthService {
     removeFamily(store, familyId) {
         store.grants = store.grants.filter((grant) => grant.familyId !== familyId);
         store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => item.familyId !== familyId);
+        store.redeemedCodes = store.redeemedCodes.filter((item) => item.familyId !== familyId);
     }
     enqueueFamilyRevocation(store, grant) {
         if (!store.revocationOutbox.some((item) => item.credentialId === grant.credentialId)) {
@@ -2127,7 +2221,8 @@ export class OAuthService {
                     usedRefreshTokens: [],
                     authorizationRequests: [],
                     authorizationCodes: [],
-                    revocationOutbox: []
+                    revocationOutbox: [],
+                    redeemedCodes: []
                 };
             }
             throw error;
@@ -2207,7 +2302,12 @@ export class OAuthService {
                 store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => item.expiresAt > now);
                 const requestsBefore = store.authorizationRequests.length;
                 store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > now);
-                housekeeping ||= usedBefore !== store.usedRefreshTokens.length || requestsBefore !== store.authorizationRequests.length;
+                const redeemedBefore = store.redeemedCodes.length;
+                store.redeemedCodes = store.redeemedCodes.filter((item) => item.expiresAt > now);
+                housekeeping ||=
+                    usedBefore !== store.usedRefreshTokens.length ||
+                        requestsBefore !== store.authorizationRequests.length ||
+                        redeemedBefore !== store.redeemedCodes.length;
                 changed = mutator(store) || housekeeping;
                 // La poda de la outbox va DESPUÉS del mutador: así lo que el
                 // mutador acabe de encolar entra ya en la cuenta del tope y no
