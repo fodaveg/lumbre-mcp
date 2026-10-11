@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { chmod, link, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BackchannelError, LUMBRE_OAUTH_CALLBACK, LumbreBackchannel, isValidRequestId } from './lumbre-oauth-backchannel.js';
@@ -59,6 +59,16 @@ const MAX_REFRESH_TOMBSTONES = 10_000;
 const MAX_REFRESH_TOMBSTONES_PER_FAMILY = 64;
 const MAX_OUTBOX_RETRIES_PER_READINESS = 1;
 const READINESS_CACHE_MS = 5_000;
+/**
+ * Temporales que dejan `mutateStore` (`oauth-store.json.<pid>.<hex>.tmp`) y
+ * la creación de la clave (`oauth.key.<pid>.<hex>.tmp`) si el proceso muere
+ * entre el `open` y el `rename`/`link`: el `unlink` de su `finally` ya no
+ * llega a correr. El del store es una copia COMPLETA del almacén (0600, con
+ * las credenciales cifradas), así que no se deja ahí (I3 del audit de
+ * seguridad y H10 del de recuperación, 10 oct 2026). Exacto a propósito: no
+ * casa con los `.tmp` de la huella de notas (`notes.ts`), que no son de aquí.
+ */
+const ORPHAN_TEMP_PATTERN = /^(?:oauth-store\.json|oauth\.key)\.\d+\.[0-9a-f]{12}\.tmp$/;
 /**
  * Tope de la outbox de revocación y caducidad de cada elemento.
  *
@@ -721,6 +731,9 @@ export class OAuthService {
     storeGeneration = 0;
     /** Hay un `sweepInactiveCredentials` en curso; ver ahí por qué solo uno. */
     sweepInFlight = false;
+    /** La limpieza de temporales huérfanos ya corrió en este proceso; ver
+     *  `removeOrphanTemps`. */
+    orphanTempsRemoved = false;
     constructor(options = {}) {
         this.stateDir = options.stateDir ?? defaultStateDir();
         this.fetchFn = options.fetch ?? globalThis.fetch;
@@ -1740,6 +1753,7 @@ export class OAuthService {
                 throw new Error('store OAuth presente sin su clave');
         }
         const key = await this.key();
+        await this.removeOrphanTemps();
         // Readiness NO se contesta desde la caché: la gracia de `/readyz` es
         // afirmar que el fichero de estado se puede leer y descifrar AHORA.
         //
@@ -1815,6 +1829,52 @@ export class OAuthService {
             if (this.readinessInFlight === pending)
                 this.readinessInFlight = undefined;
         }
+    }
+    /**
+     * Borra los temporales huérfanos de `ORPHAN_TEMP_PATTERN`. UNA vez por
+     * proceso, en el primer `ensureReady`, que en producción es el del
+     * arranque (`http.ts` no abre el listener hasta que pasa).
+     *
+     * Corre DENTRO de la cola de escritura: así ninguna escritura de este
+     * proceso tiene su temporal a medias mientras se borra, y un temporal que
+     * casa el patrón solo puede ser de un proceso anterior. Eso descansa en la
+     * misma premisa que la caché del store: un solo proceso escribe aquí (ver
+     * `cachedStore`).
+     *
+     * No lanza: un temporal que no se pudo borrar no impide arrancar. Deja una
+     * línea con el recuento, sin nombres (el nombre lleva un pid y nada más,
+     * pero no hace falta).
+     */
+    async removeOrphanTemps() {
+        if (this.orphanTempsRemoved)
+            return;
+        this.orphanTempsRemoved = true;
+        const job = this.writeQueue.then(async () => {
+            let names;
+            try {
+                names = await readdir(this.stateDir);
+            }
+            catch {
+                return;
+            }
+            let removed = 0;
+            for (const name of names) {
+                if (!ORPHAN_TEMP_PATTERN.test(name))
+                    continue;
+                try {
+                    await unlink(join(this.stateDir, name));
+                    removed += 1;
+                }
+                catch {
+                    // Lo intentará el siguiente arranque.
+                }
+            }
+            if (removed > 0) {
+                console.error(`[lumbre-mcp-oauth] ${removed} temporal(es) huérfano(s) de una escritura interrumpida borrado(s)`);
+            }
+        });
+        this.writeQueue = job;
+        await job;
     }
     /**
      * Barrido periódico: lo que este relé guarda de una credencial que Lumbre
@@ -2117,13 +2177,23 @@ export class OAuthService {
         }
         if (await pathExists(this.storePath()))
             throw new Error('store OAuth presente sin su clave');
+        // La clave se escribe ENTERA en un temporal con `fsync` y solo después
+        // aparece con su nombre (H9 del audit de recuperación del 10 oct 2026).
+        // Antes se abría `oauth.key` con `wx` y se escribía dentro: un corte
+        // entre el `open` y el `sync` dejaba una clave vacía y el siguiente
+        // arranque fallaba con «clave inválida» hasta borrarla a mano.
+        //
+        // `link` y no `rename`: los dos publican el fichero de forma atómica,
+        // pero `rename` PISA un destino que ya exista, y eso perdería lo que
+        // daba el `wx`: si dos arranques generan clave a la vez, gana uno y el
+        // otro lee la suya (`EEXIST`), en vez de quedarse cada uno con una
+        // distinta. El temporal casa con `ORPHAN_TEMP_PATTERN`, así que si el
+        // corte llega antes de publicarlo lo borra el siguiente arranque.
         const key = randomBytes(32);
-        const handle = await open(keyPath, 'wx', 0o600).catch(async (error) => {
-            if (error.code !== 'EEXIST')
-                throw error;
-            return undefined;
-        });
-        if (handle) {
+        const temp = `${keyPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+        let created = false;
+        try {
+            const handle = await open(temp, 'wx', 0o600);
             try {
                 await handle.writeFile(key.toString('base64url'), 'utf8');
                 await handle.sync();
@@ -2131,6 +2201,19 @@ export class OAuthService {
             finally {
                 await handle.close();
             }
+            try {
+                await link(temp, keyPath);
+                created = true;
+            }
+            catch (error) {
+                if (error.code !== 'EEXIST')
+                    throw error;
+            }
+        }
+        finally {
+            await unlink(temp).catch(() => undefined);
+        }
+        if (created) {
             await syncDirectory(this.stateDir);
             this.encryptionKey = key;
         }

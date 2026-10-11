@@ -977,6 +977,45 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(metadataCalls).toBe(130);
 	});
 
+	it('al arrancar borra los temporales huérfanos del store y de la clave, y nada más (I3/H10)', async () => {
+		const stateDir = await newStateDir();
+		await new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady();
+		const orphans = ['oauth-store.json.4242.0123456789ab.tmp', 'oauth.key.77.abcdefabcdef.tmp'];
+		const foreign = ['.notes-seen-0123456789abcdef.json.1.tmp', 'oauth-store.json.bak', 'oauth-store.json.tmp'];
+		for (const name of [...orphans, ...foreign]) await writeFile(join(stateDir, name), '{}', { mode: 0o600 });
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const restarted = new OAuthService({ stateDir, fetch: oauthFetch() });
+			await restarted.ensureReady();
+			const names = await readdir(stateDir);
+			for (const name of orphans) expect(names).not.toContain(name);
+			for (const name of [...foreign, 'oauth.key']) expect(names).toContain(name);
+			expect(errors.mock.calls.map((call) => call.join(' ')).join('\n')).toMatch(/2 temporal\(es\) huérfano/);
+			// Solo una vez por proceso: un temporal que aparezca después (el de
+			// una escritura en curso, en la vida real) no se toca.
+			await writeFile(join(stateDir, orphans[0]!), '{}', { mode: 0o600 });
+			await restarted.ensureReady();
+			expect(await readdir(stateDir)).toContain(orphans[0]);
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
+	it('la clave se publica completa y sin temporal; dos arranques a la vez acaban con la MISMA (H9)', async () => {
+		const stateDir = await newStateDir();
+		const first = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const second = new OAuthService({ stateDir, fetch: oauthFetch() });
+		await Promise.all([first.ensureReady(), second.ensureReady()]);
+		const names = await readdir(stateDir);
+		expect(names.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+		const keyPath = join(stateDir, 'oauth.key');
+		expect(await readFile(keyPath, 'utf8')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
+		// Lo que cifra uno lo descifra el otro: misma clave en memoria.
+		await issueTokens(await listen(first));
+		await expect(second.ensureReady()).resolves.toBeUndefined();
+	});
+
 	it('store sin clave o con clave incoherente falla cerrado en readiness', async () => {
 		const stateDir = await newStateDir();
 		const first = new OAuthService({ stateDir, fetch: oauthFetch() });
