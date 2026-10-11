@@ -294,12 +294,14 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
     // Lo que presentó el cliente. Si Lumbre lo rechazó hace unos segundos no
     // se vuelve a reenviar, y con el cupo de fallos de la IP agotado tampoco
     // se reenvía lo que aquí no se puede comprobar (Bearer directo o token en
-    // el path): las dos cosas caen en la rama de abajo (401 o 429). Ver
-    // `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE` en `oauth.ts`.
+    // el path) salvo que Lumbre lo aceptara hace poco: los dos cortes caen en
+    // la rama de abajo (401 o 429). Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`
+    // en `oauth.ts`.
     const presented = presentedBearer ?? pathToken;
     if (token &&
         presented &&
-        (oauth.isRejectedCredential(presented) || (authMode === 'token' && oauth.mcpAttemptsExhausted(req)))) {
+        (oauth.isRejectedCredential(presented) ||
+            (authMode === 'token' && !oauth.isAcceptedCredential(presented) && oauth.mcpAttemptsExhausted(req)))) {
         token = undefined;
     }
     if (!token) {
@@ -308,8 +310,10 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
         // antes, arriba del todo, y eso cortaba TODO `POST /mcp` de esa IP
         // aunque trajera un bearer bueno: claude.ai reintentando con un access
         // token caducado (duran una hora) desde una IP de salida compartida
-        // agotaba el cupo, y el bearer ya refrescado se comía un 429. Una
-        // petición que resuelve no toca el limitador ni para leerlo.
+        // agotaba el cupo, y el bearer ya refrescado se comía un 429. Un
+        // `lm_at_` que resuelve no toca el limitador ni para leerlo; una
+        // credencial directa solo lo lee (arriba) si Lumbre no la aceptó hace
+        // poco.
         //
         // Lo que se paga por ese orden: el presupuesto ya no evita el trabajo
         // de resolver, solo acota el ritmo de 401 que se pueden provocar. Sale
@@ -350,17 +354,26 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth)
         logRequest(`POST ${routeLabel}`, 400);
         return;
     }
-    // Un 401 de Lumbre a esta credencial cuenta en el limitador de la IP, una
-    // vez por petición aunque fallen varias tools del mismo cuerpo.
-    const credential = presented ?? token;
+    // Un 401 de Lumbre a esta credencial cuenta en el limitador de la IP; un
+    // 2xx a una credencial directa la deja recordada como aceptada (ver
+    // arriba). Una vez por petición cada cosa. `presented` existe siempre que
+    // haya `token`: este sale de él o de resolverlo.
+    const credential = presented;
     let rejectionRecorded = false;
+    let acceptanceRecorded = authMode !== 'token';
     const onUnauthorized = () => {
         if (rejectionRecorded)
             return;
         rejectionRecorded = true;
         oauth.recordUpstreamRejection(req, credential);
     };
-    const config = { baseUrl, token, authMode, onUnauthorized };
+    const onAuthorized = () => {
+        if (acceptanceRecorded)
+            return;
+        acceptanceRecorded = true;
+        oauth.recordUpstreamAcceptance(credential);
+    };
+    const config = { baseUrl, token, authMode, onUnauthorized, onAuthorized };
     // CONTRATO M1: la única LLAMADA a la factory real de `index.ts`.
     // `localFilesystem: false` — este proceso corre en el VPS compartido, no
     // en la máquina de quien pregunta: `add_attachment({ file_path })` NUNCA

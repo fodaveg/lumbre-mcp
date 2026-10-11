@@ -115,6 +115,7 @@ async function requestOnce(config, path, init, signal) {
         const detail = extractMessage(body) ?? (typeof body === 'string' ? body : JSON.stringify(body));
         throw new LumbreApiError(`Lumbre respondió ${res.status}: ${detail}`, res.status);
     }
+    config.onAuthorized?.();
     return body;
 }
 /** `notices` de una respuesta de la app: solo las cadenas, `[]` si no hay o
@@ -702,6 +703,7 @@ async function getAttachmentOnce(config, id, signal) {
         }
         throw new LumbreApiError(`Lumbre respondió ${res.status} al pedir el adjunto ${id}.`, res.status);
     }
+    config.onAuthorized?.();
     const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
     const lengthHeader = res.headers.get('content-length');
     const declaredNumber = lengthHeader === null ? Number.NaN : Number(lengthHeader);
@@ -856,6 +858,7 @@ async function uploadAttachmentOnce(config, input, signal) {
         const detail = extractMessage(body) ?? (typeof body === 'string' ? body : JSON.stringify(body));
         throw new LumbreApiError(`Lumbre respondió ${res.status} al subir el adjunto: ${detail}`, res.status);
     }
+    config.onAuthorized?.();
     if (!body || typeof body !== 'object' || typeof body.id !== 'string') {
         throw new LumbreApiError('Lumbre no confirmó la subida del adjunto (respuesta inesperada).');
     }

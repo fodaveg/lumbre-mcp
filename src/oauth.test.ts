@@ -1016,6 +1016,25 @@ describe('OAuth 2.1 para claude.ai', () => {
 		await expect(second.ensureReady()).resolves.toBeUndefined();
 	});
 
+	it.each(['ENOTSUP', 'EPERM'])('sin enlaces duros (%s) la clave se crea con wx, completa y sin temporal (H9)', async (code) => {
+		const stateDir = await newStateDir();
+		let linkCalls = 0;
+		const linkFile = async (): Promise<void> => {
+			linkCalls += 1;
+			throw Object.assign(new Error('sin enlaces duros'), { code });
+		};
+		const first = new OAuthService({ stateDir, fetch: oauthFetch(), linkFile });
+		await first.ensureReady();
+		expect(linkCalls).toBe(1);
+		const keyPath = join(stateDir, 'oauth.key');
+		expect(await readFile(keyPath, 'utf8')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
+		expect((await readdir(stateDir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+		// Es la clave que usa el proceso: lo que cifra lo lee otro desde disco.
+		await issueTokens(await listen(first));
+		await expect(new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady()).resolves.toBeUndefined();
+	});
+
 	it('store sin clave o con clave incoherente falla cerrado en readiness', async () => {
 		const stateDir = await newStateDir();
 		const first = new OAuthService({ stateDir, fetch: oauthFetch() });
@@ -1399,6 +1418,28 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(after.grants).toEqual([]);
 		expect(after.redeemedCodes).toEqual([]);
 		expect(after.revocationOutbox).toEqual([]);
+	});
+
+	it('dos canjes concurrentes del mismo código: uno recibe tokens, el otro 400, y la familia queda revocada (B3)', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const redeem = () => fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code', code, client_id: CLIENT_ID, redirect_uri: OAUTH_CALLBACK,
+				resource: OAUTH_RESOURCE, code_verifier: VERIFIER
+			})
+		});
+		const responses = await Promise.all([redeem(), redeem()]);
+		expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+		const issued = (await responses.find((response) => response.status === 200)!.json()) as {
+			access_token: string; refresh_token: string;
+		};
+		expect(await oauth.resolveAccessToken(issued.access_token)).toBeUndefined();
+		expect((await refresh(baseUrl, issued.refresh_token)).status).toBe(400);
 	});
 
 	it('el registro de un código canjeado caduca con el código: pasado CODE_TTL ya no revoca nada', async () => {
@@ -2666,18 +2707,52 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		for (let index = 0; index < 5; index += 1) await issueTokens(baseUrl);
 		const tokens = [...farm.credentials.keys()];
 		expect(tokens).toHaveLength(5);
-		const storeText = await readFile(join(stateDir, 'oauth-store.json'), 'utf8');
+		// Una revocación pendiente en la outbox, con la credencial de tokens[0]
+		// (mismo sobre cifrado, otro credentialId): el freno no debe parar su
+		// `flush`, solo su retirada por `inactive`.
+		const storePath = join(stateDir, 'oauth-store.json');
+		const seeded = JSON.parse(await readFile(storePath, 'utf8')) as {
+			grants: Array<{ credentialId: string; clientId: string; resource: string; scope: string; upstream: unknown }>;
+			revocationOutbox: unknown[];
+		};
+		const source = seeded.grants.find((grant) => grant.credentialId === farm.credentials.get(tokens[0]!))!;
+		seeded.revocationOutbox.push({
+			provider: 'lumbre-web',
+			credentialId: '33333333-3333-4333-8333-000000000001',
+			clientId: source.clientId,
+			resource: source.resource,
+			scope: source.scope,
+			upstream: source.upstream,
+			queuedAt: Date.now()
+		});
+		await writeFile(storePath, JSON.stringify(seeded), { mode: 0o600 });
+		const storeText = await readFile(storePath, 'utf8');
 
 		// 3 de 5 inactivas: parece un incidente de Lumbre, no bajas reales.
 		for (const token of tokens.slice(0, 3)) farm.inactive.add(token);
 		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			const held = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
-			expect(held).toMatchObject({ aborted: true, purgedGrants: 0, heldBack: 3 });
-			expect(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')).toBe(storeText);
+			let revokeCalls = 0;
+			const held = await new OAuthService({
+				stateDir,
+				fetch: farm.fetch({ revokeStatus: 503, onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
+			}).sweepInactiveCredentials();
+			expect(held).toMatchObject({ aborted: true, purgedGrants: 0, retiredOutboxItems: 0, heldBack: 3 });
+			// El `flush` se intentó; Lumbre no lo aceptó y, aunque declara
+			// inactiva esa credencial, con el freno puesto la pendiente se queda.
+			expect(revokeCalls).toBe(1);
+			expect(await readFile(storePath, 'utf8')).toBe(storeText);
 			const lines = errors.mock.calls.map((call) => call.join(' ')).join('\n');
 			expect(lines).toMatch(/freno de purga masiva, 3 de 5 autorizaciones/);
 			for (const secret of [...tokens, ...farm.credentials.values()]) expect(lines).not.toContain(secret);
+
+			// Con Lumbre aceptando el revoke, el freno sigue puesto pero la
+			// outbox se vacía igual.
+			const flushed = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+			expect(flushed).toMatchObject({ aborted: true, purgedGrants: 0, heldBack: 3 });
+			const afterFlush = await readStoredState(stateDir);
+			expect(afterFlush.revocationOutbox).toEqual([]);
+			expect(afterFlush.grants).toHaveLength(5);
 		} finally {
 			errors.mockRestore();
 		}

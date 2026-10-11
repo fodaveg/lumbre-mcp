@@ -218,7 +218,10 @@ const MAX_AUTHORIZE_CLIENT_WINDOWS = 512;
  * su cuenta (Bearer directo o token en el path) ya no se reenvía: recibe el
  * 429. Antes cualquier `Bearer x` llegaba a Lumbre sin límite (3000 de 3000
  * medidos). Un access `lm_at_` que resuelve sigue pasando siempre: ese sí se
- * comprueba aquí, y es el caso de claude.ai descrito arriba.
+ * comprueba aquí, y es el caso de claude.ai descrito arriba. Y tampoco se
+ * corta una credencial directa que Lumbre aceptó hace poco
+ * (`ACCEPTED_CREDENTIAL_TTL_MS`): una IP compartida no castiga al que ya
+ * estaba trabajando.
  */
 const DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE = 30;
 
@@ -238,6 +241,23 @@ const REJECTED_CREDENTIAL_TTL_MS = 15_000;
  *  antiguas. Con cientos de distintas por segundo el cupo de fallos por IP
  *  ya ha cortado mucho antes. */
 const MAX_REJECTED_CREDENTIALS = 1_024;
+
+/**
+ * Cuánto recuerda el relé que Lumbre ACEPTÓ una credencial de `/mcp` que él
+ * no puede comprobar por su cuenta (Bearer directo o token en el path). Con
+ * el cupo de fallos de una IP agotado, esas credenciales dejan de reenviarse
+ * (ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`), y sin esto una IP de salida
+ * compartida castigaba a todos: bastaban los 401 de otro (claude.ai
+ * reintentando un `lm_at_` caducado) para que el token válido de un tercero
+ * recibiera 429. Con esta memoria, el corte solo alcanza a credenciales que
+ * Lumbre no ha aceptado en los últimos 10 minutos: un cliente en uso las
+ * renueva con cada llamada que llega a Lumbre, y un atacante que rota
+ * bearers basura nunca entra. Un 401 posterior la saca en el acto.
+ */
+const ACCEPTED_CREDENTIAL_TTL_MS = 10 * 60_000;
+/** Techo de credenciales aceptadas recordadas a la vez; se expulsan las más
+ *  antiguas. El uso real son pocas cuentas. */
+const MAX_ACCEPTED_CREDENTIALS = 1_024;
 
 interface AuthorizationRequest {
 	clientId: string;
@@ -372,6 +392,10 @@ export interface OAuthServiceOptions {
 	 * carrera que documenta `loadStore`). En producción no se pasa nunca.
 	 */
 	storeRead?: () => void | Promise<void>;
+	/** `link` de `node:fs/promises` con el que se publica `oauth.key` (ver
+	 *  `loadOrCreateKey`). Costura para que un test simule un sistema de
+	 *  ficheros sin enlaces duros; en producción no se pasa nunca. */
+	linkFile?: (existingPath: string, newPath: string) => Promise<void>;
 	backchannel?: LumbreBackchannelApi;
 	backchannelSecret?: string;
 	lumbreAppBaseUrl?: string;
@@ -967,6 +991,45 @@ function consumeBoundedWindow(
 	windows.set(key, { startedAt: now, count: 1 });
 }
 
+/** Crea `path` con `wx` y 0600, escribe `content` y hace `fsync`. Devuelve
+ *  `false` si ya existía (`EEXIST`), sin tocarlo. */
+async function writeExclusive(path: string, content: string): Promise<boolean> {
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(path, 'wx', 0o600);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+		throw error;
+	}
+	try {
+		await handle.writeFile(content, 'utf8');
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return true;
+}
+
+/** Anota `hash` hasta `now + ttl` en un mapa hash → caducidad: retira las
+ *  caducadas, y al llegar a `max` expulsa las más antiguas. */
+function rememberCredential(memory: Map<string, number>, hash: string, now: number, ttl: number, max: number): void {
+	for (const [key, expiresAt] of memory) {
+		if (expiresAt <= now) memory.delete(key);
+	}
+	memory.delete(hash);
+	while (memory.size >= max) memory.delete(memory.keys().next().value!);
+	memory.set(hash, now + ttl);
+}
+
+/** ¿Sigue vigente `hash` en un mapa de `rememberCredential`? */
+function isRemembered(memory: Map<string, number>, hash: string, now: number): boolean {
+	const expiresAt = memory.get(hash);
+	if (expiresAt === undefined) return false;
+	if (expiresAt > now) return true;
+	memory.delete(hash);
+	return false;
+}
+
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await stat(path);
@@ -985,6 +1048,7 @@ export class OAuthService {
 	private readonly publicLimits: Record<PublicEndpoint, PublicLimit>;
 	private readonly persistenceStep?: OAuthServiceOptions['persistenceStep'];
 	private readonly storeRead?: OAuthServiceOptions['storeRead'];
+	private readonly linkFile: (existingPath: string, newPath: string) => Promise<void>;
 	private readonly backchannel: LumbreBackchannelApi;
 	private encryptionKey?: Buffer;
 	private keyPromise?: Promise<Buffer>;
@@ -992,6 +1056,9 @@ export class OAuthService {
 	/** SHA-256 de credencial rechazada por Lumbre → hasta cuándo se recuerda;
 	 *  ver `recordUpstreamRejection`. */
 	private readonly rejectedCredentials = new Map<string, number>();
+	/** SHA-256 de credencial aceptada por Lumbre → hasta cuándo se recuerda;
+	 *  ver `recordUpstreamAcceptance`. */
+	private readonly acceptedCredentials = new Map<string, number>();
 	/** Ventanas del presupuesto de `/authorize`, fuera de `rateWindows` para
 	 *  que la expulsión por tamaño de ese mapa no pueda reiniciarlas; ver
 	 *  `enterAuthorizeBudget`. */
@@ -1062,6 +1129,7 @@ export class OAuthService {
 		this.now = options.now ?? Date.now;
 		this.persistenceStep = options.persistenceStep;
 		this.storeRead = options.storeRead;
+		this.linkFile = options.linkFile ?? link;
 		this.backchannel = options.backchannel ?? new LumbreBackchannel({
 			baseUrl: options.lumbreAppBaseUrl ?? process.env.LUMBRE_APP_BASE_URL,
 			secret: options.backchannelSecret ?? process.env.LUMBRE_MCP_BACKCHANNEL_SECRET,
@@ -1238,10 +1306,13 @@ export class OAuthService {
 
 	/**
 	 * ¿Esta IP agotó su presupuesto de intentos FALLIDOS contra `/mcp`? Lo
-	 * consulta `handleMcpRequest` (`http.ts`) SOLO en la rama en la que la
-	 * petición se quedó sin credencial utilizable, y después de intentar
-	 * resolverla: una petición que autentica no pasa por aquí ni para leer el
-	 * contador. Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`.
+	 * consulta `handleMcpRequest` (`http.ts`) después de intentar resolver la
+	 * credencial, en dos sitios: en la rama sin credencial utilizable (429 en
+	 * vez de 401), y antes de reenviar una credencial que el relé no puede
+	 * comprobar (Bearer directo o token en el path) y que Lumbre no aceptó en
+	 * los últimos `ACCEPTED_CREDENTIAL_TTL_MS`. Un access `lm_at_` que
+	 * resuelve, o una credencial directa aceptada hace poco, no lo consulta.
+	 * Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`.
 	 */
 	mcpAttemptsExhausted(req: IncomingMessage): boolean {
 		const now = this.now();
@@ -1265,28 +1336,34 @@ export class OAuthService {
 	 */
 	recordUpstreamRejection(req: IncomingMessage, credential: string): void {
 		this.recordFailedMcpAttempt(req);
-		const now = this.now();
-		for (const [hash, expiresAt] of this.rejectedCredentials) {
-			if (expiresAt <= now) this.rejectedCredentials.delete(hash);
-		}
 		const hash = digest(credential);
-		this.rejectedCredentials.delete(hash);
-		while (this.rejectedCredentials.size >= MAX_REJECTED_CREDENTIALS) {
-			this.rejectedCredentials.delete(this.rejectedCredentials.keys().next().value!);
-		}
-		this.rejectedCredentials.set(hash, now + REJECTED_CREDENTIAL_TTL_MS);
+		this.acceptedCredentials.delete(hash);
+		rememberCredential(this.rejectedCredentials, hash, this.now(), REJECTED_CREDENTIAL_TTL_MS, MAX_REJECTED_CREDENTIALS);
 	}
 
 	/** ¿Rechazó Lumbre esta credencial hace menos de
 	 *  `REJECTED_CREDENTIAL_TTL_MS`? Se busca por su SHA-256, que quien llama
 	 *  no puede elegir bit a bit, así que el `Map` no abre canal temporal. */
 	isRejectedCredential(credential: string): boolean {
+		return isRemembered(this.rejectedCredentials, digest(credential), this.now());
+	}
+
+	/**
+	 * Lumbre respondió 2xx a la credencial que presentó esta petición: se
+	 * recuerda su hash durante `ACCEPTED_CREDENTIAL_TTL_MS` para que el cupo
+	 * de fallos de la IP no la corte (ver `isAcceptedCredential`). Mismo
+	 * `credential` que en `recordUpstreamRejection`.
+	 */
+	recordUpstreamAcceptance(credential: string): void {
 		const hash = digest(credential);
-		const expiresAt = this.rejectedCredentials.get(hash);
-		if (expiresAt === undefined) return false;
-		if (expiresAt > this.now()) return true;
 		this.rejectedCredentials.delete(hash);
-		return false;
+		rememberCredential(this.acceptedCredentials, hash, this.now(), ACCEPTED_CREDENTIAL_TTL_MS, MAX_ACCEPTED_CREDENTIALS);
+	}
+
+	/** ¿Aceptó Lumbre esta credencial hace menos de
+	 *  `ACCEPTED_CREDENTIAL_TTL_MS`? Por su SHA-256, como la de rechazadas. */
+	isAcceptedCredential(credential: string): boolean {
+		return isRemembered(this.acceptedCredentials, digest(credential), this.now());
 	}
 
 	/**
@@ -1794,6 +1871,13 @@ export class OAuthService {
 	 * mutador; devuelve el `credentialId` a vaciar de la outbox, o `undefined`
 	 * si no hay nada que revocar (el registro caducó, o la familia ya no
 	 * existe: entonces no se toca nada y el registro caduca solo).
+	 *
+	 * POR DISEÑO, también con un cliente legítimo: si su primera respuesta de
+	 * `/token` se pierde (timeout, red) y REINTENTA el canje con el mismo
+	 * código, ese reintento revoca la familia que el primero emitió y la
+	 * persona tiene que volver a conectar. Desde aquí un reintento y un código
+	 * robado son indistinguibles, y RFC 6749 §4.1.2 pide (SHOULD) revocar.
+	 * Lo cuenta también el README.
 	 */
 	private revokeRedeemedCodeInStore(store: OAuthStore, codeHash: string, now: number): string | undefined {
 		const redeemed = store.redeemedCodes.find((item) => matchesHash(item.codeHash, codeHash) && item.expiresAt > now);
@@ -2421,7 +2505,13 @@ export class OAuthService {
 			if (state === 'mismatch') result.undetermined += 1;
 			if (state === 'inactive') inactive.push(grant);
 		}
-		if (grants.length >= MASS_PURGE_MIN_GRANTS && inactive.length > grants.length * MASS_PURGE_MAX_RATIO) {
+		// Con el freno puesto se omite SOLO lo que se apoya en un `inactive` de
+		// Lumbre: purgar grants y retirar pendientes de la outbox. El `flush` de
+		// la outbox sigue: revocar en Lumbre lo que este relé ya soltó no
+		// destruye nada que alguien esté usando.
+		const braked =
+			grants.length >= MASS_PURGE_MIN_GRANTS && inactive.length > grants.length * MASS_PURGE_MAX_RATIO;
+		if (braked) {
 			result.aborted = true;
 			result.heldBack = inactive.length;
 			// Solo recuentos, como el resto de líneas del barrido.
@@ -2430,17 +2520,17 @@ export class OAuthService {
 					`${grants.length} autorizaciones salen inactivas en Lumbre en la misma pasada; no se purga ` +
 					'ninguna y se vuelve a mirar en el siguiente ciclo'
 			);
-			return;
-		}
-		for (const grant of inactive) {
-			if (await this.purgeInactiveGrant(grant)) result.purgedGrants += 1;
+		} else {
+			for (const grant of inactive) {
+				if (await this.purgeInactiveGrant(grant)) result.purgedGrants += 1;
+			}
 		}
 		for (const item of (await this.loadStore()).revocationOutbox) {
 			await this.flushRevocationOutbox(item.credentialId);
 			const stillQueued = (await this.loadStoreReadOnly()).revocationOutbox.some(
 				(candidate) => candidate.credentialId === item.credentialId
 			);
-			if (!stillQueued) continue;
+			if (!stillQueued || braked) continue;
 			let upstreamToken: string;
 			try {
 				upstreamToken = decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope));
@@ -2640,10 +2730,20 @@ export class OAuthService {
 				await handle.close();
 			}
 			try {
-				await link(temp, keyPath);
+				await this.linkFile(temp, keyPath);
 				created = true;
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === 'ENOTSUP' || code === 'EPERM') {
+					// Sistema de ficheros sin enlaces duros (algunos montajes FUSE o
+					// SMB): se vuelve a lo de antes, `wx` directo sobre `oauth.key`,
+					// con el contenido ya escrito y su `fsync`. Conserva la
+					// exclusividad; lo que pierde ahí es solo la atomicidad frente a
+					// un corte, que es como estaba antes de H9.
+					created = await writeExclusive(keyPath, key.toString('base64url'));
+				} else if (code !== 'EEXIST') {
+					throw error;
+				}
 			}
 		} finally {
 			await unlink(temp).catch(() => undefined);

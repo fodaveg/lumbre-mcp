@@ -519,6 +519,58 @@ describe('POST /mcp — los 401 de Lumbre cuentan en el limitador (hallazgo 2 de
 			await new Promise<void>((resolve, reject) => limitedServer.close((err) => (err ? reject(err) : resolve())));
 		}
 	});
+
+	it('IP compartida con el cupo agotado: una credencial directa que Lumbre aceptó hace poco sigue pasando; una nueva no', async () => {
+		const { createHttpApp } = await import('./http.js');
+		const { OAuthService } = await import('./oauth.js');
+		const stateDir = await mkdtemp(join(tmpdir(), 'lumbre-mcp-401-compartida-'));
+		const oauth = new OAuthService({ stateDir, failedMcpAttemptsPerMinute: 2 });
+		const app = createHttpApp('https://app.lumbre.test', oauth);
+		const sharedServer = app.listen(0, '127.0.0.1');
+		await new Promise<void>((resolve) => sharedServer.once('listening', resolve));
+		const target = `http://127.0.0.1:${(sharedServer.address() as AddressInfo).port}`;
+		const upstreamBearers: string[] = [];
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string | URL, init?: RequestInit) => {
+				if (String(url).startsWith(target)) return originalFetch(url, init);
+				const authorization = new Headers(init?.headers).get('authorization') ?? '';
+				upstreamBearers.push(authorization);
+				const accepted = authorization === 'Bearer bueno-directo';
+				return new Response(JSON.stringify(accepted ? [] : { message: 'unauthorized' }), {
+					status: accepted ? 200 : 401,
+					headers: { 'content-type': 'application/json' }
+				});
+			})
+		);
+		const call = async (authorization: string): Promise<number> =>
+			(
+				await fetch(`${target}/mcp`, {
+					method: 'POST',
+					headers: { ...JSON_RPC_HEADERS, authorization },
+					body: JSON.stringify({
+						jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_lists', arguments: {} }
+					})
+				})
+			).status;
+
+		try {
+			// Alguien trabaja con su token directo y Lumbre lo acepta.
+			expect(await call('Bearer bueno-directo')).toBe(200);
+			// Otro, tras la misma salida, acumula 401 hasta agotar el cupo.
+			expect(await call('Bearer basura-1')).toBe(200);
+			expect(await call('Bearer basura-2')).toBe(200);
+			expect(upstreamBearers).toHaveLength(3);
+			// El primero no paga los fallos del segundo.
+			expect(await call('Bearer bueno-directo')).toBe(200);
+			expect(upstreamBearers).toHaveLength(4);
+			// Una credencial que Lumbre nunca aceptó sí se corta, sin salir.
+			expect(await call('Bearer nunca-vista')).toBe(429);
+			expect(upstreamBearers).toHaveLength(4);
+		} finally {
+			await new Promise<void>((resolve, reject) => sharedServer.close((err) => (err ? reject(err) : resolve())));
+		}
+	});
 });
 
 describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)', () => {

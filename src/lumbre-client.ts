@@ -38,6 +38,11 @@ export interface LumbreConfig {
 	 *  en su limitador y no reenviar la misma credencial durante unos
 	 *  segundos (`http.ts`, `recordUpstreamRejection` en `oauth.ts`). */
 	onUnauthorized?: () => void;
+	/** Se llama cuando la API de Lumbre responde 2xx a `token`: Lumbre la
+	 *  aceptó. El relé HTTP la recuerda un rato para no cortarla aunque la
+	 *  IP haya agotado su cupo de fallos (`recordUpstreamAcceptance` en
+	 *  `oauth.ts`). */
+	onAuthorized?: () => void;
 }
 
 /** Frecuencia de una regla de repetición (`Freq` de `$lib/recurrence` en el
@@ -434,6 +439,7 @@ async function requestOnce(
 		throw new LumbreApiError(`Lumbre respondió ${res.status}: ${detail}`, res.status);
 	}
 
+	config.onAuthorized?.();
 	return body;
 }
 
@@ -1224,6 +1230,7 @@ async function getAttachmentOnce(
 		}
 		throw new LumbreApiError(`Lumbre respondió ${res.status} al pedir el adjunto ${id}.`, res.status);
 	}
+	config.onAuthorized?.();
 	const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
 	const lengthHeader = res.headers.get('content-length');
 	const declaredNumber = lengthHeader === null ? Number.NaN : Number(lengthHeader);
@@ -1407,6 +1414,7 @@ async function uploadAttachmentOnce(
 		const detail = extractMessage(body) ?? (typeof body === 'string' ? body : JSON.stringify(body));
 		throw new LumbreApiError(`Lumbre respondió ${res.status} al subir el adjunto: ${detail}`, res.status);
 	}
+	config.onAuthorized?.();
 
 	if (!body || typeof body !== 'object' || typeof (body as { id?: unknown }).id !== 'string') {
 		throw new LumbreApiError('Lumbre no confirmó la subida del adjunto (respuesta inesperada).');
