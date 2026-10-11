@@ -14,7 +14,8 @@ import type { Server } from 'node:http';
  * rutas.
  *
  *  · `clave_ausente`: hay `oauth-store.json` y falta `oauth.key`.
- *  · `clave_invalida`: la clave no mide 32 bytes o no descifra el store.
+ *  · `clave_invalida`: la clave (la del fichero o la inyectada) no mide 32
+ *    bytes o no descifra el store.
  *  · `store_json_invalido`: el store no es JSON (truncado, editado a mano).
  *  · `store_incoherente`: JSON válido que no cumple el contrato (campos,
  *    referencias cruzadas, grants fuera de contrato).
@@ -52,7 +53,11 @@ export function classifyStartupFailure(error: unknown): StartupFailureCause {
 	if (typeof code === 'string' && /^E[A-Z0-9]{1,15}$/.test(code)) return `io:${code}`;
 	const message = error instanceof Error ? error.message : '';
 	if (message.includes('presente sin su clave')) return 'clave_ausente';
-	if (/^clave (OAuth )?inválida$/.test(message) || message.includes('unable to authenticate data')) {
+	if (
+		/^clave (OAuth )?inválida$/.test(message) ||
+		message.includes('encryptionKey debe tener 32 bytes') ||
+		message.includes('unable to authenticate data')
+	) {
 		return 'clave_invalida';
 	}
 	if (message.includes('v1/v2')) return 'store_version';

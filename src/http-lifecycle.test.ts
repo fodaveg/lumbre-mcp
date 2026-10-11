@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -162,6 +162,38 @@ describe('classifyStartupFailure — causa fija, contra los errores reales de OA
 		await writeFile(join(dir, 'oauth.key'), VALID_KEY, { mode: 0o600 });
 		await mkdir(join(dir, 'oauth-store.json'));
 		expect(classifyStartupFailure(await readinessError(dir))).toBe('io:EISDIR');
+	});
+
+	it('clave_invalida: una encryptionKey inyectada que no mide 32 bytes (lanza al construir)', () => {
+		let error: unknown;
+		try {
+			new OAuthService({ stateDir: '/nunca-se-usa', encryptionKey: Buffer.alloc(16) });
+		} catch (caught) {
+			error = caught;
+		}
+		expect(classifyStartupFailure(error)).toBe('clave_invalida');
+	});
+
+	it('TODO `throw new Error(...)` de oauth.ts y del backchannel tiene causa: uno nuevo sin clasificar pone esto rojo', async () => {
+		// Lectura estática: los errores de petición de `oauth.ts` son
+		// `OAuthError` (no casan con este patrón); los `Error` a secas son los
+		// de carga y validación del store, la clave y la configuración, que
+		// son justo los que pueden tumbar el arranque.
+		const sources = await Promise.all(
+			['src/oauth.ts', 'src/lumbre-oauth-backchannel.ts'].map((path) => readFile(path, 'utf8'))
+		);
+		const messages: string[] = [];
+		const pattern = /throw new Error\(\s*(['`])((?:(?!\1).)*)\1\s*\)/g;
+		for (const source of sources) {
+			for (const match of source.matchAll(pattern)) {
+				// Las plantillas: `${…}` se sustituye por un valor cualquiera.
+				messages.push(match[2]!.replace(/\$\{[^}]*\}/g, 'https://app.lumbre.pro'));
+			}
+		}
+		// Si la expresión dejara de casar, el test pasaría sin mirar nada.
+		expect(messages.length).toBeGreaterThanOrEqual(30);
+		const unclassified = messages.filter((message) => classifyStartupFailure(new Error(message)) === 'desconocido');
+		expect(unclassified).toEqual([]);
 	});
 
 	it('desconocido para todo lo demás, y un código que no tiene forma de errno no pasa', () => {

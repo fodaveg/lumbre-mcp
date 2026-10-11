@@ -1048,7 +1048,10 @@ describe('POST /mcp — límites de abuso (lotes, tools/call en vuelo, tiempos)'
 		const sameBearer = await post(url, 'tok-a', toolCallBody(2));
 		expect(sameBearer.status).toBe(429);
 		expect(sameBearer.headers.get('retry-after')).toBe('1');
-		expect(((await sameBearer.json()) as { error: { code: number } }).error.code).toBe(-32003);
+		const rejected = (await sameBearer.json()) as { error: { code: number }; id: unknown };
+		expect(rejected.error.code).toBe(-32003);
+		// El error lleva el `id` de la petición, para que el cliente lo case.
+		expect(rejected.id).toBe(2);
 
 		const b = post(url, 'tok-b', toolCallBody(3));
 		await vi.waitFor(() => expect(upstream.state.calls).toBe(2));

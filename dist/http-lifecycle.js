@@ -17,7 +17,9 @@ export function classifyStartupFailure(error) {
     const message = error instanceof Error ? error.message : '';
     if (message.includes('presente sin su clave'))
         return 'clave_ausente';
-    if (/^clave (OAuth )?inválida$/.test(message) || message.includes('unable to authenticate data')) {
+    if (/^clave (OAuth )?inválida$/.test(message) ||
+        message.includes('encryptionKey debe tener 32 bytes') ||
+        message.includes('unable to authenticate data')) {
         return 'clave_invalida';
     }
     if (message.includes('v1/v2'))

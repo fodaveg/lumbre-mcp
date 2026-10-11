@@ -242,9 +242,17 @@ const TOKEN_PATH_PATTERN = /^[0-9a-f]{32}$/;
 function isWellFormedPathToken(segment) {
     return TOKEN_PATH_PATTERN.test(segment);
 }
-function sendJsonRpcError(res, status, code, message, headers = {}) {
+function sendJsonRpcError(res, status, code, message, headers = {}, id = null) {
     res.writeHead(status, { 'content-type': 'application/json', ...headers });
-    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
+    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id }));
+}
+/** El `id` de un mensaje JSON-RPC suelto, si lo trae y es válido; si no,
+ *  `null`, que es lo que manda la spec cuando no se pudo determinar. */
+function jsonRpcIdOf(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body))
+        return null;
+    const id = body.id;
+    return typeof id === 'string' || (typeof id === 'number' && Number.isFinite(id)) ? id : null;
 }
 /**
  * Lee el cuerpo con un tope duro de bytes (`MAX_MCP_BODY_BYTES`).
@@ -406,7 +414,7 @@ async function handleMcpRequest(req, res, baseUrl, pathToken, routeLabel, oauth,
     if (isToolCall(parsedBody)) {
         releaseToolCall = toolCalls.tryAcquire(token);
         if (!releaseToolCall) {
-            sendJsonRpcError(res, 429, JSON_RPC_TOO_MANY_IN_FLIGHT, 'Demasiadas llamadas a herramientas en curso; inténtalo de nuevo en unos segundos.', { 'retry-after': '1' });
+            sendJsonRpcError(res, 429, JSON_RPC_TOO_MANY_IN_FLIGHT, 'Demasiadas llamadas a herramientas en curso; inténtalo de nuevo en unos segundos.', { 'retry-after': '1' }, jsonRpcIdOf(parsedBody));
             logRequest(`POST ${routeLabel} ${methodLabel}`, 429);
             return;
         }

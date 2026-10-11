@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	DEFAULT_MAX_TOOL_CALLS_IN_FLIGHT,
 	DEFAULT_MAX_TOOL_CALLS_PER_BEARER,
+	TOOL_CALL_SLOT_TIMEOUT_MS,
 	ToolCallLimiter,
 	toolCallLimitsFromEnv
 } from './tool-call-limiter.js';
@@ -37,6 +38,53 @@ describe('ToolCallLimiter — semáforo sin cola, global y por credencial', () =
 		expect(limiter.tryAcquire('tok')).toBeDefined();
 		expect(limiter.tryAcquire('tok')).toBeUndefined();
 		other();
+	});
+
+	it('un hueco que nadie libera se libera solo a los 120 s, con una línea sin datos de la petición', () => {
+		vi.useFakeTimers();
+		try {
+			const lines: string[] = [];
+			const limiter = new ToolCallLimiter({ global: 1, perBearer: 1 }, { log: (line) => lines.push(line) });
+			const release = limiter.tryAcquire('lm_at_colgado')!;
+			expect(limiter.tryAcquire('otro')).toBeUndefined();
+
+			vi.advanceTimersByTime(TOOL_CALL_SLOT_TIMEOUT_MS - 1);
+			expect(limiter.inFlight).toBe(1);
+			expect(lines).toEqual([]);
+
+			vi.advanceTimersByTime(1);
+			expect(limiter.inFlight).toBe(0);
+			expect(lines).toEqual(['[lumbre-mcp-http] tools/call en vuelo más de 120000 ms: se libera su hueco']);
+			expect(lines.join('')).not.toContain('colgado');
+
+			// Vuelve a entrar, y la liberación tardía de la tool colgada no
+			// descuenta el hueco del que ha entrado después.
+			const next = limiter.tryAcquire('otro');
+			expect(next).toBeDefined();
+			release();
+			expect(limiter.inFlight).toBe(1);
+			next!();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('liberar a tiempo cancela el tope: no hay línea ni doble descuento', () => {
+		vi.useFakeTimers();
+		try {
+			const lines: string[] = [];
+			const limiter = new ToolCallLimiter({ global: 2, perBearer: 2 }, { log: (line) => lines.push(line) });
+			limiter.tryAcquire('tok')!();
+			const kept = limiter.tryAcquire('tok')!;
+			vi.advanceTimersByTime(TOOL_CALL_SLOT_TIMEOUT_MS / 2);
+			kept();
+			vi.advanceTimersByTime(TOOL_CALL_SLOT_TIMEOUT_MS * 2);
+			expect(lines).toEqual([]);
+			expect(limiter.inFlight).toBe(0);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('no guarda la credencial en claro', () => {

@@ -8,8 +8,12 @@ import { createHash } from 'node:crypto';
  * hallazgos 1 y 3), 500 llamadas concurrentes con el upstream a 3 s eran 500
  * peticiones simultáneas contra la app y el RSS pasaba de ~90 a ~370 MB, sin
  * techo. Con este tope, lo que no cabe recibe un 429 inmediato en vez de
- * esperar en cola: una cola también retiene memoria, y el cliente MCP ya sabe
- * reintentar.
+ * esperar en cola, porque una cola también retiene memoria. Ojo: el cliente
+ * del SDK MCP NO reintenta un 429 (`StreamableHTTPClientTransport` lanza
+ * `StreamableHTTPError` ante cualquier respuesta no-2xx salvo el 401 con
+ * proveedor de auth): esa `tools/call` le llega como error al modelo, que
+ * decide si repetirla. Por eso los topes tienen que quedar holgados para el
+ * uso legítimo.
  *
  * Por qué estos valores por defecto:
  *  · global 32: el uso real son 1-3 cuentas, y un cliente MCP lanza a lo
@@ -64,6 +68,23 @@ export function toolCallLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Too
 }
 
 /**
+ * Tope de lo que un hueco puede estar ocupado (120 s). El hueco se devuelve
+ * cuando la tool termina, y una tool espera como mucho 30 s por petición a la
+ * app (`lumbre-client.ts`), así que en condiciones normales esto no salta
+ * nunca. Es la red de seguridad para una tool que se quede colgada por otra
+ * vía: sin ella, cada una perdería un hueco hasta reiniciar el proceso, y 32
+ * colgadas dejarían el relé sirviendo solo 429.
+ */
+export const TOOL_CALL_SLOT_TIMEOUT_MS = 120_000;
+
+export interface ToolCallLimiterOptions {
+	/** Default `TOOL_CALL_SLOT_TIMEOUT_MS`. */
+	slotTimeoutMs?: number;
+	/** Default `console.error`. */
+	log?: (line: string) => void;
+}
+
+/**
  * Semáforo sin cola: `tryAcquire` reserva un hueco o devuelve `undefined` en
  * el acto. La credencial se cuenta por su hash (SHA-256 truncado), nunca en
  * claro: este mapa vive en memoria toda la vida del proceso y no tiene por
@@ -73,8 +94,16 @@ export function toolCallLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Too
 export class ToolCallLimiter {
 	private total = 0;
 	private readonly perKey = new Map<string, number>();
+	private readonly slotTimeoutMs: number;
+	private readonly log: (line: string) => void;
 
-	constructor(readonly limits: ToolCallLimits) {}
+	constructor(
+		readonly limits: ToolCallLimits,
+		options: ToolCallLimiterOptions = {}
+	) {
+		this.slotTimeoutMs = options.slotTimeoutMs ?? TOOL_CALL_SLOT_TIMEOUT_MS;
+		this.log = options.log ?? ((line) => console.error(line));
+	}
 
 	/** `tools/call` en vuelo ahora mismo, en todo el proceso. */
 	get inFlight(): number {
@@ -84,7 +113,9 @@ export class ToolCallLimiter {
 	/**
 	 * Reserva un hueco para `credential`. Devuelve la función que lo libera
 	 * (idempotente: llamarla dos veces no descuenta dos), o `undefined` si el
-	 * tope global o el de esa credencial ya están llenos.
+	 * tope global o el de esa credencial ya están llenos. Si nadie lo libera
+	 * en `slotTimeoutMs`, se libera solo, con una línea de texto fijo en el
+	 * log (nada de la petición ni de la credencial).
 	 */
 	tryAcquire(credential: string): (() => void) | undefined {
 		const key = createHash('sha256').update(credential).digest('hex').slice(0, 32);
@@ -93,13 +124,22 @@ export class ToolCallLimiter {
 		this.total += 1;
 		this.perKey.set(key, current + 1);
 		let released = false;
-		return () => {
+		const release = (): void => {
 			if (released) return;
 			released = true;
+			clearTimeout(expiry);
 			this.total -= 1;
 			const remaining = (this.perKey.get(key) ?? 1) - 1;
 			if (remaining > 0) this.perKey.set(key, remaining);
 			else this.perKey.delete(key);
 		};
+		const expiry = setTimeout(() => {
+			if (released) return;
+			this.log(`[lumbre-mcp-http] tools/call en vuelo más de ${this.slotTimeoutMs} ms: se libera su hueco`);
+			release();
+		}, this.slotTimeoutMs);
+		// No retiene el proceso: el apagado ordenado no tiene por qué esperarlo.
+		expiry.unref();
+		return release;
 	}
 }
