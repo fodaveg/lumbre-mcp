@@ -104,6 +104,29 @@ const ORPHAN_TEMP_PATTERN = /^(?:oauth-store\.json|oauth\.key)\.\d+\.[0-9a-f]{12
  */
 const MAX_REVOCATION_OUTBOX_ITEMS = 256;
 const REVOCATION_OUTBOX_TTL_MS = 30 * 24 * 60 * 60_000;
+/**
+ * Freno de purga masiva del barrido (I4 del audit de seguridad del 10 oct
+ * 2026): si en UNA pasada sale inactiva MÁS DE LA MITAD de las autorizaciones,
+ * y hay al menos 5, no se purga ninguna, se deja una línea con el recuento y
+ * se vuelve a mirar en el siguiente ciclo.
+ *
+ * Por qué: el barrido purga en cuanto Lumbre contesta `{active:false}`, y un
+ * incidente allí (restaurar una base de datos sin la tabla de credenciales,
+ * una migración mala) contestaría eso para TODAS: el relé desconectaría a
+ * todo el mundo en una hora sin que nadie lo decidiera. Las bajas reales
+ * llegan de una en una (alguien revoca la conexión o borra su cuenta), así
+ * que más de la mitad en la misma hora no es uso, es un fallo de Lumbre.
+ *
+ * Por qué 5 de mínimo: con menos, cada autorización es una persona, y dos de
+ * tres bajas en la misma hora son perfectamente posibles (el uso real son
+ * 1-3 cuentas). Por debajo, el freno bloquearía bajas legítimas sin
+ * distinguir nada. Lo que cuesta un falso positivo es poco: la autorización
+ * retenida no autoriza nada nuevo, porque el refresh pregunta a Lumbre antes
+ * de rotar y revoca si sale inactiva; solo tarda más en borrarse del disco
+ * (como mucho, hasta que caduca la familia).
+ */
+const MASS_PURGE_MIN_GRANTS = 5;
+const MASS_PURGE_MAX_RATIO = 0.5;
 const DEFAULT_PUBLIC_LIMITS = {
     authorize: { requestsPerMinute: 30, concurrent: 8 },
     token: { requestsPerMinute: 60, concurrent: 16 },
@@ -1890,9 +1913,12 @@ export class OAuthService {
      * QUÉ HACE, en orden y de una en una (nunca en paralelo contra Lumbre):
      *   1. La poda de siempre (`mutateStore`): familias y códigos caducados
      *      pasan a la outbox. Así la caducidad deja de depender del tráfico.
-     *   2. Por cada grant: introspección. Si Lumbre responde un `active: false`
-     *      EXPLÍCITO, se purga (`purgeInactiveGrant`) y su huella de notas se
-     *      va con él.
+     *   2. Por cada grant: introspección. Primero se pregunta por TODOS y
+     *      después se purga (`purgeInactiveGrant`, y su huella de notas se va
+     *      con él) cada uno al que Lumbre respondió un `active: false`
+     *      EXPLÍCITO, salvo que salten demasiados a la vez: ver
+     *      `MASS_PURGE_MIN_GRANTS`. Si la pasada se corta a medias, no se
+     *      purga ninguno de esa pasada.
      *   3. Por cada pendiente de la outbox: el `flush` de siempre; y si sigue
      *      ahí y Lumbre declara inactiva su credencial, se retira (ya no hay
      *      nada que revocar).
@@ -1933,7 +1959,8 @@ export class OAuthService {
             purgedGrants: 0,
             retiredOutboxItems: 0,
             undetermined: 0,
-            prunedNotesFiles: 0
+            prunedNotesFiles: 0,
+            heldBack: 0
         };
         if (this.sweepInFlight)
             return { ...result, skipped: true };
@@ -1970,7 +1997,9 @@ export class OAuthService {
     async sweepStoredCredentials(result) {
         await this.mutateStore(() => false);
         const key = await this.key();
-        for (const grant of (await this.loadStore()).grants) {
+        const grants = (await this.loadStore()).grants;
+        const inactive = [];
+        for (const grant of grants) {
             let upstreamToken;
             try {
                 upstreamToken = decrypt(grant.upstream, key, grantContext(grant.clientId, grant.resource, grant.scope));
@@ -1991,8 +2020,19 @@ export class OAuthService {
             }
             if (state === 'mismatch')
                 result.undetermined += 1;
-            if (state !== 'inactive')
-                continue;
+            if (state === 'inactive')
+                inactive.push(grant);
+        }
+        if (grants.length >= MASS_PURGE_MIN_GRANTS && inactive.length > grants.length * MASS_PURGE_MAX_RATIO) {
+            result.aborted = true;
+            result.heldBack = inactive.length;
+            // Solo recuentos, como el resto de líneas del barrido.
+            console.error(`[lumbre-mcp-oauth] barrido de credenciales: freno de purga masiva, ${inactive.length} de ` +
+                `${grants.length} autorizaciones salen inactivas en Lumbre en la misma pasada; no se purga ` +
+                'ninguna y se vuelve a mirar en el siguiente ciclo');
+            return;
+        }
+        for (const grant of inactive) {
             if (await this.purgeInactiveGrant(grant))
                 result.purgedGrants += 1;
         }

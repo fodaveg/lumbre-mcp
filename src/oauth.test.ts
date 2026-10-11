@@ -2581,6 +2581,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		['un 503', { introspectStatus: 503 }],
 		['un 429 (el límite de la ruta en Lumbre)', { introspectStatus: 429 }],
 		['un 401 del canal (secreto mal configurado)', { introspectStatus: 401 }],
+		['un 404 del canal (ruta de introspección ausente en Lumbre)', { introspectStatus: 404 }],
 		['una respuesta fuera de contrato (`active:true` sin el resto)', { introspectBody: { active: true } }],
 		['un `active:false` con campos de más', { introspectBody: { active: false, motivo: 'revocada' } }],
 		['un `active` que no es booleano', { introspectBody: { active: 'false' } }]
@@ -2601,6 +2602,43 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		expect(introspections).toBe(1);
 		expect(await readFile(join(seeded.stateDir, 'oauth-store.json'), 'utf8')).toBe(seeded.storeText);
 		expect(await notesFiles()).toEqual([...seeded.files].sort());
+	});
+
+	it('freno de purga masiva: más de la mitad inactivas en una pasada (con 5 o más) no purga ninguna (I4)', async () => {
+		const stateDir = await newStateDir();
+		const farm = credentialFarm();
+		const issuing = new OAuthService({
+			stateDir,
+			fetch: farm.fetch(),
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
+		});
+		const baseUrl = await listen(issuing);
+		// `credentialFarm` fabrica tokens de 64 caracteres hasta la 5.ª
+		// credencial, y 5 es justo el mínimo del freno.
+		for (let index = 0; index < 5; index += 1) await issueTokens(baseUrl);
+		const tokens = [...farm.credentials.keys()];
+		expect(tokens).toHaveLength(5);
+		const storeText = await readFile(join(stateDir, 'oauth-store.json'), 'utf8');
+
+		// 3 de 5 inactivas: parece un incidente de Lumbre, no bajas reales.
+		for (const token of tokens.slice(0, 3)) farm.inactive.add(token);
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const held = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+			expect(held).toMatchObject({ aborted: true, purgedGrants: 0, heldBack: 3 });
+			expect(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')).toBe(storeText);
+			const lines = errors.mock.calls.map((call) => call.join(' ')).join('\n');
+			expect(lines).toMatch(/freno de purga masiva, 3 de 5 autorizaciones/);
+			for (const secret of [...tokens, ...farm.credentials.values()]) expect(lines).not.toContain(secret);
+		} finally {
+			errors.mockRestore();
+		}
+
+		// 2 de 5 no pasan de la mitad: se purgan como siempre.
+		farm.inactive.delete(tokens[2]!);
+		const purged = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+		expect(purged).toMatchObject({ aborted: false, purgedGrants: 2, heldBack: 0 });
+		expect((await readStoredState(stateDir)).grants).toHaveLength(3);
 	});
 
 	it('con un fallo de red o un timeout no purga nada y se corta', async () => {
