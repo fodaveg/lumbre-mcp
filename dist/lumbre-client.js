@@ -17,8 +17,12 @@ export class LumbreApiError extends Error {
  * 2.1 vía `resolveAccessToken`) — ahí ese nombre no significa nada para quien
  * lo lee (nunca configuró ningún `LUMBRE_TOKEN`) ni le dice cómo arreglarlo:
  * el problema no es un env var suyo, es la autorización OAuth con Lumbre.
+ *
+ * Por ser el único sitio por el que pasa todo 401, es también donde se avisa
+ * a `config.onUnauthorized`.
  */
 function unauthorizedApiError(config) {
+    config.onUnauthorized?.();
     if (config.authMode === 'oauth') {
         return new LumbreApiError('La autorización OAuth de Lumbre no es válida o fue revocada. Vuelve a conectar Lumbre desde tu cliente.', 401);
     }

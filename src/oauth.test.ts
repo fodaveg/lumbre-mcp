@@ -1758,7 +1758,9 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// caducado desde una salida compartida y refrescándolo después—, y con
 		// el presupuesto mirado antes de resolver se comía un 429.
 		expect(await call(`Bearer ${access}`)).toBe(200);
-		// El token en el path tampoco se ve afectado.
+		// Una credencial que el relé NO puede comprobar (token en el path o
+		// Bearer directo) sí se corta con el cupo agotado: si no, cualquier
+		// `Bearer x` llegaba a Lumbre sin límite (hallazgo 2 del audit de abuso).
 		expect((await fetch(`${baseUrl}/mcp/a1b2c3d4e5f60718293a4b5c6d7e8f90`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -1766,7 +1768,22 @@ describe('OAuth 2.1 para claude.ai', () => {
 				jsonrpc: '2.0', id: 2, method: 'initialize',
 				params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'rate', version: '1' } }
 			})
-		})).status).toBe(200);
+		})).status).toBe(429);
+		expect(await call('Bearer token-directo-cualquiera')).toBe(429);
+	});
+
+	it('una credencial que Lumbre rechazó se recuerda por su hash unos segundos, no en claro', () => {
+		let currentTime = 5_000_000;
+		const oauth = new OAuthService({ stateDir: '/nunca-se-usa', fetch: oauthFetch(), now: () => currentTime });
+		const req = { headers: {}, socket: { remoteAddress: '192.0.2.9' } } as unknown as IncomingMessage;
+		expect(oauth.isRejectedCredential('token-rechazado')).toBe(false);
+		oauth.recordUpstreamRejection(req, 'token-rechazado');
+		expect(oauth.isRejectedCredential('token-rechazado')).toBe(true);
+		expect(oauth.isRejectedCredential('otro-token')).toBe(false);
+		const remembered = (oauth as unknown as { rejectedCredentials: Map<string, number> }).rejectedCredentials;
+		expect([...remembered.keys()]).toEqual([createHash('sha256').update('token-rechazado', 'utf8').digest('base64url')]);
+		currentTime += 15_000;
+		expect(oauth.isRejectedCredential('token-rechazado')).toBe(false);
 	});
 
 	it('el presupuesto global de authorize sobrevive a la expulsión por tamaño de las ventanas por IP', async () => {

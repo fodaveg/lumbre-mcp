@@ -449,6 +449,78 @@ describe('POST /mcp — el 401 de una tool según el modo de autenticación (tar
 	});
 });
 
+describe('POST /mcp — los 401 de Lumbre cuentan en el limitador (hallazgo 2 del audit de abuso)', () => {
+	/**
+	 * Un bearer que no es `lm_at_` se reenvía tal cual a app.lumbre.pro, y
+	 * antes sin límite: 3000 POST con bearers basura desde una IP eran 3000
+	 * llamadas a Lumbre. Ahora el 401 de Lumbre cuenta como fallo de esa IP,
+	 * la misma credencial no se reenvía durante unos segundos, y con el cupo
+	 * agotado una credencial que el relé no puede comprobar recibe 429.
+	 */
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('repetir un bearer rechazado no vuelve a Lumbre, y agotado el cupo ninguno nuevo sale; un lm_at_ válido sí', async () => {
+		const { createHttpApp } = await import('./http.js');
+		const { OAuthService } = await import('./oauth.js');
+		const stateDir = await mkdtemp(join(tmpdir(), 'lumbre-mcp-401-limite-'));
+		const oauth = new OAuthService({ stateDir, failedMcpAttemptsPerMinute: 3 });
+		vi.spyOn(oauth, 'resolveAccessToken').mockImplementation(async (token) =>
+			token === 'lm_at_bueno' ? 'upstream-bueno' : undefined
+		);
+		const app = createHttpApp('https://app.lumbre.test', oauth);
+		const limitedServer = app.listen(0, '127.0.0.1');
+		await new Promise<void>((resolve) => limitedServer.once('listening', resolve));
+		const target = `http://127.0.0.1:${(limitedServer.address() as AddressInfo).port}`;
+		let upstreamCalls = 0;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string | URL, init?: RequestInit) => {
+				if (String(url).startsWith(target)) return originalFetch(url, init);
+				upstreamCalls += 1;
+				return new Response(JSON.stringify({ message: 'unauthorized' }), {
+					status: 401,
+					headers: { 'content-type': 'application/json' }
+				});
+			})
+		);
+		const call = async (authorization: string, method: 'tools/call' | 'initialize' = 'tools/call'): Promise<number> =>
+			(
+				await fetch(`${target}/mcp`, {
+					method: 'POST',
+					headers: { ...JSON_RPC_HEADERS, authorization },
+					body: JSON.stringify(
+						method === 'initialize'
+							? initializeBody()
+							: { jsonrpc: '2.0', id: 1, method, params: { name: 'list_lists', arguments: {} } }
+					)
+				})
+			).status;
+
+		try {
+			// 1.º: llega a Lumbre, que lo rechaza (la tool devuelve el error).
+			expect(await call('Bearer basura-1')).toBe(200);
+			expect(upstreamCalls).toBe(1);
+			// El mismo, enseguida: 401 local, sin salir hacia Lumbre.
+			expect(await call('Bearer basura-1')).toBe(401);
+			expect(upstreamCalls).toBe(1);
+			// Otro distinto llega, y con él la IP agota su cupo de 3 fallos.
+			expect(await call('Bearer basura-2')).toBe(200);
+			expect(upstreamCalls).toBe(2);
+			// Agotado: un bearer nuevo ya no se reenvía.
+			expect(await call('Bearer basura-3')).toBe(429);
+			expect(upstreamCalls).toBe(2);
+			// Un access OAuth que resuelve sigue pasando desde esa misma IP.
+			expect(await call('Bearer lm_at_bueno', 'initialize')).toBe(200);
+		} finally {
+			await new Promise<void>((resolve, reject) => limitedServer.close((err) => (err ? reject(err) : resolve())));
+		}
+	});
+});
+
 describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)', () => {
 	const VALID_PATH_TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
 

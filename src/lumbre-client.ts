@@ -33,6 +33,11 @@ export interface LumbreConfig {
 	 *  `LUMBRE_TOKEN` ahí sería falso (este proceso nunca lo lee) y no le dice
 	 *  a quien lo usa cómo arreglarlo de verdad. Tarea 0a717ae9. */
 	authMode?: 'token' | 'oauth';
+	/** Se llama cuando la API de Lumbre responde 401 a `token` (ver
+	 *  `unauthorizedApiError`). Lo usa el relé HTTP para contar ese rechazo
+	 *  en su limitador y no reenviar la misma credencial durante unos
+	 *  segundos (`http.ts`, `recordUpstreamRejection` en `oauth.ts`). */
+	onUnauthorized?: () => void;
 }
 
 /** Frecuencia de una regla de repetición (`Freq` de `$lib/recurrence` en el
@@ -307,8 +312,12 @@ export class LumbreApiError extends Error {
  * 2.1 vía `resolveAccessToken`) — ahí ese nombre no significa nada para quien
  * lo lee (nunca configuró ningún `LUMBRE_TOKEN`) ni le dice cómo arreglarlo:
  * el problema no es un env var suyo, es la autorización OAuth con Lumbre.
+ *
+ * Por ser el único sitio por el que pasa todo 401, es también donde se avisa
+ * a `config.onUnauthorized`.
  */
 function unauthorizedApiError(config: LumbreConfig): LumbreApiError {
+	config.onUnauthorized?.();
 	if (config.authMode === 'oauth') {
 		return new LumbreApiError(
 			'La autorización OAuth de Lumbre no es válida o fue revocada. Vuelve a conectar Lumbre desde tu cliente.',

@@ -185,8 +185,32 @@ const MAX_AUTHORIZE_CLIENT_WINDOWS = 512;
  * compartida). El precio de ese orden es que el presupuesto ya no ahorra el
  * trabajo de resolver —barato desde que el store se cachea en memoria—, solo
  * acota el ritmo de 401 provocables.
+ *
+ * También cuentan los 401 que devuelve LUMBRE a la credencial reenviada
+ * (`recordUpstreamRejection`, hallazgo 2 del audit de abuso del 10 oct 2026).
+ * Y con el cupo agotado, una credencial que este relé NO puede comprobar por
+ * su cuenta (Bearer directo o token en el path) ya no se reenvía: recibe el
+ * 429. Antes cualquier `Bearer x` llegaba a Lumbre sin límite (3000 de 3000
+ * medidos). Un access `lm_at_` que resuelve sigue pasando siempre: ese sí se
+ * comprueba aquí, y es el caso de claude.ai descrito arriba.
  */
 const DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE = 30;
+/**
+ * Cuánto recuerda el relé que Lumbre rechazó con 401 una credencial de `/mcp`
+ * (hallazgo 2 del audit de abuso del 10 oct 2026; B6 del de seguridad). Un
+ * bearer que no es `lm_at_` no se puede comprobar aquí y se reenvía tal cual:
+ * sin esto, repetir el mismo bearer basura era una llamada a app.lumbre.pro
+ * por petición, desde la IP compartida del relé. Durante este plazo esa
+ * credencial recibe el 401 local (y gasta cupo de fallos) sin salir hacia
+ * Lumbre. Unos segundos bastan para cortar la repetición en ráfaga y no
+ * castigan a quien acaba de arreglar su token: un token NUEVO es otra clave.
+ * Se guarda el SHA-256, nunca la credencial.
+ */
+const REJECTED_CREDENTIAL_TTL_MS = 15_000;
+/** Techo de credenciales rechazadas recordadas a la vez; se expulsan las más
+ *  antiguas. Con cientos de distintas por segundo el cupo de fallos por IP
+ *  ya ha cortado mucho antes. */
+const MAX_REJECTED_CREDENTIALS = 1_024;
 class OAuthError extends Error {
     code;
     status;
@@ -700,6 +724,9 @@ export class OAuthService {
     encryptionKey;
     keyPromise;
     rateWindows = new Map();
+    /** SHA-256 de credencial rechazada por Lumbre → hasta cuándo se recuerda;
+     *  ver `recordUpstreamRejection`. */
+    rejectedCredentials = new Map();
     /** Ventanas del presupuesto de `/authorize`, fuera de `rateWindows` para
      *  que la expulsión por tamaño de ese mapa no pueda reiniciarlas; ver
      *  `enterAuthorizeBudget`. */
@@ -959,6 +986,40 @@ export class OAuthService {
         const now = this.now();
         this.pruneRateWindows(now);
         this.consumeRateWindow(`mcp-failed:${this.remoteAddressOf(req)}`, now);
+    }
+    /**
+     * Lumbre respondió 401 a la credencial que presentó esta petición: cuenta
+     * como un fallo de `/mcp` de esa IP y se recuerda su hash durante
+     * `REJECTED_CREDENTIAL_TTL_MS` (ver `isRejectedCredential`). `credential`
+     * es lo que presentó el CLIENTE (el bearer, `lm_at_` incluido, o el token
+     * del path), no la credencial upstream en la que se resolvió.
+     */
+    recordUpstreamRejection(req, credential) {
+        this.recordFailedMcpAttempt(req);
+        const now = this.now();
+        for (const [hash, expiresAt] of this.rejectedCredentials) {
+            if (expiresAt <= now)
+                this.rejectedCredentials.delete(hash);
+        }
+        const hash = digest(credential);
+        this.rejectedCredentials.delete(hash);
+        while (this.rejectedCredentials.size >= MAX_REJECTED_CREDENTIALS) {
+            this.rejectedCredentials.delete(this.rejectedCredentials.keys().next().value);
+        }
+        this.rejectedCredentials.set(hash, now + REJECTED_CREDENTIAL_TTL_MS);
+    }
+    /** ¿Rechazó Lumbre esta credencial hace menos de
+     *  `REJECTED_CREDENTIAL_TTL_MS`? Se busca por su SHA-256, que quien llama
+     *  no puede elegir bit a bit, así que el `Map` no abre canal temporal. */
+    isRejectedCredential(credential) {
+        const hash = digest(credential);
+        const expiresAt = this.rejectedCredentials.get(hash);
+        if (expiresAt === undefined)
+            return false;
+        if (expiresAt > this.now())
+            return true;
+        this.rejectedCredentials.delete(hash);
+        return false;
     }
     /**
      * Presupuesto de `/authorize` por IP, por `client_id` y global, que se
