@@ -264,10 +264,53 @@ llamadas de las tools.
 ./deploy/publicar.sh
 ```
 
-Recompila `dist/`, aborta si lo recompilado no coincide con lo commiteado (es
-`dist/` lo que viaja, no `src/`: publicar sin recompilar dejaría la versión
-vieja corriendo sin ningún síntoma), copia el árbol por `rsync` y reconstruye
-el contenedor.
+Publica **HEAD**, no el árbol de trabajo:
+
+1. Aborta si `git status --porcelain` no está vacío (cambios sin commitear o
+   ficheros sin seguimiento): lo que llega al servidor tiene que poder
+   reconstruirse desde un commit.
+2. Recompila `dist/` y aborta si lo recompilado no coincide con lo commiteado,
+   incluidos ficheros nuevos (es `dist/` lo que viaja, no `src/`: publicar sin
+   recompilar dejaría la versión vieja corriendo sin ningún síntoma).
+3. Exporta HEAD con `git archive` y lo copia con `rsync -rlptz --delete`,
+   excluyendo `.DS_Store`; después `chown -R 0:0` del destino y borra los
+   `.DS_Store` que quedaran de copias anteriores. No usa `--chown=root:root`
+   porque el `rsync` de macOS (openrsync) no lo admite; sin `-o`/`-g`, los
+   ficheros nuevos ya nacen del usuario remoto.
+4. En el servidor: etiqueta la imagen en marcha como `lumbre-mcp:anterior`,
+   construye `lumbre-mcp:<sha>` (con `LABEL org.opencontainers.image.revision`
+   = el SHA), guarda el log del contenedor saliente, levanta la nueva y espera
+   a `healthy` (tope `LUMBRE_MCP_HEALTH_TIMEOUT`, 90 s por defecto; el
+   healthcheck comprueba cada 2 s mientras arranca). Si llega, la etiqueta
+   también como `latest` y borra las etiquetas por SHA que no sean la nueva ni
+   la anterior. Si no llega, guarda también el log de la fallida, vuelve a
+   `anterior` y sale con 1; `latest` no se mueve.
+5. Si hay `LUMBRE_TOKEN` en el entorno, corre `scripts/smoke-remote.mjs`
+   (el token va por el entorno, no por la línea de órdenes). Si falla, sale con
+   1 e imprime el comando para volver a la anterior. Sin token, lo deja
+   indicado como paso manual.
+
+Qué commit corre en el servidor:
+
+```bash
+ssh lumbre "docker inspect -f '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' lumbre-mcp"
+```
+
+Volver a la versión anterior a mano (la imagen sigue en el servidor, sin
+recompilar ni red):
+
+```bash
+ssh lumbre 'cd /srv/lumbre-mcp && LUMBRE_MCP_IMAGE_TAG=anterior \
+  docker compose --env-file /srv/lumbre-mcp.env -f deploy/compose.yml up -d --no-build'
+```
+
+**Logs de contenedores anteriores.** Compose recrea el contenedor en cada
+deploy y Docker borra su log con él, así que `publicar.sh` lo guarda antes en
+`/var/log/lumbre-mcp/<fecha UTC>-saliente-<sha12>.log.gz` (y
+`…-fallido.log.gz` si la nueva no llega a healthy), `0600`, conservando los 30
+más recientes. `LUMBRE_MCP_LOG_DIR` cambia el directorio; tiene que quedar
+fuera de `/srv/lumbre-mcp`, que `rsync --delete` vacía. Se leen con
+`zcat <fichero> | tail`.
 
 **No usa `git pull` en el servidor** porque la clave de despliegue que hay allí
 solo da acceso a `fodaveg/lumbre`, no a este repo. Si algún día se le añade una
@@ -356,10 +399,12 @@ apagado el registro de otro host sin querer.
 ## Smoke test tras cada deploy
 
 `scripts/smoke-remote.mjs` es el guardarraíl del deploy: sin dependencias,
-habla Streamable HTTP crudo contra la URL ya desplegada.
+habla Streamable HTTP crudo contra la URL ya desplegada. `publicar.sh` lo corre
+solo si hay `LUMBRE_TOKEN` en el entorno; si no, a mano (sin el segundo
+argumento lo lee de `LUMBRE_TOKEN`, que no queda a la vista en `ps`):
 
 ```bash
-node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp "$LUMBRE_TOKEN"
+node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp
 ```
 
 Comprueba el descubrimiento OAuth (PRM path-specific + alias y metadata del
