@@ -1024,8 +1024,12 @@ dejan una revocación cifrada
 en un outbox durable hasta que Lumbre confirma el ACK idempotente. Los access
 tokens duran una hora. Cada familia refresh tiene una vigencia absoluta de 30
 días: rota en cada uso sin prolongar esa fecha; reutilizar uno antiguo revoca la
-familia incluso tras reinicio. Si una familia o el store alcanza el límite de
+familia incluso tras reinicio. Cada familia guarda las 64 tombstones más
+recientes y descarta la más antigua; si el store entero alcanza su límite de
 tombstones, la rotación revoca fail-safe esa familia en vez de bloquearse.
+El código de autorización es de un solo uso: presentar uno ya canjeado (también
+un reintento de `/token` cuya primera respuesta se perdió) revoca la familia
+emitida con él, por diseño (RFC 6749 §4.1.2, SHOULD), y obliga a reconectar.
 
 El recurso y permiso son exactos: `https://mcp.lumbre.pro/mcp` y
 `lumbre:mcp`. Los callbacks se validan contra la identidad del cliente: el

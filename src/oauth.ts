@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { chmod, link, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -24,17 +24,63 @@ const REFRESH_PREFIX = 'lm_rt_';
 const CODE_TTL_MS = 5 * 60_000;
 const TRANSACTION_TTL_MS = 10 * 60_000;
 const ACCESS_TTL_MS = 60 * 60_000;
+
+/**
+ * Caducidad de un access token recién emitido: una hora, pero nunca más allá
+ * de su familia (I1 del audit de seguridad del 10 oct 2026). Antes, el access
+ * emitido en la última hora de la familia la sobrevivía hasta 1 h, porque
+ * `resolveAccessToken` solo mira `accessExpiresAt` y la poda de la familia
+ * espera a la siguiente escritura o al barrido horario. Se recorta al
+ * emitir, que es un solo sitio, en vez de añadir otra condición al camino
+ * caliente de cada `/mcp`.
+ */
+function accessExpiryFor(now: number, familyExpiresAt: number): number {
+	return Math.min(now + ACCESS_TTL_MS, familyExpiresAt);
+}
+
+/** `expires_in` de la respuesta, en segundos enteros y nunca 0. */
+function expiresInSeconds(expiresAt: number, now: number): number {
+	return Math.max(1, Math.ceil((expiresAt - now) / 1000));
+}
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
 const MAX_FORM_BYTES = 16 * 1024;
+/**
+ * Tiempo máximo para recibir el formulario de `/token` o `/revoke` (M3 del
+ * audit de seguridad del 10 oct 2026). Sin él, la lectura heredaba el
+ * `requestTimeout` de Node (300 s): unas pocas conexiones mandando el cuerpo
+ * byte a byte retenían el trabajo durante cinco minutos. El formulario son
+ * unos cientos de bytes y como mucho `MAX_FORM_BYTES`; 10 s le sobran a
+ * cualquier red móvil y acotan lo que cuesta una conexión lenta a propósito.
+ */
+const FORM_READ_TIMEOUT_MS = 10_000;
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_PENDING_ITEMS = 1_000;
 const MAX_CIMD_CACHE_ITEMS = 128;
 const DEFAULT_CIMD_CACHE_MS = 5 * 60_000;
 const MAX_CIMD_CACHE_MS = 60 * 60_000;
 const MAX_REFRESH_TOMBSTONES = 10_000;
+/**
+ * Tombstones que se guardan por familia de refresh. Al llegar al tope se
+ * descarta la MÁS ANTIGUA de esa familia (FIFO) y la rotación sigue; ver
+ * `addRefreshTombstone`. Antes, llegar aquí revocaba la familia, y como las
+ * tombstones viven lo que la familia (30 días) y el access dura una hora, un
+ * uso continuado llegaba a la 65.ª rotación mucho antes de los 30 días y se
+ * desconectaba solo (M1 del audit de seguridad del 10 oct 2026).
+ */
 const MAX_REFRESH_TOMBSTONES_PER_FAMILY = 64;
 const MAX_OUTBOX_RETRIES_PER_READINESS = 1;
 const READINESS_CACHE_MS = 5_000;
+
+/**
+ * Temporales que dejan `mutateStore` (`oauth-store.json.<pid>.<hex>.tmp`) y
+ * la creación de la clave (`oauth.key.<pid>.<hex>.tmp`) si el proceso muere
+ * entre el `open` y el `rename`/`link`: el `unlink` de su `finally` ya no
+ * llega a correr. El del store es una copia COMPLETA del almacén (0600, con
+ * las credenciales cifradas), así que no se deja ahí (I3 del audit de
+ * seguridad y H10 del de recuperación, 10 oct 2026). Exacto a propósito: no
+ * casa con los `.tmp` de la huella de notas (`notes.ts`), que no son de aquí.
+ */
+const ORPHAN_TEMP_PATTERN = /^(?:oauth-store\.json|oauth\.key)\.\d+\.[0-9a-f]{12}\.tmp$/;
 
 /**
  * Tope de la outbox de revocación y caducidad de cada elemento.
@@ -72,6 +118,30 @@ const READINESS_CACHE_MS = 5_000;
 const MAX_REVOCATION_OUTBOX_ITEMS = 256;
 const REVOCATION_OUTBOX_TTL_MS = 30 * 24 * 60 * 60_000;
 
+/**
+ * Freno de purga masiva del barrido (I4 del audit de seguridad del 10 oct
+ * 2026): si en UNA pasada sale inactiva MÁS DE LA MITAD de las autorizaciones,
+ * y hay al menos 5, no se purga ninguna, se deja una línea con el recuento y
+ * se vuelve a mirar en el siguiente ciclo.
+ *
+ * Por qué: el barrido purga en cuanto Lumbre contesta `{active:false}`, y un
+ * incidente allí (restaurar una base de datos sin la tabla de credenciales,
+ * una migración mala) contestaría eso para TODAS: el relé desconectaría a
+ * todo el mundo en una hora sin que nadie lo decidiera. Las bajas reales
+ * llegan de una en una (alguien revoca la conexión o borra su cuenta), así
+ * que más de la mitad en la misma hora no es uso, es un fallo de Lumbre.
+ *
+ * Por qué 5 de mínimo: con menos, cada autorización es una persona, y dos de
+ * tres bajas en la misma hora son perfectamente posibles (el uso real son
+ * 1-3 cuentas). Por debajo, el freno bloquearía bajas legítimas sin
+ * distinguir nada. Lo que cuesta un falso positivo es poco: la autorización
+ * retenida no autoriza nada nuevo, porque el refresh pregunta a Lumbre antes
+ * de rotar y revoca si sale inactiva; solo tarda más en borrarse del disco
+ * (como mucho, hasta que caduca la familia).
+ */
+const MASS_PURGE_MIN_GRANTS = 5;
+const MASS_PURGE_MAX_RATIO = 0.5;
+
 type PublicEndpoint = 'authorize' | 'token' | 'revoke';
 
 interface PublicLimit {
@@ -86,18 +156,34 @@ const DEFAULT_PUBLIC_LIMITS: Record<PublicEndpoint, PublicLimit> = {
 };
 
 /**
- * Presupuesto de `/authorize` MÁS ALLÁ del límite por IP de
- * `enterPublicEndpoint`. Cada `/authorize` válido crea un registro real en
- * app.lumbre.pro, así que limitar solo por IP dejaba barato llenar
- * `MAX_PENDING_ITEMS` desde una botnet: el coste del atacante era una IP
- * distinta cada 30 peticiones.
+ * Presupuesto de `/authorize` que se gasta justo antes de crear el registro
+ * en app.lumbre.pro (ver `enterAuthorizeBudget`). Cada `/authorize` válido
+ * crea un registro real allí, así que limitar solo con el límite por IP de
+ * `enterPublicEndpoint` (que cuenta también el callback y las peticiones
+ * inválidas) dejaba barato llenar `MAX_PENDING_ITEMS` desde una botnet.
  *
- * 10 por minuto y `client_id`, 60 por minuto en total. El uso legítimo son
- * unas pocas autorizaciones a la HORA (una persona enchufando claude.ai o
- * Codex), así que ambos números están ~100x por encima de lo real y ninguno
- * puede molestar a nadie que esté conectando de verdad.
+ * El ORDEN es lo que importa (hallazgo 4 del audit de abuso del 10 oct 2026):
+ * primero POR IP y solo después por `client_id`. Con 10 por `client_id` y sin
+ * presupuesto por IP propio, doce peticiones desde doce IPs con el `client_id`
+ * público de claude.ai bastaban para que nadie pudiera conectar claude.ai al
+ * relé durante ese minuto. Ahora:
+ *   · 3 por minuto e IP: una persona conectando claude.ai o Codex hace UNA,
+ *     y dos o tres si cancela y reintenta. Una IP no puede gastar más.
+ *   · 40 por minuto y `client_id`: red de seguridad, no el freno principal.
+ *     Agotarla exige ya repartir el ataque en 14 IPs, y aun así deja 20 del
+ *     global para los demás clientes (Codex).
+ *   · 60 por minuto en total: el techo de registros que este relé crea en
+ *     Lumbre, y con el TTL de 10 min, ~600 pendientes, por debajo de
+ *     `MAX_PENDING_ITEMS`.
+ * El uso legítimo son unas pocas autorizaciones a la HORA, así que ninguno de
+ * los tres molesta a quien conecta de verdad.
  */
-const DEFAULT_AUTHORIZE_BUDGET = { perClientPerMinute: 10, globalPerMinute: 60 };
+const DEFAULT_AUTHORIZE_BUDGET = { perIpPerMinute: 3, perClientPerMinute: 40, globalPerMinute: 60 };
+
+/** Techo de ventanas por IP del presupuesto de `/authorize`. Expulsar una
+ *  reinicia el cupo de ESA IP, pero el de `client_id` y el global siguen
+ *  contando por debajo, así que llenar el mapa no abre la puerta. */
+const MAX_AUTHORIZE_IP_WINDOWS = 2_048;
 
 /** Techo de ventanas por `client_id` vivas a la vez. El path de un `client_id`
  *  de claude.ai es libre, así que el mapa necesita un límite; 512 está muy por
@@ -125,8 +211,53 @@ const MAX_AUTHORIZE_CLIENT_WINDOWS = 512;
  * compartida). El precio de ese orden es que el presupuesto ya no ahorra el
  * trabajo de resolver —barato desde que el store se cachea en memoria—, solo
  * acota el ritmo de 401 provocables.
+ *
+ * También cuentan los 401 que devuelve LUMBRE a la credencial reenviada
+ * (`recordUpstreamRejection`, hallazgo 2 del audit de abuso del 10 oct 2026).
+ * Y con el cupo agotado, una credencial que este relé NO puede comprobar por
+ * su cuenta (Bearer directo o token en el path) ya no se reenvía: recibe el
+ * 429. Antes cualquier `Bearer x` llegaba a Lumbre sin límite (3000 de 3000
+ * medidos). Un access `lm_at_` que resuelve sigue pasando siempre: ese sí se
+ * comprueba aquí, y es el caso de claude.ai descrito arriba. Y tampoco se
+ * corta una credencial directa que Lumbre aceptó hace poco
+ * (`ACCEPTED_CREDENTIAL_TTL_MS`): una IP compartida no castiga al que ya
+ * estaba trabajando.
  */
 const DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE = 30;
+
+/**
+ * Cuánto recuerda el relé que Lumbre rechazó con 401 una credencial de `/mcp`
+ * (hallazgo 2 del audit de abuso del 10 oct 2026; B6 del de seguridad). Un
+ * bearer que no es `lm_at_` no se puede comprobar aquí y se reenvía tal cual:
+ * sin esto, repetir el mismo bearer basura era una llamada a app.lumbre.pro
+ * por petición, desde la IP compartida del relé. Durante este plazo esa
+ * credencial recibe el 401 local (y gasta cupo de fallos) sin salir hacia
+ * Lumbre. Unos segundos bastan para cortar la repetición en ráfaga y no
+ * castigan a quien acaba de arreglar su token: un token NUEVO es otra clave.
+ * Se guarda el SHA-256, nunca la credencial.
+ */
+const REJECTED_CREDENTIAL_TTL_MS = 15_000;
+/** Techo de credenciales rechazadas recordadas a la vez; se expulsan las más
+ *  antiguas. Con cientos de distintas por segundo el cupo de fallos por IP
+ *  ya ha cortado mucho antes. */
+const MAX_REJECTED_CREDENTIALS = 1_024;
+
+/**
+ * Cuánto recuerda el relé que Lumbre ACEPTÓ una credencial de `/mcp` que él
+ * no puede comprobar por su cuenta (Bearer directo o token en el path). Con
+ * el cupo de fallos de una IP agotado, esas credenciales dejan de reenviarse
+ * (ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`), y sin esto una IP de salida
+ * compartida castigaba a todos: bastaban los 401 de otro (claude.ai
+ * reintentando un `lm_at_` caducado) para que el token válido de un tercero
+ * recibiera 429. Con esta memoria, el corte solo alcanza a credenciales que
+ * Lumbre no ha aceptado en los últimos 10 minutos: un cliente en uso las
+ * renueva con cada llamada que llega a Lumbre, y un atacante que rota
+ * bearers basura nunca entra. Un 401 posterior la saca en el acto.
+ */
+const ACCEPTED_CREDENTIAL_TTL_MS = 10 * 60_000;
+/** Techo de credenciales aceptadas recordadas a la vez; se expulsan las más
+ *  antiguas. El uso real son pocas cuentas. */
+const MAX_ACCEPTED_CREDENTIALS = 1_024;
 
 interface AuthorizationRequest {
 	clientId: string;
@@ -188,6 +319,20 @@ interface UsedRefreshToken {
 	expiresAt: number;
 }
 
+/**
+ * Código de autorización YA canjeado: de qué familia salió, hasta que el
+ * código habría caducado (`CODE_TTL_MS`). Sirve para cumplir el SHOULD de
+ * RFC 6749 §4.1.2 (B3 del audit de seguridad del 10 oct 2026): si alguien
+ * presenta un código ya usado, se revoca la familia que se emitió con él,
+ * porque o bien el código se filtró, o bien quien lo canjeó primero no era el
+ * cliente. Solo el hash del código, como en `authorizationCodes`.
+ */
+interface RedeemedCode {
+	codeHash: string;
+	familyId: string;
+	expiresAt: number;
+}
+
 /** Vista de solo lectura (profunda) de un valor — para el camino sin copia
  *  de `loadStoreReadOnly`: el compilador impide mutar la caché. */
 type DeepReadonly<T> = T extends (infer U)[]
@@ -203,6 +348,9 @@ interface OAuthStore {
 	authorizationRequests: StoredAuthorizationRequest[];
 	authorizationCodes: StoredAuthorizationCode[];
 	revocationOutbox: RevocationOutboxItem[];
+	/** OPCIONAL en disco por migración, como `queuedAt`: un store anterior a
+	 *  este campo carga con la lista vacía. En memoria siempre está. */
+	redeemedCodes: RedeemedCode[];
 }
 
 interface EncryptedValue {
@@ -226,12 +374,15 @@ export interface OAuthServiceOptions {
 	fetch?: typeof fetch;
 	now?: () => number;
 	publicLimits?: Partial<Record<PublicEndpoint, Partial<PublicLimit>>>;
-	/** Presupuesto de `/authorize` por `client_id` y global; ver
+	/** Presupuesto de `/authorize` por IP, por `client_id` y global; ver
 	 *  `DEFAULT_AUTHORIZE_BUDGET`. Inyectable para los tests. */
 	authorizeBudget?: Partial<typeof DEFAULT_AUTHORIZE_BUDGET>;
 	/** Intentos fallidos de `/mcp` por IP y minuto; ver
 	 *  `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`. Inyectable para los tests. */
 	failedMcpAttemptsPerMinute?: number;
+	/** Plazo para recibir el formulario de `/token` y `/revoke`; ver
+	 *  `FORM_READ_TIMEOUT_MS`. Inyectable para los tests. */
+	formReadTimeoutMs?: number;
 	persistenceStep?: (step: PersistenceStep) => void | Promise<void>;
 	/**
 	 * Se espera justo después de leer y normalizar el store del disco, ANTES
@@ -241,6 +392,10 @@ export interface OAuthServiceOptions {
 	 * carrera que documenta `loadStore`). En producción no se pasa nunca.
 	 */
 	storeRead?: () => void | Promise<void>;
+	/** `link` de `node:fs/promises` con el que se publica `oauth.key` (ver
+	 *  `loadOrCreateKey`). Costura para que un test simule un sistema de
+	 *  ficheros sin enlaces duros; en producción no se pasa nunca. */
+	linkFile?: (existingPath: string, newPath: string) => Promise<void>;
 	backchannel?: LumbreBackchannelApi;
 	backchannelSecret?: string;
 	lumbreAppBaseUrl?: string;
@@ -280,6 +435,9 @@ export interface CredentialSweepResult {
 	undetermined: number;
 	/** Ficheros de huella de notas borrados por llevar 30 días sin escribirse. */
 	prunedNotesFiles: number;
+	/** Autorizaciones que Lumbre declaró inactivas y NO se purgaron porque
+	 *  saltó el freno de purga masiva (`MASS_PURGE_MIN_GRANTS`). */
+	heldBack: number;
 }
 
 /** Lo mínimo de una credencial upstream guardada (en un grant o en un código
@@ -409,7 +567,16 @@ export function stopReceiving(req: IncomingMessage): void {
 	req.once('close', close);
 }
 
-async function readLimitedBody(req: IncomingMessage, limit = MAX_FORM_BYTES): Promise<string> {
+/**
+ * Lee el cuerpo hasta `limit` bytes y en menos de `timeoutMs`. Pasado el
+ * plazo responde 408 y deja de recibir (`stopReceiving`), igual que al
+ * pasarse de tamaño: lo que siga llegando ya no se guarda ni se espera.
+ */
+async function readLimitedBody(
+	req: IncomingMessage,
+	limit = MAX_FORM_BYTES,
+	timeoutMs = FORM_READ_TIMEOUT_MS
+): Promise<string> {
 	const declared = Number(req.headers['content-length']);
 	if (Number.isFinite(declared) && declared > limit) {
 		stopReceiving(req);
@@ -418,31 +585,45 @@ async function readLimitedBody(req: IncomingMessage, limit = MAX_FORM_BYTES): Pr
 	return await new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		let size = 0;
-		let exceeded = false;
+		let settled = false;
+		const fail = (error: unknown): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			chunks.length = 0;
+			reject(error);
+		};
+		const timer = setTimeout(() => {
+			stopReceiving(req);
+			fail(new OAuthError('invalid_request', 'El formulario tardó demasiado en llegar.', 408));
+		}, timeoutMs);
+		timer.unref();
 		req.on('data', (chunk: Buffer) => {
+			if (settled) return;
 			size += chunk.length;
-			if (size > limit && !exceeded) {
-				exceeded = true;
-				chunks.length = 0;
+			if (size > limit) {
 				stopReceiving(req);
-				reject(new OAuthError('invalid_request', 'Formulario demasiado grande.', 413));
+				fail(new OAuthError('invalid_request', 'Formulario demasiado grande.', 413));
 				return;
 			}
-			if (!exceeded) chunks.push(chunk);
+			chunks.push(chunk);
 		});
 		req.on('end', () => {
-			if (!exceeded) resolve(Buffer.concat(chunks).toString('utf8'));
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(Buffer.concat(chunks).toString('utf8'));
 		});
-		req.on('error', reject);
+		req.on('error', fail);
 	});
 }
 
-async function readForm(req: IncomingMessage): Promise<URLSearchParams> {
+async function readForm(req: IncomingMessage, timeoutMs?: number): Promise<URLSearchParams> {
 	const type = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
 	if (type !== 'application/x-www-form-urlencoded') {
 		throw new OAuthError('invalid_request', 'Se requiere application/x-www-form-urlencoded.');
 	}
-	return new URLSearchParams(await readLimitedBody(req));
+	return new URLSearchParams(await readLimitedBody(req, MAX_FORM_BYTES, timeoutMs));
 }
 
 function one(params: URLSearchParams, name: string, required = true): string | undefined {
@@ -611,6 +792,7 @@ function normalizeStore(value: unknown): OAuthStore {
 		authorizationRequests?: unknown;
 		authorizationCodes?: unknown;
 		revocationOutbox?: unknown;
+		redeemedCodes?: unknown;
 	};
 	if (raw.version === 1 || raw.version === 2) {
 		throw new Error('store OAuth provisional v1/v2 no compatible; archívalo y vuelve a autorizar desde la sesión web');
@@ -621,7 +803,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		!Array.isArray(raw.usedRefreshTokens) ||
 		!Array.isArray(raw.authorizationRequests) ||
 		!Array.isArray(raw.authorizationCodes) ||
-		!Array.isArray(raw.revocationOutbox)
+		!Array.isArray(raw.revocationOutbox) ||
+		(raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes))
 	) {
 		throw new Error('store OAuth inválido');
 	}
@@ -752,6 +935,14 @@ function normalizeStore(value: unknown): OAuthStore {
 		}
 		return item as RevocationOutboxItem;
 	});
+	const redeemedCodes = ((raw.redeemedCodes ?? []) as unknown[]).map((value): RedeemedCode => {
+		if (!value || typeof value !== 'object') throw new Error('código canjeado OAuth inválido');
+		const item = value as Partial<RedeemedCode>;
+		if (typeof item.codeHash !== 'string' || typeof item.familyId !== 'string' || !Number.isFinite(item.expiresAt)) {
+			throw new Error('código canjeado OAuth inválido');
+		}
+		return item as RedeemedCode;
+	});
 	const credentialIds = [
 		...grants.map((item) => item.credentialId),
 		...authorizationCodes.map((item) => item.credentialId),
@@ -760,10 +951,12 @@ function normalizeStore(value: unknown): OAuthStore {
 	const opaqueHashes = [
 		...grants.flatMap((item) => [item.accessHash, item.refreshHash]),
 		...usedRefreshTokens.map((item) => item.hash),
-		...authorizationCodes.map((item) => item.codeHash)
+		...authorizationCodes.map((item) => item.codeHash),
+		...redeemedCodes.map((item) => item.codeHash)
 	];
 	if (
 		authorizationCodes.length > MAX_PENDING_ITEMS ||
+		redeemedCodes.length > MAX_PENDING_ITEMS ||
 		new Set(authorizationCodes.map((item) => item.codeHash)).size !== authorizationCodes.length ||
 		new Set(credentialIds).size !== credentialIds.length ||
 		new Set(opaqueHashes).size !== opaqueHashes.length
@@ -776,8 +969,65 @@ function normalizeStore(value: unknown): OAuthStore {
 		usedRefreshTokens,
 		authorizationRequests,
 		authorizationCodes,
-		revocationOutbox
+		revocationOutbox,
+		redeemedCodes
 	};
+}
+
+/** Suma uno a la ventana de `key`, creándola si no existe; al crearla expulsa
+ *  las más antiguas si el mapa llegó a `max`. */
+function consumeBoundedWindow(
+	windows: Map<string, { startedAt: number; count: number }>,
+	key: string,
+	now: number,
+	max: number
+): void {
+	const window = windows.get(key);
+	if (window) {
+		window.count += 1;
+		return;
+	}
+	while (windows.size >= max) windows.delete(windows.keys().next().value!);
+	windows.set(key, { startedAt: now, count: 1 });
+}
+
+/** Crea `path` con `wx` y 0600, escribe `content` y hace `fsync`. Devuelve
+ *  `false` si ya existía (`EEXIST`), sin tocarlo. */
+async function writeExclusive(path: string, content: string): Promise<boolean> {
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(path, 'wx', 0o600);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+		throw error;
+	}
+	try {
+		await handle.writeFile(content, 'utf8');
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return true;
+}
+
+/** Anota `hash` hasta `now + ttl` en un mapa hash → caducidad: retira las
+ *  caducadas, y al llegar a `max` expulsa las más antiguas. */
+function rememberCredential(memory: Map<string, number>, hash: string, now: number, ttl: number, max: number): void {
+	for (const [key, expiresAt] of memory) {
+		if (expiresAt <= now) memory.delete(key);
+	}
+	memory.delete(hash);
+	while (memory.size >= max) memory.delete(memory.keys().next().value!);
+	memory.set(hash, now + ttl);
+}
+
+/** ¿Sigue vigente `hash` en un mapa de `rememberCredential`? */
+function isRemembered(memory: Map<string, number>, hash: string, now: number): boolean {
+	const expiresAt = memory.get(hash);
+	if (expiresAt === undefined) return false;
+	if (expiresAt > now) return true;
+	memory.delete(hash);
+	return false;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -798,15 +1048,27 @@ export class OAuthService {
 	private readonly publicLimits: Record<PublicEndpoint, PublicLimit>;
 	private readonly persistenceStep?: OAuthServiceOptions['persistenceStep'];
 	private readonly storeRead?: OAuthServiceOptions['storeRead'];
+	private readonly linkFile: (existingPath: string, newPath: string) => Promise<void>;
 	private readonly backchannel: LumbreBackchannelApi;
 	private encryptionKey?: Buffer;
 	private keyPromise?: Promise<Buffer>;
 	private readonly rateWindows = new Map<string, { startedAt: number; count: number }>();
+	/** SHA-256 de credencial rechazada por Lumbre → hasta cuándo se recuerda;
+	 *  ver `recordUpstreamRejection`. */
+	private readonly rejectedCredentials = new Map<string, number>();
+	/** SHA-256 de credencial aceptada por Lumbre → hasta cuándo se recuerda;
+	 *  ver `recordUpstreamAcceptance`. */
+	private readonly acceptedCredentials = new Map<string, number>();
 	/** Ventanas del presupuesto de `/authorize`, fuera de `rateWindows` para
 	 *  que la expulsión por tamaño de ese mapa no pueda reiniciarlas; ver
 	 *  `enterAuthorizeBudget`. */
 	private authorizeGlobalWindow?: { startedAt: number; count: number };
 	private readonly authorizeClientWindows = new Map<string, { startedAt: number; count: number }>();
+	private readonly authorizeIpWindows = new Map<string, { startedAt: number; count: number }>();
+	/** Huecos de `MAX_PENDING_ITEMS` apartados por un `/authorize` que está
+	 *  hablando con Lumbre y aún no ha guardado su pendiente; ver
+	 *  `reservePendingSlot`. */
+	private pendingReservations = 0;
 	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0 };
 	private readonly clientMetadataCache = new Map<string, { metadata: ClientMetadata; expiresAt: number }>();
 	private readonly clientMetadataInFlight = new Map<string, Promise<ClientMetadata>>();
@@ -815,6 +1077,7 @@ export class OAuthService {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private readonly authorizeBudget: typeof DEFAULT_AUTHORIZE_BUDGET;
 	private readonly failedMcpAttemptsPerMinute: number;
+	private readonly formReadTimeoutMs: number;
 	/**
 	 * Último estado PERSISTIDO conocido del store, en memoria.
 	 *
@@ -850,6 +1113,15 @@ export class OAuthService {
 	private storeGeneration = 0;
 	/** Hay un `sweepInactiveCredentials` en curso; ver ahí por qué solo uno. */
 	private sweepInFlight = false;
+	/** Índice `accessHash` → grant del store del que salió; ver
+	 *  `grantByAccessHash`. */
+	private accessIndex?: {
+		store: DeepReadonly<OAuthStore>;
+		byHash: Map<string, DeepReadonly<StoredGrant>>;
+	};
+	/** La limpieza de temporales huérfanos ya corrió en este proceso; ver
+	 *  `removeOrphanTemps`. */
+	private orphanTempsRemoved = false;
 
 	constructor(options: OAuthServiceOptions = {}) {
 		this.stateDir = options.stateDir ?? defaultStateDir();
@@ -857,6 +1129,7 @@ export class OAuthService {
 		this.now = options.now ?? Date.now;
 		this.persistenceStep = options.persistenceStep;
 		this.storeRead = options.storeRead;
+		this.linkFile = options.linkFile ?? link;
 		this.backchannel = options.backchannel ?? new LumbreBackchannel({
 			baseUrl: options.lumbreAppBaseUrl ?? process.env.LUMBRE_APP_BASE_URL,
 			secret: options.backchannelSecret ?? process.env.LUMBRE_MCP_BACKCHANNEL_SECRET,
@@ -872,6 +1145,7 @@ export class OAuthService {
 		};
 		this.authorizeBudget = { ...DEFAULT_AUTHORIZE_BUDGET, ...options.authorizeBudget };
 		this.failedMcpAttemptsPerMinute = options.failedMcpAttemptsPerMinute ?? DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE;
+		this.formReadTimeoutMs = options.formReadTimeoutMs ?? FORM_READ_TIMEOUT_MS;
 	}
 
 	protectedResourceMetadata(): object {
@@ -1032,10 +1306,13 @@ export class OAuthService {
 
 	/**
 	 * ¿Esta IP agotó su presupuesto de intentos FALLIDOS contra `/mcp`? Lo
-	 * consulta `handleMcpRequest` (`http.ts`) SOLO en la rama en la que la
-	 * petición se quedó sin credencial utilizable, y después de intentar
-	 * resolverla: una petición que autentica no pasa por aquí ni para leer el
-	 * contador. Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`.
+	 * consulta `handleMcpRequest` (`http.ts`) después de intentar resolver la
+	 * credencial, en dos sitios: en la rama sin credencial utilizable (429 en
+	 * vez de 401), y antes de reenviar una credencial que el relé no puede
+	 * comprobar (Bearer directo o token en el path) y que Lumbre no aceptó en
+	 * los últimos `ACCEPTED_CREDENTIAL_TTL_MS`. Un access `lm_at_` que
+	 * resuelve, o una credencial directa aceptada hace poco, no lo consulta.
+	 * Ver `DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE`.
 	 */
 	mcpAttemptsExhausted(req: IncomingMessage): boolean {
 		const now = this.now();
@@ -1051,9 +1328,52 @@ export class OAuthService {
 	}
 
 	/**
-	 * Presupuesto de `/authorize` por `client_id` y global, que se gasta JUSTO
-	 * ANTES de llamar al backchannel — el orden es el punto: pasada esta
-	 * puerta, la petición crea un registro real en app.lumbre.pro.
+	 * Lumbre respondió 401 a la credencial que presentó esta petición: cuenta
+	 * como un fallo de `/mcp` de esa IP y se recuerda su hash durante
+	 * `REJECTED_CREDENTIAL_TTL_MS` (ver `isRejectedCredential`). `credential`
+	 * es lo que presentó el CLIENTE (el bearer, `lm_at_` incluido, o el token
+	 * del path), no la credencial upstream en la que se resolvió.
+	 */
+	recordUpstreamRejection(req: IncomingMessage, credential: string): void {
+		this.recordFailedMcpAttempt(req);
+		const hash = digest(credential);
+		this.acceptedCredentials.delete(hash);
+		rememberCredential(this.rejectedCredentials, hash, this.now(), REJECTED_CREDENTIAL_TTL_MS, MAX_REJECTED_CREDENTIALS);
+	}
+
+	/** ¿Rechazó Lumbre esta credencial hace menos de
+	 *  `REJECTED_CREDENTIAL_TTL_MS`? Se busca por su SHA-256, que quien llama
+	 *  no puede elegir bit a bit, así que el `Map` no abre canal temporal. */
+	isRejectedCredential(credential: string): boolean {
+		return isRemembered(this.rejectedCredentials, digest(credential), this.now());
+	}
+
+	/**
+	 * Lumbre respondió 2xx a la credencial que presentó esta petición: se
+	 * recuerda su hash durante `ACCEPTED_CREDENTIAL_TTL_MS` para que el cupo
+	 * de fallos de la IP no la corte (ver `isAcceptedCredential`). Mismo
+	 * `credential` que en `recordUpstreamRejection`.
+	 */
+	recordUpstreamAcceptance(credential: string): void {
+		const hash = digest(credential);
+		this.rejectedCredentials.delete(hash);
+		rememberCredential(this.acceptedCredentials, hash, this.now(), ACCEPTED_CREDENTIAL_TTL_MS, MAX_ACCEPTED_CREDENTIALS);
+	}
+
+	/** ¿Aceptó Lumbre esta credencial hace menos de
+	 *  `ACCEPTED_CREDENTIAL_TTL_MS`? Por su SHA-256, como la de rechazadas. */
+	isAcceptedCredential(credential: string): boolean {
+		return isRemembered(this.acceptedCredentials, digest(credential), this.now());
+	}
+
+	/**
+	 * Presupuesto de `/authorize` por IP, por `client_id` y global, que se
+	 * gasta JUSTO ANTES de llamar al backchannel — el orden es el punto:
+	 * pasada esta puerta, la petición crea un registro real en app.lumbre.pro.
+	 *
+	 * Se mira primero la IP y no se gasta NADA si alguno de los tres está
+	 * agotado: así una IP que insiste se queda en su propio cupo y no se come
+	 * el del `client_id` público (ver `DEFAULT_AUTHORIZE_BUDGET`).
 	 *
 	 * NO usa `rateWindows`, y ese es justo el arreglo: ahí la expulsión por
 	 * TAMAÑO borra por orden de inserción, y la ventana global es de las claves
@@ -1069,13 +1389,19 @@ export class OAuthService {
 	 * Expulsar una de ellas reinicia el cupo de ESE cliente, pero el global
 	 * —que es el que acota el total— sigue contando por debajo.
 	 */
-	private enterAuthorizeBudget(clientId: string): void {
+	private enterAuthorizeBudget(clientId: string, remote: string): void {
 		const now = this.now();
 		if (this.authorizeGlobalWindow && this.authorizeGlobalWindow.startedAt + 60_000 <= now) {
 			this.authorizeGlobalWindow = undefined;
 		}
-		for (const [key, window] of this.authorizeClientWindows) {
-			if (window.startedAt + 60_000 <= now) this.authorizeClientWindows.delete(key);
+		for (const windows of [this.authorizeIpWindows, this.authorizeClientWindows]) {
+			for (const [key, window] of windows) {
+				if (window.startedAt + 60_000 <= now) windows.delete(key);
+			}
+		}
+		const ipWindow = this.authorizeIpWindows.get(remote);
+		if (ipWindow !== undefined && ipWindow.count >= this.authorizeBudget.perIpPerMinute) {
+			throw new OAuthError('temporarily_unavailable', 'Demasiadas autorizaciones desde esta conexión; inténtalo de nuevo más tarde.', 429);
 		}
 		const clientWindow = this.authorizeClientWindows.get(clientId);
 		if (
@@ -1085,31 +1411,93 @@ export class OAuthService {
 		) {
 			throw new OAuthError('temporarily_unavailable', 'Demasiadas autorizaciones en curso; inténtalo de nuevo más tarde.', 429);
 		}
-		if (clientWindow) {
-			clientWindow.count += 1;
-		} else {
-			while (this.authorizeClientWindows.size >= MAX_AUTHORIZE_CLIENT_WINDOWS) {
-				this.authorizeClientWindows.delete(this.authorizeClientWindows.keys().next().value!);
-			}
-			this.authorizeClientWindows.set(clientId, { startedAt: now, count: 1 });
-		}
+		consumeBoundedWindow(this.authorizeIpWindows, remote, now, MAX_AUTHORIZE_IP_WINDOWS);
+		consumeBoundedWindow(this.authorizeClientWindows, clientId, now, MAX_AUTHORIZE_CLIENT_WINDOWS);
 		if (this.authorizeGlobalWindow) this.authorizeGlobalWindow.count += 1;
 		else this.authorizeGlobalWindow = { startedAt: now, count: 1 };
 	}
 
+	/**
+	 * Aparta un hueco de `MAX_PENDING_ITEMS` ANTES de llamar al backchannel y
+	 * devuelve cómo soltarlo (hallazgo 7 del audit de abuso del 10 oct 2026).
+	 * Mirar el tope solo contra lo guardado dejaba una carrera: ocho
+	 * `/authorize` concurrentes con 999 pendientes veían todos sitio, los ocho
+	 * creaban su registro en Lumbre y siete se rechazaban después, huérfanos.
+	 *
+	 * La comprobación va DENTRO de un mutador: la cola de `mutateStore` la
+	 * ordena con las escrituras, así que ve lo ya guardado (con la poda de
+	 * caducadas hecha) más lo apartado por quien sigue hablando con Lumbre. El
+	 * mutador no escribe nada por sí mismo.
+	 */
+	private async reservePendingSlot(): Promise<() => void> {
+		let reserved = false;
+		try {
+			await this.mutateStore((store) => {
+				if (store.authorizationRequests.length + this.pendingReservations >= MAX_PENDING_ITEMS) return false;
+				this.pendingReservations += 1;
+				reserved = true;
+				return false;
+			});
+		} catch (error) {
+			if (reserved) this.pendingReservations -= 1;
+			throw error;
+		}
+		if (!reserved) throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.pendingReservations -= 1;
+		};
+	}
+
+	/** Límite por ritmo e IP Y ranura de concurrencia, de una vez: para las
+	 *  rutas que no leen cuerpo (`/authorize`, el callback). */
 	private enterPublicEndpoint(req: IncomingMessage, endpoint: PublicEndpoint): () => void {
-		const remote = this.remoteAddressOf(req);
-		const now = this.now();
-		this.pruneRateWindows(now);
-		const key = `${endpoint}:${remote}`;
-		const limit = this.publicLimits[endpoint];
-		if (this.overRateLimit(key, limit.requestsPerMinute)) {
+		const key = this.checkRateLimit(req, endpoint);
+		this.checkConcurrency(endpoint);
+		this.consumeRateWindow(key, this.now());
+		return this.takeConcurrencySlot(endpoint);
+	}
+
+	/**
+	 * Solo el límite por ritmo e IP, gastándolo. Lo usan `/token` y
+	 * `/revoke`, que toman la ranura de concurrencia DESPUÉS de leer el
+	 * formulario (`enterConcurrency`): tomarla antes dejaba que unas pocas
+	 * conexiones lentas ocuparan las 16 ranuras globales mientras mandaban el
+	 * cuerpo, y todos los refresh legítimos recibían 429 (M3 del audit de
+	 * seguridad del 10 oct 2026). La lectura ya está acotada en tamaño y en
+	 * tiempo (`readLimitedBody`) y no toca el store ni Lumbre, así que no
+	 * necesita ranura.
+	 */
+	private enterRateLimit(req: IncomingMessage, endpoint: PublicEndpoint): void {
+		const key = this.checkRateLimit(req, endpoint);
+		this.consumeRateWindow(key, this.now());
+	}
+
+	/** Ranura de concurrencia global del endpoint; devuelve cómo soltarla. */
+	private enterConcurrency(endpoint: PublicEndpoint): () => void {
+		this.checkConcurrency(endpoint);
+		return this.takeConcurrencySlot(endpoint);
+	}
+
+	/** ¿Le queda cupo del minuto a esta IP? Lanza 429 si no; no gasta nada. */
+	private checkRateLimit(req: IncomingMessage, endpoint: PublicEndpoint): string {
+		this.pruneRateWindows(this.now());
+		const key = `${endpoint}:${this.remoteAddressOf(req)}`;
+		if (this.overRateLimit(key, this.publicLimits[endpoint].requestsPerMinute)) {
 			throw new OAuthError('temporarily_unavailable', 'Demasiadas solicitudes; inténtalo de nuevo más tarde.', 429);
 		}
-		if (this.inFlight[endpoint] >= limit.concurrent) {
+		return key;
+	}
+
+	private checkConcurrency(endpoint: PublicEndpoint): void {
+		if (this.inFlight[endpoint] >= this.publicLimits[endpoint].concurrent) {
 			throw new OAuthError('temporarily_unavailable', 'El servidor está ocupado; inténtalo de nuevo.', 429);
 		}
-		this.consumeRateWindow(key, now);
+	}
+
+	private takeConcurrencySlot(endpoint: PublicEndpoint): () => void {
 		this.inFlight[endpoint] += 1;
 		let released = false;
 		return () => {
@@ -1121,6 +1509,7 @@ export class OAuthService {
 
 	async handleAuthorize(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
 		let release: (() => void) | undefined;
+		let releaseReservation: (() => void) | undefined;
 		try {
 			release = this.enterPublicEndpoint(req, 'authorize');
 			if (req.method !== 'GET') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
@@ -1129,21 +1518,24 @@ export class OAuthService {
 			if (!metadata.redirect_uris.some((registered) => registeredRedirectMatches(request.clientId, request.redirectUri, registered))) {
 				throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
 			}
-			const clientName = metadata.client_name!.trim().slice(0, 120);
-			// Las DOS puertas que faltaban antes de tocar app.lumbre.pro:
-			// presupuesto por `client_id` y global (el límite por IP de
-			// `enterPublicEndpoint` no basta: se reparte entre IPs), y el cupo
-			// de pendientes. Lo de `MAX_PENDING_ITEMS` ya se comprobaba, pero
-			// DESPUÉS del backchannel: llenar la cola dejaba mil registros
-			// creados en Lumbre que aquí ni se guardaban. Ahora se mira antes,
-			// y es barato porque el store está cacheado en memoria.
-			this.enterAuthorizeBudget(request.clientId);
-			const pendingNow = (await this.loadStore()).authorizationRequests.filter(
-				(item) => item.expiresAt > this.now()
-			).length;
-			if (pendingNow >= MAX_PENDING_ITEMS) {
-				throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+			// La URI que el almacén aceptará guardar para este cliente, mirada
+			// AQUÍ y no solo en `normalizeStore` (B2 del audit de seguridad del
+			// 10 oct 2026). Si el CIMD de un `client_id` de claude.ai registraba
+			// otra URI, la comprobación de arriba pasaba, se creaba el registro
+			// en Lumbre y el rechazo llegaba al guardar: un 500 y un registro
+			// huérfano allí. Ahora es un 400 antes de gastar presupuesto.
+			if (!validStoredRedirect(request.clientId, request.redirectUri)) {
+				throw new OAuthError('invalid_request', 'redirect_uri no admitido para este cliente.');
 			}
+			const clientName = metadata.client_name!.trim().slice(0, 120);
+			// Las DOS puertas antes de tocar app.lumbre.pro: el presupuesto
+			// (por IP, por `client_id` y global; el límite por IP de
+			// `enterPublicEndpoint` no basta, se reparte entre IPs), y un hueco
+			// apartado en la cola de pendientes. Lo de `MAX_PENDING_ITEMS` se
+			// comprobaba DESPUÉS del backchannel: llenar la cola dejaba mil
+			// registros creados en Lumbre que aquí ni se guardaban.
+			this.enterAuthorizeBudget(request.clientId, this.remoteAddressOf(req));
+			releaseReservation = await this.reservePendingSlot();
 			const transactionId = randomBytes(32).toString('base64url');
 			let created;
 			try {
@@ -1191,6 +1583,7 @@ export class OAuthService {
 		} catch (error) {
 			oauthError(res, error);
 		} finally {
+			releaseReservation?.();
 			release?.();
 		}
 	}
@@ -1339,9 +1732,11 @@ export class OAuthService {
 	async handleToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		let release: (() => void) | undefined;
 		try {
-			release = this.enterPublicEndpoint(req, 'token');
+			this.enterRateLimit(req, 'token');
 			if (req.method !== 'POST') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
-			const form = await readForm(req);
+			// Primero el formulario, después la ranura: ver `enterRateLimit`.
+			const form = await readForm(req, this.formReadTimeoutMs);
+			release = this.enterConcurrency('token');
 			const grantType = one(form, 'grant_type');
 			if (grantType === 'authorization_code') await this.exchangeCode(form, res);
 			else if (grantType === 'refresh_token') await this.exchangeRefresh(form, res);
@@ -1360,8 +1755,17 @@ export class OAuthService {
 		const verifier = one(form, 'code_verifier');
 		const resource = one(form, 'resource');
 		const codeHash = digest(codeValue!);
-		const code = (await this.loadStore()).authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash));
-		if (!code) throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
+		const snapshot = await this.loadStore();
+		const code = snapshot.authorizationCodes.find((item) => matchesHash(item.codeHash, codeHash));
+		if (!code) {
+			// ¿Es un código ya canjeado? Entonces se revoca lo emitido con él
+			// (ver `RedeemedCode`). Se mira antes en la copia leída para que un
+			// código cualquiera no haga cola en `mutateStore`.
+			if (snapshot.redeemedCodes.some((item) => matchesHash(item.codeHash, codeHash) && item.expiresAt > this.now())) {
+				await this.revokeRedeemedCodeFamily(codeHash);
+			}
+			throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
+		}
 		if (code.expiresAt <= this.now()) {
 			await this.retireAuthorizationCode(codeHash);
 			throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
@@ -1462,6 +1866,37 @@ export class OAuthService {
 		return state === 'active';
 	}
 
+	/**
+	 * Revoca la familia emitida con un código ya canjeado (B3). Dentro de un
+	 * mutador; devuelve el `credentialId` a vaciar de la outbox, o `undefined`
+	 * si no hay nada que revocar (el registro caducó, o la familia ya no
+	 * existe: entonces no se toca nada y el registro caduca solo).
+	 *
+	 * POR DISEÑO, también con un cliente legítimo: si su primera respuesta de
+	 * `/token` se pierde (timeout, red) y REINTENTA el canje con el mismo
+	 * código, ese reintento revoca la familia que el primero emitió y la
+	 * persona tiene que volver a conectar. Desde aquí un reintento y un código
+	 * robado son indistinguibles, y RFC 6749 §4.1.2 pide (SHOULD) revocar.
+	 * Lo cuenta también el README.
+	 */
+	private revokeRedeemedCodeInStore(store: OAuthStore, codeHash: string, now: number): string | undefined {
+		const redeemed = store.redeemedCodes.find((item) => matchesHash(item.codeHash, codeHash) && item.expiresAt > now);
+		if (!redeemed) return undefined;
+		const grant = store.grants.find((item) => item.familyId === redeemed.familyId);
+		if (!grant) return undefined;
+		this.enqueueFamilyRevocation(store, grant);
+		return grant.credentialId;
+	}
+
+	private async revokeRedeemedCodeFamily(codeHash: string): Promise<void> {
+		let credentialId: string | undefined;
+		await this.mutateStore((store) => {
+			credentialId = this.revokeRedeemedCodeInStore(store, codeHash, this.now());
+			return credentialId !== undefined;
+		});
+		if (credentialId) await this.flushRevocationOutbox(credentialId);
+	}
+
 	private async issueGrant(code: StoredAuthorizationCode, codeHash: string, res: ServerResponse): Promise<void> {
 		const accessToken = opaque(ACCESS_PREFIX);
 		const refreshToken = opaque(REFRESH_PREFIX);
@@ -1469,12 +1904,25 @@ export class OAuthService {
 		const now = this.now();
 		const familyExpiresAt = now + REFRESH_TTL_MS;
 		let issued = false;
+		let replayedCredentialId: string | undefined;
 		await this.mutateStore((store) => {
 			const storedCode = store.authorizationCodes.find(
 				(item) => matchesHash(item.codeHash, codeHash) && item.credentialId === code.credentialId && item.expiresAt > now
 			);
-			if (!storedCode) return false;
+			if (!storedCode) {
+				// Lo canjeó otro entre la lectura y aquí (dos canjes en
+				// carrera): el segundo también es reutilización.
+				replayedCredentialId = this.revokeRedeemedCodeInStore(store, codeHash, now);
+				return replayedCredentialId !== undefined;
+			}
 			store.authorizationCodes = store.authorizationCodes.filter((item) => !matchesHash(item.codeHash, codeHash));
+			store.redeemedCodes.push({ codeHash, familyId, expiresAt: storedCode.expiresAt });
+			// Los códigos ya nacen acotados (`MAX_PENDING_ITEMS` y el
+			// presupuesto de `/authorize`), así que esto no debería recortar
+			// nunca; está para que la lista no pueda crecer sin techo.
+			if (store.redeemedCodes.length > MAX_PENDING_ITEMS) {
+				store.redeemedCodes = store.redeemedCodes.slice(-MAX_PENDING_ITEMS);
+			}
 			store.grants.push({
 				provider: 'lumbre-web',
 				credentialId: code.credentialId,
@@ -1484,7 +1932,7 @@ export class OAuthService {
 				resource: code.resource,
 				scope: code.scope,
 				accessHash: digest(accessToken),
-				accessExpiresAt: now + ACCESS_TTL_MS,
+				accessExpiresAt: accessExpiryFor(now, familyExpiresAt),
 				refreshHash: digest(refreshToken),
 				refreshExpiresAt: familyExpiresAt,
 				upstream: code.upstream
@@ -1492,8 +1940,17 @@ export class OAuthService {
 			issued = true;
 			return true;
 		});
-		if (!issued) throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
-		json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: refreshToken, scope: code.scope });
+		if (!issued) {
+			if (replayedCredentialId) await this.flushRevocationOutbox(replayedCredentialId);
+			throw new OAuthError('invalid_grant', 'Código inválido, usado o caducado.');
+		}
+		json(res, 200, {
+			access_token: accessToken,
+			token_type: 'Bearer',
+			expires_in: expiresInSeconds(accessExpiryFor(now, familyExpiresAt), now),
+			refresh_token: refreshToken,
+			scope: code.scope
+		});
 	}
 
 	private async exchangeRefresh(form: URLSearchParams, res: ServerResponse): Promise<void> {
@@ -1534,7 +1991,10 @@ export class OAuthService {
 			await this.revokeFamily(grantSnapshot.familyId, grantSnapshot.credentialId);
 			throw new OAuthError('invalid_grant', 'La credencial de Lumbre ya no está activa.');
 		}
-		const result: { outcome: 'invalid' | 'rotated' | 'replayed' } = { outcome: 'invalid' };
+		const result: { outcome: 'invalid' | 'rotated' | 'replayed'; accessExpiresAt: number } = {
+			outcome: 'invalid',
+			accessExpiresAt: now
+		};
 		await this.mutateStore((store) => {
 			const used = store.usedRefreshTokens.find((item) => matchesHash(item.hash, oldHash) && item.expiresAt > now);
 			if (used) {
@@ -1565,16 +2025,18 @@ export class OAuthService {
 			}
 			const nextRefreshExpiresAt = grant.familyExpiresAt;
 			if (!this.addRefreshTombstone(store, oldHash, grant.familyId, nextRefreshExpiresAt)) {
-				// Al alcanzar cualquier límite, la opción segura y siempre disponible
+				// Al alcanzar el tope GLOBAL, la opción segura y siempre disponible
 				// es revocar la familia. Nunca se bloquea una eliminación por intentar
-				// conservar otra tombstone.
+				// conservar otra tombstone. (El tope por familia ya no llega aquí:
+				// descarta la más antigua, ver `addRefreshTombstone`.)
 				result.outcome = 'replayed';
 				this.enqueueFamilyRevocation(store, grant);
 				return true;
 			}
 			result.outcome = 'rotated';
 			grant.accessHash = digest(accessToken);
-			grant.accessExpiresAt = now + ACCESS_TTL_MS;
+			grant.accessExpiresAt = accessExpiryFor(now, grant.familyExpiresAt);
+			result.accessExpiresAt = grant.accessExpiresAt;
 			grant.refreshHash = digest(nextRefresh);
 			grant.refreshExpiresAt = nextRefreshExpiresAt;
 			return true;
@@ -1583,15 +2045,37 @@ export class OAuthService {
 			if (result.outcome === 'replayed') await this.flushRevocationOutbox(grantSnapshot.credentialId);
 			throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
 		}
-		json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: nextRefresh, scope: OAUTH_SCOPE });
+		json(res, 200, {
+			access_token: accessToken,
+			token_type: 'Bearer',
+			expires_in: expiresInSeconds(result.accessExpiresAt, now),
+			refresh_token: nextRefresh,
+			scope: OAUTH_SCOPE
+		});
 	}
 
+	/**
+	 * Guarda la tombstone del refresh que se acaba de rotar. Devuelve `false`
+	 * solo si el tope GLOBAL está lleno, y entonces quien llama revoca.
+	 *
+	 * Con la familia en su tope (`MAX_REFRESH_TOMBSTONES_PER_FAMILY`) descarta
+	 * primero la más antigua de ESA familia (FIFO: `push` añade al final, así
+	 * que la primera del array es la más vieja). Lo que se pierde es detectar
+	 * el replay de un refresh de hace más de 64 rotaciones: presentarlo ya no
+	 * revoca la familia, solo recibe el `invalid_grant` de un refresh
+	 * desconocido. Es un precio pequeño: un refresh robado y guardado 64 horas
+	 * sin usar, mientras el legítimo sigue rotando, ya no vale para nada; lo
+	 * que la tombstone añade es la revocación, y esa sigue intacta para las 64
+	 * más recientes, que es donde cae una carrera o un robo reciente.
+	 */
 	private addRefreshTombstone(store: OAuthStore, hash: string, familyId: string, expiresAt: number): boolean {
 		if (store.usedRefreshTokens.some((item) => matchesHash(item.hash, hash))) return true;
-		const familyCount = store.usedRefreshTokens.filter((item) => item.familyId === familyId).length;
-		if (familyCount >= MAX_REFRESH_TOMBSTONES_PER_FAMILY || store.usedRefreshTokens.length >= MAX_REFRESH_TOMBSTONES) {
-			return false;
+		const family = store.usedRefreshTokens.filter((item) => item.familyId === familyId);
+		if (family.length >= MAX_REFRESH_TOMBSTONES_PER_FAMILY) {
+			const discarded = new Set(family.slice(0, family.length - MAX_REFRESH_TOMBSTONES_PER_FAMILY + 1));
+			store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => !discarded.has(item));
 		}
+		if (store.usedRefreshTokens.length >= MAX_REFRESH_TOMBSTONES) return false;
 		store.usedRefreshTokens.push({ hash, familyId, expiresAt });
 		return true;
 	}
@@ -1599,6 +2083,7 @@ export class OAuthService {
 	private removeFamily(store: OAuthStore, familyId: string): void {
 		store.grants = store.grants.filter((grant) => grant.familyId !== familyId);
 		store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => item.familyId !== familyId);
+		store.redeemedCodes = store.redeemedCodes.filter((item) => item.familyId !== familyId);
 	}
 
 	private enqueueFamilyRevocation(store: OAuthStore, grant: StoredGrant): void {
@@ -1681,9 +2166,11 @@ export class OAuthService {
 	async handleRevoke(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		let release: (() => void) | undefined;
 		try {
-			release = this.enterPublicEndpoint(req, 'revoke');
+			this.enterRateLimit(req, 'revoke');
 			if (req.method !== 'POST') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
-			const form = await readForm(req);
+			// Primero el formulario, después la ranura: ver `enterRateLimit`.
+			const form = await readForm(req, this.formReadTimeoutMs);
+			release = this.enterConcurrency('revoke');
 			const token = one(form, 'token');
 			const clientId = one(form, 'client_id');
 			const hash = digest(token!);
@@ -1719,7 +2206,7 @@ export class OAuthService {
 			// Solo lectura: sin clonar el store entero en cada petición (ver
 			// `loadStoreReadOnly`).
 			const store = await this.loadStoreReadOnly();
-			const grant = store.grants.find((item) => matchesHash(item.accessHash, hash));
+			const grant = this.grantByAccessHash(store, hash);
 			if (
 				!grant ||
 				grant.provider !== 'lumbre-web' ||
@@ -1735,6 +2222,34 @@ export class OAuthService {
 		}
 	}
 
+	/**
+	 * Grant cuyo access tiene este hash, por índice y no recorriendo la lista
+	 * (hallazgo 9 del audit de abuso del 10 oct 2026: con 10 000 grants, el
+	 * `find` con `timingSafeEqual` por grant costaba ~1,7 ms de event loop en
+	 * CADA `/mcp`, también con tokens inventados).
+	 *
+	 * COHERENCIA: el índice se ata a la IDENTIDAD del objeto store del que
+	 * salió y se rehace en cuanto llega otro. Eso basta porque la caché nunca
+	 * se muta en sitio, solo se sustituye (`adoptStore`, `invalidateStore`):
+	 * altas, rotaciones, revocaciones, purgas y la relectura de `ensureReady`
+	 * producen todas un objeto nuevo. No hay un segundo sitio que mantener.
+	 *
+	 * La búsqueda en el `Map` no es en tiempo constante, pero la clave es el
+	 * SHA-256 del token presentado: quien llama no puede elegir sus bits, así
+	 * que no hay prefijo que ir afinando. Lo encontrado se confirma igualmente
+	 * con `matchesHash`, como el resto de comparaciones de credencial.
+	 */
+	private grantByAccessHash(
+		store: DeepReadonly<OAuthStore>,
+		hash: string
+	): DeepReadonly<StoredGrant> | undefined {
+		if (this.accessIndex?.store !== store) {
+			this.accessIndex = { store, byHash: new Map(store.grants.map((grant) => [grant.accessHash, grant])) };
+		}
+		const grant = this.accessIndex.byHash.get(hash);
+		return grant && matchesHash(grant.accessHash, hash) ? grant : undefined;
+	}
+
 	isOAuthAccessToken(token: string): boolean {
 		return token.startsWith(ACCESS_PREFIX);
 	}
@@ -1745,6 +2260,7 @@ export class OAuthService {
 			if (await pathExists(this.storePath())) throw new Error('store OAuth presente sin su clave');
 		}
 		const key = await this.key();
+		await this.removeOrphanTemps();
 		// Readiness NO se contesta desde la caché: la gracia de `/readyz` es
 		// afirmar que el fichero de estado se puede leer y descifrar AHORA.
 		//
@@ -1827,6 +2343,49 @@ export class OAuthService {
 	}
 
 	/**
+	 * Borra los temporales huérfanos de `ORPHAN_TEMP_PATTERN`. UNA vez por
+	 * proceso, en el primer `ensureReady`, que en producción es el del
+	 * arranque (`http.ts` no abre el listener hasta que pasa).
+	 *
+	 * Corre DENTRO de la cola de escritura: así ninguna escritura de este
+	 * proceso tiene su temporal a medias mientras se borra, y un temporal que
+	 * casa el patrón solo puede ser de un proceso anterior. Eso descansa en la
+	 * misma premisa que la caché del store: un solo proceso escribe aquí (ver
+	 * `cachedStore`).
+	 *
+	 * No lanza: un temporal que no se pudo borrar no impide arrancar. Deja una
+	 * línea con el recuento, sin nombres (el nombre lleva un pid y nada más,
+	 * pero no hace falta).
+	 */
+	private async removeOrphanTemps(): Promise<void> {
+		if (this.orphanTempsRemoved) return;
+		this.orphanTempsRemoved = true;
+		const job = this.writeQueue.then(async () => {
+			let names: string[];
+			try {
+				names = await readdir(this.stateDir);
+			} catch {
+				return;
+			}
+			let removed = 0;
+			for (const name of names) {
+				if (!ORPHAN_TEMP_PATTERN.test(name)) continue;
+				try {
+					await unlink(join(this.stateDir, name));
+					removed += 1;
+				} catch {
+					// Lo intentará el siguiente arranque.
+				}
+			}
+			if (removed > 0) {
+				console.error(`[lumbre-mcp-oauth] ${removed} temporal(es) huérfano(s) de una escritura interrumpida borrado(s)`);
+			}
+		});
+		this.writeQueue = job;
+		await job;
+	}
+
+	/**
 	 * Barrido periódico: lo que este relé guarda de una credencial que Lumbre
 	 * ya no reconoce se borra aquí, sin esperar a que el cliente vuelva.
 	 *
@@ -1840,9 +2399,12 @@ export class OAuthService {
 	 * QUÉ HACE, en orden y de una en una (nunca en paralelo contra Lumbre):
 	 *   1. La poda de siempre (`mutateStore`): familias y códigos caducados
 	 *      pasan a la outbox. Así la caducidad deja de depender del tráfico.
-	 *   2. Por cada grant: introspección. Si Lumbre responde un `active: false`
-	 *      EXPLÍCITO, se purga (`purgeInactiveGrant`) y su huella de notas se
-	 *      va con él.
+	 *   2. Por cada grant: introspección. Primero se pregunta por TODOS y
+	 *      después se purga (`purgeInactiveGrant`, y su huella de notas se va
+	 *      con él) cada uno al que Lumbre respondió un `active: false`
+	 *      EXPLÍCITO, salvo que salten demasiados a la vez: ver
+	 *      `MASS_PURGE_MIN_GRANTS`. Si la pasada se corta a medias, no se
+	 *      purga ninguno de esa pasada.
 	 *   3. Por cada pendiente de la outbox: el `flush` de siempre; y si sigue
 	 *      ahí y Lumbre declara inactiva su credencial, se retira (ya no hay
 	 *      nada que revocar).
@@ -1883,7 +2445,8 @@ export class OAuthService {
 			purgedGrants: 0,
 			retiredOutboxItems: 0,
 			undetermined: 0,
-			prunedNotesFiles: 0
+			prunedNotesFiles: 0,
+			heldBack: 0
 		};
 		if (this.sweepInFlight) return { ...result, skipped: true };
 		this.sweepInFlight = true;
@@ -1920,7 +2483,9 @@ export class OAuthService {
 	private async sweepStoredCredentials(result: CredentialSweepResult): Promise<void> {
 		await this.mutateStore(() => false);
 		const key = await this.key();
-		for (const grant of (await this.loadStore()).grants) {
+		const grants = (await this.loadStore()).grants;
+		const inactive: StoredGrant[] = [];
+		for (const grant of grants) {
 			let upstreamToken: string;
 			try {
 				upstreamToken = decrypt(grant.upstream, key, grantContext(grant.clientId, grant.resource, grant.scope));
@@ -1938,15 +2503,34 @@ export class OAuthService {
 				return;
 			}
 			if (state === 'mismatch') result.undetermined += 1;
-			if (state !== 'inactive') continue;
-			if (await this.purgeInactiveGrant(grant)) result.purgedGrants += 1;
+			if (state === 'inactive') inactive.push(grant);
+		}
+		// Con el freno puesto se omite SOLO lo que se apoya en un `inactive` de
+		// Lumbre: purgar grants y retirar pendientes de la outbox. El `flush` de
+		// la outbox sigue: revocar en Lumbre lo que este relé ya soltó no
+		// destruye nada que alguien esté usando.
+		const braked =
+			grants.length >= MASS_PURGE_MIN_GRANTS && inactive.length > grants.length * MASS_PURGE_MAX_RATIO;
+		if (braked) {
+			result.aborted = true;
+			result.heldBack = inactive.length;
+			// Solo recuentos, como el resto de líneas del barrido.
+			console.error(
+				`[lumbre-mcp-oauth] barrido de credenciales: freno de purga masiva, ${inactive.length} de ` +
+					`${grants.length} autorizaciones salen inactivas en Lumbre en la misma pasada; no se purga ` +
+					'ninguna y se vuelve a mirar en el siguiente ciclo'
+			);
+		} else {
+			for (const grant of inactive) {
+				if (await this.purgeInactiveGrant(grant)) result.purgedGrants += 1;
+			}
 		}
 		for (const item of (await this.loadStore()).revocationOutbox) {
 			await this.flushRevocationOutbox(item.credentialId);
 			const stillQueued = (await this.loadStoreReadOnly()).revocationOutbox.some(
 				(candidate) => candidate.credentialId === item.credentialId
 			);
-			if (!stillQueued) continue;
+			if (!stillQueued || braked) continue;
 			let upstreamToken: string;
 			try {
 				upstreamToken = decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope));
@@ -2122,18 +2706,49 @@ export class OAuthService {
 			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 		}
 		if (await pathExists(this.storePath())) throw new Error('store OAuth presente sin su clave');
+		// La clave se escribe ENTERA en un temporal con `fsync` y solo después
+		// aparece con su nombre (H9 del audit de recuperación del 10 oct 2026).
+		// Antes se abría `oauth.key` con `wx` y se escribía dentro: un corte
+		// entre el `open` y el `sync` dejaba una clave vacía y el siguiente
+		// arranque fallaba con «clave inválida» hasta borrarla a mano.
+		//
+		// `link` y no `rename`: los dos publican el fichero de forma atómica,
+		// pero `rename` PISA un destino que ya exista, y eso perdería lo que
+		// daba el `wx`: si dos arranques generan clave a la vez, gana uno y el
+		// otro lee la suya (`EEXIST`), en vez de quedarse cada uno con una
+		// distinta. El temporal casa con `ORPHAN_TEMP_PATTERN`, así que si el
+		// corte llega antes de publicarlo lo borra el siguiente arranque.
 		const key = randomBytes(32);
-		const handle = await open(keyPath, 'wx', 0o600).catch(async (error: NodeJS.ErrnoException) => {
-			if (error.code !== 'EEXIST') throw error;
-			return undefined;
-		});
-		if (handle) {
+		const temp = `${keyPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+		let created = false;
+		try {
+			const handle = await open(temp, 'wx', 0o600);
 			try {
 				await handle.writeFile(key.toString('base64url'), 'utf8');
 				await handle.sync();
 			} finally {
 				await handle.close();
 			}
+			try {
+				await this.linkFile(temp, keyPath);
+				created = true;
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === 'ENOTSUP' || code === 'EPERM') {
+					// Sistema de ficheros sin enlaces duros (algunos montajes FUSE o
+					// SMB): se vuelve a lo de antes, `wx` directo sobre `oauth.key`,
+					// con el contenido ya escrito y su `fsync`. Conserva la
+					// exclusividad; lo que pierde ahí es solo la atomicidad frente a
+					// un corte, que es como estaba antes de H9.
+					created = await writeExclusive(keyPath, key.toString('base64url'));
+				} else if (code !== 'EEXIST') {
+					throw error;
+				}
+			}
+		} finally {
+			await unlink(temp).catch(() => undefined);
+		}
+		if (created) {
 			await syncDirectory(this.stateDir);
 			this.encryptionKey = key;
 		} else {
@@ -2227,7 +2842,8 @@ export class OAuthService {
 					usedRefreshTokens: [],
 					authorizationRequests: [],
 					authorizationCodes: [],
-					revocationOutbox: []
+					revocationOutbox: [],
+					redeemedCodes: []
 				};
 			}
 			throw error;
@@ -2313,7 +2929,12 @@ export class OAuthService {
 				store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => item.expiresAt > now);
 				const requestsBefore = store.authorizationRequests.length;
 				store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > now);
-				housekeeping ||= usedBefore !== store.usedRefreshTokens.length || requestsBefore !== store.authorizationRequests.length;
+				const redeemedBefore = store.redeemedCodes.length;
+				store.redeemedCodes = store.redeemedCodes.filter((item) => item.expiresAt > now);
+				housekeeping ||=
+					usedBefore !== store.usedRefreshTokens.length ||
+					requestsBefore !== store.authorizationRequests.length ||
+					redeemedBefore !== store.redeemedCodes.length;
 				changed = mutator(store) || housekeeping;
 				// La poda de la outbox va DESPUÉS del mutador: así lo que el
 				// mutador acabe de encolar entra ya en la cuenta del tope y no

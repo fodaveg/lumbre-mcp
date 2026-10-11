@@ -609,7 +609,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await restarted.resolveAccessToken(grants[1]!.access)).toBeUndefined();
 	});
 
-	it('el cap por familia revoca fail-safe sin crecer ni bloquear la rotación', async () => {
+	it('el cap por familia descarta la tombstone más antigua (FIFO) sin crecer ni revocar', async () => {
 		const stateDir = await newStateDir();
 		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
@@ -630,13 +630,56 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		const capped = new OAuthService({ stateDir, fetch: oauthFetch() });
 		const cappedBase = await listen(capped);
-		expect((await refresh(cappedBase, String(issued.refresh_token))).status).toBe(400);
+		expect((await refresh(cappedBase, String(issued.refresh_token))).status).toBe(200);
 		const persisted = JSON.parse(await readFile(storePath, 'utf8')) as {
-			grants: unknown[];
-			usedRefreshTokens: Array<{ familyId: string }>;
+			grants: Array<{ familyId: string }>;
+			usedRefreshTokens: Array<{ hash: string; familyId: string }>;
 		};
-		expect(persisted.grants).toEqual([]);
-		expect(persisted.usedRefreshTokens.some((item) => item.familyId === grant.familyId)).toBe(false);
+		expect(persisted.grants.map((item) => item.familyId)).toEqual([grant.familyId]);
+		const family = persisted.usedRefreshTokens.filter((item) => item.familyId === grant.familyId);
+		expect(family).toHaveLength(64);
+		// Sale la más antigua y entra la del refresh que se acaba de rotar.
+		expect(family.map((item) => item.hash)).not.toContain('familia-cap-0');
+		expect(family.map((item) => item.hash)).toContain('familia-cap-1');
+		expect(family.at(-1)!.hash).toBe(createHash('sha256').update(String(issued.refresh_token), 'utf8').digest('base64url'));
+	});
+
+	it('65 rotaciones legítimas seguidas no revocan la familia (M1)', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch(),
+			// Este test mide el tope de tombstones, no el límite por IP de `/token`.
+			publicLimits: { token: { requestsPerMinute: 1_000, concurrent: 16 } }
+		});
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		const history = [String(issued.refresh_token)];
+		let current = { access: String(issued.access_token), refresh: String(issued.refresh_token) };
+		for (let index = 0; index < 65; index += 1) {
+			const response = await refresh(baseUrl, current.refresh);
+			expect(response.status, `rotación ${index + 1}`).toBe(200);
+			const body = (await response.json()) as { access_token: string; refresh_token: string };
+			current = { access: body.access_token, refresh: body.refresh_token };
+			history.push(current.refresh);
+		}
+		expect(await oauth.resolveAccessToken(current.access)).toBe(UPSTREAM_TOKEN);
+		const persisted = JSON.parse(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')) as {
+			grants: unknown[];
+			usedRefreshTokens: unknown[];
+		};
+		expect(persisted.grants).toHaveLength(1);
+		expect(persisted.usedRefreshTokens).toHaveLength(64);
+
+		// El refresh más antiguo ya salió de las tombstones: es un refresh
+		// desconocido, 400 y nada más; la familia sigue viva.
+		expect((await refresh(baseUrl, history[0]!)).status).toBe(400);
+		expect(await oauth.resolveAccessToken(current.access)).toBe(UPSTREAM_TOKEN);
+		// Uno reciente SÍ sigue vigilado: su replay revoca la familia entera.
+		expect((await refresh(baseUrl, history.at(-2)!)).status).toBe(400);
+		expect(await oauth.resolveAccessToken(current.access)).toBeUndefined();
+		expect((await refresh(baseUrl, current.refresh)).status).toBe(400);
 	});
 
 	it('store v3 ya sobre cap se rechaza intacto y no pierde la credencial', async () => {
@@ -917,9 +960,9 @@ describe('OAuth 2.1 para claude.ai', () => {
 			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 300 } },
 			// Este test mide la caché CIMD, no los presupuestos: hace 130
 			// autorizaciones en un segundo, muy por encima de lo que permite el
-			// presupuesto global (60/min) y el de por cliente. Se sube igual que
+			// presupuesto global (60/min), el de por cliente y el de por IP. Se sube igual que
 			// ya se subía el límite por IP, por el mismo motivo.
-			authorizeBudget: { perClientPerMinute: 300, globalPerMinute: 300 }
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
 		});
 		const baseUrl = await listen(oauth);
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
@@ -932,6 +975,64 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// CLIENT_ID fue la entrada LRU y ya debe volver a consultarse.
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
 		expect(metadataCalls).toBe(130);
+	});
+
+	it('al arrancar borra los temporales huérfanos del store y de la clave, y nada más (I3/H10)', async () => {
+		const stateDir = await newStateDir();
+		await new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady();
+		const orphans = ['oauth-store.json.4242.0123456789ab.tmp', 'oauth.key.77.abcdefabcdef.tmp'];
+		const foreign = ['.notes-seen-0123456789abcdef.json.1.tmp', 'oauth-store.json.bak', 'oauth-store.json.tmp'];
+		for (const name of [...orphans, ...foreign]) await writeFile(join(stateDir, name), '{}', { mode: 0o600 });
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const restarted = new OAuthService({ stateDir, fetch: oauthFetch() });
+			await restarted.ensureReady();
+			const names = await readdir(stateDir);
+			for (const name of orphans) expect(names).not.toContain(name);
+			for (const name of [...foreign, 'oauth.key']) expect(names).toContain(name);
+			expect(errors.mock.calls.map((call) => call.join(' ')).join('\n')).toMatch(/2 temporal\(es\) huérfano/);
+			// Solo una vez por proceso: un temporal que aparezca después (el de
+			// una escritura en curso, en la vida real) no se toca.
+			await writeFile(join(stateDir, orphans[0]!), '{}', { mode: 0o600 });
+			await restarted.ensureReady();
+			expect(await readdir(stateDir)).toContain(orphans[0]);
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
+	it('la clave se publica completa y sin temporal; dos arranques a la vez acaban con la MISMA (H9)', async () => {
+		const stateDir = await newStateDir();
+		const first = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const second = new OAuthService({ stateDir, fetch: oauthFetch() });
+		await Promise.all([first.ensureReady(), second.ensureReady()]);
+		const names = await readdir(stateDir);
+		expect(names.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+		const keyPath = join(stateDir, 'oauth.key');
+		expect(await readFile(keyPath, 'utf8')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
+		// Lo que cifra uno lo descifra el otro: misma clave en memoria.
+		await issueTokens(await listen(first));
+		await expect(second.ensureReady()).resolves.toBeUndefined();
+	});
+
+	it.each(['ENOTSUP', 'EPERM'])('sin enlaces duros (%s) la clave se crea con wx, completa y sin temporal (H9)', async (code) => {
+		const stateDir = await newStateDir();
+		let linkCalls = 0;
+		const linkFile = async (): Promise<void> => {
+			linkCalls += 1;
+			throw Object.assign(new Error('sin enlaces duros'), { code });
+		};
+		const first = new OAuthService({ stateDir, fetch: oauthFetch(), linkFile });
+		await first.ensureReady();
+		expect(linkCalls).toBe(1);
+		const keyPath = join(stateDir, 'oauth.key');
+		expect(await readFile(keyPath, 'utf8')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
+		expect((await readdir(stateDir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+		// Es la clave que usa el proceso: lo que cifra lo lee otro desde disco.
+		await issueTokens(await listen(first));
+		await expect(new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady()).resolves.toBeUndefined();
 	});
 
 	it('store sin clave o con clave incoherente falla cerrado en readiness', async () => {
@@ -1279,6 +1380,112 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(replay.status).toBe(400);
 	});
 
+	it('reutilizar un código ya canjeado revoca la familia emitida con él, también tras reiniciar (B3)', async () => {
+		const stateDir = await newStateDir();
+		let revokeCalls = 0;
+		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } });
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		const storeText = await readFile(join(stateDir, 'oauth-store.json'), 'utf8');
+		expect(storeText).not.toContain(code);
+
+		// Un código cualquiera no toca nada.
+		const restarted = new OAuthService({ stateDir, fetch: fetchFn });
+		const restartedBase = await listen(restarted);
+		const replay = (value: string) => fetch(`${restartedBase}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code', code: value, client_id: CLIENT_ID, redirect_uri: OAUTH_CALLBACK,
+				resource: OAUTH_RESOURCE, code_verifier: VERIFIER
+			})
+		});
+		expect((await replay('lm_code_no-existe')).status).toBe(400);
+		expect(await restarted.resolveAccessToken(String(issued.access_token))).toBe(UPSTREAM_TOKEN);
+		expect(revokeCalls).toBe(0);
+
+		// El código de verdad, otra vez: 400 y la familia entera fuera.
+		const reused = await replay(code);
+		expect(reused.status).toBe(400);
+		expect(((await reused.json()) as { error: string }).error).toBe('invalid_grant');
+		expect(await restarted.resolveAccessToken(String(issued.access_token))).toBeUndefined();
+		expect((await refresh(restartedBase, String(issued.refresh_token))).status).toBe(400);
+		expect(revokeCalls).toBe(1);
+		const after = JSON.parse(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')) as {
+			grants: unknown[]; redeemedCodes: unknown[]; revocationOutbox: unknown[];
+		};
+		expect(after.grants).toEqual([]);
+		expect(after.redeemedCodes).toEqual([]);
+		expect(after.revocationOutbox).toEqual([]);
+	});
+
+	it('dos canjes concurrentes del mismo código: uno recibe tokens, el otro 400, y la familia queda revocada (B3)', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const redeem = () => fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code', code, client_id: CLIENT_ID, redirect_uri: OAUTH_CALLBACK,
+				resource: OAUTH_RESOURCE, code_verifier: VERIFIER
+			})
+		});
+		const responses = await Promise.all([redeem(), redeem()]);
+		expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+		const issued = (await responses.find((response) => response.status === 200)!.json()) as {
+			access_token: string; refresh_token: string;
+		};
+		expect(await oauth.resolveAccessToken(issued.access_token)).toBeUndefined();
+		expect((await refresh(baseUrl, issued.refresh_token)).status).toBe(400);
+	});
+
+	it('el registro de un código canjeado caduca con el código: pasado CODE_TTL ya no revoca nada', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 3_000_000;
+		const fetchFn = oauthFetch({ requestBody: pendingRequestBody(currentTime) });
+		const oauth = new OAuthService({ stateDir, fetch: fetchFn, now: () => currentTime });
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		currentTime += 5 * 60_000 + 1;
+		const late = await fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code', code, client_id: CLIENT_ID, redirect_uri: OAUTH_CALLBACK,
+				resource: OAUTH_RESOURCE, code_verifier: VERIFIER
+			})
+		});
+		expect(late.status).toBe(400);
+		expect(await oauth.resolveAccessToken(String(issued.access_token))).toBe(UPSTREAM_TOKEN);
+	});
+
+	it('el access emitido en la última hora de la familia no la sobrevive (I1)', async () => {
+		const stateDir = await newStateDir();
+		let currentTime = 4_000_000;
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch({ requestBody: pendingRequestBody(currentTime) }),
+			now: () => currentTime
+		});
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		expect(issued.expires_in).toBe(3600);
+		// Diez minutos antes del fin de la familia (30 días desde el canje).
+		currentTime += 30 * 24 * 60 * 60_000 - 10 * 60_000;
+		const rotated = await refresh(baseUrl, String(issued.refresh_token));
+		expect(rotated.status).toBe(200);
+		const body = (await rotated.json()) as { access_token: string; expires_in: number };
+		expect(body.expires_in).toBe(600);
+		expect(await oauth.resolveAccessToken(body.access_token)).toBe(UPSTREAM_TOKEN);
+		currentTime += 10 * 60_000;
+		expect(await oauth.resolveAccessToken(body.access_token)).toBeUndefined();
+	});
+
 	it('rechaza resource distinto, client_id fuera de claude.ai y redirects de CIMD', async () => {
 		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
 		expect((await beginAuthorization(baseUrl, { resource: `${OAUTH_ISSUER}/otro` })).status).toBe(400);
@@ -1453,6 +1660,37 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
 	});
 
+	it('el índice por accessHash sigue a altas, rotaciones, revocaciones y relecturas del disco (abuso #9)', async () => {
+		const stateDir = await newStateDir();
+		const farm = credentialFarm();
+		const oauth = new OAuthService({ stateDir, fetch: farm.fetch() });
+		const baseUrl = await listen(oauth);
+		const first = await issueTokens(baseUrl);
+		const [firstUpstream] = [...farm.credentials.keys()];
+		expect(await oauth.resolveAccessToken(first.access)).toBe(firstUpstream);
+		// Alta: un grant nuevo resuelve sin tocar nada más.
+		const second = await issueTokens(baseUrl);
+		const secondUpstream = [...farm.credentials.keys()][1];
+		expect(await oauth.resolveAccessToken(second.access)).toBe(secondUpstream);
+		// Rotación: el access viejo deja de resolver y el nuevo resuelve.
+		const rotated = await rotate(baseUrl, first.refresh);
+		expect(await oauth.resolveAccessToken(first.access)).toBeUndefined();
+		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
+		// Revocación.
+		expect((await revokeFromClient(baseUrl, second.access)).status).toBe(200);
+		expect(await oauth.resolveAccessToken(second.access)).toBeUndefined();
+		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
+		// Cambio externo del fichero (otro proceso revoca): la relectura de
+		// `ensureReady` lo adopta y el índice lo sigue.
+		const other = new OAuthService({ stateDir, fetch: farm.fetch() });
+		expect((await revokeFromClient(await listen(other), rotated.access)).status).toBe(200);
+		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
+		await oauth.ensureReady();
+		expect(await oauth.resolveAccessToken(rotated.access)).toBeUndefined();
+		// Y un proceso nuevo carga del disco con el índice vacío.
+		expect(await new OAuthService({ stateDir, fetch: farm.fetch() }).resolveAccessToken(rotated.access)).toBeUndefined();
+	});
+
 	it('una lectura en vuelo NO pisa una escritura que termina antes (caché por generación)', async () => {
 		/**
 		 * La carrera: `ensureReady` lanza su lectura del disco, y mientras esa
@@ -1561,7 +1799,9 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// caducado desde una salida compartida y refrescándolo después—, y con
 		// el presupuesto mirado antes de resolver se comía un 429.
 		expect(await call(`Bearer ${access}`)).toBe(200);
-		// El token en el path tampoco se ve afectado.
+		// Una credencial que el relé NO puede comprobar (token en el path o
+		// Bearer directo) sí se corta con el cupo agotado: si no, cualquier
+		// `Bearer x` llegaba a Lumbre sin límite (hallazgo 2 del audit de abuso).
 		expect((await fetch(`${baseUrl}/mcp/a1b2c3d4e5f60718293a4b5c6d7e8f90`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -1569,7 +1809,22 @@ describe('OAuth 2.1 para claude.ai', () => {
 				jsonrpc: '2.0', id: 2, method: 'initialize',
 				params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'rate', version: '1' } }
 			})
-		})).status).toBe(200);
+		})).status).toBe(429);
+		expect(await call('Bearer token-directo-cualquiera')).toBe(429);
+	});
+
+	it('una credencial que Lumbre rechazó se recuerda por su hash unos segundos, no en claro', () => {
+		let currentTime = 5_000_000;
+		const oauth = new OAuthService({ stateDir: '/nunca-se-usa', fetch: oauthFetch(), now: () => currentTime });
+		const req = { headers: {}, socket: { remoteAddress: '192.0.2.9' } } as unknown as IncomingMessage;
+		expect(oauth.isRejectedCredential('token-rechazado')).toBe(false);
+		oauth.recordUpstreamRejection(req, 'token-rechazado');
+		expect(oauth.isRejectedCredential('token-rechazado')).toBe(true);
+		expect(oauth.isRejectedCredential('otro-token')).toBe(false);
+		const remembered = (oauth as unknown as { rejectedCredentials: Map<string, number> }).rejectedCredentials;
+		expect([...remembered.keys()]).toEqual([createHash('sha256').update('token-rechazado', 'utf8').digest('base64url')]);
+		currentTime += 15_000;
+		expect(oauth.isRejectedCredential('token-rechazado')).toBe(false);
 	});
 
 	it('el presupuesto global de authorize sobrevive a la expulsión por tamaño de las ventanas por IP', async () => {
@@ -1660,6 +1915,39 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(chunked.status).toBe(413);
 		expect(chunked.cut).toBe(true);
 	}, 20_000);
+
+	it('un formulario lento no ocupa la ranura de /token y se corta con 408 al vencer el plazo (M3)', async () => {
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch(),
+			publicLimits: { token: { concurrent: 1, requestsPerMinute: 60 } },
+			formReadTimeoutMs: 300
+		}));
+		const url = new URL(`${baseUrl}/token`);
+		// Declara 100 bytes y manda 10: el servidor se queda esperando el resto.
+		const slow = new Promise<{ status: number; elapsed: number }>((resolve, reject) => {
+			const started = Date.now();
+			const request = httpRequest(
+				{
+					hostname: url.hostname, port: url.port, path: '/token', method: 'POST',
+					headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': '100' }
+				},
+				(response) => {
+					response.resume();
+					resolve({ status: response.statusCode ?? 0, elapsed: Date.now() - started });
+				}
+			);
+			request.once('error', reject);
+			request.write('grant_type');
+		});
+		// Con la única ranura de concurrencia, un refresh normal NO recibe 429
+		// mientras el lento sigue mandando: la ranura se toma tras leer.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect((await refresh(baseUrl, 'lm_rt_no-existe')).status).toBe(400);
+		const { status, elapsed } = await slow;
+		expect(status).toBe(408);
+		expect(elapsed).toBeLessThan(5_000);
+	});
 
 	it('la outbox de revocación caduca sus pendientes y no crece sin límite', async () => {
 		const stateDir = await newStateDir();
@@ -1773,7 +2061,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			stateDir: await newStateDir(),
 			fetch: twoClientsFetch,
 			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } },
-			authorizeBudget: { perClientPerMinute: 2, globalPerMinute: 300 }
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 2, globalPerMinute: 300 }
 		});
 		const baseUrl = await listen(oauth);
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
@@ -1812,6 +2100,106 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// Antes el 503 llegaba DESPUÉS del backchannel: llenar la cola dejaba
 		// mil registros creados en Lumbre que aquí ni se guardaban.
 		expect(requests).toBe(1);
+	});
+
+	it('ocho authorize concurrentes con un hueco libre crean UN registro en Lumbre, no ocho (abuso #7)', async () => {
+		const stateDir = await newStateDir();
+		let requests = 0;
+		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } });
+		const limits = {
+			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 16 } },
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
+		};
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn, ...limits }));
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		const storePath = join(stateDir, 'oauth-store.json');
+		const store = JSON.parse(await readFile(storePath, 'utf8')) as {
+			authorizationRequests: Array<Record<string, unknown>>;
+		};
+		const pending = store.authorizationRequests[0]!;
+		store.authorizationRequests = Array.from({ length: 999 }, (_, index) => ({
+			...pending,
+			requestId: `40000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+		}));
+		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
+		requests = 0;
+
+		const nearlyFull = await listen(new OAuthService({ stateDir, fetch: fetchFn, ...limits }));
+		const statuses = (await Promise.all(Array.from({ length: 8 }, () => beginAuthorization(nearlyFull))))
+			.map((response) => response.status)
+			.sort();
+		expect(statuses).toEqual([302, 503, 503, 503, 503, 503, 503, 503]);
+		expect(requests).toBe(1);
+		expect((JSON.parse(await readFile(storePath, 'utf8')) as {
+			authorizationRequests: unknown[];
+		}).authorizationRequests).toHaveLength(1_000);
+	});
+
+	it('el presupuesto de authorize es por IP primero: el client_id público no se agota desde 12 IPs (abuso #4)', async () => {
+		let requests = 0;
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } }),
+			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } }
+		}));
+		const from = async (ip: string): Promise<number> =>
+			(await fetch(authorizeUrl(baseUrl), { redirect: 'manual', headers: { 'x-forwarded-for': ip } })).status;
+		for (let index = 0; index < 12; index += 1) expect(await from(`203.0.113.${index}`)).toBe(302);
+		// Una IP legítima que llega después conecta: antes recibía 429.
+		expect(await from('198.51.100.7')).toBe(302);
+		expect(requests).toBe(13);
+
+		// Una sola IP que insiste se queda en SU cupo (3/min) y no gasta el del
+		// client_id: el 429 llega sin crear registro en Lumbre.
+		for (let index = 0; index < 3; index += 1) expect(await from('192.0.2.50')).toBe(302);
+		expect(await from('192.0.2.50')).toBe(429);
+		expect(requests).toBe(16);
+		expect(await from('198.51.100.8')).toBe(302);
+	});
+
+	it('PKCE: rechaza code_challenge_method=plain y su ausencia antes de leer el CIMD', async () => {
+		let metadataCalls = 0;
+		let backchannelCalls = 0;
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({ onMetadata: () => (metadataCalls += 1), onBackchannel: () => (backchannelCalls += 1) })
+		}));
+		const plain = await beginAuthorization(baseUrl, { code_challenge_method: 'plain', code_challenge: VERIFIER.slice(0, 43) });
+		expect(plain.status).toBe(400);
+		expect(((await plain.json()) as { error: string }).error).toBe('invalid_request');
+		const params = new URL(authorizeUrl(baseUrl)).searchParams;
+		params.delete('code_challenge_method');
+		const missing = await fetch(`${baseUrl}/authorize?${params}`, { redirect: 'manual' });
+		expect(missing.status).toBe(400);
+		expect(((await missing.json()) as { error: string }).error).toBe('invalid_request');
+		expect(missing.headers.get('location')).toBeNull();
+		expect(metadataCalls).toBe(0);
+		expect(backchannelCalls).toBe(0);
+	});
+
+	it('un CIMD de claude.ai que registra otra redirect_uri da 400 sin tocar Lumbre (B2)', async () => {
+		let backchannelCalls = 0;
+		const otherRedirect = 'https://claude.ai/api/otro_callback';
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({
+				metadataBody: JSON.stringify({
+					client_id: CLIENT_ID,
+					client_name: 'Claude',
+					redirect_uris: [OAUTH_CALLBACK, otherRedirect],
+					token_endpoint_auth_method: 'none'
+				}),
+				onBackchannel: () => (backchannelCalls += 1)
+			})
+		}));
+		const rejected = await beginAuthorization(baseUrl, { redirect_uri: otherRedirect });
+		expect(rejected.status).toBe(400);
+		expect(((await rejected.json()) as { error: string }).error).toBe('invalid_request');
+		expect(rejected.headers.get('location')).toBeNull();
+		expect(backchannelCalls).toBe(0);
+		// La URI fija de claude.ai, registrada en el mismo documento, sigue valiendo.
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		expect(backchannelCalls).toBe(1);
 	});
 
 	it('un decision=denied falsificado no aborta la autorización de otro', async () => {
@@ -2282,6 +2670,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		['un 503', { introspectStatus: 503 }],
 		['un 429 (el límite de la ruta en Lumbre)', { introspectStatus: 429 }],
 		['un 401 del canal (secreto mal configurado)', { introspectStatus: 401 }],
+		['un 404 del canal (ruta de introspección ausente en Lumbre)', { introspectStatus: 404 }],
 		['una respuesta fuera de contrato (`active:true` sin el resto)', { introspectBody: { active: true } }],
 		['un `active:false` con campos de más', { introspectBody: { active: false, motivo: 'revocada' } }],
 		['un `active` que no es booleano', { introspectBody: { active: 'false' } }]
@@ -2302,6 +2691,77 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		expect(introspections).toBe(1);
 		expect(await readFile(join(seeded.stateDir, 'oauth-store.json'), 'utf8')).toBe(seeded.storeText);
 		expect(await notesFiles()).toEqual([...seeded.files].sort());
+	});
+
+	it('freno de purga masiva: más de la mitad inactivas en una pasada (con 5 o más) no purga ninguna (I4)', async () => {
+		const stateDir = await newStateDir();
+		const farm = credentialFarm();
+		const issuing = new OAuthService({
+			stateDir,
+			fetch: farm.fetch(),
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
+		});
+		const baseUrl = await listen(issuing);
+		// `credentialFarm` fabrica tokens de 64 caracteres hasta la 5.ª
+		// credencial, y 5 es justo el mínimo del freno.
+		for (let index = 0; index < 5; index += 1) await issueTokens(baseUrl);
+		const tokens = [...farm.credentials.keys()];
+		expect(tokens).toHaveLength(5);
+		// Una revocación pendiente en la outbox, con la credencial de tokens[0]
+		// (mismo sobre cifrado, otro credentialId): el freno no debe parar su
+		// `flush`, solo su retirada por `inactive`.
+		const storePath = join(stateDir, 'oauth-store.json');
+		const seeded = JSON.parse(await readFile(storePath, 'utf8')) as {
+			grants: Array<{ credentialId: string; clientId: string; resource: string; scope: string; upstream: unknown }>;
+			revocationOutbox: unknown[];
+		};
+		const source = seeded.grants.find((grant) => grant.credentialId === farm.credentials.get(tokens[0]!))!;
+		seeded.revocationOutbox.push({
+			provider: 'lumbre-web',
+			credentialId: '33333333-3333-4333-8333-000000000001',
+			clientId: source.clientId,
+			resource: source.resource,
+			scope: source.scope,
+			upstream: source.upstream,
+			queuedAt: Date.now()
+		});
+		await writeFile(storePath, JSON.stringify(seeded), { mode: 0o600 });
+		const storeText = await readFile(storePath, 'utf8');
+
+		// 3 de 5 inactivas: parece un incidente de Lumbre, no bajas reales.
+		for (const token of tokens.slice(0, 3)) farm.inactive.add(token);
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			let revokeCalls = 0;
+			const held = await new OAuthService({
+				stateDir,
+				fetch: farm.fetch({ revokeStatus: 503, onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
+			}).sweepInactiveCredentials();
+			expect(held).toMatchObject({ aborted: true, purgedGrants: 0, retiredOutboxItems: 0, heldBack: 3 });
+			// El `flush` se intentó; Lumbre no lo aceptó y, aunque declara
+			// inactiva esa credencial, con el freno puesto la pendiente se queda.
+			expect(revokeCalls).toBe(1);
+			expect(await readFile(storePath, 'utf8')).toBe(storeText);
+			const lines = errors.mock.calls.map((call) => call.join(' ')).join('\n');
+			expect(lines).toMatch(/freno de purga masiva, 3 de 5 autorizaciones/);
+			for (const secret of [...tokens, ...farm.credentials.values()]) expect(lines).not.toContain(secret);
+
+			// Con Lumbre aceptando el revoke, el freno sigue puesto pero la
+			// outbox se vacía igual.
+			const flushed = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+			expect(flushed).toMatchObject({ aborted: true, purgedGrants: 0, heldBack: 3 });
+			const afterFlush = await readStoredState(stateDir);
+			expect(afterFlush.revocationOutbox).toEqual([]);
+			expect(afterFlush.grants).toHaveLength(5);
+		} finally {
+			errors.mockRestore();
+		}
+
+		// 2 de 5 no pasan de la mitad: se purgan como siempre.
+		farm.inactive.delete(tokens[2]!);
+		const purged = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+		expect(purged).toMatchObject({ aborted: false, purgedGrants: 2, heldBack: 0 });
+		expect((await readStoredState(stateDir)).grants).toHaveLength(3);
 	});
 
 	it('con un fallo de red o un timeout no purga nada y se corta', async () => {
