@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { BrlExistenceCache, EXISTENCE_CACHE_TTL_MS, TaskExistenceCache } from './existence-cache.js';
+import {
+	BrlExistenceCache,
+	EXISTENCE_CACHE_TTL_MS,
+	TaskExistenceCache,
+	getExistenceCachesForToken,
+	pruneIdleTokens,
+	resetExistenceCacheRegistryForTests
+} from './existence-cache.js';
 import type { LumbreBrlEntry, LumbreTask } from './lumbre-client.js';
 
 /**
@@ -92,6 +99,44 @@ describe('TaskExistenceCache', () => {
 		cache.set(task({ id: 'a' })); // refresca
 		clock.advance(EXISTENCE_CACHE_TTL_MS - 1);
 		expect(cache.get('a')).toBeDefined();
+	});
+});
+
+describe('TaskExistenceCache: privacidad en memoria', () => {
+	it('solo retiene id, parentId y archivedAt: ni contenido ni nota', () => {
+		const cache = new TaskExistenceCache();
+		cache.set(task({ id: 'a', content: 'secreto', notes: 'nota privada', parentId: 'p' }));
+		const cached = cache.get('a');
+		expect(cached).toEqual({ id: 'a', parentId: 'p', archivedAt: undefined });
+		expect(JSON.stringify(cached)).not.toContain('secreto');
+		expect(JSON.stringify(cached)).not.toContain('nota privada');
+	});
+
+	it('set y setAll podan las entradas caducadas aunque nadie las pida', () => {
+		const clock = fakeClock();
+		const cache = new TaskExistenceCache(EXISTENCE_CACHE_TTL_MS, clock.now);
+		const size = () => (cache as unknown as { entries: Map<string, unknown> }).entries.size;
+		cache.set(task({ id: 'a' }));
+		cache.setAll([task({ id: 'b' })]);
+		expect(size()).toBe(2);
+		clock.advance(EXISTENCE_CACHE_TTL_MS);
+		cache.set(task({ id: 'c' }));
+		expect(size()).toBe(1);
+		clock.advance(EXISTENCE_CACHE_TTL_MS);
+		cache.setAll([task({ id: 'd' })]);
+		expect(size()).toBe(1);
+		expect(cache.get('d')?.id).toBe('d');
+	});
+});
+
+describe('pruneIdleTokens (exportada para el barrido horario)', () => {
+	it('retira un token inactivo más de 30 min sin necesitar otro acceso', () => {
+		resetExistenceCacheRegistryForTests();
+		const first = getExistenceCachesForToken('tok', EXISTENCE_CACHE_TTL_MS, () => 1_000);
+		pruneIdleTokens(1_000 + 31 * 60 * 1000);
+		const second = getExistenceCachesForToken('tok', EXISTENCE_CACHE_TTL_MS, () => 1_000 + 31 * 60 * 1000);
+		expect(second).not.toBe(first);
+		resetExistenceCacheRegistryForTests();
 	});
 });
 

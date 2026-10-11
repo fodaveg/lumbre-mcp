@@ -1123,11 +1123,11 @@ export function subtaskFieldsNotAllowedError(taskId: string, fields: readonly st
  * `moveTaskToList` se los tragaría como no-op MUDO, así que este error es lo
  * único que le dice al modelo que no pasó nada.
  */
-export function assertTaskUsable(
-	task: LumbreTask | undefined,
+export function assertTaskUsable<T extends Pick<LumbreTask, 'parentId'>>(
+	task: T | undefined,
 	taskId: string,
 	opts: SubtaskDecision = {}
-): asserts task is LumbreTask {
+): asserts task is T {
 	if (!task) throw taskNotFoundError(taskId);
 	if (!opts.allowSubtask && task.parentId) throw subtaskNotAllowedError(taskId, opts.op);
 }

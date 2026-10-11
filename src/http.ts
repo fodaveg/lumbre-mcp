@@ -3,6 +3,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { pathToFileURL } from 'node:url';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { LumbreConfig } from './lumbre-client.js';
+import { pruneIdleTokens } from './existence-cache.js';
 import { createAccountNotesSeenStore } from './notes.js';
 import {
 	createOAuthService,
@@ -613,6 +614,7 @@ export function startCredentialSweep(
 	const run = (): void => {
 		// Dentro del ejecutor de una promesa: la llamada sale ya, y tanto un
 		// rechazo como una excepción síncrona acaban en el mismo `catch`.
+		pruneIdleTokens(Date.now());
 		void new Promise((resolve) => resolve(oauth.sweepInactiveCredentials())).catch(() => {
 			console.error('[lumbre-mcp-oauth] barrido de credenciales: falló; se reintenta en el siguiente ciclo');
 		});

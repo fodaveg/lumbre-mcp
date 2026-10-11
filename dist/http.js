@@ -2,6 +2,7 @@
 import { createServer as createHttpServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { pruneIdleTokens } from './existence-cache.js';
 import { createAccountNotesSeenStore } from './notes.js';
 import { createOAuthService, OAUTH_CHALLENGE, stopReceiving } from './oauth.js';
 import { stripToolsListSchema } from './schema-strip.js';
@@ -528,6 +529,7 @@ export function startCredentialSweep(server, oauth, options = {}) {
     const run = () => {
         // Dentro del ejecutor de una promesa: la llamada sale ya, y tanto un
         // rechazo como una excepción síncrona acaban en el mismo `catch`.
+        pruneIdleTokens(Date.now());
         void new Promise((resolve) => resolve(oauth.sweepInactiveCredentials())).catch(() => {
             console.error('[lumbre-mcp-oauth] barrido de credenciales: falló; se reintenta en el siguiente ciclo');
         });

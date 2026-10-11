@@ -54,16 +54,35 @@ export class TaskExistenceCache {
      *  ampliada no debe autorizar indirectamente una escritura que el lookup
      *  normal (`includeArchived=false`) rechazaría. */
     set(task) {
+        this.pruneExpired();
         if (task.archivedAt) {
             this.entries.delete(task.id);
             return;
         }
-        this.entries.set(task.id, { value: task, expiresAt: this.now() + this.ttlMs });
+        this.put(task);
+    }
+    put(task) {
+        const value = { id: task.id, parentId: task.parentId, archivedAt: task.archivedAt };
+        this.entries.set(task.id, { value, expiresAt: this.now() + this.ttlMs });
+    }
+    /** Poda las entradas ya caducadas: sin esto una tarea que no se vuelve a
+     *  pedir se quedaría en memoria hasta que el token se retirara por inactivo. */
+    pruneExpired() {
+        const nowMs = this.now();
+        for (const [id, entry] of this.entries) {
+            if (entry.expiresAt <= nowMs)
+                this.entries.delete(id);
+        }
     }
     /** Atajo de `set` para un lote (`listTasks`/`findTasksByIds`). */
     setAll(tasks) {
-        for (const task of tasks)
-            this.set(task);
+        this.pruneExpired();
+        for (const task of tasks) {
+            if (task.archivedAt)
+                this.entries.delete(task.id);
+            else
+                this.put(task);
+        }
     }
     /** Borra la entrada de `taskId` — cualquier mutación LOCAL sobre ese id
      *  (encolada desde ESTE proceso) la invalida, para no servir un "existe"
@@ -130,7 +149,7 @@ const IDLE_EVICT_MS = 30 * 60 * 1000;
  *  distintos antes de que `IDLE_EVICT_MS` tenga ocasión de podarlos. */
 const MAX_TOKENS = 200;
 const registryByToken = new Map();
-function pruneIdleTokens(nowMs) {
+export function pruneIdleTokens(nowMs) {
     for (const [token, bundle] of registryByToken) {
         if (nowMs - bundle.lastAccessMs > IDLE_EVICT_MS)
             registryByToken.delete(token);

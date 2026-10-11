@@ -19,6 +19,15 @@ import type { LumbreBrlEntry, LumbreTask } from './lumbre-client.js';
  */
 export const EXISTENCE_CACHE_TTL_MS = 5000;
 
+/** Lo ÚNICO que se retiene de una tarea: lo que lee `assertTaskUsable`
+ *  (`parentId`) más `archivedAt`. Sin título ni nota: la caché vive en memoria
+ *  del relé compartido y no debe acumular contenido de la persona usuaria. */
+export interface CachedTask {
+	id: string;
+	parentId: string | null | undefined;
+	archivedAt: string | null | undefined;
+}
+
 interface CacheEntry<T> {
 	value: T;
 	expiresAt: number;
@@ -35,7 +44,7 @@ interface CacheEntry<T> {
  * `computeAutoNotesRender` en `notes.ts`.
  */
 export class TaskExistenceCache {
-	private readonly entries = new Map<string, CacheEntry<LumbreTask>>();
+	private readonly entries = new Map<string, CacheEntry<CachedTask>>();
 
 	constructor(
 		private readonly ttlMs: number = EXISTENCE_CACHE_TTL_MS,
@@ -44,7 +53,7 @@ export class TaskExistenceCache {
 
 	/** Tarea cacheada y AÚN vigente para `taskId`, o `undefined` — nunca vista,
 	 *  o expirada (en cuyo caso también se poda de la caché, de paso). */
-	get(taskId: string): LumbreTask | undefined {
+	get(taskId: string): CachedTask | undefined {
 		const entry = this.entries.get(taskId);
 		if (!entry) return undefined;
 		if (entry.expiresAt <= this.now()) {
@@ -62,16 +71,35 @@ export class TaskExistenceCache {
 	 *  ampliada no debe autorizar indirectamente una escritura que el lookup
 	 *  normal (`includeArchived=false`) rechazaría. */
 	set(task: LumbreTask): void {
+		this.pruneExpired();
 		if (task.archivedAt) {
 			this.entries.delete(task.id);
 			return;
 		}
-		this.entries.set(task.id, { value: task, expiresAt: this.now() + this.ttlMs });
+		this.put(task);
+	}
+
+	private put(task: LumbreTask): void {
+		const value: CachedTask = { id: task.id, parentId: task.parentId, archivedAt: task.archivedAt };
+		this.entries.set(task.id, { value, expiresAt: this.now() + this.ttlMs });
+	}
+
+	/** Poda las entradas ya caducadas: sin esto una tarea que no se vuelve a
+	 *  pedir se quedaría en memoria hasta que el token se retirara por inactivo. */
+	private pruneExpired(): void {
+		const nowMs = this.now();
+		for (const [id, entry] of this.entries) {
+			if (entry.expiresAt <= nowMs) this.entries.delete(id);
+		}
 	}
 
 	/** Atajo de `set` para un lote (`listTasks`/`findTasksByIds`). */
 	setAll(tasks: Iterable<LumbreTask>): void {
-		for (const task of tasks) this.set(task);
+		this.pruneExpired();
+		for (const task of tasks) {
+			if (task.archivedAt) this.entries.delete(task.id);
+			else this.put(task);
+		}
 	}
 
 	/** Borra la entrada de `taskId` — cualquier mutación LOCAL sobre ese id
@@ -190,7 +218,7 @@ const MAX_TOKENS = 200;
 
 const registryByToken = new Map<string, TokenCacheBundle>();
 
-function pruneIdleTokens(nowMs: number): void {
+export function pruneIdleTokens(nowMs: number): void {
 	for (const [token, bundle] of registryByToken) {
 		if (nowMs - bundle.lastAccessMs > IDLE_EVICT_MS) registryByToken.delete(token);
 	}
