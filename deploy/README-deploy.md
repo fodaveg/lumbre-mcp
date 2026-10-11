@@ -105,8 +105,11 @@ Medidos y elegidos el 11 oct 2026 a partir de
   distinto en cada petición; el de credencial (contada por el hash de la
   credencial upstream, nunca en claro) impide que una cuenta se coma el cupo de
   las demás. Lo que no cabe recibe 429 en el acto, sin cola: una cola también
-  retiene memoria, y los clientes ya reintentan. El hueco se devuelve cuando la
-  tool termina con la app, aunque el cliente se haya ido antes.
+  retiene memoria. El cliente del SDK MCP no reintenta un 429: la llamada le
+  llega al modelo como error, y por eso los topes son holgados. El hueco se
+  devuelve cuando la tool termina con la app, aunque el cliente se haya ido
+  antes, y como mucho a los 120 s (`TOOL_CALL_SLOT_TIMEOUT_MS`), con una línea
+  en el log, por si una tool se quedara colgada.
 - **Cambiarlos.** Las dos variables se leen al arrancar; ponerlas en
   `/srv/lumbre-mcp.env` (Compose las pasa al contenedor) y recrear el
   contenedor. Un valor que no sea un entero entre 1 y 10 000 cae al defecto y
@@ -118,7 +121,9 @@ Medidos y elegidos el 11 oct 2026 a partir de
   64 cuerpos de 2 MB a medio llegar, ~225 MB; 32 `add_attachment` de 1 MiB en
   vuelo, ~320 MB de pico, que es el peor caso y lo que fija el límite en 512 MB.
   `maxConnections` es lo que acota los cuerpos a medio llegar: con 256 eran
-  ~520 MB.
+  ~520 MB. Detrás de Caddy ya no llegan cuerpos a medias (`request_buffers`,
+  ver «Cambiar el fragmento de Caddy»); el tope queda para quien alcance el
+  contenedor por la red `edge`.
 
 ### Arranque fallido y parada
 
@@ -342,12 +347,40 @@ quien lo alcance por la red `edge` sin pasar por aquí) y un HSTS con
 el dominio. `src/caddy-config.test.ts` comprueba que el `max_size` del borde no
 se despega de la constante de la app.
 
-Cada `reverse_proxy` lleva además plazos hacia el contenedor (`transport http`):
-`dial_timeout 5s`, `response_header_timeout 90s` (las cabeceras salen cuando la
-tool termina, y una tool puede encadenar varias peticiones de hasta 30 s a la
-app) y `write_timeout 60s`, igual que el `requestTimeout` del relé. Validado con
-`caddy adapt` de Caddy v2.11.6; el test comprueba que los tres bloques llevan
-los mismos valores.
+Cada `reverse_proxy` lleva además:
+
+- `request_buffers 2MiB`: el borde recibe el cuerpo entero antes de abrir la
+  petición al contenedor, así que el relé solo ve cuerpos completos y una
+  subida lenta no le ocupa una de sus 64 conexiones. Medido con Caddy real
+  delante de un upstream Node (11 oct 2026): con el búfer, el upstream recibe
+  las cabeceras cuando el cliente termina (3030 ms, con la segunda mitad del
+  cuerpo enviada a los 3000 ms); sin él, a los 14 ms.
+- Plazos hacia el contenedor (`transport http`): `dial_timeout 5s`,
+  `response_header_timeout 90s` (las cabeceras salen cuando la tool termina, y
+  una tool puede encadenar varias peticiones de hasta 30 s a la app),
+  `write_timeout 60s`, igual que el `requestTimeout` del relé, y
+  `keepalive 4s`, por debajo de los 5 s tras los que Node cierra una conexión
+  ociosa: así Caddy nunca reutiliza una que Node está cerrando (502).
+
+Validado con `caddy adapt` (Caddy v2.11.7); el test comprueba que los tres
+bloques llevan los mismos valores y que el búfer cubre `MAX_MCP_BODY_BYTES`.
+
+**Paso manual recomendado en el borde (no está en este repo).** Con el búfer,
+quien sube despacio ya no ocupa al relé, pero sí a Caddy mientras tanto. El
+plazo para leer el cuerpo del cliente es una opción GLOBAL del servidor de
+Caddy, que no cabe en este fragmento; se pone en el bloque global de
+`/srv/edge/Caddyfile` y afecta a TODOS los sitios del borde, así que hay que
+comprobar antes que ninguno necesite subidas más largas:
+
+```
+{
+	servers {
+		timeouts {
+			read_body 30s
+		}
+	}
+}
+```
 
 Validar ANTES de recargar: el `reload` de Caddy es en caliente y no corta
 conexiones vivas, pero una config inválida deja el borde entero (Lumbre, Senda,

@@ -131,7 +131,8 @@ describe('Caddy — tope del cuerpo y HSTS', () => {
 			return {
 				dial: read('dial_timeout'),
 				responseHeader: read('response_header_timeout'),
-				write: read('write_timeout')
+				write: read('write_timeout'),
+				keepalive: read('keepalive')
 			};
 		});
 		expect(new Set(timeouts.map((t) => JSON.stringify(t))).size).toBe(1);
@@ -142,6 +143,30 @@ describe('Caddy — tope del cuerpo y HSTS', () => {
 		// Una tool puede encadenar varias peticiones de 30 s a la app.
 		expect(t!.responseHeader).toBeGreaterThanOrEqual(60_000);
 		expect(t!.responseHeader).toBeLessThanOrEqual(120_000);
+		// Caddy suelta la conexión ociosa ANTES que Node: si no, puede
+		// reutilizar una que Node está cerrando y devolver un 502.
+		const { createHttpApp } = await import('./http.js');
+		const app = createHttpApp('https://app.lumbre.test', {} as never);
+		expect(t!.keepalive).toBeGreaterThan(0);
+		expect(t!.keepalive).toBeLessThan(app.keepAliveTimeout);
+	});
+
+	it('los tres reverse_proxy reciben el cuerpo entero antes de hablar con el contenedor', async () => {
+		const config = await readFile('deploy/mcp-lumbre-pro.caddy', 'utf8');
+		const blocks = reverseProxyBlocks(config);
+		expect(blocks).toHaveLength(3);
+		const edgeMax = parseBytes(/request_body\s*\{\s*max_size\s+(\S+)\s*\}/.exec(config)![1]!);
+		for (const block of blocks) {
+			const declared = /\n\s*request_buffers\s+(\S+)/.exec(block)?.[1];
+			expect(declared, block).toBeDefined();
+			const buffer = parseBytes(declared!);
+			// Cabe el cuerpo más grande que deja pasar el borde y el que acepta
+			// la app: el contenedor nunca ve una subida a medias.
+			expect(buffer).toBeGreaterThanOrEqual(MAX_MCP_BODY_BYTES);
+			expect(buffer).toBeGreaterThanOrEqual(edgeMax);
+			// …y no es un búfer sin techo por error de unidades.
+			expect(buffer).toBeLessThanOrEqual(4 * 1024 * 1024);
+		}
 	});
 
 	it('HSTS alcanza a los subdominios de este host, sin preload', async () => {
