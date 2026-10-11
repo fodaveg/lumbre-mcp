@@ -115,10 +115,14 @@ function isToolCall(body) {
  *  · `headersTimeout` 20 s: para las cabeceras, que son unos cientos de bytes.
  *  · `connectionsCheckingInterval` 5 s: cada cuánto mira Node esos dos
  *    plazos (por defecto 30 s, que podía casi duplicarlos).
- *  · `maxConnections` 256: por encima, Node cierra la conexión nueva en el
- *    acto. Ocho veces el tope global de `tools/call` en vuelo (32): sobra
- *    para Caddy, que es el único cliente legítimo, y acota los sockets que
- *    un cliente puede tener abiertos a la vez.
+ *  · `maxConnections` 64: por encima, Node cierra la conexión nueva en el
+ *    acto. Es el tope de MEMORIA de los cuerpos a medio llegar, que
+ *    `readBody` acumula antes de que nadie mire el tope de `tools/call`:
+ *    medido en `node:22-alpine` (11 oct 2026), 256 conexiones subiendo 2 MB
+ *    y reteniendo el último byte llevaban el RSS de ~90 a ~520 MB; con 64,
+ *    el peor caso son ~64 × 2 MiB. Sigue siendo el doble del tope global
+ *    de `tools/call` en vuelo (32), y Caddy, el único cliente legítimo, no
+ *    abre más conexiones que peticiones concurrentes.
  *
  * El borde tiene sus propios plazos hacia este contenedor
  * (`deploy/mcp-lumbre-pro.caddy`, `transport http`).
@@ -126,7 +130,7 @@ function isToolCall(body) {
 export const MCP_REQUEST_TIMEOUT_MS = 60_000;
 export const MCP_HEADERS_TIMEOUT_MS = 20_000;
 export const MCP_CONNECTIONS_CHECK_INTERVAL_MS = 5_000;
-export const MCP_MAX_CONNECTIONS = 256;
+export const MCP_MAX_CONNECTIONS = 64;
 /**
  * Hosts permitidos, tanto para el header `Host` (protección DNS-rebinding
  * mínima: si alguien resuelve `mcp.lumbre.pro` a este proceso desde un
