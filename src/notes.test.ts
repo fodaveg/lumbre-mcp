@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -1031,7 +1031,47 @@ describe('pruneStaleAccountNotesSeen: la caducidad de 30 días sin depender de u
 		expect(names.filter((name) => /^notes-seen-[0-9a-f]{16}\.json$/.test(name))).toHaveLength(1);
 	});
 
+	it('también poda el temporal huérfano `.notes-seen-<id>.json.<pid>.<uuid>.tmp` caducado, y no el de stdio ni el reciente', async () => {
+		const dir = join(stateDir, 'lumbre-mcp');
+		await mkdir(dir, { recursive: true });
+		const nowMs = Date.now();
+		const old = new Date(nowMs - 40 * 24 * 60 * 60 * 1000);
+		const uuid = '123e4567-e89b-12d3-a456-426614174000';
+		const orphan = `.notes-seen-0123456789abcdef.json.4242.${uuid}.tmp`;
+		const stdio = `.notes-seen.json.4242.${uuid}.tmp`;
+		const fresh = `.notes-seen-fedcba9876543210.json.4242.${uuid}.tmp`;
+		for (const name of [orphan, stdio]) {
+			await writeFile(join(dir, name), '{}');
+			await utimes(join(dir, name), old, old);
+		}
+		await writeFile(join(dir, fresh), '{}');
+		await expect(pruneStaleAccountNotesSeen(nowMs, { force: true })).resolves.toBe(1);
+		const names = await readdir(dir);
+		expect(names).not.toContain(orphan);
+		expect(names).toContain(stdio);
+		expect(names).toContain(fresh);
+	});
+
 	it('sin directorio de estado no lanza y devuelve 0', async () => {
 		await expect(pruneStaleAccountNotesSeen(Date.now(), { force: true })).resolves.toBe(0);
+	});
+});
+
+describe('huella en disco: privacidad', () => {
+	const accountFile = (token: string) => `notes-seen-${createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16)}.json`;
+
+	it('el directorio se crea 0700 y el fichero 0600', async () => {
+		await createAccountNotesSeenStore('tok-permisos').save(touchNotesSeen({}, 't', 1, '2026-07-01T00:00:00.000Z'));
+		const dir = join(stateDir, 'lumbre-mcp');
+		expect((await stat(dir)).mode & 0o777).toBe(0o700);
+		expect((await stat(join(dir, accountFile('tok-permisos')))).mode & 0o777).toBe(0o600);
+	});
+
+	it('si el rename falla no queda el temporal huérfano', async () => {
+		const dir = join(stateDir, 'lumbre-mcp');
+		// Un directorio donde debería ir el fichero hace fallar el rename.
+		await mkdir(join(dir, accountFile('tok-rename')), { recursive: true });
+		await createAccountNotesSeenStore('tok-rename').save(touchNotesSeen({}, 't', 1, '2026-07-01T00:00:00.000Z'));
+		expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
 	});
 });

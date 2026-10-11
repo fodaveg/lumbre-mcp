@@ -355,14 +355,19 @@ async function readStateFile(filename: string): Promise<NotesSeenState> {
  * fichero de cuenta del transporte HTTP.
  */
 async function writeStateFileAtomic(filename: string, state: NotesSeenState): Promise<void> {
+	let tmpPath: string | undefined;
 	try {
 		const dir = stateDir();
-		await mkdir(dir, { recursive: true });
-		const tmpPath = join(dir, `.${filename}.${process.pid}.${randomUUID()}.tmp`);
-		await writeFile(tmpPath, JSON.stringify(state));
+		// La huella es dato personal seudónimo (ids de tarea + marcas de nota):
+		// directorio y fichero solo para el usuario del proceso.
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		tmpPath = join(dir, `.${filename}.${process.pid}.${randomUUID()}.tmp`);
+		await writeFile(tmpPath, JSON.stringify(state), { mode: 0o600 });
 		await rename(tmpPath, join(dir, filename));
 	} catch {
-		// Best-effort — ver JSDoc de arriba.
+		// Best-effort — ver JSDoc de arriba. Si el temporal llegó a crearse y el
+		// rename (o la escritura) falló, no se deja huérfano en disco.
+		if (tmpPath !== undefined) await unlink(tmpPath).catch(() => undefined);
 	}
 }
 
@@ -413,6 +418,11 @@ function accountFileName(token: string): string {
  *  no matchea este patrón) ni ningún otro fichero del mismo directorio (p.
  *  ej. el store OAuth de `oauth.ts`). */
 const ACCOUNT_FILE_PATTERN = /^notes-seen-[0-9a-f]{16}\.json$/;
+
+/** Temporal huérfano de `writeStateFileAtomic` para un fichero de cuenta
+ *  (`.notes-seen-<16 hex>.json.<pid>.<uuid>.tmp`) — lo deja un proceso muerto
+ *  entre `writeFile` y `rename`; la poda lo trata como a la huella misma. */
+const ACCOUNT_TMP_PATTERN = /^\.notes-seen-[0-9a-f]{16}\.json\.\d+\.[0-9a-f-]{36}\.tmp$/;
 
 /** Ventana de limpieza de `pruneStaleAccountNotesSeen` — una cuenta que lleva un
  *  mes sin usar el transporte HTTP (token rotado, dispositivo retirado…) ya
@@ -466,7 +476,7 @@ export async function pruneStaleAccountNotesSeen(nowMs: number, opts: { force?: 
 		lastPruneAtMs.set(dir, nowMs);
 		const names = await readdir(dir);
 		for (const name of names) {
-			if (!ACCOUNT_FILE_PATTERN.test(name)) continue;
+			if (!ACCOUNT_FILE_PATTERN.test(name) && !ACCOUNT_TMP_PATTERN.test(name)) continue;
 			const filePath = join(dir, name);
 			try {
 				const info = await stat(filePath);
