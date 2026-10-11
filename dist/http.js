@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createAccountNotesSeenStore } from './notes.js';
 import { createOAuthService, OAUTH_CHALLENGE, stopReceiving } from './oauth.js';
 import { stripToolsListSchema } from './schema-strip.js';
+import { classifyStartupFailure, installGracefulShutdown } from './http-lifecycle.js';
 import { ToolCallLimiter, toolCallLimitsFromEnv } from './tool-call-limiter.js';
 // CONTRATO M1: acoplamiento con la factory real de `index.ts` (M1, ya
 // integrado). `createServer(config, opts)` NO cae en los defaults de `opts`
@@ -629,17 +630,33 @@ const isMainModule = process.argv[1] !== undefined && import.meta.url === pathTo
 if (isMainModule) {
     const port = Number(process.env.PORT) || DEFAULT_PORT;
     const baseUrl = process.env.LUMBRE_BASE_URL?.trim() || DEFAULT_BASE_URL;
-    const oauth = createOAuthService();
-    void oauth.ensureReady().then(() => {
-        const app = createHttpApp(baseUrl, oauth);
+    // La causa sale de un conjunto fijo (`classifyStartupFailure`), nunca el
+    // mensaje del error: un `SyntaxError` de `JSON.parse` copia un trozo del
+    // store. La frase de siempre se conserva para quien la busque en el log.
+    const startupFailed = (error) => {
+        console.error(`[lumbre-mcp-http] estado OAuth no disponible (causa: ${classifyStartupFailure(error)}); listener no iniciado`);
+        process.exitCode = 1;
+    };
+    // Construir el servicio también puede lanzar (`LUMBRE_APP_BASE_URL` mal
+    // puesta): sin este `try` era una excepción sin capturar y sin causa.
+    let oauth;
+    try {
+        oauth = createOAuthService();
+    }
+    catch (error) {
+        startupFailed(error);
+    }
+    const service = oauth;
+    void service?.ensureReady().then(() => {
+        const app = createHttpApp(baseUrl, service);
         // Con el almacén ya validado: barrido de arranque y luego cada hora.
-        startCredentialSweep(app, oauth);
+        startCredentialSweep(app, service);
+        // SIGTERM/SIGINT: deja de aceptar, espera lo que está en vuelo y la
+        // cola de escritura del store, con tope (`http-lifecycle.ts`).
+        installGracefulShutdown(app, { drain: () => service.whenWritesSettled() });
         app.listen(port, () => {
             console.error(`[lumbre-mcp-http] escuchando en :${port} (relé hacia ${baseUrl})`);
         });
-    }, () => {
-        console.error('[lumbre-mcp-http] estado OAuth no disponible; listener no iniciado');
-        process.exitCode = 1;
-    });
+    }, startupFailed);
 }
 //# sourceMappingURL=http.js.map
