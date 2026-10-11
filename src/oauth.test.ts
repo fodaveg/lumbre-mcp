@@ -609,7 +609,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await restarted.resolveAccessToken(grants[1]!.access)).toBeUndefined();
 	});
 
-	it('el cap por familia revoca fail-safe sin crecer ni bloquear la rotación', async () => {
+	it('el cap por familia descarta la tombstone más antigua (FIFO) sin crecer ni revocar', async () => {
 		const stateDir = await newStateDir();
 		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
@@ -630,13 +630,56 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		const capped = new OAuthService({ stateDir, fetch: oauthFetch() });
 		const cappedBase = await listen(capped);
-		expect((await refresh(cappedBase, String(issued.refresh_token))).status).toBe(400);
+		expect((await refresh(cappedBase, String(issued.refresh_token))).status).toBe(200);
 		const persisted = JSON.parse(await readFile(storePath, 'utf8')) as {
-			grants: unknown[];
-			usedRefreshTokens: Array<{ familyId: string }>;
+			grants: Array<{ familyId: string }>;
+			usedRefreshTokens: Array<{ hash: string; familyId: string }>;
 		};
-		expect(persisted.grants).toEqual([]);
-		expect(persisted.usedRefreshTokens.some((item) => item.familyId === grant.familyId)).toBe(false);
+		expect(persisted.grants.map((item) => item.familyId)).toEqual([grant.familyId]);
+		const family = persisted.usedRefreshTokens.filter((item) => item.familyId === grant.familyId);
+		expect(family).toHaveLength(64);
+		// Sale la más antigua y entra la del refresh que se acaba de rotar.
+		expect(family.map((item) => item.hash)).not.toContain('familia-cap-0');
+		expect(family.map((item) => item.hash)).toContain('familia-cap-1');
+		expect(family.at(-1)!.hash).toBe(createHash('sha256').update(String(issued.refresh_token), 'utf8').digest('base64url'));
+	});
+
+	it('65 rotaciones legítimas seguidas no revocan la familia (M1)', async () => {
+		const stateDir = await newStateDir();
+		const oauth = new OAuthService({
+			stateDir,
+			fetch: oauthFetch(),
+			// Este test mide el tope de tombstones, no el límite por IP de `/token`.
+			publicLimits: { token: { requestsPerMinute: 1_000, concurrent: 16 } }
+		});
+		const baseUrl = await listen(oauth);
+		const { code } = await authorize(baseUrl);
+		const issued = await exchangeCode(baseUrl, code);
+		const history = [String(issued.refresh_token)];
+		let current = { access: String(issued.access_token), refresh: String(issued.refresh_token) };
+		for (let index = 0; index < 65; index += 1) {
+			const response = await refresh(baseUrl, current.refresh);
+			expect(response.status, `rotación ${index + 1}`).toBe(200);
+			const body = (await response.json()) as { access_token: string; refresh_token: string };
+			current = { access: body.access_token, refresh: body.refresh_token };
+			history.push(current.refresh);
+		}
+		expect(await oauth.resolveAccessToken(current.access)).toBe(UPSTREAM_TOKEN);
+		const persisted = JSON.parse(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')) as {
+			grants: unknown[];
+			usedRefreshTokens: unknown[];
+		};
+		expect(persisted.grants).toHaveLength(1);
+		expect(persisted.usedRefreshTokens).toHaveLength(64);
+
+		// El refresh más antiguo ya salió de las tombstones: es un refresh
+		// desconocido, 400 y nada más; la familia sigue viva.
+		expect((await refresh(baseUrl, history[0]!)).status).toBe(400);
+		expect(await oauth.resolveAccessToken(current.access)).toBe(UPSTREAM_TOKEN);
+		// Uno reciente SÍ sigue vigilado: su replay revoca la familia entera.
+		expect((await refresh(baseUrl, history.at(-2)!)).status).toBe(400);
+		expect(await oauth.resolveAccessToken(current.access)).toBeUndefined();
+		expect((await refresh(baseUrl, current.refresh)).status).toBe(400);
 	});
 
 	it('store v3 ya sobre cap se rechaza intacto y no pierde la credencial', async () => {

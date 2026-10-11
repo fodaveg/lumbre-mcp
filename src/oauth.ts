@@ -32,6 +32,14 @@ const MAX_CIMD_CACHE_ITEMS = 128;
 const DEFAULT_CIMD_CACHE_MS = 5 * 60_000;
 const MAX_CIMD_CACHE_MS = 60 * 60_000;
 const MAX_REFRESH_TOMBSTONES = 10_000;
+/**
+ * Tombstones que se guardan por familia de refresh. Al llegar al tope se
+ * descarta la MÁS ANTIGUA de esa familia (FIFO) y la rotación sigue; ver
+ * `addRefreshTombstone`. Antes, llegar aquí revocaba la familia, y como las
+ * tombstones viven lo que la familia (30 días) y el access dura una hora, un
+ * uso continuado llegaba a la 65.ª rotación mucho antes de los 30 días y se
+ * desconectaba solo (M1 del audit de seguridad del 10 oct 2026).
+ */
 const MAX_REFRESH_TOMBSTONES_PER_FAMILY = 64;
 const MAX_OUTBOX_RETRIES_PER_READINESS = 1;
 const READINESS_CACHE_MS = 5_000;
@@ -1565,9 +1573,10 @@ export class OAuthService {
 			}
 			const nextRefreshExpiresAt = grant.familyExpiresAt;
 			if (!this.addRefreshTombstone(store, oldHash, grant.familyId, nextRefreshExpiresAt)) {
-				// Al alcanzar cualquier límite, la opción segura y siempre disponible
+				// Al alcanzar el tope GLOBAL, la opción segura y siempre disponible
 				// es revocar la familia. Nunca se bloquea una eliminación por intentar
-				// conservar otra tombstone.
+				// conservar otra tombstone. (El tope por familia ya no llega aquí:
+				// descarta la más antigua, ver `addRefreshTombstone`.)
 				result.outcome = 'replayed';
 				this.enqueueFamilyRevocation(store, grant);
 				return true;
@@ -1586,12 +1595,28 @@ export class OAuthService {
 		json(res, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: nextRefresh, scope: OAUTH_SCOPE });
 	}
 
+	/**
+	 * Guarda la tombstone del refresh que se acaba de rotar. Devuelve `false`
+	 * solo si el tope GLOBAL está lleno, y entonces quien llama revoca.
+	 *
+	 * Con la familia en su tope (`MAX_REFRESH_TOMBSTONES_PER_FAMILY`) descarta
+	 * primero la más antigua de ESA familia (FIFO: `push` añade al final, así
+	 * que la primera del array es la más vieja). Lo que se pierde es detectar
+	 * el replay de un refresh de hace más de 64 rotaciones: presentarlo ya no
+	 * revoca la familia, solo recibe el `invalid_grant` de un refresh
+	 * desconocido. Es un precio pequeño: un refresh robado y guardado 64 horas
+	 * sin usar, mientras el legítimo sigue rotando, ya no vale para nada; lo
+	 * que la tombstone añade es la revocación, y esa sigue intacta para las 64
+	 * más recientes, que es donde cae una carrera o un robo reciente.
+	 */
 	private addRefreshTombstone(store: OAuthStore, hash: string, familyId: string, expiresAt: number): boolean {
 		if (store.usedRefreshTokens.some((item) => matchesHash(item.hash, hash))) return true;
-		const familyCount = store.usedRefreshTokens.filter((item) => item.familyId === familyId).length;
-		if (familyCount >= MAX_REFRESH_TOMBSTONES_PER_FAMILY || store.usedRefreshTokens.length >= MAX_REFRESH_TOMBSTONES) {
-			return false;
+		const family = store.usedRefreshTokens.filter((item) => item.familyId === familyId);
+		if (family.length >= MAX_REFRESH_TOMBSTONES_PER_FAMILY) {
+			const discarded = new Set(family.slice(0, family.length - MAX_REFRESH_TOMBSTONES_PER_FAMILY + 1));
+			store.usedRefreshTokens = store.usedRefreshTokens.filter((item) => !discarded.has(item));
 		}
+		if (store.usedRefreshTokens.length >= MAX_REFRESH_TOMBSTONES) return false;
 		store.usedRefreshTokens.push({ hash, familyId, expiresAt });
 		return true;
 	}
