@@ -1619,6 +1619,37 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
 	});
 
+	it('el índice por accessHash sigue a altas, rotaciones, revocaciones y relecturas del disco (abuso #9)', async () => {
+		const stateDir = await newStateDir();
+		const farm = credentialFarm();
+		const oauth = new OAuthService({ stateDir, fetch: farm.fetch() });
+		const baseUrl = await listen(oauth);
+		const first = await issueTokens(baseUrl);
+		const [firstUpstream] = [...farm.credentials.keys()];
+		expect(await oauth.resolveAccessToken(first.access)).toBe(firstUpstream);
+		// Alta: un grant nuevo resuelve sin tocar nada más.
+		const second = await issueTokens(baseUrl);
+		const secondUpstream = [...farm.credentials.keys()][1];
+		expect(await oauth.resolveAccessToken(second.access)).toBe(secondUpstream);
+		// Rotación: el access viejo deja de resolver y el nuevo resuelve.
+		const rotated = await rotate(baseUrl, first.refresh);
+		expect(await oauth.resolveAccessToken(first.access)).toBeUndefined();
+		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
+		// Revocación.
+		expect((await revokeFromClient(baseUrl, second.access)).status).toBe(200);
+		expect(await oauth.resolveAccessToken(second.access)).toBeUndefined();
+		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
+		// Cambio externo del fichero (otro proceso revoca): la relectura de
+		// `ensureReady` lo adopta y el índice lo sigue.
+		const other = new OAuthService({ stateDir, fetch: farm.fetch() });
+		expect((await revokeFromClient(await listen(other), rotated.access)).status).toBe(200);
+		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
+		await oauth.ensureReady();
+		expect(await oauth.resolveAccessToken(rotated.access)).toBeUndefined();
+		// Y un proceso nuevo carga del disco con el índice vacío.
+		expect(await new OAuthService({ stateDir, fetch: farm.fetch() }).resolveAccessToken(rotated.access)).toBeUndefined();
+	});
+
 	it('una lectura en vuelo NO pisa una escritura que termina antes (caché por generación)', async () => {
 		/**
 		 * La carrera: `ensureReady` lanza su lectura del disco, y mientras esa

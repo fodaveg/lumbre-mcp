@@ -1018,6 +1018,12 @@ export class OAuthService {
 	private storeGeneration = 0;
 	/** Hay un `sweepInactiveCredentials` en curso; ver ahí por qué solo uno. */
 	private sweepInFlight = false;
+	/** Índice `accessHash` → grant del store del que salió; ver
+	 *  `grantByAccessHash`. */
+	private accessIndex?: {
+		store: DeepReadonly<OAuthStore>;
+		byHash: Map<string, DeepReadonly<StoredGrant>>;
+	};
 	/** La limpieza de temporales huérfanos ya corrió en este proceso; ver
 	 *  `removeOrphanTemps`. */
 	private orphanTempsRemoved = false;
@@ -2055,7 +2061,7 @@ export class OAuthService {
 			// Solo lectura: sin clonar el store entero en cada petición (ver
 			// `loadStoreReadOnly`).
 			const store = await this.loadStoreReadOnly();
-			const grant = store.grants.find((item) => matchesHash(item.accessHash, hash));
+			const grant = this.grantByAccessHash(store, hash);
 			if (
 				!grant ||
 				grant.provider !== 'lumbre-web' ||
@@ -2069,6 +2075,34 @@ export class OAuthService {
 		} catch {
 			return undefined;
 		}
+	}
+
+	/**
+	 * Grant cuyo access tiene este hash, por índice y no recorriendo la lista
+	 * (hallazgo 9 del audit de abuso del 10 oct 2026: con 10 000 grants, el
+	 * `find` con `timingSafeEqual` por grant costaba ~1,7 ms de event loop en
+	 * CADA `/mcp`, también con tokens inventados).
+	 *
+	 * COHERENCIA: el índice se ata a la IDENTIDAD del objeto store del que
+	 * salió y se rehace en cuanto llega otro. Eso basta porque la caché nunca
+	 * se muta en sitio, solo se sustituye (`adoptStore`, `invalidateStore`):
+	 * altas, rotaciones, revocaciones, purgas y la relectura de `ensureReady`
+	 * producen todas un objeto nuevo. No hay un segundo sitio que mantener.
+	 *
+	 * La búsqueda en el `Map` no es en tiempo constante, pero la clave es el
+	 * SHA-256 del token presentado: quien llama no puede elegir sus bits, así
+	 * que no hay prefijo que ir afinando. Lo encontrado se confirma igualmente
+	 * con `matchesHash`, como el resto de comparaciones de credencial.
+	 */
+	private grantByAccessHash(
+		store: DeepReadonly<OAuthStore>,
+		hash: string
+	): DeepReadonly<StoredGrant> | undefined {
+		if (this.accessIndex?.store !== store) {
+			this.accessIndex = { store, byHash: new Map(store.grants.map((grant) => [grant.accessHash, grant])) };
+		}
+		const grant = this.accessIndex.byHash.get(hash);
+		return grant && matchesHash(grant.accessHash, hash) ? grant : undefined;
 	}
 
 	isOAuthAccessToken(token: string): boolean {
