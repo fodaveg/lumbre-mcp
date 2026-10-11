@@ -210,6 +210,13 @@ quien lo alcance por la red `edge` sin pasar por aquí) y un HSTS con
 el dominio. `src/caddy-config.test.ts` comprueba que el `max_size` del borde no
 se despega de la constante de la app.
 
+Cada `reverse_proxy` lleva además plazos hacia el contenedor (`transport http`):
+`dial_timeout 5s`, `response_header_timeout 90s` (las cabeceras salen cuando la
+tool termina, y una tool puede encadenar varias peticiones de hasta 30 s a la
+app) y `write_timeout 60s`, igual que el `requestTimeout` del relé. Validado con
+`caddy adapt` de Caddy v2.11.6; el test comprueba que los tres bloques llevan
+los mismos valores.
+
 Validar ANTES de recargar: el `reload` de Caddy es en caliente y no corta
 conexiones vivas, pero una config inválida deja el borde entero (Lumbre, Senda,
 fodaveg, Vega y las demos) sirviendo la anterior sin avisar de por qué.
