@@ -960,9 +960,9 @@ describe('OAuth 2.1 para claude.ai', () => {
 			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 300 } },
 			// Este test mide la caché CIMD, no los presupuestos: hace 130
 			// autorizaciones en un segundo, muy por encima de lo que permite el
-			// presupuesto global (60/min) y el de por cliente. Se sube igual que
+			// presupuesto global (60/min), el de por cliente y el de por IP. Se sube igual que
 			// ya se subía el límite por IP, por el mismo motivo.
-			authorizeBudget: { perClientPerMinute: 300, globalPerMinute: 300 }
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
 		});
 		const baseUrl = await listen(oauth);
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
@@ -1849,7 +1849,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			stateDir: await newStateDir(),
 			fetch: twoClientsFetch,
 			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } },
-			authorizeBudget: { perClientPerMinute: 2, globalPerMinute: 300 }
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 2, globalPerMinute: 300 }
 		});
 		const baseUrl = await listen(oauth);
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
@@ -1888,6 +1888,106 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// Antes el 503 llegaba DESPUÉS del backchannel: llenar la cola dejaba
 		// mil registros creados en Lumbre que aquí ni se guardaban.
 		expect(requests).toBe(1);
+	});
+
+	it('ocho authorize concurrentes con un hueco libre crean UN registro en Lumbre, no ocho (abuso #7)', async () => {
+		const stateDir = await newStateDir();
+		let requests = 0;
+		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } });
+		const limits = {
+			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 16 } },
+			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
+		};
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn, ...limits }));
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		const storePath = join(stateDir, 'oauth-store.json');
+		const store = JSON.parse(await readFile(storePath, 'utf8')) as {
+			authorizationRequests: Array<Record<string, unknown>>;
+		};
+		const pending = store.authorizationRequests[0]!;
+		store.authorizationRequests = Array.from({ length: 999 }, (_, index) => ({
+			...pending,
+			requestId: `40000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+		}));
+		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
+		requests = 0;
+
+		const nearlyFull = await listen(new OAuthService({ stateDir, fetch: fetchFn, ...limits }));
+		const statuses = (await Promise.all(Array.from({ length: 8 }, () => beginAuthorization(nearlyFull))))
+			.map((response) => response.status)
+			.sort();
+		expect(statuses).toEqual([302, 503, 503, 503, 503, 503, 503, 503]);
+		expect(requests).toBe(1);
+		expect((JSON.parse(await readFile(storePath, 'utf8')) as {
+			authorizationRequests: unknown[];
+		}).authorizationRequests).toHaveLength(1_000);
+	});
+
+	it('el presupuesto de authorize es por IP primero: el client_id público no se agota desde 12 IPs (abuso #4)', async () => {
+		let requests = 0;
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } }),
+			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } }
+		}));
+		const from = async (ip: string): Promise<number> =>
+			(await fetch(authorizeUrl(baseUrl), { redirect: 'manual', headers: { 'x-forwarded-for': ip } })).status;
+		for (let index = 0; index < 12; index += 1) expect(await from(`203.0.113.${index}`)).toBe(302);
+		// Una IP legítima que llega después conecta: antes recibía 429.
+		expect(await from('198.51.100.7')).toBe(302);
+		expect(requests).toBe(13);
+
+		// Una sola IP que insiste se queda en SU cupo (3/min) y no gasta el del
+		// client_id: el 429 llega sin crear registro en Lumbre.
+		for (let index = 0; index < 3; index += 1) expect(await from('192.0.2.50')).toBe(302);
+		expect(await from('192.0.2.50')).toBe(429);
+		expect(requests).toBe(16);
+		expect(await from('198.51.100.8')).toBe(302);
+	});
+
+	it('PKCE: rechaza code_challenge_method=plain y su ausencia antes de leer el CIMD', async () => {
+		let metadataCalls = 0;
+		let backchannelCalls = 0;
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({ onMetadata: () => (metadataCalls += 1), onBackchannel: () => (backchannelCalls += 1) })
+		}));
+		const plain = await beginAuthorization(baseUrl, { code_challenge_method: 'plain', code_challenge: VERIFIER.slice(0, 43) });
+		expect(plain.status).toBe(400);
+		expect(((await plain.json()) as { error: string }).error).toBe('invalid_request');
+		const params = new URL(authorizeUrl(baseUrl)).searchParams;
+		params.delete('code_challenge_method');
+		const missing = await fetch(`${baseUrl}/authorize?${params}`, { redirect: 'manual' });
+		expect(missing.status).toBe(400);
+		expect(((await missing.json()) as { error: string }).error).toBe('invalid_request');
+		expect(missing.headers.get('location')).toBeNull();
+		expect(metadataCalls).toBe(0);
+		expect(backchannelCalls).toBe(0);
+	});
+
+	it('un CIMD de claude.ai que registra otra redirect_uri da 400 sin tocar Lumbre (B2)', async () => {
+		let backchannelCalls = 0;
+		const otherRedirect = 'https://claude.ai/api/otro_callback';
+		const baseUrl = await listen(new OAuthService({
+			stateDir: await newStateDir(),
+			fetch: oauthFetch({
+				metadataBody: JSON.stringify({
+					client_id: CLIENT_ID,
+					client_name: 'Claude',
+					redirect_uris: [OAUTH_CALLBACK, otherRedirect],
+					token_endpoint_auth_method: 'none'
+				}),
+				onBackchannel: () => (backchannelCalls += 1)
+			})
+		}));
+		const rejected = await beginAuthorization(baseUrl, { redirect_uri: otherRedirect });
+		expect(rejected.status).toBe(400);
+		expect(((await rejected.json()) as { error: string }).error).toBe('invalid_request');
+		expect(rejected.headers.get('location')).toBeNull();
+		expect(backchannelCalls).toBe(0);
+		// La URI fija de claude.ai, registrada en el mismo documento, sigue valiendo.
+		expect((await beginAuthorization(baseUrl)).status).toBe(302);
+		expect(backchannelCalls).toBe(1);
 	});
 
 	it('un decision=denied falsificado no aborta la autorización de otro', async () => {

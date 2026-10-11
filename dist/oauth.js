@@ -84,18 +84,33 @@ const DEFAULT_PUBLIC_LIMITS = {
     revoke: { requestsPerMinute: 60, concurrent: 16 }
 };
 /**
- * Presupuesto de `/authorize` MÁS ALLÁ del límite por IP de
- * `enterPublicEndpoint`. Cada `/authorize` válido crea un registro real en
- * app.lumbre.pro, así que limitar solo por IP dejaba barato llenar
- * `MAX_PENDING_ITEMS` desde una botnet: el coste del atacante era una IP
- * distinta cada 30 peticiones.
+ * Presupuesto de `/authorize` que se gasta justo antes de crear el registro
+ * en app.lumbre.pro (ver `enterAuthorizeBudget`). Cada `/authorize` válido
+ * crea un registro real allí, así que limitar solo con el límite por IP de
+ * `enterPublicEndpoint` (que cuenta también el callback y las peticiones
+ * inválidas) dejaba barato llenar `MAX_PENDING_ITEMS` desde una botnet.
  *
- * 10 por minuto y `client_id`, 60 por minuto en total. El uso legítimo son
- * unas pocas autorizaciones a la HORA (una persona enchufando claude.ai o
- * Codex), así que ambos números están ~100x por encima de lo real y ninguno
- * puede molestar a nadie que esté conectando de verdad.
+ * El ORDEN es lo que importa (hallazgo 4 del audit de abuso del 10 oct 2026):
+ * primero POR IP y solo después por `client_id`. Con 10 por `client_id` y sin
+ * presupuesto por IP propio, doce peticiones desde doce IPs con el `client_id`
+ * público de claude.ai bastaban para que nadie pudiera conectar claude.ai al
+ * relé durante ese minuto. Ahora:
+ *   · 3 por minuto e IP: una persona conectando claude.ai o Codex hace UNA,
+ *     y dos o tres si cancela y reintenta. Una IP no puede gastar más.
+ *   · 40 por minuto y `client_id`: red de seguridad, no el freno principal.
+ *     Agotarla exige ya repartir el ataque en 14 IPs, y aun así deja 20 del
+ *     global para los demás clientes (Codex).
+ *   · 60 por minuto en total: el techo de registros que este relé crea en
+ *     Lumbre, y con el TTL de 10 min, ~600 pendientes, por debajo de
+ *     `MAX_PENDING_ITEMS`.
+ * El uso legítimo son unas pocas autorizaciones a la HORA, así que ninguno de
+ * los tres molesta a quien conecta de verdad.
  */
-const DEFAULT_AUTHORIZE_BUDGET = { perClientPerMinute: 10, globalPerMinute: 60 };
+const DEFAULT_AUTHORIZE_BUDGET = { perIpPerMinute: 3, perClientPerMinute: 40, globalPerMinute: 60 };
+/** Techo de ventanas por IP del presupuesto de `/authorize`. Expulsar una
+ *  reinicia el cupo de ESA IP, pero el de `client_id` y el global siguen
+ *  contando por debajo, así que llenar el mapa no abre la puerta. */
+const MAX_AUTHORIZE_IP_WINDOWS = 2_048;
 /** Techo de ventanas por `client_id` vivas a la vez. El path de un `client_id`
  *  de claude.ai es libre, así que el mapa necesita un límite; 512 está muy por
  *  encima de los clientes reales (dos) y de lo que cabe en un minuto con el
@@ -588,6 +603,18 @@ function normalizeStore(value) {
         revocationOutbox
     };
 }
+/** Suma uno a la ventana de `key`, creándola si no existe; al crearla expulsa
+ *  las más antiguas si el mapa llegó a `max`. */
+function consumeBoundedWindow(windows, key, now, max) {
+    const window = windows.get(key);
+    if (window) {
+        window.count += 1;
+        return;
+    }
+    while (windows.size >= max)
+        windows.delete(windows.keys().next().value);
+    windows.set(key, { startedAt: now, count: 1 });
+}
 async function pathExists(path) {
     try {
         await stat(path);
@@ -616,6 +643,11 @@ export class OAuthService {
      *  `enterAuthorizeBudget`. */
     authorizeGlobalWindow;
     authorizeClientWindows = new Map();
+    authorizeIpWindows = new Map();
+    /** Huecos de `MAX_PENDING_ITEMS` apartados por un `/authorize` que está
+     *  hablando con Lumbre y aún no ha guardado su pendiente; ver
+     *  `reservePendingSlot`. */
+    pendingReservations = 0;
     inFlight = { authorize: 0, token: 0, revoke: 0 };
     clientMetadataCache = new Map();
     clientMetadataInFlight = new Map();
@@ -861,9 +893,13 @@ export class OAuthService {
         this.consumeRateWindow(`mcp-failed:${this.remoteAddressOf(req)}`, now);
     }
     /**
-     * Presupuesto de `/authorize` por `client_id` y global, que se gasta JUSTO
-     * ANTES de llamar al backchannel — el orden es el punto: pasada esta
-     * puerta, la petición crea un registro real en app.lumbre.pro.
+     * Presupuesto de `/authorize` por IP, por `client_id` y global, que se
+     * gasta JUSTO ANTES de llamar al backchannel — el orden es el punto:
+     * pasada esta puerta, la petición crea un registro real en app.lumbre.pro.
+     *
+     * Se mira primero la IP y no se gasta NADA si alguno de los tres está
+     * agotado: así una IP que insiste se queda en su propio cupo y no se come
+     * el del `client_id` público (ver `DEFAULT_AUTHORIZE_BUDGET`).
      *
      * NO usa `rateWindows`, y ese es justo el arreglo: ahí la expulsión por
      * TAMAÑO borra por orden de inserción, y la ventana global es de las claves
@@ -879,14 +915,20 @@ export class OAuthService {
      * Expulsar una de ellas reinicia el cupo de ESE cliente, pero el global
      * —que es el que acota el total— sigue contando por debajo.
      */
-    enterAuthorizeBudget(clientId) {
+    enterAuthorizeBudget(clientId, remote) {
         const now = this.now();
         if (this.authorizeGlobalWindow && this.authorizeGlobalWindow.startedAt + 60_000 <= now) {
             this.authorizeGlobalWindow = undefined;
         }
-        for (const [key, window] of this.authorizeClientWindows) {
-            if (window.startedAt + 60_000 <= now)
-                this.authorizeClientWindows.delete(key);
+        for (const windows of [this.authorizeIpWindows, this.authorizeClientWindows]) {
+            for (const [key, window] of windows) {
+                if (window.startedAt + 60_000 <= now)
+                    windows.delete(key);
+            }
+        }
+        const ipWindow = this.authorizeIpWindows.get(remote);
+        if (ipWindow !== undefined && ipWindow.count >= this.authorizeBudget.perIpPerMinute) {
+            throw new OAuthError('temporarily_unavailable', 'Demasiadas autorizaciones desde esta conexión; inténtalo de nuevo más tarde.', 429);
         }
         const clientWindow = this.authorizeClientWindows.get(clientId);
         if ((clientWindow !== undefined && clientWindow.count >= this.authorizeBudget.perClientPerMinute) ||
@@ -894,19 +936,50 @@ export class OAuthService {
                 this.authorizeGlobalWindow.count >= this.authorizeBudget.globalPerMinute)) {
             throw new OAuthError('temporarily_unavailable', 'Demasiadas autorizaciones en curso; inténtalo de nuevo más tarde.', 429);
         }
-        if (clientWindow) {
-            clientWindow.count += 1;
-        }
-        else {
-            while (this.authorizeClientWindows.size >= MAX_AUTHORIZE_CLIENT_WINDOWS) {
-                this.authorizeClientWindows.delete(this.authorizeClientWindows.keys().next().value);
-            }
-            this.authorizeClientWindows.set(clientId, { startedAt: now, count: 1 });
-        }
+        consumeBoundedWindow(this.authorizeIpWindows, remote, now, MAX_AUTHORIZE_IP_WINDOWS);
+        consumeBoundedWindow(this.authorizeClientWindows, clientId, now, MAX_AUTHORIZE_CLIENT_WINDOWS);
         if (this.authorizeGlobalWindow)
             this.authorizeGlobalWindow.count += 1;
         else
             this.authorizeGlobalWindow = { startedAt: now, count: 1 };
+    }
+    /**
+     * Aparta un hueco de `MAX_PENDING_ITEMS` ANTES de llamar al backchannel y
+     * devuelve cómo soltarlo (hallazgo 7 del audit de abuso del 10 oct 2026).
+     * Mirar el tope solo contra lo guardado dejaba una carrera: ocho
+     * `/authorize` concurrentes con 999 pendientes veían todos sitio, los ocho
+     * creaban su registro en Lumbre y siete se rechazaban después, huérfanos.
+     *
+     * La comprobación va DENTRO de un mutador: la cola de `mutateStore` la
+     * ordena con las escrituras, así que ve lo ya guardado (con la poda de
+     * caducadas hecha) más lo apartado por quien sigue hablando con Lumbre. El
+     * mutador no escribe nada por sí mismo.
+     */
+    async reservePendingSlot() {
+        let reserved = false;
+        try {
+            await this.mutateStore((store) => {
+                if (store.authorizationRequests.length + this.pendingReservations >= MAX_PENDING_ITEMS)
+                    return false;
+                this.pendingReservations += 1;
+                reserved = true;
+                return false;
+            });
+        }
+        catch (error) {
+            if (reserved)
+                this.pendingReservations -= 1;
+            throw error;
+        }
+        if (!reserved)
+            throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+        let released = false;
+        return () => {
+            if (released)
+                return;
+            released = true;
+            this.pendingReservations -= 1;
+        };
     }
     /** Límite por ritmo e IP Y ranura de concurrencia, de una vez: para las
      *  rutas que no leen cuerpo (`/authorize`, el callback). */
@@ -961,6 +1034,7 @@ export class OAuthService {
     }
     async handleAuthorize(req, res, url) {
         let release;
+        let releaseReservation;
         try {
             release = this.enterPublicEndpoint(req, 'authorize');
             if (req.method !== 'GET')
@@ -970,19 +1044,24 @@ export class OAuthService {
             if (!metadata.redirect_uris.some((registered) => registeredRedirectMatches(request.clientId, request.redirectUri, registered))) {
                 throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
             }
-            const clientName = metadata.client_name.trim().slice(0, 120);
-            // Las DOS puertas que faltaban antes de tocar app.lumbre.pro:
-            // presupuesto por `client_id` y global (el límite por IP de
-            // `enterPublicEndpoint` no basta: se reparte entre IPs), y el cupo
-            // de pendientes. Lo de `MAX_PENDING_ITEMS` ya se comprobaba, pero
-            // DESPUÉS del backchannel: llenar la cola dejaba mil registros
-            // creados en Lumbre que aquí ni se guardaban. Ahora se mira antes,
-            // y es barato porque el store está cacheado en memoria.
-            this.enterAuthorizeBudget(request.clientId);
-            const pendingNow = (await this.loadStore()).authorizationRequests.filter((item) => item.expiresAt > this.now()).length;
-            if (pendingNow >= MAX_PENDING_ITEMS) {
-                throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+            // La URI que el almacén aceptará guardar para este cliente, mirada
+            // AQUÍ y no solo en `normalizeStore` (B2 del audit de seguridad del
+            // 10 oct 2026). Si el CIMD de un `client_id` de claude.ai registraba
+            // otra URI, la comprobación de arriba pasaba, se creaba el registro
+            // en Lumbre y el rechazo llegaba al guardar: un 500 y un registro
+            // huérfano allí. Ahora es un 400 antes de gastar presupuesto.
+            if (!validStoredRedirect(request.clientId, request.redirectUri)) {
+                throw new OAuthError('invalid_request', 'redirect_uri no admitido para este cliente.');
             }
+            const clientName = metadata.client_name.trim().slice(0, 120);
+            // Las DOS puertas antes de tocar app.lumbre.pro: el presupuesto
+            // (por IP, por `client_id` y global; el límite por IP de
+            // `enterPublicEndpoint` no basta, se reparte entre IPs), y un hueco
+            // apartado en la cola de pendientes. Lo de `MAX_PENDING_ITEMS` se
+            // comprobaba DESPUÉS del backchannel: llenar la cola dejaba mil
+            // registros creados en Lumbre que aquí ni se guardaban.
+            this.enterAuthorizeBudget(request.clientId, this.remoteAddressOf(req));
+            releaseReservation = await this.reservePendingSlot();
             const transactionId = randomBytes(32).toString('base64url');
             let created;
             try {
@@ -1027,6 +1106,7 @@ export class OAuthService {
             oauthError(res, error);
         }
         finally {
+            releaseReservation?.();
             release?.();
         }
     }
