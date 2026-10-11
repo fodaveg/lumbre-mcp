@@ -37,7 +37,9 @@ en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
 reemplaza contenido y notas) y `unlink_list_note` (retira un vínculo) no lo
 declaran y quedan con el valor por defecto de la especificación. `list_tasks` y
 `get_task` van como solo lectura aunque actualizan la huella local de notas
-vistas del conector (estado interno, no datos del usuario en Lumbre).
+vistas del conector (no son datos del usuario en Lumbre, pero sí dato personal
+seudónimo: ids de tarea y marcas de edición ligados a una cuenta; ver su
+retención en «Qué guarda el relé»).
 
 - `add_task` — añade una tarea nueva a Lumbre (vía `POST /api/ingest`, el
   mismo endpoint que usan los Atajos de iOS). La app la encola y la
@@ -392,7 +394,9 @@ de lote, que ya las cubrían entero:
   `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`,
   `set_list_notes`, `move_to_list`, `set_list_kind` (desde MC6, tipo visible
   de un proyecto o área existente) y, desde MC7, `delete_habit` (borra un
-  hábito, sin `restore`).
+  hábito, sin `restore`). Desde el 2026-10-08: `close_project`,
+  `reopen_project`, `set_project_when` y `set_project_deadline` (cierre,
+  reapertura y fechas de un proyecto).
 
 Por qué se partió así: baja el coste fijo de `tools/list` (de 26.756 a 21.346
 caracteres, -20%) y, sobre todo, deja la frontera de "puede borrar / no puede
@@ -664,9 +668,11 @@ operación suelta. Mismo informe por op que el resto de Fase 2.
   todas sus tareas abiertas quedan hechos o cancelados con él, y `reopen_project` NO los
   reabre, así que por API es difícil de deshacer: confirma con el usuario antes.
 - `reopen_project`: `listId*` — reabre SOLO el proyecto nombrado, no sus subproyectos ni
-  sus tareas.
-- `set_project_when`: `listId*`, `when*` (`YYYY-MM-DD`, `'someday'` o `null`, que lo quita).
-- `set_project_deadline`: `listId*`, `deadline*` (`YYYY-MM-DD` o `null`, que la quita).
+  sus tareas (2026-10-08).
+- `set_project_when`: `listId*`, `when*` (`YYYY-MM-DD`, `'someday'` o `null`, que lo quita)
+  (2026-10-08).
+- `set_project_deadline`: `listId*`, `deadline*` (`YYYY-MM-DD` o `null`, que la quita)
+  (2026-10-08).
 
   Las cuatro viajan como `{ type: "mutate", taskId: listId, kind: "closeProject"|
   "reopenProject"|"setProjectWhen"|"setProjectDeadline", payload }` y no comprueban
@@ -731,7 +737,9 @@ más abajo. Lectura:
   /api/habits` (R9: mismo token que `list_tasks` y su mismo límite, **120
   peticiones/min**; devuelve solo `habits` y `habitLog`). Contra una app
   anterior a R9 (404) da un error legible: actualiza la app o revisa
-  `LUMBRE_BASE_URL`.
+  `LUMBRE_BASE_URL`. Desde el 2026-10-08 (`6452fca`) ese 404 NO cae a
+  `GET /api/export`: el volcado devolvería la cuenta entera, más de lo que
+  declara la conexión.
   Por hábito: `id`, `nombre`, `clase` (`registro`|`cadencia`|`contador`) y si
   está `archivedAt` (epoch ms). Por defecto solo los vivos; `includeArchived:
   true` incluye los archivados, con su fecha. Añade además las **últimas 3
@@ -1165,6 +1173,14 @@ Límites que se quedan, y conviene conocer:
 - **El barrido vive en el transporte HTTP.** El conector stdio local no tiene
   almacén OAuth ni lo necesita: su `notes-seen.json` es de la máquina de quien
   lo usa y el relé nunca lo toca.
+
+**Lo que el relé guarda solo en memoria.** Para no repetir la comprobación de
+existencia antes de cada mutación, el proceso recuerda unos 5 segundos, por
+credencial, de cada tarea que acaba de ver: su id, el id de su tarea madre y si
+está archivada. No guarda título, notas ni ningún otro contenido. Las entradas
+caducadas se podan en cada escritura de la caché, y la caché entera de una
+credencial sin actividad durante 30 minutos se retira en el barrido horario. No
+llega a disco y se pierde al reiniciar el proceso.
 
 **El coste de la forma heredada del path**: el token queda guardado en la
 configuración del conector del lado de Anthropic (claude.ai) y visible en

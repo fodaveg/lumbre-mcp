@@ -19,7 +19,10 @@ En claude.ai web o móvil, añade un conector personalizado con esa misma URL. N
 añadas un bearer ni un token en el path.
 
 Los clientes cachean `tools/list` al conectar: cuando cambia la superficie del
-MCP (la última vez, el 2026-09-24, al añadir seis ops nuevas de `mutate_tasks`/
+MCP (la última vez, el 2026-10-08, al añadir cuatro ops de proyecto a
+`organize` —cierre, reapertura y fechas— y hacer que `list_habits` llame a
+`GET /api/habits`; antes, el 2026-10-07, al dar `get_list` el nombre del
+padre; antes, el 2026-09-24, al añadir seis ops nuevas de `mutate_tasks`/
 `organize` en MC7; antes, el 2026-09-23, al ampliar el esquema de
 `recurrence`; antes, el 2026-09-19, al retirar las nueve tools sueltas de
 mutación y partir el lote en `mutate_tasks`/`organize`), una sesión ya abierta

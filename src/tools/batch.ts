@@ -276,9 +276,11 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 		.strict()
 ]);
 
-/** Formas ESTRICTAS de las 10 ops de `organize` (ver el JSDoc de arriba): las
+/** Formas ESTRICTAS de las 14 ops de `organize` (ver el JSDoc de arriba): las
  *  8 que tenían en `mutate_tasks` antes del reparto, byte a byte, más
- *  `set_list_kind` (MC6). */
+ *  `set_list_kind` (MC6), `delete_habit` (MC7) y las cuatro de ciclo de vida
+ *  y fechas de proyecto (`close_project`, `reopen_project`, `set_project_when`,
+ *  `set_project_deadline`, 2026-10-08). */
 export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 	z
 		.object({
