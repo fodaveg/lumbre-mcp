@@ -39,8 +39,9 @@ mcp.lumbre.pro {
 
 	# ── El token del path NUNCA debe llegar a un log ──────────────────────
 	#
-	# Las conexiones nuevas de claude.ai usarán OAuth y la URL limpia `/mcp`
-	# cuando se integre el broker; se conserva temporalmente `/mcp/<token>`.
+	# Las conexiones nuevas de claude.ai usan OAuth y la URL limpia `/mcp` (el
+	# broker de Lumbre ya está desplegado); se conserva `/mcp/<token>` para los
+	# conectores existentes mientras migran.
 	# Esa URI heredada es un secreto. Caddy vuelca la URI COMPLETA en sus
 	# entradas de `http.log.error` (502, timeout...), que van al log del
 	# contenedor `edge-caddy`.

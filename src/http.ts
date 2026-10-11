@@ -29,14 +29,16 @@ import { createServer } from './index.js';
  * petición trae una credencial. Este lote incorpora el núcleo OAuth 2.1
  * Authorization Code + PKCE: el bearer opaco se resuelve localmente al token
  * upstream cifrado y solo ESTE último se convierte en `config.token`; el
- * bearer OAuth nunca se reenvía a app.lumbre.pro. El consentimiento actual es
- * un arnés provisional y no se despliega hasta integrar el broker de Lumbre.
- * Mientras tanto se conservan el Bearer directo y `/mcp/<token>`.
+ * bearer OAuth nunca se reenvía a app.lumbre.pro. El consentimiento se abre en
+ * la sesión web de Lumbre y el canje va por backchannel (broker de Lumbre, ya
+ * desplegado). Se conservan, como formas heredadas, el Bearer directo y
+ * `/mcp/<token>`.
  *
  * SEGUNDA FORMA (tarea M2b, 2026-08-25): `POST /mcp/<token>` — el token va en
  * el PATH en vez de la cabecera. Motivo: claude.ai (web/móvil) no deja
- * configurar cabeceras en un conector personalizado. OAuth sustituirá esta vía
- * cuando exista el broker; se mantiene durante la migración. `/mcp` sigue funcionando exactamente
+ * configurar cabeceras en un conector personalizado. OAuth sustituye a esta vía
+ * (el broker ya está desplegado); se conserva para los conectores existentes
+ * durante la migración. `/mcp` sigue funcionando exactamente
  * igual para quien sí puede mandar cabecera (Claude Code, ver
  * `deploy/README-deploy.md`). Si llegan las dos formas a la vez, GANA la
  * cabecera (resuelta en `handleMcpRequest`) — es la menos expuesta de las dos (no
