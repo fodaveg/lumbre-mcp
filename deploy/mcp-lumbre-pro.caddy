@@ -72,6 +72,13 @@ mcp.lumbre.pro {
 		rewrite * /mcp
 		reverse_proxy lumbre-mcp:8787 {
 			flush_interval -1
+			request_buffers 2MiB
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 90s
+				write_timeout 60s
+				keepalive 4s
+			}
 		}
 	}
 
@@ -86,6 +93,13 @@ mcp.lumbre.pro {
 		reverse_proxy lumbre-mcp:8787 {
 			header_up Authorization "Bearer {re.tok_noauth.1}"
 			flush_interval -1
+			request_buffers 2MiB
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 90s
+				write_timeout 60s
+				keepalive 4s
+			}
 		}
 	}
 
@@ -96,6 +110,40 @@ mcp.lumbre.pro {
 			# buffer del proxy. Mismo motivo por el que `senda.caddy` sube el
 			# `read_timeout` de PocketBase.
 			flush_interval -1
+			# Cuerpo entero en el borde antes de abrir la petición al
+			# contenedor. Sin esto Caddy pasaba el cuerpo según llegaba, y 64
+			# subidas lentas con un bearer inventado ocupaban durante 60 s las
+			# 64 conexiones del relé (`MCP_MAX_CONNECTIONS`): 502 para todos.
+			# Con el búfer, el contenedor solo ve cuerpos completos. 2MiB es
+			# `MAX_MCP_BODY_BYTES` (`src/http.ts`) y cubre de sobra el
+			# `max_size 2MB` de arriba; `src/caddy-config.test.ts` lo ata.
+			request_buffers 2MiB
+			# Plazos hacia el contenedor (hallazgo 3 de
+			# `docs/audit-abuso-y-limites-20261010.md`; sin ellos, los de Go
+			# por defecto: sin tope de espera de respuesta). Los mismos en los
+			# tres `reverse_proxy` de este fichero, y
+			# `src/caddy-config.test.ts` lo comprueba:
+			#  · dial 5s: es la red Docker local; si no conecta en 5 s, el
+			#    contenedor no está.
+			#  · response_header 90s: con `enableJsonResponse` las cabeceras
+			#    salen cuando la tool ha terminado, y una tool puede encadenar
+			#    dos o tres peticiones a la app de hasta 30 s cada una
+			#    (`src/lumbre-client.ts`). Por encima, 504.
+			#  · write 60s: igual que el `requestTimeout` del relé
+			#    (`MCP_REQUEST_TIMEOUT_MS` en `src/http.ts`).
+			#  · keepalive 4s: Node cierra una conexión ociosa a los 5 s
+			#    (`keepAliveTimeout` por defecto). Si Caddy la guardara más
+			#    (2 min por defecto), podría reutilizarla justo cuando Node la
+			#    cierra y devolver un 502; cerrándola antes que Node, no.
+			# El plazo para LEER el cuerpo del cliente
+			# (`servers { timeouts { read_body … } }`) es opción global del
+			# borde y no cabe en este fragmento: ver `deploy/README-deploy.md`.
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 90s
+				write_timeout 60s
+				keepalive 4s
+			}
 		}
 	}
 

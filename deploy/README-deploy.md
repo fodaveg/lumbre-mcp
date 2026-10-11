@@ -60,6 +60,100 @@ VPS. `/readyz` comparte una sola comprobación concurrente, cacheada cinco
 segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
 `127.0.0.1`.
 
+### Una sola instancia, y por qué
+
+El relé corre como **un único proceso** y tiene que seguir así: nada de
+`docker compose up --scale`, de un segundo contenedor sobre el mismo volumen ni
+de despliegues azul/verde que dejen dos vivos a la vez. `container_name` fijo ya
+impide `--scale`, y `publicar.sh` recrea el contenedor (para el viejo y luego
+arranca el nuevo), así que nunca hay dos. Lo que se rompería con dos:
+
+- **Se pierden escrituras del store OAuth.** Cada proceso reescribe el fichero
+  entero desde su caché en memoria. Medido el 10 oct 2026
+  (`docs/audit-abuso-y-limites-20261010.md`, hallazgo 5): dos procesos sobre el
+  mismo directorio, 10 `/authorize` alternados, todos 302, y solo 5 pendientes
+  en disco. En la práctica: callbacks que responden «caducada o no existe» y
+  refresh tokens que desaparecen.
+- **Los topes se multiplican.** Los límites de ritmo de OAuth, las ventanas de
+  `/authorize` y el tope de `tools/call` en vuelo son de cada proceso: con N
+  réplicas, N veces el cupo.
+- **Las cachés divergen.** La de existencia de tareas (`src/existence-cache.ts`)
+  y la del store no se invalidan entre procesos.
+
+Si algún día hace falta escalar, antes hay que mover el store a un almacén
+compartido (o poner un lock de fichero y releer antes de cada escritura) y
+llevar los contadores a un sitio común.
+
+### Límites del transporte
+
+Medidos y elegidos el 11 oct 2026 a partir de
+`docs/audit-abuso-y-limites-20261010.md` (hallazgos 1 y 3):
+
+| Límite | Valor | Dónde se cambia | Al pasarse |
+| --- | --- | --- | --- |
+| Lotes JSON-RPC (array) en `/mcp` | no se admiten | — | 400, `-32600` |
+| `tools/call` en vuelo, todo el proceso | 32 | `LUMBRE_MCP_MAX_TOOL_CALLS` | 429, `-32003`, `Retry-After: 1` |
+| `tools/call` en vuelo, misma credencial | 8 | `LUMBRE_MCP_MAX_TOOL_CALLS_PER_BEARER` | 429, ídem |
+| Recibir la petición entera | 60 s | `MCP_REQUEST_TIMEOUT_MS` (`src/http.ts`) | 408 |
+| Recibir las cabeceras | 20 s | `MCP_HEADERS_TIMEOUT_MS` | 408 |
+| Conexiones abiertas a la vez | 64 | `MCP_MAX_CONNECTIONS` | la nueva se cierra en el acto (502 en el borde) |
+| Memoria del contenedor | 512 MB límite, 128 MB reserva | `mem_limit` / `mem_reservation` (`deploy/compose.yml`) | el kernel mata el proceso y `restart` lo levanta |
+
+- **Por qué estos topes de `tools/call`.** El uso real son 1-3 cuentas y un
+  cliente MCP lanza un puñado de tools en paralelo; 32 da para cuatro cuentas
+  con 8 a la vez cada una. El global es el que frena a quien inventa un bearer
+  distinto en cada petición; el de credencial (contada por el hash de la
+  credencial upstream, nunca en claro) impide que una cuenta se coma el cupo de
+  las demás. Lo que no cabe recibe 429 en el acto, sin cola: una cola también
+  retiene memoria. El cliente del SDK MCP no reintenta un 429: la llamada le
+  llega al modelo como error, y por eso los topes son holgados. El hueco se
+  devuelve cuando la tool termina con la app, aunque el cliente se haya ido
+  antes, y como mucho a los 120 s (`TOOL_CALL_SLOT_TIMEOUT_MS`), con una línea
+  en el log, por si una tool se quedara colgada.
+- **Cambiarlos.** Las dos variables se leen al arrancar; ponerlas en
+  `/srv/lumbre-mcp.env` (Compose las pasa al contenedor) y recrear el
+  contenedor. Un valor que no sea un entero entre 1 y 10 000 cae al defecto y
+  deja una línea en el log; nunca quita el tope.
+- **Memoria, medida en `node:22-alpine`** con las sondas del audit más una de
+  peor caso: reposo de la sonda ~90 MB (el contenedor real en reposo, 28 MiB
+  en local y 45-69 MiB en producción); 500 `tools/call` concurrentes con el
+  upstream a 3 s, 32 × 200 y el resto 429 o conexión cerrada, ~110 MB;
+  64 cuerpos de 2 MB a medio llegar, ~225 MB; 32 `add_attachment` de 1 MiB en
+  vuelo, ~320 MB de pico, que es el peor caso y lo que fija el límite en 512 MB.
+  `maxConnections` es lo que acota los cuerpos a medio llegar: con 256 eran
+  ~520 MB. Detrás de Caddy ya no llegan cuerpos a medias (`request_buffers`,
+  ver «Cambiar el fragmento de Caddy»); el tope queda para quien alcance el
+  contenedor por la red `edge`.
+
+### Arranque fallido y parada
+
+Si el relé no puede arrancar, la línea del log dice la causa, de un conjunto
+fijo y sin el texto del error (un `JSON.parse` fallido copiaría un trozo del
+store):
+
+```
+[lumbre-mcp-http] estado OAuth no disponible (causa: store_json_invalido); listener no iniciado
+```
+
+| Causa | Qué es |
+| --- | --- |
+| `clave_ausente` | hay `oauth-store.json` y falta `oauth.key` |
+| `clave_invalida` | la clave no mide 32 bytes o no descifra el store |
+| `store_json_invalido` | el store no es JSON (truncado o editado a mano) |
+| `store_incoherente` | JSON válido que no cumple el contrato |
+| `store_version` | store provisional v1/v2 |
+| `secreto_backchannel` | `LUMBRE_MCP_BACKCHANNEL_SECRET` falta o no mide 32-512 caracteres |
+| `app_base_url` | `LUMBRE_APP_BASE_URL` no es `https://app.lumbre.pro` |
+| `io:<código>` | error del sistema de ficheros (`io:EACCES`, `io:ENOSPC`…) |
+| `desconocido` | ninguna de las anteriores |
+
+Al parar (`docker stop`, deploy), `init: true` pone un init como PID 1 que
+entrega SIGTERM a Node, y el relé deja de aceptar conexiones, espera a las
+peticiones en vuelo y a la cola de escritura del store, y sale. Si en 10 s no ha
+terminado, corta lo que quede y sale con 1; `stop_grace_period: 15s` deja 5 s
+más antes del SIGKILL de Docker. Medido en local con la imagen: `docker stop`
+tarda menos de un segundo y sale con 0 (antes, 10 s y SIGKILL en cada deploy).
+
 ### Qué guarda el volumen de cada conexión y cuándo se borra
 
 Por cada conexión OAuth hay dos cosas en `/state/lumbre-mcp`: la credencial
@@ -175,10 +269,66 @@ llamadas de las tools.
 ./deploy/publicar.sh
 ```
 
-Recompila `dist/`, aborta si lo recompilado no coincide con lo commiteado (es
-`dist/` lo que viaja, no `src/`: publicar sin recompilar dejaría la versión
-vieja corriendo sin ningún síntoma), copia el árbol por `rsync` y reconstruye
-el contenedor.
+Publica **HEAD**, no el árbol de trabajo:
+
+1. Aborta si `git status --porcelain` no está vacío (cambios sin commitear o
+   ficheros sin seguimiento): lo que llega al servidor tiene que poder
+   reconstruirse desde un commit.
+2. Recompila `dist/` y aborta si lo recompilado no coincide con lo commiteado,
+   incluidos ficheros nuevos (es `dist/` lo que viaja, no `src/`: publicar sin
+   recompilar dejaría la versión vieja corriendo sin ningún síntoma).
+3. Exporta HEAD con `git archive` y lo copia con `rsync -rlptz --delete`,
+   excluyendo `.DS_Store`; después `chown -R 0:0` del destino y borra los
+   `.DS_Store` que quedaran de copias anteriores. No usa `--chown=root:root`
+   porque el `rsync` de macOS (openrsync) no lo admite; sin `-o`/`-g`, los
+   ficheros nuevos ya nacen del usuario remoto.
+4. En el servidor: etiqueta la imagen en marcha como `lumbre-mcp:anterior`,
+   construye `lumbre-mcp:<sha>` (con `LABEL org.opencontainers.image.revision`
+   = el SHA), para el contenedor saliente (`docker stop -t 15`, apagado
+   ordenado) y guarda su log ya con las líneas del apagado, levanta la nueva y
+   espera a `healthy` (tope `LUMBRE_MCP_HEALTH_TIMEOUT` en segundos reales, 90
+   por defecto; el healthcheck comprueba cada 2 s mientras arranca). Si llega,
+   la etiqueta también como `latest` y borra las etiquetas por SHA que no sean
+   la nueva ni la anterior. Si el `up` falla o no llega a healthy, para la
+   fallida, guarda su log, vuelve a `anterior` y sale con 1; `latest` no se
+   mueve.
+
+   Esta parte se sube a `/var/log/lumbre-mcp/.deploy-<fecha>-<sha12>/` y se
+   lanza con `setsid nohup`, desacoplada del ssh, con su salida en
+   `/var/log/lumbre-mcp/deploy-<fecha>-<sha>.log` (los 30 más recientes). Si el
+   canal se cae a mitad, el deploy y la vuelta atrás siguen en el servidor;
+   desde el Mac solo se sigue ese log (`tail --pid`, reenganchándose si el ssh
+   se corta) y se devuelve el código de salida que el script remoto deja al
+   terminar.
+5. Si hay `LUMBRE_TOKEN` en el entorno, corre `scripts/smoke-remote.mjs`
+   (el token va por el entorno, no por la línea de órdenes). Si falla, sale con
+   1 e imprime el comando para volver a la anterior. Sin token, lo deja
+   indicado como paso manual.
+
+Qué commit corre en el servidor:
+
+```bash
+ssh lumbre "docker inspect -f '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' lumbre-mcp"
+```
+
+Volver a la versión anterior a mano (la imagen sigue en el servidor, sin
+recompilar ni red):
+
+```bash
+ssh lumbre 'cd /srv/lumbre-mcp && docker tag lumbre-mcp:anterior lumbre-mcp:latest && \
+  LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file /srv/lumbre-mcp.env -f deploy/compose.yml up -d --no-build'
+```
+
+El `docker tag` va primero para que `latest` deje de apuntar a la rota: si no,
+un `docker compose up -d` a mano la resucitaría.
+
+**Logs de contenedores anteriores.** Compose recrea el contenedor en cada
+deploy y Docker borra su log con él, así que `publicar.sh` lo para y lo guarda
+antes en `/var/log/lumbre-mcp/<fecha UTC>-saliente-<sha12>.log.gz` (y
+`…-fallido.log.gz` si la nueva no llega a healthy), `0600`, conservando los 30
+más recientes. `LUMBRE_MCP_LOG_DIR` cambia el directorio; tiene que quedar
+fuera de `/srv/lumbre-mcp`, que `rsync --delete` vacía. Se leen con
+`zcat <fichero> | tail`.
 
 **No usa `git pull` en el servidor** porque la clave de despliegue que hay allí
 solo da acceso a `fodaveg/lumbre`, no a este repo. Si algún día se le añade una
@@ -209,6 +359,41 @@ quien lo alcance por la red `edge` sin pasar por aquí) y un HSTS con
 `includeSubDomains` — sin `preload`, que se pide desde el ápice y afecta a todo
 el dominio. `src/caddy-config.test.ts` comprueba que el `max_size` del borde no
 se despega de la constante de la app.
+
+Cada `reverse_proxy` lleva además:
+
+- `request_buffers 2MiB`: el borde recibe el cuerpo entero antes de abrir la
+  petición al contenedor, así que el relé solo ve cuerpos completos y una
+  subida lenta no le ocupa una de sus 64 conexiones. Medido con Caddy real
+  delante de un upstream Node (11 oct 2026): con el búfer, el upstream recibe
+  las cabeceras cuando el cliente termina (3030 ms, con la segunda mitad del
+  cuerpo enviada a los 3000 ms); sin él, a los 14 ms.
+- Plazos hacia el contenedor (`transport http`): `dial_timeout 5s`,
+  `response_header_timeout 90s` (las cabeceras salen cuando la tool termina, y
+  una tool puede encadenar varias peticiones de hasta 30 s a la app),
+  `write_timeout 60s`, igual que el `requestTimeout` del relé, y
+  `keepalive 4s`, por debajo de los 5 s tras los que Node cierra una conexión
+  ociosa: así Caddy nunca reutiliza una que Node está cerrando (502).
+
+Validado con `caddy adapt` (Caddy v2.11.7); el test comprueba que los tres
+bloques llevan los mismos valores y que el búfer cubre `MAX_MCP_BODY_BYTES`.
+
+**Paso manual recomendado en el borde (no está en este repo).** Con el búfer,
+quien sube despacio ya no ocupa al relé, pero sí a Caddy mientras tanto. El
+plazo para leer el cuerpo del cliente es una opción GLOBAL del servidor de
+Caddy, que no cabe en este fragmento; se pone en el bloque global de
+`/srv/edge/Caddyfile` y afecta a TODOS los sitios del borde, así que hay que
+comprobar antes que ninguno necesite subidas más largas:
+
+```
+{
+	servers {
+		timeouts {
+			read_body 30s
+		}
+	}
+}
+```
 
 Validar ANTES de recargar: el `reload` de Caddy es en caliente y no corta
 conexiones vivas, pero una config inválida deja el borde entero (Lumbre, Senda,
@@ -260,10 +445,12 @@ apagado el registro de otro host sin querer.
 ## Smoke test tras cada deploy
 
 `scripts/smoke-remote.mjs` es el guardarraíl del deploy: sin dependencias,
-habla Streamable HTTP crudo contra la URL ya desplegada.
+habla Streamable HTTP crudo contra la URL ya desplegada. `publicar.sh` lo corre
+solo si hay `LUMBRE_TOKEN` en el entorno; si no, a mano (sin el segundo
+argumento lo lee de `LUMBRE_TOKEN`, que no queda a la vista en `ps`):
 
 ```bash
-node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp "$LUMBRE_TOKEN"
+node scripts/smoke-remote.mjs https://mcp.lumbre.pro/mcp
 ```
 
 Comprueba el descubrimiento OAuth (PRM path-specific + alias y metadata del

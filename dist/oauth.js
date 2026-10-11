@@ -2570,6 +2570,20 @@ export class OAuthService {
         }
         return discarded > 0 || stamped > 0;
     }
+    /**
+     * Espera a que la cola de escritura del store quede vacía, incluidas las
+     * escrituras que se encolen mientras se espera. La usa el apagado
+     * ordenado de `http.ts` (SIGTERM) para no salir con un `rename` a medias
+     * de confirmar. No lanza: el fallo de una escritura ya lo recibe quien la
+     * pidió.
+     */
+    async whenWritesSettled() {
+        let queue;
+        do {
+            queue = this.writeQueue;
+            await queue.catch(() => undefined);
+        } while (queue !== this.writeQueue);
+    }
     async mutateStore(mutator) {
         let failure;
         let changed = false;

@@ -1070,3 +1070,207 @@ describe('POST /mcp — huella de notas SEGREGADA por cuenta (createAccountNotes
 		expect(names).not.toContain('notes-seen.json'); // el transporte HTTP nunca escribe el fichero sin sufijo
 	});
 });
+
+/**
+ * Límites de abuso del transporte (`docs/audit-abuso-y-limites-20261010.md`,
+ * hallazgos 1 y 3): lotes JSON-RPC, `tools/call` en vuelo y tiempos del
+ * listener. Cada test levanta su propia app con los topes que necesita.
+ */
+describe('POST /mcp — límites de abuso (lotes, tools/call en vuelo, tiempos)', () => {
+	const originalFetch = globalThis.fetch;
+	const apps: Server[] = [];
+
+	afterEach(async () => {
+		vi.unstubAllGlobals();
+		for (const app of apps.splice(0)) {
+			app.closeAllConnections();
+			await new Promise<void>((resolve) => app.close(() => resolve()));
+		}
+	});
+
+	async function startApp(options: import('./http.js').HttpAppOptions): Promise<string> {
+		const { createHttpApp } = await import('./http.js');
+		const { OAuthService } = await import('./oauth.js');
+		const stateDir = await mkdtemp(join(tmpdir(), 'lumbre-mcp-limites-'));
+		const app = createHttpApp('https://app.lumbre.test', new OAuthService({ stateDir }), options);
+		app.listen(0, '127.0.0.1');
+		await new Promise<void>((resolve) => app.once('listening', resolve));
+		apps.push(app);
+		return `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+	}
+
+	/**
+	 * Upstream falso que RETIENE cada petición hasta `open()`: así una
+	 * `tools/call` queda en vuelo todo lo que el test quiera. Cuenta las
+	 * llamadas que llegan a la app.
+	 */
+	function holdUpstream(appUrl: () => string) {
+		const held: Array<() => void> = [];
+		let released = false;
+		const state = { calls: 0 };
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string | URL, init?: RequestInit) => {
+				const u = String(url);
+				if (u.startsWith(appUrl())) return originalFetch(url, init);
+				state.calls += 1;
+				if (!released) await new Promise<void>((resolve) => held.push(resolve));
+				return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+			})
+		);
+		return {
+			state,
+			open() {
+				released = true;
+				for (const resolve of held.splice(0)) resolve();
+			}
+		};
+	}
+
+	function toolCallBody(id: number) {
+		return JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'list_lists', arguments: {} } });
+	}
+
+	function post(url: string, bearer: string, body: string, signal?: AbortSignal) {
+		return fetch(`${url}/mcp`, {
+			method: 'POST',
+			headers: { ...JSON_RPC_HEADERS, authorization: `Bearer ${bearer}` },
+			body,
+			signal
+		});
+	}
+
+	it('un lote JSON-RPC (array) se rechaza con 400 / -32600 sin llamar a la app', async () => {
+		let url = '';
+		const upstream = holdUpstream(() => url);
+		upstream.open();
+		url = await startApp({});
+		const batch = `[${toolCallBody(1)},${toolCallBody(2)},${toolCallBody(3)}]`;
+		for (const body of [batch, '[]']) {
+			const res = await post(url, 'tok-lote', body);
+			expect(res.status, body.slice(0, 20)).toBe(400);
+			const json = (await res.json()) as { jsonrpc: string; error: { code: number; message: string }; id: null };
+			expect(json.jsonrpc).toBe('2.0');
+			expect(json.error.code).toBe(-32600);
+			expect(json.id).toBeNull();
+		}
+		expect(upstream.state.calls).toBe(0);
+		// Un mensaje suelto sigue funcionando.
+		expect((await post(url, 'tok-lote', toolCallBody(4))).status).toBe(200);
+		expect(upstream.state.calls).toBeGreaterThan(0);
+	});
+
+	it('tools/call en vuelo: 429 al pasar el tope por credencial y el global; initialize no cuenta', async () => {
+		let url = '';
+		const upstream = holdUpstream(() => url);
+		url = await startApp({ toolCallLimits: { global: 2, perBearer: 1 } });
+
+		const a = post(url, 'tok-a', toolCallBody(1));
+		await vi.waitFor(() => expect(upstream.state.calls).toBe(1));
+
+		// Misma credencial, segunda en vuelo: tope por credencial (1).
+		const sameBearer = await post(url, 'tok-a', toolCallBody(2));
+		expect(sameBearer.status).toBe(429);
+		expect(sameBearer.headers.get('retry-after')).toBe('1');
+		const rejected = (await sameBearer.json()) as { error: { code: number }; id: unknown };
+		expect(rejected.error.code).toBe(-32003);
+		// El error lleva el `id` de la petición, para que el cliente lo case.
+		expect(rejected.id).toBe(2);
+
+		const b = post(url, 'tok-b', toolCallBody(3));
+		await vi.waitFor(() => expect(upstream.state.calls).toBe(2));
+
+		// Otra credencial cualquiera: tope global (2) lleno. Es lo que frena a
+		// quien inventa un bearer distinto en cada petición.
+		expect((await post(url, 'tok-c', toolCallBody(4))).status).toBe(429);
+		// `initialize` y `tools/list` no van a la app y no ocupan hueco.
+		expect((await post(url, 'tok-c', JSON.stringify(initializeBody(5)))).status).toBe(200);
+		expect((await post(url, 'tok-c', JSON.stringify(toolsListBody(6)))).status).toBe(200);
+		expect(upstream.state.calls).toBe(2);
+
+		upstream.open();
+		expect((await a).status).toBe(200);
+		expect((await b).status).toBe(200);
+		// Liberados: vuelve a entrar.
+		expect((await post(url, 'tok-a', toolCallBody(7))).status).toBe(200);
+	});
+
+	it('si el cliente se va, el hueco sigue ocupado hasta que la tool termina con la app', async () => {
+		let url = '';
+		const upstream = holdUpstream(() => url);
+		url = await startApp({ toolCallLimits: { global: 4, perBearer: 1 } });
+
+		const abort = new AbortController();
+		const gone = post(url, 'tok-se-va', toolCallBody(1), abort.signal).catch((error: Error) => error);
+		await vi.waitFor(() => expect(upstream.state.calls).toBe(1));
+		abort.abort();
+		expect(await gone).toBeInstanceOf(Error);
+
+		// La petición a la app sigue en vuelo: el hueco no se ha devuelto.
+		expect((await post(url, 'tok-se-va', toolCallBody(2))).status).toBe(429);
+
+		upstream.open();
+		await vi.waitFor(async () => {
+			expect((await post(url, 'tok-se-va', toolCallBody(3))).status).toBe(200);
+		});
+	});
+
+	it('el listener lleva los tiempos y el tope de conexiones elegidos (no los de Node)', async () => {
+		const {
+			MCP_CONNECTIONS_CHECK_INTERVAL_MS,
+			MCP_HEADERS_TIMEOUT_MS,
+			MCP_MAX_CONNECTIONS,
+			MCP_REQUEST_TIMEOUT_MS
+		} = await import('./http.js');
+		// `server` es la app de `beforeAll`, construida con los defectos.
+		expect(server.requestTimeout).toBe(MCP_REQUEST_TIMEOUT_MS);
+		expect(server.headersTimeout).toBe(MCP_HEADERS_TIMEOUT_MS);
+		expect(server.maxConnections).toBe(MCP_MAX_CONNECTIONS);
+		// Node 300 s por defecto; el audit pide 30-60 s.
+		expect(MCP_REQUEST_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+		expect(MCP_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
+		expect(MCP_HEADERS_TIMEOUT_MS).toBeLessThan(MCP_REQUEST_TIMEOUT_MS);
+		expect(MCP_CONNECTIONS_CHECK_INTERVAL_MS).toBeLessThanOrEqual(MCP_HEADERS_TIMEOUT_MS);
+	});
+
+	it('un cuerpo que no termina de llegar se corta con 408 al vencer requestTimeout', async () => {
+		const { connect } = await import('node:net');
+		const url = await startApp({ requestTimeoutMs: 300, headersTimeoutMs: 200, connectionsCheckingIntervalMs: 50 });
+		const port = Number(new URL(url).port);
+		const t0 = Date.now();
+		const reply = await new Promise<string>((resolve) => {
+			let data = '';
+			const socket = connect(port, '127.0.0.1', () => {
+				socket.write(
+					'POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer tok-lento\r\n' +
+						'Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"jsonrpc":'
+				);
+			});
+			socket.on('data', (chunk) => (data += chunk.toString()));
+			socket.on('close', () => resolve(data));
+			socket.on('error', () => undefined);
+		});
+		expect(reply).toMatch(/^HTTP\/1\.1 408/);
+		expect(Date.now() - t0).toBeLessThan(3_000);
+	});
+
+	it('maxConnections: la conexión que sobra se cierra en el acto', async () => {
+		const { connect } = await import('node:net');
+		const url = await startApp({ maxConnections: 2 });
+		const port = Number(new URL(url).port);
+		const open = async () => {
+			const socket = connect(port, '127.0.0.1');
+			await new Promise<void>((resolve) => socket.once('connect', () => resolve()));
+			return socket;
+		};
+		const kept = [await open(), await open()];
+		const extra = await open();
+		const closed = await new Promise<boolean>((resolve) => {
+			extra.once('close', () => resolve(true));
+			setTimeout(() => resolve(false), 2_000);
+		});
+		expect(closed).toBe(true);
+		expect(kept.every((socket) => !socket.destroyed)).toBe(true);
+		for (const socket of kept) socket.destroy();
+	});
+});

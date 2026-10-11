@@ -18,9 +18,34 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: lumbre-mcp:latest
+      args:
+        # SHA del commit desplegado; `deploy/publicar.sh` lo pasa y acaba en
+        # la etiqueta `org.opencontainers.image.revision` de la imagen.
+        REVISION: '${LUMBRE_MCP_REVISION:-desconocida}'
+    # `publicar.sh` construye `lumbre-mcp:<sha>`, levanta esa y solo cuando
+    # está healthy la etiqueta además como `latest`; la anterior queda como
+    # `lumbre-mcp:anterior` para volver atrás. Sin la variable (un `up -d` a
+    # mano) se usa `latest`, que es la última que llegó a estar healthy.
+    image: 'lumbre-mcp:${LUMBRE_MCP_IMAGE_TAG:-latest}'
     container_name: lumbre-mcp
     restart: unless-stopped
+    # `init`: un init mínimo (tini) es el PID 1 y reenvía SIGTERM a Node, que
+    # lo atiende con un apagado ordenado de hasta 10 s (`src/http-lifecycle.ts`).
+    # Sin él, Node era PID 1, ignoraba la señal y Docker mandaba SIGKILL a
+    # los 10 s en cada deploy (H3 de `docs/audit-recuperacion-despliegue-20261010.md`).
+    # `stop_grace_period` deja 5 s de margen sobre ese plazo antes del SIGKILL.
+    init: true
+    stop_grace_period: 15s
+    # Techo de memoria (antes, ninguno: compartía los 3,7 GiB del host con
+    # Postgres y la app de Lumbre). Medido en `node:22-alpine` el 11 oct 2026
+    # con las sondas de `docs/audit-abuso-y-limites-20261010.sondas/`: reposo
+    # ~90 MB en la sonda (45-69 MiB en producción); 500 `tools/call`
+    # concurrentes con los topes nuevos, ~110 MB; 64 cuerpos de 2 MB a medio
+    # llegar, ~225 MB; 32 `add_attachment` de 1 MiB en vuelo, ~320 MB de
+    # pico, el peor caso medido. 512 MB deja margen sobre él; por encima, el
+    # kernel mata el proceso y `restart` lo levanta.
+    mem_limit: 512m
+    mem_reservation: 128m
     environment:
       PORT: '8787'
       LUMBRE_BASE_URL: 'https://app.lumbre.pro'
@@ -42,6 +67,12 @@ services:
       # arranque stdio local (`src/index.ts`, una máquina por usuario) sigue
       # usando el fichero único `notes-seen.json`, sin sufijo.
       XDG_STATE_HOME: /state
+      # Topes de `tools/call` en vuelo (global y por credencial). Vacíos =
+      # los defectos del código (32 y 8); se cambian sin tocar este fichero,
+      # poniéndolos en el `--env-file` del servidor. Ver
+      # `deploy/README-deploy.md`, «Límites del transporte».
+      LUMBRE_MCP_MAX_TOOL_CALLS: '${LUMBRE_MCP_MAX_TOOL_CALLS:-}'
+      LUMBRE_MCP_MAX_TOOL_CALLS_PER_BEARER: '${LUMBRE_MCP_MAX_TOOL_CALLS_PER_BEARER:-}'
       # NO hay un `LUMBRE_TOKEN` global aquí. La credencial dedicada del
       # backchannel se persiste cifrada por grant; el bearer OAuth
       # opaco se resolverá localmente y no se reenviará a Lumbre.
@@ -58,6 +89,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+      # Durante `start_period` comprueba cada 2 s en vez de cada 30: así un
+      # arranque sano pasa a `healthy` en segundos y `publicar.sh`, que lo
+      # espera, no tarda medio minuto en dar el deploy por bueno.
+      start_interval: 2s
     logging:
       driver: json-file
       options:
