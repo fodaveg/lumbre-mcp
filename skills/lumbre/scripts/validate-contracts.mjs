@@ -260,6 +260,18 @@ invariant(
     ]),
   "closing a batch must force every @wip task to @done or back to @acked with a written reason, verified by a sweep against this task's reads and applied results",
 );
+const developmentSubtasks = section(development, "Subtareas").replace(/\s+/g, " ");
+invariant(
+  "PARENT_DONE_WHEN_ALL_SUBTASKS_DONE",
+  hasAll(developmentSubtasks, [
+    /la principal pasa a `@done` en la misma escritura/i,
+    /siempre/i,
+    /`add_subtask`/,
+  ]) &&
+    !/trabajo propio de la principal/i.test(developmentSubtasks) &&
+    /ninguna principal con todas sus subtareas en `@done` o cerradas queda sin `@done`/i.test(developmentClose),
+  "a parent whose subtasks are all done or closed must move to @done in the same write, and the closing sweep must check it",
+);
 invariant(
   "RELEASE_AUTHORITY_DOES_NOT_EXPAND_MUTATION",
   hasAll(release.replace(/\s+/g, " "), [/no autoriza por s[ií] misma ninguna mutaci[oó]n adicional/i, /autoridad requerida/i, /mismo candidato/i]),

@@ -73,9 +73,12 @@ La principal refleja a sus subtareas, no las decide por su cuenta:
 
 - Cuando una subtarea pasa a `@wip`, la principal pasa a `@wip` si no tenía estado o
   estaba en `@acked`.
-- La principal solo pasa a `@done` cuando todas sus subtareas están en `@done` o
-  cerradas (completadas o canceladas) y el trabajo propio de la principal, si lo
-  tiene, está verificado. Terminar una subtarea no pone la principal en `@done`.
+- Cuando todas las subtareas están en `@done` o cerradas (completadas o canceladas), la
+  principal pasa a `@done` en la misma escritura (el mismo lote), siempre. `@done` es la
+  señal para que el usuario revise, no una verificación suya. Mientras quede una subtarea
+  sin terminar, la principal no pasa a `@done`. Si a la principal le queda trabajo que
+  ninguna subtarea cubre, añádelo como subtarea (op `add_subtask`) antes de cerrar las
+  demás, en vez de dejar la principal abierta.
 - Un `@not-done` en una subtarea devuelve la principal a `@acked` (o `@wip` si se
   corrige ya) si estaba en `@done`.
 
@@ -126,7 +129,8 @@ aplicada: puede haber cambiado por otra vía. Para un lote principal + subtareas
 `get_task` de la principal trae el `content` y la marca de cada una; para un lote
 marcado con `#tag` por cruzar proyectos, lista el proyecto (o `scope:"all"`) y filtra
 por el tag en el resultado. Confirma que ninguna, principal o subtarea, sigue en
-`@wip`. Mientras quede una sin resolver, no anuncies el lote cerrado, no lo des por
+`@wip`, y que ninguna principal con todas sus subtareas en `@done` o cerradas queda sin
+`@done`. Mientras quede una sin resolver, no anuncies el lote cerrado, no lo des por
 entregado y no pases al siguiente.
 
 Matices:
