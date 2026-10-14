@@ -70,12 +70,24 @@ cuándo una tarea acabó en otro sitio del pedido.
 Espera la respuesta y lee el resultado de cada operación. Ese informe dice qué pasó
 con cada op, pero no devuelve los campos finales de la tarea. Una op `aplicada`, sin
 «aplicadas con aviso» ni `avisos de la app` que la afecten, acredita los campos que
-enviaste con su valor final completo (un `update` de `content` o `notes` enteros, una
-`priority`, un `reschedule`, un `complete`) y preserva los que no enviaste: no releas
-para confirmarlos.
+enviaste con su valor final completo (un `update` de `notes` entero, una `priority`,
+un `reschedule`, un `complete`) y preserva los que no enviaste: no releas para
+confirmarlos.
+
+**`content` y marcas de estado (`@acked`/`@wip`/`@done`) son la excepción.** «Aplicada»
+solo dice que el servidor lo aplicó en ese momento, no que siga así: otra sesión,
+dispositivo o integración puede reescribir el `content` después y nadie avisa. Tras un
+`update` que cambia `content`, haz `get_task` de la principal (o de la propia tarea si es
+de primer nivel; la principal trae el `content` de cada subtarea) y compara el `content`
+de cada tarea escrita con el enviado. Solo esa relectura acredita la marca o el
+`content`. Si difiere (marca ausente o texto cambiado), hay otro escritor: no reescribas a
+ciegas ni en bucle; informa el `content` literal encontrado y repón una sola vez, y solo
+si tu encargo lo cubre. Quien informe al usuario de una marca o `content` ya puesto, si
+viene del informe de un subagente o de una escritura anterior del encargo, relee la
+principal en ese momento. Un informe de escritura sin esa relectura no acredita nada.
 
 Relee por id o filtro acotado, comparando los campos objetivo y los que debían
-preservarse, solo cuando el informe no basta:
+preservarse, cuando el informe no basta (y siempre para `content`, ver arriba):
 
 - la op no salió `aplicada` (sin confirmar, pendiente de aplicar, sin efecto, sin
   objetivo, fallida o en cuarentena), o llega con aviso;
