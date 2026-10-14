@@ -1349,6 +1349,57 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+	it('set_parent null + set_section en el MISMO lote (tarea sin lista previa): no se rechaza, decide el servidor', () => {
+		const sinLista = topLevel('t1');
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_parent', taskId: 't1', parentId: null },
+			{ op: 'set_section', taskId: 't1', section: 'Bugs' }
+		];
+		const { batchOps, skipped } = buildBatchFromOps(ops, new Map([['t1', sinLista]]));
+		expect(skipped).toEqual([]);
+		expect(batchOps.map((o) => (o as { kind: string }).kind)).toEqual(['setParent', 'setSection']);
+	});
+
+	it('set_parent null + set_section sobre una SUBTAREA: la saca a primer nivel y la sección ya no se rechaza por subtarea', () => {
+		const sub = topLevel('s1', { parentId: 'm1' });
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_parent', taskId: 's1', parentId: null },
+			{ op: 'set_section', taskId: 's1', section: 'Bugs' }
+		];
+		const { skipped } = buildBatchFromOps(ops, new Map([['s1', sub], ['m1', topLevel('m1')]]));
+		expect(skipped).toEqual([]);
+	});
+
+	it('set_section ANTES de un set_parent null sigue validándose contra el estado previo', () => {
+		const sinLista = topLevel('t1');
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_section', taskId: 't1', section: 'Bugs' },
+			{ op: 'set_parent', taskId: 't1', parentId: null }
+		];
+		const { skipped } = buildBatchFromOps(ops, new Map([['t1', sinLista]]));
+		expect(skipped).toEqual([{ index: 0, error: taskWithoutListNotAllowedError('t1').message }]);
+	});
+
+	it('set_parent con madre + set_section: la tarea pierde la lista, se rechaza aunque la tuviera', () => {
+		const conLista = topLevel('t1', { somedayListId: 'l1' });
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_parent', taskId: 't1', parentId: 'm1' },
+			{ op: 'set_section', taskId: 't1', section: 'Bugs' }
+		];
+		const { skipped } = buildBatchFromOps(ops, new Map([['t1', conLista], ['m1', topLevel('m1')]]));
+		expect(skipped).toEqual([{ index: 1, error: taskWithoutListNotAllowedError('t1').message }]);
+	});
+
+	it('un set_parent null RECHAZADO (madre inexistente no aplica; subtarea de otra) no cuenta como dar lista', () => {
+		const sinLista = topLevel('t1');
+		const ops: MutateTasksOp[] = [
+			{ op: 'set_parent', taskId: 't1', parentId: 'no-existe' },
+			{ op: 'set_section', taskId: 't1', section: 'Bugs' }
+		];
+		const { skipped } = buildBatchFromOps(ops, new Map([['t1', sinLista]]));
+		expect(skipped.map((x) => x.index)).toEqual([0, 1]);
+	});
+
 	it('add_subtask sobre una tarea que YA es una SUBTAREA: se rechaza ANTES de encolar (anidamiento de UN nivel)', () => {
 		// `allowSubtask: true` de `add_subtask` en `TASK_TARGET_ALLOW_SUBTASK`
 		// deja pasar el chequeo de residencia (no escribe `somedayListId`/
