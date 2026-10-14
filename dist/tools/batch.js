@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { buildBatchFromOps, collectExistenceCheckIds, collectSeriesSeedIds, excludeIngestForBrokenListPromises, filterPhase2AfterPhase1, findTasksByIds, planBatchPhases, runBatch } from '../lumbre-client.js';
-import { errorResult, exposedRecurrenceSchema, formatOpShapeError, formatOutcomeReport, NOTES_OVERWRITE_CAVEAT, OUTCOME_NOTE, recurrencePatchSchema, recurrenceSchema, subtasksSchema, tagSchema, textResult } from './shared.js';
+import { errorResult, exposedRecurrenceSchema, formatOpShapeError, formatOutcomeReport, NOTES_OVERWRITE_CAVEAT, OUTCOME_NOTE, recurrencePatchSchema, recurrenceSchema, subtasksSchema, tagSchema, textResult, toOpOutcome } from './shared.js';
 /**
  * `true` si el elemento CRUDO es un `update` que escribe texto de notas no
  * vacío (MC8 del audit de paridad, 24 sep 2026: ver `NOTES_OVERWRITE_CAVEAT`
@@ -141,7 +141,9 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
         // `buildBatchFromOps`, no aquí (necesita saber si el `taskId` es
         // subtarea, que solo se resuelve tras la comprobación de existencia).
         deadline: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()]).optional(),
-        reminders: z.array(z.number().int().nonnegative()).optional()
+        reminders: z.array(z.number().int().nonnegative()).optional(),
+        expectedContent: z.string().max(2000).optional(),
+        expectedNotes: z.string().max(10000).optional()
     })
         .strict(),
     z
@@ -434,6 +436,8 @@ export const mutateTasksOpSchema = z
         .array(z.number().int().nonnegative())
         .optional()
         .describe('update: offsets en minutos-antes de time; [] los quita. PROHIBIDO sobre una subtarea'),
+    expectedContent: z.string().optional().describe('update: content leído; si cambió, la op da conflict'),
+    expectedNotes: z.string().optional(),
     subtasks: subtasksSchema.optional().describe('Textos de las subtareas, en orden (máx. 50, 500 caracteres cada una)'),
     done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
     cancelled: z.boolean().optional().describe('true = cancelar (default); false = quitar la cancelación'),
@@ -672,11 +676,17 @@ async function runOpsBatch(ctx, rawOps, strictOpSchema, toolName) {
         if (r.ok) {
             if (r.id !== undefined)
                 succeededWithId.push({ index, id: r.id });
-            const outcome = r.materialization ?? 'unconfirmed';
+            const outcome = toOpOutcome(r.materialization);
             outcomes.push({
                 index,
                 op: opNameAt(index),
                 outcome,
+                ...(outcome === 'conflict'
+                    ? {
+                        ...(r.currentContent !== undefined ? { currentContent: r.currentContent } : {}),
+                        ...(r.currentNotes !== undefined ? { currentNotes: r.currentNotes } : {})
+                    }
+                    : {}),
                 ...(outcome === 'applied' && opWritesVisibleNotes(rawOps[index]) ? { caveat: NOTES_OVERWRITE_CAVEAT } : {})
             });
         }
@@ -730,7 +740,7 @@ export function registerBatchTool(server, ctx) {
                 '[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
                 'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
                 'en una semilla archivada), deadline, reminders (deadline/reminders/recurrence PROHIBIDOS sobre ' +
-                'una subtarea)] · ' +
+                'una subtarea)] [expectedContent, expectedNotes] · ' +
                 'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
                 'set_waiting: taskId*, until* (estrictamente futura; no en subtarea) [for] · clear_waiting: taskId* · ' +
                 'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +

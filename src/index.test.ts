@@ -371,7 +371,11 @@ describe('tools/list — superficie completa', () => {
 		// Re-medido el 2026-10-08 (`organize` +4 ops de ciclo de vida de
 		// proyecto; la lista de ops del encabezado de la description se recortó,
 		// ya vive en `ops`): 26.692, sin tocar el techo.
-		const CHAR_CEILING = 26700;
+		// Re-medido el 2026-10-14 (`update.expectedContent`/`expectedNotes`:
+		// precondición de texto, estado `conflict`): 26.863 (+171, dos campos
+		// planos y su mención en `ops`; sin `.max()` en el esquema plano, que ya
+		// impone el estricto). Techo = medido + ~1% (27.100).
+		const CHAR_CEILING = 27100;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -3124,6 +3128,88 @@ describe('set_parent — anidar y desanidar una tarea', () => {
 
 		expect(text).toMatch(/\[0\] set_parent: sin efecto/);
 		expect(text).toContain(`avisos de la app:\n  - ${notice}`);
+	});
+
+	describe('update con expectedContent/expectedNotes', () => {
+		const run = async (results: unknown[], update: Record<string, unknown>) => {
+			const fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
+				if (String(url).includes('/api/tasks?')) return jsonResponse([task()]);
+				return jsonResponse({ ok: true, results });
+			});
+			vi.stubGlobal('fetch', fetchSpy);
+			const client = await buildClient();
+			const text = resultText(
+				await client.callTool({
+					name: 'mutate_tasks',
+					arguments: { ops: [{ op: 'update', taskId: TASK_ID, ...update }] }
+				})
+			);
+			return { fetchSpy, text };
+		};
+
+		it('los campos viajan en el payload cuando se pasan', async () => {
+			const { fetchSpy } = await run(
+				[{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }],
+				{ content: 'nuevo', expectedContent: 'viejo', expectedNotes: 'n' }
+			);
+			expect(batchOps(fetchSpy)).toEqual([
+				{
+					type: 'mutate',
+					taskId: TASK_ID,
+					kind: 'update',
+					payload: { content: 'nuevo', expectedContent: 'viejo', expectedNotes: 'n' }
+				}
+			]);
+		});
+
+		it('no viajan cuando no se pasan', async () => {
+			const { fetchSpy } = await run(
+				[{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'applied' }],
+				{ content: 'nuevo' }
+			);
+			expect(batchOps(fetchSpy)).toEqual([
+				{ type: 'mutate', taskId: TASK_ID, kind: 'update', payload: { content: 'nuevo' } }
+			]);
+		});
+
+		it('conflict con currentContent: NO aplicada, con el texto actual y categoría propia', async () => {
+			const { text } = await run(
+				[
+					{
+						index: 0,
+						type: 'mutate',
+						ok: true,
+						id: TASK_ID,
+						materialization: 'conflict',
+						currentContent: 'texto de otro @wip'
+					}
+				],
+				{ content: 'nuevo', expectedContent: 'viejo' }
+			);
+			expect(text).toContain('Resultado en la app: 0 aplicadas, 1 en conflicto.');
+			expect(text).toContain(
+				'[0] update: en conflicto: el texto cambió desde que lo leíste, no se aplicó nada; content ahora: "texto de otro @wip"'
+			);
+		});
+
+		it('conflict sin currentContent: sigue sin aplicar', async () => {
+			const { text } = await run(
+				[{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'conflict' }],
+				{ content: 'nuevo', expectedContent: 'viejo' }
+			);
+			expect(text).toContain('1 en conflicto');
+			expect(text).toContain('[0] update: en conflicto: el texto cambió desde que lo leíste, no se aplicó nada');
+			expect(text).not.toContain('content ahora');
+		});
+
+		it('un estado desconocido de un servidor futuro cuenta como sin confirmar', async () => {
+			const { text } = await run(
+				[{ index: 0, type: 'mutate', ok: true, id: TASK_ID, materialization: 'inventado' }],
+				{ content: 'nuevo' }
+			);
+			expect(text).toContain('1 sin confirmar');
+			expect(text).not.toContain('undefined');
+		});
 	});
 
 	it('set_parent NO existe en organize: puntero a mutate_tasks, sin tocar red', async () => {

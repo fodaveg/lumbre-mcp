@@ -22,6 +22,20 @@ export function errorResult(err) {
  * `tools/list` tres veces.
  */
 export const OUTCOME_NOTE = 'El informe dice por op si la app la aplicó, no tuvo efecto o falló.';
+const KNOWN_OUTCOMES = [
+    'applied',
+    'noop',
+    'failed',
+    'quarantined',
+    'not-found',
+    'queued',
+    'unconfirmed',
+    'conflict'
+];
+/** Estado del servidor -> `OpOutcome`; ausente o desconocido (servidor futuro) = `unconfirmed`. */
+export function toOpOutcome(s) {
+    return typeof s === 'string' && KNOWN_OUTCOMES.includes(s) ? s : 'unconfirmed';
+}
 /**
  * Aviso para `update.notes` (MC8 del audit de paridad, 23 sep 2026): sobre
  * una nota ya BORRADA (`notesDeletedAt` puesto), la app escribe la celda
@@ -43,6 +57,7 @@ const OUTCOME_COUNT_LABEL = {
     'not-found': 'sin objetivo',
     failed: 'fallidas al aplicar',
     quarantined: 'en cuarentena',
+    conflict: 'en conflicto',
     queued: 'pendientes de aplicar',
     unconfirmed: 'sin confirmar'
 };
@@ -77,6 +92,14 @@ const PROJECT_LIFECYCLE_OPS = new Set([
 ]);
 /** Texto de «sin aplicar» de una op: el genérico de `OUTCOME_DETAIL`, salvo el `noop` de las ops de proyecto. */
 function outcomeDetail(e) {
+    if (e.outcome === 'conflict') {
+        const parts = ['en conflicto: el texto cambió desde que lo leíste, no se aplicó nada'];
+        if (e.currentContent !== undefined)
+            parts.push(`content ahora: ${JSON.stringify(e.currentContent)}`);
+        if (e.currentNotes !== undefined)
+            parts.push(`notes ahora: ${JSON.stringify(e.currentNotes)}`);
+        return parts.join('; ');
+    }
     if (e.outcome === 'noop' && PROJECT_LIFECYCLE_OPS.has(e.op))
         return PROJECT_NOOP_DETAIL;
     return OUTCOME_DETAIL[e.outcome];
