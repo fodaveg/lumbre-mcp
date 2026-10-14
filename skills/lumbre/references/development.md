@@ -27,8 +27,8 @@ tarea (`… texto de la tarea @wip`), con una op `update` que lleve solo `taskId
 `content`. Nunca en el campo `tags` de `mutate_tasks`: el MCP rechaza esos tags de
 estado con un error (y no son un estado). Parte del `content` íntegro ya leído en este
 encargo (`get_task` de la tarea o, para una subtarea, la línea de `get_task` de su
-principal), no del texto de `list_tasks`. El `update` envía el `content` final entero y
-no toca `tags`. Un resultado `aplicada` no acredita la marca: solo la acredita la
+principal), no del texto de `list_tasks`. El `update` envía el `content` final entero con `expectedContent` (el `content` leído; si sale `en conflicto`, no
+reescribas) y no toca `tags`. Un resultado `aplicada` no acredita la marca: solo la acredita la
 relectura con `get_task` (ver «Consistencia» en
 [mcp-safe-operations.md](mcp-safe-operations.md)). El mecánico de esto es
 `lumbre-tagger`, cuyo informe lista por tarea la marca leída en esa relectura; sin ella

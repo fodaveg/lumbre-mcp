@@ -59,7 +59,23 @@ export const OUTCOME_NOTE = 'El informe dice por op si la app la aplicó, no tuv
  * `/api/mutations` (`not-found`, `queued`) y `unconfirmed` para un servidor
  * que no manda el campo.
  */
-export type OpOutcome = 'applied' | 'noop' | 'failed' | 'quarantined' | 'not-found' | 'queued' | 'unconfirmed';
+export type OpOutcome = 'applied' | 'noop' | 'failed' | 'quarantined' | 'not-found' | 'queued' | 'unconfirmed' | 'conflict';
+
+const KNOWN_OUTCOMES: readonly string[] = [
+	'applied',
+	'noop',
+	'failed',
+	'quarantined',
+	'not-found',
+	'queued',
+	'unconfirmed',
+	'conflict'
+];
+
+/** Estado del servidor -> `OpOutcome`; ausente o desconocido (servidor futuro) = `unconfirmed`. */
+export function toOpOutcome(s: unknown): OpOutcome {
+	return typeof s === 'string' && KNOWN_OUTCOMES.includes(s) ? (s as OpOutcome) : 'unconfirmed';
+}
 
 /**
  * Una op aceptada (`ok`) con su estado, por su posición en `ops`.
@@ -75,6 +91,9 @@ export interface OpOutcomeEntry {
 	op: string;
 	outcome: OpOutcome;
 	caveat?: string;
+	/** Solo `conflict`: texto actual de la app (`update` con `expectedContent`/`expectedNotes`). */
+	currentContent?: string;
+	currentNotes?: string;
 }
 
 /**
@@ -100,6 +119,7 @@ const OUTCOME_COUNT_LABEL: Record<OpOutcome, string> = {
 	'not-found': 'sin objetivo',
 	failed: 'fallidas al aplicar',
 	quarantined: 'en cuarentena',
+	conflict: 'en conflicto',
 	queued: 'pendientes de aplicar',
 	unconfirmed: 'sin confirmar'
 };
@@ -112,7 +132,7 @@ const OUTCOME_COUNT_LABEL: Record<OpOutcome, string> = {
  * se libera; el commit nombra la causa (breaker de borrado masivo) y el
  * lugar (`/admin`), y este mensaje pasa a citarlos igual.
  */
-const OUTCOME_DETAIL: Record<Exclude<OpOutcome, 'applied'>, string> = {
+const OUTCOME_DETAIL: Record<Exclude<OpOutcome, 'applied' | 'conflict'>, string> = {
 	noop: 'sin efecto: la app no cambió nada (ya estaba así, o el objetivo no admite el cambio)',
 	'not-found': 'sin efecto: la app no encontró el objetivo (inexistente, borrado o archivado)',
 	failed: 'falló al aplicarse; la app la reintentará en un drenaje posterior',
@@ -138,8 +158,14 @@ const PROJECT_LIFECYCLE_OPS = new Set([
 
 /** Texto de «sin aplicar» de una op: el genérico de `OUTCOME_DETAIL`, salvo el `noop` de las ops de proyecto. */
 function outcomeDetail(e: OpOutcomeEntry): string {
+	if (e.outcome === 'conflict') {
+		const parts = ['en conflicto: el texto cambió desde que lo leíste, no se aplicó nada'];
+		if (e.currentContent !== undefined) parts.push(`content ahora: ${JSON.stringify(e.currentContent)}`);
+		if (e.currentNotes !== undefined) parts.push(`notes ahora: ${JSON.stringify(e.currentNotes)}`);
+		return parts.join('; ');
+	}
 	if (e.outcome === 'noop' && PROJECT_LIFECYCLE_OPS.has(e.op)) return PROJECT_NOOP_DETAIL;
-	return OUTCOME_DETAIL[e.outcome as Exclude<OpOutcome, 'applied'>];
+	return OUTCOME_DETAIL[e.outcome as Exclude<OpOutcome, 'applied' | 'conflict'>];
 }
 
 /**

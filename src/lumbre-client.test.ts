@@ -1655,6 +1655,26 @@ describe('buildBatchFromOps', () => {
 		]);
 	});
 
+	it('update con `expectedContent`/`expectedNotes`: viajan en el payload; sin ellos no', () => {
+		const existing = new Map([['t1', topLevel('t1')]]);
+		const { batchOps } = buildBatchFromOps(
+			[
+				{ op: 'update', taskId: 't1', content: 'b', expectedContent: 'a', expectedNotes: 'n' },
+				{ op: 'update', taskId: 't1', content: 'c' }
+			],
+			existing
+		);
+		expect(batchOps).toEqual([
+			{
+				type: 'mutate',
+				taskId: 't1',
+				kind: 'update',
+				payload: { content: 'b', expectedContent: 'a', expectedNotes: 'n' }
+			},
+			{ type: 'mutate', taskId: 't1', kind: 'update', payload: { content: 'c' } }
+		]);
+	});
+
 	it('update con `deadline:null`: quita el deadline', () => {
 		const existing = new Map([['t1', topLevel('t1')]]);
 		const ops: MutateTasksOp[] = [{ op: 'update', taskId: 't1', deadline: null }];

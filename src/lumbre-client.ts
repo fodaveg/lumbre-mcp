@@ -1513,6 +1513,10 @@ export interface UpdateMutationPayload {
 	 *  aviso en el otro repo. PROHIBIDO en una SUBTAREA (§2.5), mismo criterio
 	 *  que `deadline`. */
 	reminders?: number[];
+	/** Precondición: `content`/`notes` leídos. Si el texto de la app ya no coincide
+	 *  (por bytes), la op no aplica nada y vuelve `conflict` (contrato de Lumbre, 14 oct 2026). */
+	expectedContent?: string;
+	expectedNotes?: string;
 }
 /** Entra en «esperando»: `until` (`YYYY-MM-DD`) OBLIGATORIA, es la fecha de
  *  reconsulta — el servidor la rechaza si no es estrictamente futura (compara
@@ -1923,6 +1927,9 @@ export interface BatchResultItem {
 	/** Qué pasó al drenarla en el servidor, solo en las `ok` (ver
 	 *  `DrainItemStatus`). Ausente en un servidor anterior al campo. */
 	materialization?: DrainItemStatus;
+	/** Solo con `materialization: 'conflict'`: el texto que tiene la app ahora. */
+	currentContent?: string;
+	currentNotes?: string;
 }
 
 /**
@@ -1930,9 +1937,10 @@ export interface BatchResultItem {
  * `$lib/server/sync/drain-report.ts` en el repo principal): `applied` cambió
  * algo, `noop` se aplicó sin cambiar nada, `failed` falló al aplicarse y la
  * fila queda reabierta para un drenaje posterior, `quarantined` la retuvo el
- * cortacircuitos de borrado masivo para revisión.
+ * cortacircuitos de borrado masivo para revisión, `conflict` no aplicó nada
+ * porque `expectedContent`/`expectedNotes` ya no coincidían con el texto de la app.
  */
-export type DrainItemStatus = 'applied' | 'noop' | 'failed' | 'quarantined';
+export type DrainItemStatus = 'applied' | 'noop' | 'failed' | 'quarantined' | 'conflict';
 
 /** Respuesta completa de `POST /api/batch`. */
 export interface BatchResponse {
@@ -2011,6 +2019,9 @@ export type MutateTasksOp =
 			/** `[]` los quita, ausente no los toca. Mismo PROHIBIDO en subtarea
 			 *  que `deadline`. */
 			reminders?: number[];
+			/** Precondición de texto: ver `UpdateMutationPayload.expectedContent`. */
+			expectedContent?: string;
+			expectedNotes?: string;
 	  }
 	| { op: 'reschedule'; taskId: string; date: string | null }
 	| { op: 'delete'; taskId: string }
@@ -2374,7 +2385,9 @@ function translateOp(op: MutateTasksOp): BatchOp {
 					// (`mergeRecurrencePatch`), así que aquí es una regla entera o `null`.
 					...(op.recurrence !== undefined ? { recurrence: op.recurrence as IngestRecurrence | null } : {}),
 					...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
-					...(op.reminders !== undefined ? { reminders: op.reminders } : {})
+					...(op.reminders !== undefined ? { reminders: op.reminders } : {}),
+					...(op.expectedContent !== undefined ? { expectedContent: op.expectedContent } : {}),
+					...(op.expectedNotes !== undefined ? { expectedNotes: op.expectedNotes } : {})
 				}
 			};
 		case 'reschedule':

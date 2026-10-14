@@ -1211,7 +1211,9 @@ function translateOp(op) {
                     // (`mergeRecurrencePatch`), así que aquí es una regla entera o `null`.
                     ...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {}),
                     ...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
-                    ...(op.reminders !== undefined ? { reminders: op.reminders } : {})
+                    ...(op.reminders !== undefined ? { reminders: op.reminders } : {}),
+                    ...(op.expectedContent !== undefined ? { expectedContent: op.expectedContent } : {}),
+                    ...(op.expectedNotes !== undefined ? { expectedNotes: op.expectedNotes } : {})
                 }
             };
         case 'reschedule':

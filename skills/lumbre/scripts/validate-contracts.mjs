@@ -185,6 +185,8 @@ invariant(
     /Solo esa relectura acredita la marca o el `content`/i,
     /hay otro escritor/i,
     /Un informe de escritura sin esa relectura no acredita nada/i,
+    /manda adem[aá]s `expectedContent` con el `content` le[ií]do/i,
+    /sale `en conflicto`[^.]*no reescribas/i,
   ]) &&
     !/acredita la marca: no releas/i.test(read("assets/subagents/contracts.json")) &&
     !/aplicada[^.]{0,40}sin aviso deja acreditado el estado/i.test(development.replace(/\s+/g, " ")),

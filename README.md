@@ -411,7 +411,8 @@ encola el lote y lo materializa en el servidor en la misma petición, y
 devuelve por op `materialization`: aplicada, sin efecto (ya estaba así, o el
 objetivo no admite el cambio), fallida al aplicar (queda reabierta para un
 drenaje posterior) o en cuarentena (la retuvo el cortacircuitos de borrado
-masivo). El informe lo cuenta así:
+masivo) o en conflicto (`update` con `expectedContent`/`expectedNotes` cuyo texto
+ya no coincide con el de la app: no se aplica nada). El informe lo cuenta así:
 
 ```
 Lumbre: 3/3 operación(es) aceptadas.
@@ -422,6 +423,23 @@ sin aplicar:
 avisos de la app:
   - …
 ```
+
+**Precondición de texto en `update` (`expectedContent`, `expectedNotes`).** Si
+mandas el `content` (o las `notes`) que leíste, la app compara por bytes con el
+que tiene al aplicar la op; si difiere, la op entera no aplica nada y se
+informa como no aplicada, con el texto actual (que es de otro escritor), y
+cuenta aparte en el resumen:
+
+```
+Resultado en la app: 0 aplicadas, 1 en conflicto.
+sin aplicar:
+  [0] update: en conflicto: el texto cambió desde que lo leíste, no se aplicó nada; content ahora: "…"
+```
+
+Sin los campos el comportamiento no cambia. Valen en subtareas, y en un mismo
+lote la segunda op sobre el mismo texto da `conflict` si lleva el valor leído
+antes de la primera. Un estado que el conector no conoce (servidor más nuevo)
+se informa como «sin confirmar».
 
 «aceptadas» cuenta las que la app aceptó; lo que se aplicó es la
 segunda línea. Los `notices` del lote (por ejemplo, «la lista destino estaba
@@ -461,7 +479,7 @@ operaciones a la vez» más abajo):
   decide la app. El informe dice «aplicada» si volvió, o «sin efecto» con el
   aviso de la app si ya no había nada que restaurar (la fila se purgó
   definitivamente).
-- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence?, deadline?, reminders? }`
+- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence?, deadline?, reminders?, expectedContent?, expectedNotes? }`
   (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora, regla de
   repetición, fecha límite o avisos; solo toca los campos que envíes. `tags: []` quita todos los tags
   propios (un tag `acked`/`wip`/`done`/`not-done`, case-insensitive, se RECHAZA:
@@ -787,7 +805,7 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
-update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders]
+update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes]
 reschedule: taskId*, date*
 set_section: taskId*, section*
 set_waiting: taskId*, until* (estrictamente futura; no en subtarea) [for]

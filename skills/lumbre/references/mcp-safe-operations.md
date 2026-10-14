@@ -86,6 +86,11 @@ si tu encargo lo cubre. Quien informe al usuario de una marca o `content` ya pue
 viene del informe de un subagente o de una escritura anterior del encargo, relee la
 principal en ese momento. Un informe de escritura sin esa relectura no acredita nada.
 
+Al escribir una marca o un `content`, manda además `expectedContent` con el `content` leído (y
+`expectedNotes` con las `notes` leídas si las editas): si el texto cambió, la op sale `en
+conflicto`, no se aplica nada, y no reescribas: informa el `content` actual que trae, que es
+el texto de otro escritor.
+
 Relee por id o filtro acotado, comparando los campos objetivo y los que debían
 preservarse, cuando el informe no basta (y siempre para `content`, ver arriba):
 
