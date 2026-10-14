@@ -1475,6 +1475,13 @@ export function buildBatchFromOps(ops, existing) {
     const batchOps = [];
     const originalIndexes = [];
     const skipped = [];
+    // Lo que una op ANTERIOR (aceptada) de esta misma llamada ya cambió sobre la
+    // residencia de una tarea, para que `set_section` no se valide contra el
+    // estado previo al lote: `set_parent` con madre la deja SIN lista
+    // (`'none'`); `set_parent` con `null` la deja en lo que decida la app
+    // (`'unknown'`: lista de la madre, o ninguna si la madre no tiene y la hija
+    // tiene fecha), y en ese caso el servidor decide, no se rechaza de antemano.
+    const residence = new Map();
     ops.forEach((op, index) => {
         const localError = localValidationError(op);
         if (localError !== null) {
@@ -1484,7 +1491,11 @@ export function buildBatchFromOps(ops, existing) {
         // `undefined` = la op no targetea una tarea (lista/sección/`add_task`):
         // no comprueba existencia. Mismo criterio, MISMA tabla, que
         // `collectExistenceCheckIds`.
-        const allowSubtask = TASK_TARGET_ALLOW_SUBTASK[op.op];
+        let allowSubtask = TASK_TARGET_ALLOW_SUBTASK[op.op];
+        // Una subtarea que un `set_parent: null` anterior del lote saca a primer
+        // nivel ya no lo es cuando llega su `set_section`.
+        if (op.op === 'set_section' && residence.get(op.taskId) === 'unknown')
+            allowSubtask = true;
         if (allowSubtask !== undefined) {
             const targetId = targetIdOf(op);
             try {
@@ -1502,9 +1513,13 @@ export function buildBatchFromOps(ops, existing) {
         // puede saber de antemano que no van a aplicarse (ver los JSDoc de
         // `taskWithoutListNotAllowedError`/`nestedSubtaskNotAllowedError`). No
         // toca la cola ni el drenaje: los sigue tratando tal como responden hoy.
-        if (op.op === 'set_section' && !existing.get(op.taskId)?.somedayListId) {
-            skipped.push({ index, error: taskWithoutListNotAllowedError(op.taskId).message });
-            return;
+        if (op.op === 'set_section') {
+            const known = residence.get(op.taskId);
+            const hasList = known === undefined ? !!existing.get(op.taskId)?.somedayListId : known === 'unknown';
+            if (!hasList) {
+                skipped.push({ index, error: taskWithoutListNotAllowedError(op.taskId).message });
+                return;
+            }
         }
         if (op.op === 'add_subtask' && existing.get(op.taskId)?.parentId) {
             skipped.push({ index, error: nestedSubtaskNotAllowedError(op.taskId).message });
@@ -1566,6 +1581,8 @@ export function buildBatchFromOps(ops, existing) {
             originalIndexes.push(index);
             return;
         }
+        if (op.op === 'set_parent')
+            residence.set(op.taskId, op.parentId === null ? 'unknown' : 'none');
         batchOps.push(translateOp(op));
         originalIndexes.push(index);
     });

@@ -753,7 +753,8 @@ export function registerBatchTool(server, ctx) {
                 'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
                 'unarchive_habit: habitId* · ' +
                 'set_parent: taskId*, parentId* (la anida en parentId; null la saca a la lista de su ' +
-                'madre. La app rechaza con subtareas, deadline, recordatorios, esperando o serie; ' +
+                'madre; si la madre no tiene proyecto ni área y ella tiene fecha, queda en su día sin ' +
+                'ellos. La app rechaza con subtareas, deadline, recordatorios, esperando o serie; ' +
                 'update quita antes deadline y recordatorios y clear_waiting el esperando; la serie no: ' +
                 'recurrence null apaga la serie entera, solo si el usuario lo pide)')
         }

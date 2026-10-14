@@ -536,7 +536,13 @@ operaciones a la vez» más abajo):
   no pertenece a ningún proyecto o área: una sección solo existe DENTRO de una
   lista, así que el conector la rechaza ANTES de encolarla (hasta el
   2026-09-24 la app la ignoraba en silencio y aun así confirmaba `applied` —
-  MC2 del audit de paridad). Muévela primero con `move_to_list`.
+  MC2 del audit de paridad). Muévela primero con `move_to_list`, en una
+  llamada de `organize` aparte: `move_to_list` y `set_section` viven en tools
+  distintas, así que no comparten lote. Dentro de `mutate_tasks`, la validación
+  tiene en cuenta las ops anteriores de la misma llamada: tras un `set_parent`
+  con `parentId: null` el resultado (lista de la madre, o ninguna) lo decide la
+  app, así que `set_section` no se rechaza de antemano y responde el servidor;
+  tras un `set_parent` con madre la tarea queda sin lista y se rechaza.
 - `{ op: "set_waiting", taskId, until, for? }` (`mutate_tasks`, MC6) — entra en
   «esperando»: `until` (`YYYY-MM-DD`) es la fecha de reconsulta y la app la
   RECHAZA si no es estrictamente futura (el conector solo valida el formato,
@@ -603,7 +609,8 @@ operaciones a la vez» más abajo):
 - `{ op: "set_parent", taskId, parentId }` (`mutate_tasks`, 2026-09-25) —
   convierte `taskId` en subtarea de `parentId` (va al final de su checklist y
   pierde lista y sección), o la saca con `parentId: null` (queda en la lista
-  de la que era su madre, sin sección). Conserva id, notas, adjuntos, tags,
+  de la que era su madre, sin sección; si la madre no tiene proyecto ni área y
+  ella tiene fecha, se queda en su día sin proyecto ni área). Conserva id, notas, adjuntos, tags,
   prioridad, estado y fecha. `taskId` puede ser una subtarea (es el caso de
   sacarla); de `parentId` el conector solo comprueba que exista, en la misma
   petición agrupada que el resto de objetivos del lote (también si está
