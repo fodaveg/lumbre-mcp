@@ -162,8 +162,9 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// Re-medido el mismo día (MC7, tarea 8eee8c72): 17 tools/25.893 sobre
 		// este transporte (25.558 en `index.test.ts`, in-memory — la diferencia
 		// no es de este lote, ya existía antes). Techo 26.700 (2026-10-02: medido
-		// 26.468 en `index.test.ts` + ~1%), el mismo que allí.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(26700);
+		// 26.468 en `index.test.ts` + ~1%), el mismo que allí. Subido a 27.100 el
+		// 2026-10-14 con `index.test.ts` (expectedContent/expectedNotes: 26.863).
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(27100);
 	});
 
 	it('el log solo identifica métodos MCP conocidos y nunca copia un method arbitrario del body', async () => {
