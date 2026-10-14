@@ -60,7 +60,9 @@ const scope = 'lumbre:mcp';
 // tools, 25.558 caracteres; el test sube su techo a 26.800.
 // 2026-10-02 (audit, annotations): medido 26.468 en `index.test.ts`; techo
 // medido + ~1% = 26.700, el mismo en los tres sitios.
-const CHAR_CEILING = 26700;
+// 2026-10-14 (expectedContent/expectedNotes en `update`): medido 26.863; techo
+// 27.100, el mismo en `index.test.ts` y `http.test.ts`.
+const CHAR_CEILING = 27100;
 const EXPECTED_TOOL_COUNT = 17;
 
 if (!url) {
