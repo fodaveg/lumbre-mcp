@@ -155,8 +155,8 @@ Qué cambió:
   aplicó, y solo «aplicada» cuenta como hecho.
 - La lectura íntegra se exige antes de reeditar `content` o `notes`, de delegar o cuando la
   decisión dependa de un campo no leído; no antes de cualquier mutación.
-- La regla de no releer una op aplicada y la de subtareas tienen una sola definición
-  (`mcp-safe-operations.md`); el resto remite. `contracts.json` no puede remitir y las
+- La regla de no releer una op aplicada (salvo `content` y marcas, que exigen relectura)
+  y la de subtareas tienen una sola definición (`mcp-safe-operations.md`); el resto remite. `contracts.json` no puede remitir y las
   acorta.
 - Se retiran las menciones a `ids` y `#tag` como parámetros de `list_tasks`, la afirmación
   de que no hay áreas creables y el límite «solo admite» de `mutate_tasks` (ahora es el

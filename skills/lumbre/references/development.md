@@ -28,9 +28,11 @@ tarea (`… texto de la tarea @wip`), con una op `update` que lleve solo `taskId
 estado con un error (y no son un estado). Parte del `content` íntegro ya leído en este
 encargo (`get_task` de la tarea o, para una subtarea, la línea de `get_task` de su
 principal), no del texto de `list_tasks`. El `update` envía el `content` final entero y
-no toca `tags`, así que un resultado `aplicada` sin aviso deja acreditado el estado (ver
-«Consistencia» en [mcp-safe-operations.md](mcp-safe-operations.md)). El mecánico de
-esto es `lumbre-tagger`.
+no toca `tags`. Un resultado `aplicada` no acredita la marca: solo la acredita la
+relectura con `get_task` (ver «Consistencia» en
+[mcp-safe-operations.md](mcp-safe-operations.md)). El mecánico de esto es
+`lumbre-tagger`, cuyo informe lista por tarea la marca leída en esa relectura; sin ella
+no vale y el coordinador relee antes de decirle al usuario que la marca está puesta.
 
 Mantén un solo estado de esa familia al transicionar y conserva tags ortogonales de
 lote o backlog. El checkbox y la aceptación humana son independientes. El despliegue
@@ -96,8 +98,8 @@ mecánico no las descubre por sí solo.
 - Al iniciar y delegar trabajo, deja en la conversación un checkpoint proporcional con
   estado, ownership y siguiente paso. En una tarea trivial basta una línea. Escríbelo
   también en las notas solo si lo pide el usuario o el contrato vigente del repositorio.
-- Si el inicio escribe `@wip`, confirma esa escritura antes de delegar con el resultado
-  de la op (ver «Consistencia»).
+- Si el inicio escribe `@wip`, confirma esa escritura antes de delegar con la relectura
+  de `get_task` (ver «Consistencia»).
 - Límites como dos tareas, seis horas o lotes de tres a seis son perfiles opcionales.
   Un presupuesto explícito del usuario prevalece.
 
@@ -118,9 +120,9 @@ el trabajo a medias es obligación de quien lo dejó, nunca del usuario.
 
 Antes de declarar cerrado un lote o de anunciar una entrega, haz el barrido y
 enséñalo: tarea por tarea del lote (principal y subtareas), su marca final y de dónde
-consta, contra las lecturas y los resultados «aplicada» de este encargo, no de memoria
-ni del plan. Relee solo la tarea cuyo estado no consta por una escritura propia
-aplicada, o que pudo cambiar por otra vía: para un lote principal + subtareas,
+consta, contra las relecturas de este encargo, no de memoria
+ni del plan. Relee siempre la(s) principal(es), aunque conste una escritura propia
+aplicada: puede haber cambiado por otra vía. Para un lote principal + subtareas,
 `get_task` de la principal trae el `content` y la marca de cada una; para un lote
 marcado con `#tag` por cruzar proyectos, lista el proyecto (o `scope:"all"`) y filtra
 por el tag en el resultado. Confirma que ninguna, principal o subtarea, sigue en

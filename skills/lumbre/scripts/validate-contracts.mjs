@@ -178,6 +178,19 @@ invariant(
   "an asynchronous write must get one refresh and bounded reread before a limitation",
 );
 invariant(
+  "APPLIED_DOES_NOT_ACCREDIT_CONTENT_OR_STATE_MARKS",
+  hasAll(section(safeOperations, "Consistencia").replace(/\s+/g, " "), [
+    /`content` y marcas de estado[^.]*son la excepci[oó]n/i,
+    /«Aplicada» solo dice que el servidor lo aplic[oó]/i,
+    /Solo esa relectura acredita la marca o el `content`/i,
+    /hay otro escritor/i,
+    /Un informe de escritura sin esa relectura no acredita nada/i,
+  ]) &&
+    !/acredita la marca: no releas/i.test(read("assets/subagents/contracts.json")) &&
+    !/aplicada[^.]{0,40}sin aviso deja acreditado el estado/i.test(development.replace(/\s+/g, " ")),
+  "an «aplicada» result must never accredit a status mark or content: only a get_task reread does",
+);
+invariant(
   "ATTACHMENT_UPLOAD_IS_SYNCHRONOUS_AND_OTHER_WRITES_NEED_APPLIED",
   hasAll(section(attachments, "Adjuntos y topología").replace(/\s+/g, " "), [
     /`add_attachment` es s[ií]ncrona/i,
@@ -240,8 +253,8 @@ invariant(
       /escribe el motivo/i,
       /nota de la tarea/i,
       /barrido/i,
-      /resultados «aplicada» de este encargo/i,
-      /Relee solo la tarea cuyo estado no consta/i,
+      /relecturas de este encargo/i,
+      /Relee siempre la\(s\) principal\(es\)/i,
     ]),
   "closing a batch must force every @wip task to @done or back to @acked with a written reason, verified by a sweep against this task's reads and applied results",
 );
