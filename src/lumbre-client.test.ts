@@ -20,6 +20,7 @@ import {
 	LumbreApiError,
 	mergeRecurrencePatch,
 	mutateTask,
+	refreshSync,
 	nestedSubtaskNotAllowedError,
 	parseListNoteUrl,
 	planBatchPhases,
@@ -2257,6 +2258,16 @@ describe('deleteAttachment', () => {
 		expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
 	});
 
+	it('lleva content-type application/json y cuerpo {} (SvelteKit 3 da 403 a una mutación sin Content-Type)', async () => {
+		const fetchSpy = mockDeleteResponse({ ok: true });
+
+		await deleteAttachment(config, ATTACHMENT_ID);
+
+		const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect((init.headers as Record<string, string>)['content-type']).toBe('application/json');
+		expect(init.body).toBe('{}');
+	});
+
 	it('404 no distingue un id inexistente de uno ajeno (anti-IDOR)', async () => {
 		mockDeleteResponse({ message: 'No encontrado' }, 404);
 		await expect(deleteAttachment(config, ATTACHMENT_ID)).rejects.toThrow(
@@ -2456,5 +2467,53 @@ describe('timeouts de red (R4)', () => {
 		);
 		await expect(listTasks(config, {})).resolves.toEqual([]);
 		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+// ── Content-Type por defecto en mutaciones (requestOnce) ────────────────────
+
+describe('Content-Type por defecto en peticiones', () => {
+	function mockJson(body: unknown): ReturnType<typeof vi.fn> {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		return fetchSpy;
+	}
+
+	it('refreshSync: POST con content-type application/json y cuerpo {}', async () => {
+		const fetchSpy = mockJson({ ok: true });
+
+		await refreshSync(config);
+
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('https://lumbre.test/api/sync/flush');
+		expect(init.method).toBe('POST');
+		expect((init.headers as Record<string, string>)['content-type']).toBe('application/json');
+		expect(init.body).toBe('{}');
+	});
+
+	it('un GET no lleva content-type', async () => {
+		const fetchSpy = mockJson([]);
+
+		await listTasks(config, {});
+
+		const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(init.method ?? 'GET').toBe('GET');
+		expect(Object.keys(init.headers as Record<string, string>)).not.toContain('content-type');
+	});
+
+	it('la subida de adjunto conserva application/octet-stream', async () => {
+		const fetchSpy = mockJson({ id: 'att-1' });
+
+		await uploadAttachment(config, {
+			taskId: '11111111-1111-1111-1111-111111111111',
+			filename: 'f.png',
+			mime: 'image/png',
+			bytes: Buffer.from('x')
+		}).catch(() => undefined);
+
+		const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect((init.headers as Record<string, string>)['content-type']).toBe('application/octet-stream');
 	});
 });

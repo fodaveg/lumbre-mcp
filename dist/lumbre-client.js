@@ -86,16 +86,23 @@ async function request(config, path, init = {}) {
 }
 async function requestOnce(config, path, init, signal) {
     const url = `${config.baseUrl.replace(/\/$/, '')}${path}`;
+    // `init.headers` puede ser objeto plano, `Headers` o array de pares: `Headers`
+    // los normaliza (claves en minúscula, sin distinguir mayúsculas) y gana lo
+    // que traiga el llamador.
+    const headers = {
+        authorization: `Bearer ${config.token}`,
+        ...Object.fromEntries(new Headers(init.headers).entries())
+    };
+    // SvelteKit 3 responde 403 a una petición mutativa sin Content-Type si su
+    // Origin no es el propio: toda mutación lleva uno (JSON salvo que el
+    // llamador fije otro, como la subida de adjuntos).
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && headers['content-type'] === undefined) {
+        headers['content-type'] = 'application/json';
+    }
     let res;
     try {
-        res = await fetch(url, {
-            ...init,
-            signal,
-            headers: {
-                authorization: `Bearer ${config.token}`,
-                ...init.headers
-            }
-        });
+        res = await fetch(url, { ...init, signal, headers });
     }
     catch (err) {
         const cause = err instanceof Error ? err.message : String(err);
@@ -760,7 +767,10 @@ async function readBoundedBody(res, maxBytes) {
 export async function deleteAttachment(config, id) {
     let body;
     try {
-        body = await request(config, `/api/attachments/${id}`, { method: 'DELETE' });
+        body = await request(config, `/api/attachments/${id}`, {
+            method: 'DELETE',
+            body: '{}'
+        });
     }
     catch (err) {
         if (err instanceof LumbreApiError && err.status === 404) {
@@ -867,12 +877,12 @@ async function uploadAttachmentOnce(config, input, signal) {
 /**
  * `POST /api/sync/flush`: fuerza el flush del sync ANTES de leer (bug:
  * ventana de debounce del persister — ver ese endpoint en el repo
- * principal). Sin cuerpo. Útil justo antes de un `listTasks` cuando importa
+ * principal). Cuerpo `{}` (la app exige Content-Type en mutaciones). Útil justo antes de un `listTasks` cuando importa
  * ver el estado más reciente posible; NO recupera cambios de un cliente que
  * esté offline y nunca los haya mandado por WS (límite server-side).
  */
 export async function refreshSync(config) {
-    const body = await request(config, '/api/sync/flush', { method: 'POST' });
+    const body = await request(config, '/api/sync/flush', { method: 'POST', body: '{}' });
     if (!body || typeof body !== 'object' || body.ok !== true) {
         throw new LumbreApiError('Lumbre no confirmó el flush del sync (respuesta inesperada).');
     }
