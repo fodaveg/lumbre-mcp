@@ -92,6 +92,13 @@ mecánico no las descubre por sí solo.
 - Agrupa por causa y superficie compartida. El lote por defecto es una tarea principal
   con sus subtareas; añade un `#tag` libre solo cuando cruza secciones, proyectos o
   áreas. No lo conviertas en sección por ser un lote de ejecución.
+- Si las tareas de un lote ya existen sueltas, al despacharlo se le da estructura en la
+  misma pasada que las marca `@wip`: crea su principal con la op `add_task` de
+  `mutate_tasks` (devuelve el id) y, en la llamada siguiente, anídalas con `set_parent`
+  y marca `@wip` subtareas y principal. Marcar `@wip` sin anidar deja el lote sin
+  principal. `set_parent` rechaza las que tienen deadline, recordatorios, «esperando»,
+  repetición o subtareas propias: esas siguen en primer nivel y la nota de la principal
+  las nombra.
 - Antes de delegar, registra ids, alcance, ownership y superficies compartidas cuando
   el riesgo o la concurrencia lo justifique.
 - Una sola tarea no se presenta como lote salvo delimitación explícita.
