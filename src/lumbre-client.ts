@@ -591,17 +591,18 @@ export interface ListNoteLinkInput {
 	label: string;
 }
 
-/** UUID v4 de una nota de Hebra, igual que exige el servidor (`hebraListNoteId`
- *  en `src/lib/list-links.ts` del repo `lumbre`). */
-const HEBRA_NOTE_UUID_V4 =
-	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** UUID RFC 4122/9562 de una nota de Hebra (versiones 1 a 8, variante RFC),
+ *  igual que `HEBRA_NOTE_ID_PATTERN` en `src/lib/links/hebra-note-id.ts` del
+ *  repo `lumbre`. Las notas importadas del vault llevan UUID v5. */
+const HEBRA_NOTE_UUID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * Identifica la nota sin alterar la URL que se guardará y mostrará. Acepta
  * `obsidian://`, el enlace universal `https://app.hebra.pro/note/<uuid>` y el
  * esquema nativo de la app `hebra://note/<uuid>[?target=note:<uuid>[:…]]` —
  * alineado con `hebraListNoteId` del servidor (repo `lumbre`,
- * `src/lib/list-links.ts`, que exige v4 y devuelve el uuid en minúsculas):
+ * `src/lib/links/list-links.ts`, que acepta versiones 1 a 8 y devuelve el uuid en minúsculas):
  * ambas formas de Hebra de la MISMA nota devuelven el mismo `noteId`/
  * `targetKey` (uuid en minúsculas), para que no acaben creando dos vínculos.
  * Un `target` con ancla (`:heading:…`/`:block:…`) se acepta pero se colapsa al
@@ -625,14 +626,14 @@ export function parseListNoteUrl(raw: string):
 	}
 	if (url.protocol === 'https:' && url.origin === 'https://app.hebra.pro') {
 		const match = /^\/note\/([0-9a-f-]+)$/i.exec(url.pathname);
-		if (!match || !HEBRA_NOTE_UUID_V4.test(match[1])) return null;
+		if (!match || !HEBRA_NOTE_UUID.test(match[1])) return null;
 		const noteId = match[1].toLowerCase();
 		return { kind: 'hebra', noteId, targetKey: noteId };
 	}
 	if (url.protocol === 'hebra:') {
 		if (url.port !== '' || url.hostname !== 'note' || url.hash !== '') return null;
 		const match = /^\/([0-9a-f-]+)$/i.exec(url.pathname);
-		if (!match || !HEBRA_NOTE_UUID_V4.test(match[1])) return null;
+		if (!match || !HEBRA_NOTE_UUID.test(match[1])) return null;
 		const noteId = match[1].toLowerCase();
 		const queryKeys = [...url.searchParams.keys()];
 		if (queryKeys.length > 1 || (queryKeys.length === 1 && queryKeys[0] !== 'target')) return null;

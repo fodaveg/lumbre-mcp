@@ -633,6 +633,33 @@ describe('linkListNote / unlinkListNote', () => {
 		expect((await linkListNote(config, { listId: LIST_ID, url, label: 'Proyecto Lumbre' })).link).toEqual(link);
 	});
 
+	it.each(['https', 'hebra', 'hebra con target'])('vincula y desvincula una nota importada UUID v5 por %s', async (form) => {
+		const noteId = 'ea4cc2ed-ebc8-5863-a569-ded9c1bbdcca';
+		const upperId = noteId.toUpperCase();
+		const url = form === 'https'
+			? `https://app.hebra.pro/note/${upperId}`
+			: `hebra://note/${upperId}${form === 'hebra con target' ? `?target=note%3A${upperId}%3Aheading%3AResumen` : ''}`;
+		const link = { ...LINK, kind: 'hebra', noteId, targetKey: noteId, url };
+		const fetchSpy = vi.fn()
+			.mockResolvedValueOnce(Response.json({ ok: true, type: 'link', listId: LIST_ID, deleted: false, link }))
+			.mockResolvedValueOnce(Response.json({ ok: true, type: 'unlink', listId: LIST_ID, deleted: false, removed: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+
+		expect((await linkListNote(config, { listId: LIST_ID, url, label: LINK.label })).link).toEqual(link);
+		expect(await unlinkListNote(config, { listId: LIST_ID, url, label: LINK.label })).toMatchObject({ removed: true });
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		for (const [index, type] of ['link', 'unlink'].entries()) {
+			const [requestUrl, init] = fetchSpy.mock.calls[index] as [string, RequestInit];
+			expect(requestUrl).toBe('https://lumbre.test/api/list-links');
+			expect(init.method).toBe('POST');
+			expect(JSON.parse(String(init.body))).toEqual({
+				type,
+				listId: LIST_ID,
+				target: { kind: 'hebra', noteId, url, label: LINK.label }
+			});
+		}
+	});
+
 	it('acepta el deep link nativo hebra://note/<uuid>, con y sin ?target=, y lo envía literal', async () => {
 		const nativeUrl = `hebra://note/${NOTE_ID}`;
 		const nativeUrlWithTarget = `hebra://note/${NOTE_ID}?target=note%3A${NOTE_ID}`;
@@ -710,6 +737,28 @@ describe('parseListNoteUrl', () => {
 	const UUID = 'ea4cc2ed-ebc8-4863-8569-ded9c1bbdcca';
 	const UUID_UPPER = UUID.toUpperCase();
 
+	it.each([1, 2, 3, 4, 5, 6, 7, 8])('acepta UUID v%i con todas las variantes RFC, igual que Lumbre', (version) => {
+		for (const variant of ['8', '9', 'a', 'b']) {
+			const noteId = `ea4cc2ed-ebc8-${version}863-${variant}569-ded9c1bbdcca`;
+			for (const url of [`https://app.hebra.pro/note/${noteId.toUpperCase()}`, `hebra://note/${noteId.toUpperCase()}`]) {
+				expect(parseListNoteUrl(url)).toEqual({ kind: 'hebra', noteId, targetKey: noteId });
+			}
+		}
+	});
+
+	it.each([
+		'ea4cc2ed-ebc8-0863-8569-ded9c1bbdcca',
+		'ea4cc2ed-ebc8-9863-8569-ded9c1bbdcca',
+		'ea4cc2ed-ebc8-f863-8569-ded9c1bbdcca',
+		'ea4cc2ed-ebc8-5863-7569-ded9c1bbdcca',
+		'ea4cc2ed-ebc8-5863-c569-ded9c1bbdcca',
+		'ea4cc2ed-ebc8-5863-8569-ded9c1bbdcc'
+	])('rechaza el id fuera del contrato RFC %s en ambas formas de URL', (noteId) => {
+		for (const url of [`https://app.hebra.pro/note/${noteId}`, `hebra://note/${noteId}`]) {
+			expect(parseListNoteUrl(url)).toBeNull();
+		}
+	});
+
 	it.each([
 		['obsidian://', 'obsidian://open?vault=fodaveg&file=nota.md', { kind: 'obsidian', targetKey: 'obsidian://open?vault=fodaveg&file=nota.md' }],
 		['https://', `https://app.hebra.pro/note/${UUID}`, { kind: 'hebra', noteId: UUID, targetKey: UUID }],
@@ -746,7 +795,7 @@ describe('parseListNoteUrl', () => {
 		['hebra sin path', 'hebra://note/'],
 		['hebra con path extra', `hebra://note/${UUID}/extra`],
 		['hebra con uuid inválido', 'hebra://note/no-es-un-uuid'],
-		['hebra con uuid no v4', 'hebra://note/ea4cc2ed-ebc8-1863-1569-ded9c1bbdcca'],
+		['hebra con variante uuid inválida', 'hebra://note/ea4cc2ed-ebc8-1863-1569-ded9c1bbdcca'],
 		['hebra con credenciales', `hebra://user:pass@note/${UUID}`],
 		['hebra con puerto', `hebra://note:8443/${UUID}`],
 		['hebra con fragmento', `hebra://note/${UUID}#heading`],
@@ -755,7 +804,7 @@ describe('parseListNoteUrl', () => {
 		['hebra con target que no empieza por note:', `hebra://note/${UUID}?target=${UUID}`],
 		['hebra con target duplicado', `hebra://note/${UUID}?target=note:${UUID}&target=note:${UUID}`],
 		['https con host distinto', `https://app.hebra.pro.evil.test/note/${UUID}`],
-		['https con uuid no v4', 'https://app.hebra.pro/note/ea4cc2ed-ebc8-1863-1569-ded9c1bbdcca'],
+		['https con variante uuid inválida', 'https://app.hebra.pro/note/ea4cc2ed-ebc8-1863-1569-ded9c1bbdcca'],
 		['más de 2048 caracteres', `obsidian://open?file=${'a'.repeat(2_049)}`],
 		['más de 2048 bytes UTF-8', `obsidian://open?file=${'á'.repeat(1_025)}`],
 		['no es una URL', 'no-es-una-url']

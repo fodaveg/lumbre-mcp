@@ -217,7 +217,8 @@ retención en «Qué guarda el relé»).
   universal `https://app.hebra.pro/note/<uuid>` o el esquema nativo
   `hebra://note/<uuid>` (con o sin `?target=note:<uuid>[:…]`), sin credenciales
   ni puerto (máx. 2.048 caracteres y bytes UTF-8). Las dos formas de Hebra de la
-  misma nota producen el mismo `noteId`/`targetKey` (UUID v4 en minúsculas), así
+  misma nota producen el mismo `noteId`/`targetKey` (UUID RFC de versión 1 a 8,
+  variante `[89ab]`, en minúsculas; incluye las notas importadas con UUID v5), así
   que no crean vínculos duplicados. El MCP infiere `kind` y, para Hebra, el
   `noteId` del UUID de la ruta. `label`, tras recortarlo,
   debe medir 1..300 caracteres. Solo se recortan los extremos: la URL se guarda
