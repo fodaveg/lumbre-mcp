@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir } from 'node:fs/promises';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import { request as httpRequest, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -949,6 +949,85 @@ describe('ruta desconocida', () => {
 	it('404 texto plano', async () => {
 		const res = await fetch(`${baseUrl}/no-existe`);
 		expect(res.status).toBe(404);
+	});
+});
+
+describe('ruta que no parsea (escáneres)', () => {
+	/** Petición cruda por socket: `fetch` normaliza la ruta y no llega así. */
+	function rawGet(port: number, target: string): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const socket = connect(port, '127.0.0.1');
+			let data = '';
+			socket.setEncoding('utf8');
+			socket.on('connect', () =>
+				socket.write(`GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`)
+			);
+			socket.on('data', (chunk) => (data += chunk));
+			socket.on('end', () => resolve(data));
+			socket.on('error', reject);
+		});
+	}
+
+	it.each(['//..%2f.env', '//', '//[', '//\\', '//:99999'])(
+		'%s responde 400 con las cabeceras de seguridad y el servidor sigue vivo',
+		async (target) => {
+			const port = Number(new URL(baseUrl).port);
+			const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+			try {
+				const raw = await rawGet(port, target);
+				expect(raw).toMatch(/^HTTP\/1\.1 400 /);
+				expect(raw.toLowerCase()).toContain('cache-control: no-store');
+				expect(raw.toLowerCase()).toContain('x-content-type-options: nosniff');
+				expect(errors).toHaveBeenCalledWith('[lumbre-mcp-http] GET (url inválida) 400');
+			} finally {
+				errors.mockRestore();
+			}
+			const health = await fetch(`${baseUrl}/healthz`);
+			expect(health.status).toBe(200);
+		}
+	);
+
+	async function listenWith(oauth: InstanceType<typeof import('./oauth.js').OAuthService>) {
+		const { createHttpApp } = await import('./http.js');
+		const app = createHttpApp('https://app.lumbre.test', oauth);
+		app.listen(0, '127.0.0.1');
+		await new Promise<void>((resolve) => app.once('listening', resolve));
+		return { app, url: `http://127.0.0.1:${(app.address() as AddressInfo).port}` };
+	}
+
+	it('una excepción síncrona en el handler responde 500 y no tumba el servidor', async () => {
+		const { OAuthService } = await import('./oauth.js');
+		const oauth = new OAuthService({ stateDir: await mkdtemp(join(tmpdir(), 'lumbre-mcp-500-sync-')) });
+		vi.spyOn(oauth, 'protectedResourceMetadata').mockImplementation(() => {
+			throw new Error('boom');
+		});
+		const { app, url } = await listenWith(oauth);
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const res = await fetch(`${url}/.well-known/oauth-protected-resource`);
+			expect(res.status).toBe(500);
+			expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+			expect((await fetch(`${url}/healthz`)).status).toBe(200);
+		} finally {
+			errors.mockRestore();
+			await new Promise<void>((resolve) => app.close(() => resolve()));
+		}
+	});
+
+	it('un handler asíncrono que rechaza responde 500 y no tumba el servidor', async () => {
+		const { OAuthService } = await import('./oauth.js');
+		const oauth = new OAuthService({ stateDir: await mkdtemp(join(tmpdir(), 'lumbre-mcp-500-async-')) });
+		vi.spyOn(oauth, 'handleToken').mockRejectedValue(new Error('boom'));
+		const { app, url } = await listenWith(oauth);
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const res = await fetch(`${url}/token`, { method: 'POST' });
+			expect(res.status).toBe(500);
+			expect((await fetch(`${url}/healthz`)).status).toBe(200);
+		} finally {
+			errors.mockRestore();
+			await new Promise<void>((resolve) => app.close(() => resolve()));
+		}
 	});
 });
 

@@ -522,7 +522,49 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
         headersTimeout: options.headersTimeoutMs ?? MCP_HEADERS_TIMEOUT_MS,
         connectionsCheckingInterval: options.connectionsCheckingIntervalMs ?? MCP_CONNECTIONS_CHECK_INTERVAL_MS
     }, (req, res) => {
-        const url = new URL(req.url ?? '/', 'http://localhost');
+        // Red de seguridad por petición: una excepción síncrona del handler o el
+        // rechazo de un handler asíncrono se vuelve un 500 de ESA petición. Sin
+        // esto, Node la deja subir como `uncaughtException` y el proceso muere:
+        // un DoS sin autenticar (`GET //..%2f.env`). Deliberadamente NO hay
+        // `process.on('uncaughtException')` global.
+        const fail = () => {
+            console.error('[lumbre-mcp-http] error interno en el handler');
+            try {
+                if (!res.headersSent) {
+                    res.setHeader('cache-control', 'no-store');
+                    res.setHeader('x-content-type-options', 'nosniff');
+                    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+                }
+                res.end('Internal server error');
+            }
+            catch {
+                res.destroy();
+            }
+        };
+        try {
+            routeRequest(req, res, (promise) => void promise.catch(fail));
+        }
+        catch {
+            fail();
+        }
+    });
+    const routeRequest = (req, res, spawn) => {
+        // Cabeceras de seguridad ANTES de parsear la URL: la respuesta 400 de una
+        // ruta inválida debe llevarlas igual que cualquier otra.
+        res.setHeader('cache-control', 'no-store');
+        res.setHeader('x-content-type-options', 'nosniff');
+        let url;
+        try {
+            url = new URL(req.url ?? '/', 'http://localhost');
+        }
+        catch {
+            // Escáneres: `//..%2f.env` casa como host inválido. Ni se enruta ni se
+            // refleja la ruta en el log (dato no confiable).
+            res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+            res.end('Bad request');
+            logRequest(`${req.method ?? 'UNKNOWN'} (url inválida)`, 400);
+            return;
+        }
         // Cabeceras de seguridad para TODA respuesta de este servidor, puestas
         // en un solo sitio y antes de enrutar. Las rutas OAuth ya traían las
         // suyas (`securityHeaders` en `oauth.ts`), pero el resto —errores
@@ -536,8 +578,6 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
         // cada `writeHead` pase después, y en un choque GANA `writeHead` — así
         // la metadata OAuth conserva su `cache-control: public, max-age=300`
         // deliberado sin excepciones repartidas por el fichero.
-        res.setHeader('cache-control', 'no-store');
-        res.setHeader('x-content-type-options', 'nosniff');
         if (!isAllowedHost(req) || !isAllowedOrigin(req)) {
             res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
             res.end('Host/Origin no permitido.');
@@ -561,33 +601,35 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
         if (req.method === 'GET' &&
             (url.pathname === '/.well-known/oauth-protected-resource/mcp' ||
                 url.pathname === '/.well-known/oauth-protected-resource')) {
+            const body = JSON.stringify(oauth.protectedResourceMetadata());
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' });
-            res.end(JSON.stringify(oauth.protectedResourceMetadata()));
+            res.end(body);
             return;
         }
         if (req.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
+            const body = JSON.stringify(oauth.authorizationServerMetadata());
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' });
-            res.end(JSON.stringify(oauth.authorizationServerMetadata()));
+            res.end(body);
             return;
         }
         if (url.pathname === '/authorize') {
-            void oauth.handleAuthorize(req, res, url);
+            spawn(oauth.handleAuthorize(req, res, url));
             return;
         }
         if (url.pathname === '/oauth/lumbre/callback') {
-            void oauth.handleLumbreCallback(req, res, url);
+            spawn(oauth.handleLumbreCallback(req, res, url));
             return;
         }
         if (url.pathname === '/token') {
-            void oauth.handleToken(req, res);
+            spawn(oauth.handleToken(req, res));
             return;
         }
         if (url.pathname === '/revoke') {
-            void oauth.handleRevoke(req, res);
+            spawn(oauth.handleRevoke(req, res));
             return;
         }
         if (url.pathname === '/mcp') {
-            void handleMcpRequest(req, res, baseUrl, undefined, '/mcp', oauth, toolCalls);
+            spawn(handleMcpRequest(req, res, baseUrl, undefined, '/mcp', oauth, toolCalls));
             return;
         }
         // `/mcp/<token>` (segunda forma, ver el JSDoc de cabecera). Cualquier
@@ -603,12 +645,12 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             const remainder = url.pathname.slice(MCP_PATH_PREFIX.length);
             const isSingleSegment = remainder.length > 0 && !remainder.includes('/');
             const pathToken = isSingleSegment && isWellFormedPathToken(remainder) ? remainder : undefined;
-            void handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>', oauth, toolCalls);
+            spawn(handleMcpRequest(req, res, baseUrl, pathToken, '/mcp/<redactado>', oauth, toolCalls));
             return;
         }
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('Not found');
-    });
+    };
     server.maxConnections = options.maxConnections ?? MCP_MAX_CONNECTIONS;
     return server;
 }
