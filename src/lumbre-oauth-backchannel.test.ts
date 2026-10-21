@@ -104,7 +104,7 @@ describe('backchannel web de Lumbre', () => {
 		await expect(backchannel.createSumegoAuthorizationRequest(request)).rejects.toMatchObject({ kind: 'invalid' });
 	});
 
-	it('Sumego: el canje va a /api/integrations/mcp/sumego/exchange con su cuerpo y valida el 200', async () => {
+	it('Sumego: el canje va EXACTAMENTE a /api/integrations/lumbre-mcp/sumego/exchange con su cuerpo y valida el 200', async () => {
 		let seen: { url: string; body: unknown } | undefined;
 		const backchannel = new LumbreBackchannel({
 			secret: SECRET,
@@ -122,7 +122,10 @@ describe('backchannel web de Lumbre', () => {
 			scope: 'lumbre:mcp'
 		};
 		expect(await backchannel.exchangeSumegoIdentity(request)).toMatchObject({ credentialId: CREDENTIAL_ID, accessToken: TOKEN });
-		expect(seen).toEqual({ url: 'https://app.lumbre.pro/api/integrations/mcp/sumego/exchange', body: request });
+		// Literal a propósito, y no `SUMEGO_EXCHANGE_PATH`: una ruta mal escrita
+		// en la constante tiene que salir aquí en rojo (la primera versión del
+		// contrato citaba `/api/integrations/mcp/sumego/…`, que en Lumbre da 404).
+		expect(seen).toEqual({ url: 'https://app.lumbre.pro/api/integrations/lumbre-mcp/sumego/exchange', body: request });
 	});
 
 	it.each([
@@ -140,6 +143,7 @@ describe('backchannel web de Lumbre', () => {
 		[413, {}, 'invalid', undefined],
 		[400, { code: '<script>no-es-de-la-lista</script>' }, 'invalid', undefined],
 		[503, { code: 'sumego_unavailable' }, 'transient', 'sumego_unavailable'],
+		[429, { code: 'rate_limited' }, 'transient', 'rate_limited'],
 		[503, { code: 'jwks_unavailable' }, 'transient', undefined],
 		[500, 'no es json', 'transient', undefined]
 	] as const)('Sumego: el canje con %i %j es %s y lleva el code %s', async (status, body, kind, code) => {

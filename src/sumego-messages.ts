@@ -20,6 +20,7 @@ export const SUMEGO_PERSON_MESSAGES = {
 	transactionNotFound: 'La autorización ha caducado. Vuelve a conectar desde la aplicación.',
 	tokenReused: 'Esta autorización ya se usó. Vuelve a conectar desde la aplicación.',
 	accountsUnavailable: 'El servicio de cuentas no responde. Inténtalo en un rato.',
+	tooManyAttempts: 'Demasiados intentos. Espera un minuto y vuelve a empezar desde la aplicación.',
 	lumbreUnavailable: 'Lumbre no está disponible ahora mismo. Inténtalo de nuevo en unos minutos.',
 	generic: 'No se pudo completar la conexión con Lumbre. Vuelve a intentarlo desde la aplicación.',
 	// Vuelta de Sumego y consentimiento.
@@ -48,6 +49,9 @@ const EXCHANGE_CODES: Record<SumegoExchangeErrorCode, { status: number; message:
 	transaction_not_found: { status: 400, message: 'transactionNotFound' },
 	token_reused: { status: 400, message: 'tokenReused' },
 	sumego_unavailable: { status: 503, message: 'accountsUnavailable' },
+	// Transitorio: Lumbre limita a 10 intentos por minuto y solicitud. La
+	// solicitud del relé ya se consumió, así que hay que empezar de nuevo.
+	rate_limited: { status: 429, message: 'tooManyAttempts' },
 	invalid_request: { status: 502, message: 'generic', ourFault: true },
 	payload_too_large: { status: 502, message: 'generic', ourFault: true }
 };

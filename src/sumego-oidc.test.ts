@@ -255,6 +255,8 @@ class FakeSumego {
 class FakeLumbre {
 	readonly requests: Record<string, unknown>[] = [];
 	readonly sumegoExchanges: Record<string, unknown>[] = [];
+	/** URL completa de cada canje con Sumego que llegó (cualquier otra ruta da 404). */
+	readonly sumegoExchangeUrls: string[] = [];
 	readonly revoked: string[] = [];
 	exchangeFailure?: { status: number; body: unknown };
 	/** Se espera antes de responder al canje con Sumego. */
@@ -288,7 +290,8 @@ class FakeLumbre {
 					: { authorizationUrl: `https://app.lumbre.pro/integrations/lumbre-mcp?request=${requestId}`, requestId, expiresAt }
 			);
 		}
-		if (path === 'mcp/sumego/exchange') {
+		if (path === 'lumbre-mcp/sumego/exchange') {
+			this.sumegoExchangeUrls.push(url);
 			this.sumegoExchanges.push(body);
 			await this.beforeSumegoExchange?.();
 			if (this.exchangeFailure) return Response.json(this.exchangeFailure.body, { status: this.exchangeFailure.status });
@@ -608,6 +611,14 @@ describe('cliente OIDC: ID token', () => {
 		expect(idp.calls).toMatchObject({ discovery: 1, jwks: 1, token: 2 });
 	});
 
+	it('con varias aud vale solo si azp es lumbre-mcp (lo que también exige Lumbre al canjear)', async () => {
+		const several = (azp: string | undefined) => (c: Record<string, unknown>) =>
+			jws({ ...c, aud: ['lumbre-web', CLIENT_ID], ...(azp === undefined ? {} : { azp }) }, idp.key);
+		expect(await redeemWith(several(CLIENT_ID))).toMatchObject({ identity: { sub: ANA.sub } });
+		expect(await redeemWith(several(undefined))).toBeInstanceOf(OidcError);
+		expect(await redeemWith(several('lumbre-web'))).toBeInstanceOf(OidcError);
+	});
+
 	it.each([
 		['iss ausente', (c: Record<string, unknown>) => jws({ ...c, iss: undefined }, idp.key)],
 		['iss de otro', (c: Record<string, unknown>) => jws({ ...c, iss: 'https://otro.example' }, idp.key)],
@@ -713,6 +724,8 @@ describe('login con Sumego en el relé', () => {
 		expect(allowed.status).toBe(302);
 		expect(allowed.headers.get('set-cookie')).toContain('Max-Age=0');
 		expect(h.lumbre.sumegoExchanges).toHaveLength(1);
+		// La ruta exacta del contrato de Lumbre, escrita a mano.
+		expect(h.lumbre.sumegoExchangeUrls).toEqual(['https://app.lumbre.pro/api/integrations/lumbre-mcp/sumego/exchange']);
 		const exchange = h.lumbre.sumegoExchanges[0]!;
 		expect(Object.keys(exchange).sort()).toEqual(['clientId', 'idToken', 'requestId', 'resource', 'scope', 'transactionId']);
 		expect(exchange).toMatchObject({ requestId: page.request, clientId: CLAUDE_CLIENT, resource: OAUTH_RESOURCE, scope: OAUTH_SCOPE });
@@ -850,7 +863,8 @@ describe('login con Sumego en el relé', () => {
 		[413, { code: 'payload_too_large' }, 502, 'generic', true],
 		// 401 del secreto: el cuerpo de error de SvelteKit, sin `code`.
 		[401, { message: 'Unauthorized' }, 502, 'generic', true],
-		[502, { code: 'algo_que_no_esta_en_la_lista' }, 503, 'lumbreUnavailable', false]
+		[502, { code: 'algo_que_no_esta_en_la_lista' }, 503, 'lumbreUnavailable', false],
+		[429, { code: 'rate_limited' }, 429, 'tooManyAttempts', false]
 	] as const)('Lumbre %i %j: página %i con la frase %s (fallo nuestro: %s)', async (status, body, pageStatus, key, ourFault) => {
 		const h = await harness();
 		h.lumbre.exchangeFailure = { status, body };
@@ -870,7 +884,7 @@ describe('login con Sumego en el relé', () => {
 		const html = await response.text();
 		expect(html).toContain(SUMEGO_PERSON_MESSAGES[key]);
 		// Nada interno: ni el código de Lumbre ni su cuerpo.
-		expect(html).not.toMatch(/invalid_|unknown_account|account_|transaction_not_found|token_reused|sumego_unavailable|payload_|Unauthorized|algo_que/);
+		expect(html).not.toMatch(/invalid_|unknown_account|account_|transaction_not_found|token_reused|sumego_unavailable|payload_|Unauthorized|algo_que|rate_limited/);
 		const ourFaultLines = lines.filter((line) => line.includes('fallo del relé'));
 		expect(ourFaultLines.length > 0).toBe(ourFault);
 		for (const line of ourFaultLines) expect(line).not.toMatch(/eyJ|[a-f0-9]{64}/);

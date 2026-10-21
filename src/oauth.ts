@@ -2664,7 +2664,7 @@ export class OAuthService {
 		if (failure.log) {
 			console.error(`[lumbre-mcp-oauth] canje con Sumego: fallo del relé o de su configuración, no de la persona (${failure.log})`);
 		}
-		const code = failure.status === 503 ? 'temporarily_unavailable' : failure.status === 403 ? 'access_denied' : 'invalid_grant';
+		const code = failure.status === 503 || failure.status === 429 ? 'temporarily_unavailable' : failure.status === 403 ? 'access_denied' : 'invalid_grant';
 		return new OAuthError(code, failure.message, failure.status);
 	}
 

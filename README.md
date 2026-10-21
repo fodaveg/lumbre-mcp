@@ -1189,14 +1189,16 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    no canjean nada (403) y tampoco queman la transacción, para que nadie pueda
    abortar la de otra persona. «Cancelar» vuelve al cliente con `access_denied` e
    `iss`.
-4. «Permitir» canjea en Lumbre (`POST /api/integrations/mcp/sumego/exchange`, con
+4. «Permitir» canjea en Lumbre (`POST /api/integrations/lumbre-mcp/sumego/exchange`,
+   el mismo prefijo que el resto del canal, con
    el secreto del canal y el cuerpo `{requestId, transactionId, idToken, clientId,
    resource, scope}`). Lumbre vuelve a validar el ID token y devuelve la misma
    credencial dedicada que `/exchange`. Desde ahí todo sigue como con Lumbre: código
    de autorización, `/token`, refresh y revocación. Si Lumbre rechaza, la persona ve
    una página con una frase cerrada según el `code` (cuenta pendiente, suspendida,
    rechazada, usuario sin cuenta, autorización caducada o ya usada, servicio de
-   cuentas caído); `invalid_request`, `payload_too_large` y el 401 del secreto son
+   cuentas caído, o demasiados intentos con `rate_limited`, que es transitorio: Lumbre
+   admite 10 por minuto y solicitud); `invalid_request`, `payload_too_large` y el 401 del secreto son
    fallos nuestros: frase genérica para la persona y una línea en el log del
    servidor. Todas las frases viven en `src/sumego-messages.ts`. Un rechazo termina
    el flujo; no se reintenta solo. El grant hereda el `sub`, el `sid` y el refresh de
@@ -1271,9 +1273,9 @@ en producción antes de ajustarlo.
 Cambiar de proveedor no corta los grants vivos: los nacidos con uno siguen
 refrescando y resolviendo con el otro, y el logout de Sumego se atiende también con
 `lumbre`. Con Sumego caído solo fallan las conexiones nuevas. El contrato de Lumbre
-para el canje con Sumego lo cerró la sesión de Lumbre el 21 oct 2026 (su commit
-a54f12c15, todavía sin desplegar): hasta que esté en producción, `sumego` no conecta
-a nadie. La configuración está en `deploy/README-deploy.md`.
+para el canje con Sumego lo cerró la sesión de Lumbre el 21 oct 2026 (main de Lumbre
+e0fdd69c7 + 6cfe83b25): hasta que eso esté en producción, `sumego` no conecta a
+nadie. La configuración está en `deploy/README-deploy.md`.
 
 **La outbox de revocación** tiene tope (256) y caducidad (30 días, la misma
 vigencia absoluta que una familia de refresh). Descartar un elemento significa

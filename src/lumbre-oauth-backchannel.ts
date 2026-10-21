@@ -11,7 +11,7 @@ export type BackchannelFailureKind = 'invalid' | 'transient';
 
 /**
  * Códigos de error del canje con identidad de Sumego (`{ code }` en el
- * cuerpo de un 4xx/5xx de `/api/integrations/mcp/sumego/exchange`). Lista
+ * cuerpo de un 4xx/5xx de `/api/integrations/lumbre-mcp/sumego/exchange`). Lista
  * CERRADA: un `code` que no esté aquí se trata como si no viniera, para que
  * nada que mande Lumbre llegue sin filtrar a la página de la persona.
  */
@@ -25,7 +25,8 @@ export const SUMEGO_EXCHANGE_ERROR_CODES = [
 	'token_reused',
 	'sumego_unavailable',
 	'invalid_request',
-	'payload_too_large'
+	'payload_too_large',
+	'rate_limited'
 ] as const;
 
 export type SumegoExchangeErrorCode = (typeof SUMEGO_EXCHANGE_ERROR_CODES)[number];
@@ -91,7 +92,7 @@ export interface CreatedSumegoAuthorizationRequest {
 	expiresAt: number;
 }
 
-/** Cuerpo de `POST /api/integrations/mcp/sumego/exchange`. */
+/** Cuerpo de `POST /api/integrations/lumbre-mcp/sumego/exchange`. */
 export interface SumegoExchangeRequest {
 	requestId: string;
 	transactionId: string;
@@ -238,9 +239,15 @@ async function errorCodeOf(response: Response): Promise<SumegoExchangeErrorCode 
 	}
 }
 
-/** Prefijo del canal de siempre. El canje con Sumego vive en otra ruta
- *  (`/api/integrations/mcp/sumego/exchange`), por decisión de Lumbre. */
+/** Prefijo del canal servidor con Lumbre, común a todas sus rutas: las de
+ *  siempre (`requests`, `exchange`, `introspect`, `revoke`) y el canje con
+ *  Sumego (`sumego/exchange`). Las rutas se escriben siempre a partir de él,
+ *  nunca como literal: el primer contrato del canje con Sumego citaba una ruta
+ *  sin el segmento `lumbre-mcp`, que en Lumbre habría dado 404. */
 const LUMBRE_MCP_PATH = '/api/integrations/lumbre-mcp/';
+
+/** Ruta del canje con Sumego (main de Lumbre e0fdd69c7 + 6cfe83b25). */
+export const SUMEGO_EXCHANGE_PATH = `${LUMBRE_MCP_PATH}sumego/exchange`;
 
 export class LumbreBackchannel implements LumbreBackchannelApi {
 	private readonly baseUrl: string;
@@ -323,15 +330,17 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 	 * contra el hash que se le dio al crear la solicitud) y busca la cuenta
 	 * por su `sub`. El 200 es idéntico al de `exchange`.
 	 *
-	 * Contrato del lado de Lumbre (commit a54f12c15 de `lumbre`, 21 oct 2026,
-	 * aún sin desplegar). Errores, con `{ code }` en el cuerpo: 400
+	 * Ruta: `SUMEGO_EXCHANGE_PATH`, `POST /api/integrations/lumbre-mcp/sumego/exchange`,
+	 * con el mismo prefijo que el resto del canal (main de Lumbre e0fdd69c7 +
+	 * 6cfe83b25). Errores, con `{ code }` en el cuerpo: 400
 	 * `invalid_token` (también si `clientId`, `resource` o `scope` no casan
 	 * con la solicitud), `unknown_account` o `invalid_request` (cuerpo roto o
 	 * con claves de más: fallo NUESTRO); 401 secreto del canal malo, con el
 	 * cuerpo de error de SvelteKit y SIN `code`; 403 `account_pending`,
 	 * `account_suspended` o `account_rejected`; 404 `transaction_not_found`;
-	 * 409 `token_reused`; 413 `payload_too_large`; 503 `sumego_unavailable`
-	 * si a Lumbre le falla el discovery o el JWKS de Sumego. 4xx = `invalid`;
+	 * 409 `token_reused`; 413 `payload_too_large`; 429 `rate_limited` (10
+	 * intentos por minuto y solicitud); 503 `sumego_unavailable` si a Lumbre
+	 * le falla el discovery o el JWKS de Sumego. 4xx salvo 429 = `invalid`;
 	 * 5xx, 429 y timeout = `transient`. El `code` viaja en el
 	 * `BackchannelError` solo si es de la lista cerrada
 	 * (`SUMEGO_EXCHANGE_ERROR_CODES`). Si el contrato cambia, se ajusta AQUÍ
@@ -346,7 +355,7 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 			throw new BackchannelError('invalid', 'Canje con Sumego fuera de contrato.');
 		}
 		return exchangedCredential(
-			await this.post('/api/integrations/mcp/sumego/exchange', request, { readErrorCode: true })
+			await this.post(SUMEGO_EXCHANGE_PATH, request, { readErrorCode: true })
 		);
 	}
 
