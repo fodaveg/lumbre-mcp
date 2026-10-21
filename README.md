@@ -1181,7 +1181,11 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    `/oauth/sumego/consent` con un token CSRF atado a la transacción y la cookie. CSP
    estricta (`default-src 'none'`, `frame-ancestors 'none'` y `form-action` solo a sí
    mismo y al origen del cliente, porque Chrome aplica `form-action` también a la
-   redirección que sigue al envío) y `no-store`. La transacción y el consentimiento
+   redirección que sigue al envío) y `no-store`. Sale con `Referrer-Policy:
+   same-origin`, no con el `no-referrer` del resto de páginas: con `no-referrer` el
+   navegador manda el POST con `Origin: null`, que el filtro de `Host`/`Origin`
+   rechaza con 403. Así el POST lleva `Origin: https://mcp.lumbre.pro`, y el 302 al
+   cliente (otro origen) sigue con `no-referrer`. La transacción y el consentimiento
    son de un solo uso. La transacción caduca a los 10 minutos. El consentimiento caduca
    antes, a los 4 min 30 s del `iat` del ID token: Lumbre no acepta ID tokens de más de
    5 minutos (con 60 s de margen), y así un «Permitir» tardío caduca aquí sin gastar el

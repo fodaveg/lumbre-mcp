@@ -415,8 +415,12 @@ async function callback(h: Harness, params: Record<string, string>, cookie?: str
 	return await fetch(callbackUrl(h, params), { redirect: 'manual', headers: cookie ? { cookie } : {} });
 }
 
-/** Hasta la página de consentimiento; devuelve lo que el formulario lleva. */
-async function reachConsent(h: Harness, person: Person = ANA): Promise<{ cookie: string; request: string; csrf: string; html: string; nonce: string }> {
+/** Hasta la página de consentimiento; devuelve lo que el formulario lleva y
+ *  la `Referrer-Policy` con la que sale, que decide el `Origin` del envío. */
+async function reachConsent(
+	h: Harness,
+	person: Person = ANA
+): Promise<{ cookie: string; request: string; csrf: string; html: string; nonce: string; referrerPolicy: string | null }> {
 	const { location, cookie } = await startLogin(h);
 	const { code, state, nonce } = h.idp.issueCode(location, person);
 	const response = await callback(h, { code, state, iss: ISSUER }, cookie);
@@ -426,20 +430,38 @@ async function reachConsent(h: Harness, person: Person = ANA): Promise<{ cookie:
 		cookie,
 		html,
 		nonce,
+		referrerPolicy: response.headers.get('referrer-policy'),
 		request: html.match(/name="request" value="([^"]+)"/)![1]!,
 		csrf: html.match(/name="csrf" value="([^"]+)"/)![1]!
 	};
 }
 
+/**
+ * El `Origin` que un navegador pone al POST de un formulario de
+ * `https://mcp.lumbre.pro` a sí mismo, según la `Referrer-Policy` de la
+ * página. Fetch («append a request `Origin` header»): con `no-referrer` el
+ * origen se serializa como `null`; con cualquier otra, a un destino del mismo
+ * origen va el de verdad. El `fetch` de Node no manda `Origin`, así que sin
+ * esto los tests no ven lo que ve el navegador (21 oct 2026: 403 en prod).
+ */
+function browserFormOrigin(policy: string | null): string {
+	return policy === 'no-referrer' ? 'null' : 'https://mcp.lumbre.pro';
+}
+
 async function consent(
 	h: Harness,
 	form: { request: string; csrf: string; decision: string },
-	cookie?: string
+	cookie?: string,
+	origin?: string
 ): Promise<Response> {
 	return await fetch(`${h.baseUrl}/oauth/sumego/consent`, {
 		method: 'POST',
 		redirect: 'manual',
-		headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) },
+		headers: {
+			'content-type': 'application/x-www-form-urlencoded',
+			...(cookie ? { cookie } : {}),
+			...(origin !== undefined ? { origin } : {})
+		},
 		body: new URLSearchParams(form)
 	});
 }
@@ -909,6 +931,74 @@ describe('login con Sumego en el relé', () => {
 		expect(exchangeFailure(new BackchannelError('invalid', 'x')).log).toBeDefined();
 		expect(exchangeFailure(new BackchannelError('transient', 'x')).key).toBe('lumbreUnavailable');
 	});
+});
+
+/**
+ * El POST del consentimiento con el `Origin` que pone un navegador. El 21 oct
+ * 2026 «Permitir» dio 403 «Host/Origin no permitido.» en producción: la página
+ * salía con `Referrer-Policy: no-referrer`, el navegador mandaba `Origin: null`
+ * y `http.ts` lo rechaza (bien). Los tests no lo vieron porque el `fetch` de
+ * Node no manda `Origin`.
+ */
+describe('el consentimiento con el Origin de un navegador', () => {
+	it.each([
+		['allow', 1],
+		['deny', 0]
+	] as const)('«%s» enviado desde la página vuelve al cliente (canjes: %i)', async (decision, exchanges) => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		const response = await consent(
+			h,
+			{ request: page.request, csrf: page.csrf, decision },
+			page.cookie,
+			browserFormOrigin(page.referrerPolicy)
+		);
+		expect(response.status, await response.clone().text()).toBe(302);
+		const back = new URL(response.headers.get('location')!);
+		expect(`${back.origin}${back.pathname}`).toBe(OAUTH_CALLBACK);
+		expect(h.lumbre.sumegoExchanges).toHaveLength(exchanges);
+	});
+
+	it('la página de consentimiento va con same-origin; los errores y el 302 al cliente, con no-referrer', async () => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		expect(page.referrerPolicy).toBe('same-origin');
+		// Una página de error del mismo flujo: un state que no existe.
+		const { location, cookie } = await startLogin(h);
+		const { code } = h.idp.issueCode(location);
+		const error = await callback(h, { code, state: 'x'.repeat(43), iss: ISSUER }, cookie);
+		expect(error.status).toBe(400);
+		expect(error.headers.get('content-type')).toContain('text/html');
+		expect(error.headers.get('referrer-policy')).toBe('no-referrer');
+		// El 302 a claude.ai, otro origen: sin Referer.
+		const allowed = await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie, 'https://mcp.lumbre.pro');
+		expect(allowed.status).toBe(302);
+		expect(allowed.headers.get('referrer-policy')).toBe('no-referrer');
+	});
+
+	it('con Origin https://mcp.lumbre.pro da 302 y canjea', async () => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		const allowed = await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie, 'https://mcp.lumbre.pro');
+		expect(allowed.status).toBe(302);
+		expect(new URL(allowed.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+		expect(h.lumbre.sumegoExchanges).toHaveLength(1);
+	});
+
+	it.each(['null', 'https://evil.example', 'https://app.lumbre.pro'])(
+		'con Origin %s da 403, no canjea y no quema la transacción',
+		async (origin) => {
+			const h = await harness();
+			const page = await reachConsent(h);
+			const rejected = await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie, origin);
+			expect(rejected.status).toBe(403);
+			expect(await rejected.text()).toBe('Host/Origin no permitido.');
+			expect(h.lumbre.sumegoExchanges).toHaveLength(0);
+			const allowed = await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie, 'https://mcp.lumbre.pro');
+			expect(allowed.status).toBe(302);
+			expect(h.lumbre.sumegoExchanges).toHaveLength(1);
+		}
+	);
 });
 
 describe('back-channel logout de Sumego', () => {

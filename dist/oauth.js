@@ -605,9 +605,14 @@ const PAGE_STYLE = 'body{font-family:system-ui,-apple-system,sans-serif;margin:0
  * `form-action` también a la REDIRECCIÓN que sigue al envío (medido por
  * Sumego, SPEC §3), así que el del cliente (claude.ai, el loopback de Codex)
  * tiene que estar o el «Permitir» se queda en blanco.
+ *
+ * `referrerPolicy` sustituye al `no-referrer` de `securityHeaders` solo en la
+ * página que la pide (el consentimiento); las de error se quedan como están.
  */
 function htmlPage(res, status, page) {
     const headers = securityHeaders('text/html; charset=utf-8');
+    if (page.referrerPolicy)
+        headers['referrer-policy'] = page.referrerPolicy;
     headers['content-security-policy'] =
         "default-src 'none'; style-src 'unsafe-inline'; " +
             `form-action ${['\'self\'', ...(page.formAction ?? [])].join(' ')}; ` +
@@ -1951,6 +1956,14 @@ export class OAuthService {
         htmlPage(res, 200, {
             title: 'Conectar con Lumbre',
             formAction: [redirect.origin],
+            // `same-origin` y no el `no-referrer` del resto: con `no-referrer`
+            // el navegador manda el POST del formulario con `Origin: null`
+            // (Fetch, «append a request Origin header»), y `http.ts` lo
+            // rechaza con 403 —el «Permitir» roto del 21 oct 2026—. Así el
+            // POST a sí mismo lleva `Origin: https://mcp.lumbre.pro`, y el
+            // 302 posterior a claude.ai o al loopback, que es otro origen,
+            // sigue sin Referer (esa respuesta ya va con `no-referrer`).
+            referrerPolicy: 'same-origin',
             body: `<h1>¿Dar acceso a ${clientName} a tu Lumbre?</h1>` +
                 `<p>${clientName} podrá leer y cambiar tus tareas, proyectos y áreas de Lumbre en tu nombre, hasta que lo desconectes.</p>` +
                 '<dl>' +
