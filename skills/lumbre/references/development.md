@@ -144,6 +144,10 @@ Matices:
 
 - Si el trabajo sigue vivo y lo continúas en el mismo turno, no hay cierre: mantén
   `@wip` y termínalo. Parar el turno con la tarea en `@wip` sí es un cierre.
+- Un subagente despachado que sigue trabajando en la tarea cuando acaba el turno también
+  es trabajo vivo: la tarea sigue en `@wip`, porque el usuario mira el tablero para saber
+  qué se está haciendo. El cierre llega cuando ese agente entrega, falla o se para; si se
+  para sin terminar, la tarea vuelve a `@acked` con el motivo.
 - Una tarea bloqueada por un tercero, por una decisión del usuario o por falta de
   datos también vuelve a `@acked`, con el bloqueo nombrado como motivo.
 - La tarea devuelta conserva su `#tag` de lote, su nota y su evidencia. No se borra
