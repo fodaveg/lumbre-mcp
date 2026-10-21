@@ -8,6 +8,12 @@ import { describe, expect, it } from 'vitest';
 const FAKE_SHA = 'c0ffee0000000000000000000000000000000001';
 const PREVIOUS_SHA = 'beef000000000000000000000000000000000002';
 
+// La válvula del smoke (ff4c832): sin LUMBRE_TOKEN solo se sigue con ella y con motivo.
+const SIN_SMOKE = {
+	LUMBRE_MCP_SKIP_SMOKE: '1',
+	LUMBRE_MCP_SKIP_SMOKE_MOTIVO: 'test: el smoke real no corre contra el doble de node'
+};
+
 // Sandbox con dobles de `npm`, `git`, `rsync`, `ssh`, `docker` y `node`:
 // registran su invocación en un log en vez de tocar red ni disco real.
 //  · `git` contesta como un árbol limpio en `FAKE_SHA` (`FAKE_GIT_DIRTY=1`
@@ -174,12 +180,12 @@ describe('deploy OAuth fail-closed', () => {
 	it('ejecuta el precheck remoto y rechaza secretos dentro del destino antes de ssh/rsync', async () => {
 		const { sandbox, log, run, reset } = await createSandbox();
 		try {
-			let result = run();
+			let result = run(SIN_SMOKE);
 			expect(result.status, result.stderr).toBe(0);
 			expect(await readFile(log, 'utf8')).toContain('test -r /srv/lumbre-mcp.env');
 
 			await reset();
-			result = run({ LUMBRE_MCP_ENV_FILE: '/srv/secrets/lumbre-mcp.env' });
+			result = run({ ...SIN_SMOKE, LUMBRE_MCP_ENV_FILE: '/srv/secrets/lumbre-mcp.env' });
 			expect(result.status, result.stderr).toBe(0);
 			expect(await readFile(log, 'utf8')).toContain('test -r /srv/secrets/lumbre-mcp.env');
 
@@ -252,7 +258,7 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 	it('camino feliz: copia el export de HEAD, etiqueta por SHA, guarda el log del saliente y mueve latest', async () => {
 		const { sandbox, log, logDir, run } = await createSandbox();
 		try {
-			const result = run();
+			const result = run(SIN_SMOKE);
 			expect(result.status, result.stderr).toBe(0);
 			const lines = await calls(log);
 
@@ -305,9 +311,9 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 			// El directorio de trabajo se retira al recoger el código.
 			expect(entries.some((name) => name.startsWith('.deploy-'))).toBe(false);
 
-			// Sin LUMBRE_TOKEN no hay smoke, y lo dice.
+			// Sin LUMBRE_TOKEN y con la válvula no hay smoke, y deja constancia con el motivo.
 			expect(lines.some((line) => line.startsWith('node '))).toBe(false);
-			expect(result.stdout).toContain('Sin LUMBRE_TOKEN');
+			expect(result.stdout).toContain(`SIN SMOKE: ${SIN_SMOKE.LUMBRE_MCP_SKIP_SMOKE_MOTIVO}`);
 		} finally {
 			await rm(sandbox, { recursive: true, force: true });
 		}
@@ -362,7 +368,7 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 	it('si el ssh de seguimiento se cae, el deploy sigue en el servidor y su código se recoge igual', async () => {
 		const { sandbox, log, run } = await createSandbox();
 		try {
-			const result = run({ FAKE_FOLLOW_DROPS: '1' });
+			const result = run({ ...SIN_SMOKE, FAKE_FOLLOW_DROPS: '1' });
 			expect(result.status, result.stderr).toBe(0);
 			const lines = await calls(log);
 			const follows = lines.filter((line) => line.includes('tail -n '));
@@ -409,13 +415,49 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 	it('primer deploy (no hay contenedor): no etiqueta anterior ni vuelca log, y llega a healthy', async () => {
 		const { sandbox, log, logDir, run } = await createSandbox();
 		try {
-			const result = run({ FAKE_NO_PREVIOUS: '1' });
+			const result = run({ ...SIN_SMOKE, FAKE_NO_PREVIOUS: '1' });
 			expect(result.status, result.stderr).toBe(0);
 			const lines = await calls(log);
 			expect(lines.some((line) => line.includes('lumbre-mcp:anterior'))).toBe(false);
 			expect(lines.some((line) => line.startsWith('docker stop'))).toBe(false);
 			indexOf(lines, `docker tag lumbre-mcp:${FAKE_SHA} lumbre-mcp:latest`);
 			expect((await readdir(logDir)).filter((name) => name.endsWith('.log.gz'))).toEqual([]);
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('sin LUMBRE_TOKEN ni válvula el deploy falla, sin smoke y con el comando de vuelta atrás', async () => {
+		const { sandbox, log, run } = await createSandbox();
+		try {
+			const result = run();
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain('falta LUMBRE_TOKEN');
+			expect(result.stderr).toContain('LUMBRE_MCP_SKIP_SMOKE=1');
+			expect(result.stderr).toMatch(/docker tag lumbre-mcp:anterior lumbre-mcp:latest/);
+			expect((await calls(log)).some((line) => line.startsWith('node '))).toBe(false);
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('la válvula LUMBRE_MCP_SKIP_SMOKE=1 sin motivo falla: no se salta el smoke sin decir por qué', async () => {
+		const { sandbox, run } = await createSandbox();
+		try {
+			const result = run({ LUMBRE_MCP_SKIP_SMOKE: '1' });
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain('exige LUMBRE_MCP_SKIP_SMOKE_MOTIVO');
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
+
+	it('la válvula solo vale con el valor exacto 1: «true» no salta el smoke', async () => {
+		const { sandbox, run } = await createSandbox();
+		try {
+			const result = run({ LUMBRE_MCP_SKIP_SMOKE: 'true', LUMBRE_MCP_SKIP_SMOKE_MOTIVO: 'x' });
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain('falta LUMBRE_TOKEN');
 		} finally {
 			await rm(sandbox, { recursive: true, force: true });
 		}
@@ -553,7 +595,7 @@ describe('un .env local no puede acabar en git, en la imagen ni en el servidor',
 			}
 
 			await writeFile(log, '');
-			const result = run({ LUMBRE_MCP_HOST: 'usuario@lumbre.example.com' });
+			const result = run({ ...SIN_SMOKE, LUMBRE_MCP_HOST: 'usuario@lumbre.example.com' });
 			expect(result.status).toBe(0);
 			expect(await readFile(log, 'utf8')).toContain('ssh ');
 		} finally {
