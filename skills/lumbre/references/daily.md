@@ -64,9 +64,11 @@ subtareas.
 ## Tareas que el agente crea por su cuenta
 
 Lo que decide el destino es quién pidió la tarea, no de qué trabajo cuelga. Si el usuario
-pide las tareas («haz X», «crea las tareas de este audit»), van al proyecto del trabajo
-según la sección anterior. Si nacen por iniciativa del agente mientras trabaja (al hacer
-X descubre que la sincronización falla por Y), van sin preguntar al proyecto que el
+pide las tareas («haz X», «crea las tareas de este audit») o pide o propone un cambio en
+la conversación aunque no diga «crea la tarea» («¿y si quitamos los segundos?»), van al
+proyecto del trabajo según la sección anterior. Si nacen por iniciativa del agente
+mientras trabaja (al hacer X descubre que la sincronización falla por Y) o de la petición
+de otra sesión u otro agente, van sin preguntar al proyecto que el
 usuario dedica al trabajo de los agentes (por ejemplo, «Agentes Lumbre»), en su propia
 sección por tema, para no mezclarlas con las del usuario. Usa la sección de ese tema si
 ya existe. Si el usuario no tiene ese proyecto, van al proyecto del trabajo en una
