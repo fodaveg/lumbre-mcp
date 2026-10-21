@@ -2560,11 +2560,13 @@ export class OAuthService {
      *   · `skipped`: no es de Sumego, no guarda refresh, o se comprobó hace
      *     menos de `SUMEGO_RECHECK_MS`.
      *   · `ok`: Sumego renovó (y rotó) el refresh; se guarda el nuevo y la hora.
-     *   · `revoked`: Sumego respondió 4xx salvo 429. La familia se revoca y su
-     *     credencial de Lumbre va a la outbox.
-     *   · `transient`: 429, 5xx, timeout o Sumego caído. No se corta nada y
-     *     se vuelve a intentar en el siguiente `/token` (SPEC §8: con Sumego
-     *     caído las sesiones abiertas siguen).
+     *   · `revoked`: Sumego respondió `400 invalid_grant`. La familia se revoca
+     *     y su credencial de Lumbre va a la outbox.
+     *   · `transient`: 429, 5xx, timeout, Sumego caído, o cualquier otro 4xx
+     *     (`invalid_client` y compañía: configuración nuestra, no la sesión;
+     *     ver la desviación de la SPEC en `SumegoOidcClient.refresh`). No se
+     *     corta nada y se vuelve a intentar en el siguiente `/token` (SPEC §8:
+     *     con Sumego caído las sesiones abiertas siguen).
      *
      * CONCURRENCIA, que es lo delicado: Sumego rota el refresh en cada uso, así
      * que dos renovaciones con el mismo refresh harían que la segunda recibiera

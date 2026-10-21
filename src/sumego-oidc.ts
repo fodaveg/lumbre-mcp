@@ -146,7 +146,8 @@ export interface SumegoOidcApi {
 	ensureConfigured(): void;
 	authorizationUrl(params: { state: string; nonce: string; codeChallenge: string }): Promise<string>;
 	redeemCode(code: string, codeVerifier: string, nonce: string): Promise<RedeemedIdentity>;
-	/** Renueva un refresh. `invalid` = 4xx salvo 429: la sesión ya no vale. */
+	/** Renueva un refresh. `invalid` SOLO con `400 invalid_grant`: la sesión ya no
+	 *  vale. Otro 4xx es configuración nuestra y va como `transient` (ver `refresh`). */
 	refresh(refreshToken: string): Promise<RenewedSession>;
 	/** Revoca un refresh si el discovery publica `revocation_endpoint`; si no,
 	 *  no hace nada. Lanza si falla: quien llama decide si le importa. */
@@ -406,16 +407,37 @@ export class SumegoOidcClient implements SumegoOidcApi {
 	 * de valer: quien llama tiene que guardar el nuevo, y no puede usar el
 	 * mismo dos veces (lo segundo sería un `invalid_grant` legítimo).
 	 *
-	 * Errores: 4xx salvo 429 es `invalid` (SPEC §4.0.3: la sesión se cierra,
-	 * con la cuenta suspendida, el grant revocado o el refresh ya usado); 429,
-	 * 5xx, red y timeout son `transient`. Un 200 sin `refresh_token` también es
-	 * `transient`: no prueba que la sesión haya muerto, y cortar por un
-	 * contrato roto de Sumego desconectaría a todo el mundo.
+	 * Errores: SOLO un `400` con `error=invalid_grant` es `invalid`: la sesión
+	 * se cierra (cuenta suspendida, grant revocado o refresh ya usado, SPEC
+	 * §4.0.3). Todo lo demás es `transient` y no corta nada: 429, 5xx, red,
+	 * timeout, un 200 sin `refresh_token`, y también cualquier otro 4xx.
+	 *
+	 * DESVIACIÓN DE LA SPEC, decidida por David el 21 oct 2026. §4.0.3 dice
+	 * «cualquier 4xx del token endpoint salvo 429» cierra la sesión. Aquí no:
+	 * `invalid_client`, `unauthorized_client`, `invalid_request`, un 401 o un
+	 * 400 sin cuerpo legible hablan de NUESTRA configuración (el secreto de
+	 * cliente, sobre todo), no de la sesión de la persona. Tomarlos al pie de
+	 * la letra haría que un secreto mal rotado revocara, en una hora, TODOS los
+	 * grants de Sumego del relé. Se tratan como transitorios y dejan una línea
+	 * en el log para que alguien revise el secreto. En el LOGIN no se aplica:
+	 * ahí cualquier 4xx hace fallar el login (`redeemCode`), porque no hay
+	 * nada que conservar.
 	 */
 	async refresh(refreshToken: string): Promise<RenewedSession> {
 		this.ensureConfigured();
 		const { tokenEndpoint } = await this.metadata();
 		const response = await this.postForm(tokenEndpoint, { grant_type: 'refresh_token', refresh_token: refreshToken });
+		if (response.status === 400 && (await this.oauthErrorCode(response)) === 'invalid_grant') {
+			throw new OidcError('invalid', 'Sumego rechazó la renovación: la sesión ya no vale.');
+		}
+		if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+			await response.body?.cancel().catch(() => undefined);
+			// Sin datos: ni token ni cuerpo; el client_id no es secreto.
+			console.error(
+				`[lumbre-mcp-oauth] Sumego rechaza al cliente ${this.clientId}: revisar LUMBRE_MCP_OIDC_CLIENT_SECRET`
+			);
+			throw new OidcError('transient', 'Sumego rechaza al cliente (configuración), no a la sesión.');
+		}
 		if (response.status !== 200) throw await this.tokenEndpointError(response, 'Sumego rechazó la renovación.');
 		let body: unknown;
 		try {
@@ -465,6 +487,18 @@ export class SumegoOidcClient implements SumegoOidcApi {
 			});
 		} catch {
 			throw new OidcError('transient', 'No se pudo contactar con Sumego.');
+		}
+	}
+
+	/** El `error` de una respuesta de error OAuth (RFC 6749 §5.2), o
+	 *  `undefined` si el cuerpo no es un JSON legible con ese campo. Nunca
+	 *  lanza: un cuerpo raro es solo «sin código». */
+	private async oauthErrorCode(response: Response): Promise<string | undefined> {
+		try {
+			const body = await readBoundedJson(response, 'Error de Sumego');
+			return isRecord(body) && typeof body.error === 'string' ? body.error : undefined;
+		} catch {
+			return undefined;
 		}
 	}
 

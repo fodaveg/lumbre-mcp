@@ -1233,9 +1233,16 @@ Si el aviso se pierde, el grant ya no vive 30 días: en un `/token` con
 `grant_type=refresh_token`, si la última comprobación de un grant de Sumego tiene más
 de una hora, el relé renueva antes su refresh en Sumego (SPEC de Sumego §4 y §7.7):
 - **200:** guarda el refresh nuevo (Sumego rota siempre) y la hora.
-- **4xx que no sea 429:** cuenta suspendida, grant revocado o refresh ya usado. El
-  relé revoca la familia y la credencial de Lumbre por la outbox, y responde
-  `invalid_grant`.
+- **`400` con `error=invalid_grant`:** cuenta suspendida, grant revocado o refresh ya
+  usado. El relé revoca la familia y la credencial de Lumbre por la outbox, y
+  responde `invalid_grant`.
+- **Cualquier otro 4xx** (`invalid_client`, `unauthorized_client`,
+  `invalid_request`, un 401, un 400 sin cuerpo legible): fallo de nuestra
+  configuración. No corta nada, se trata como transitorio y deja en el log «Sumego
+  rechaza al cliente lumbre-mcp: revisar LUMBRE_MCP_OIDC_CLIENT_SECRET». Esto se
+  desvía de la SPEC de Sumego (§4.0.3, «cualquier 4xx salvo 429»), decidido el
+  21 oct 2026: así un secreto mal rotado no revoca todos los grants de golpe. En
+  el login no cambia nada: cualquier 4xx del canje del code lo hace fallar.
 - **429, 5xx, timeout o Sumego caído:** no corta nada y reintenta en el siguiente
   `/token` (SPEC §8).
 

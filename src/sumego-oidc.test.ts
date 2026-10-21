@@ -83,6 +83,8 @@ class FakeSumego {
 	tokenStatus = 200;
 	/** Estado del canje de un refresh (`grant_type=refresh_token`). */
 	refreshStatus = 200;
+	/** Respuesta entera del refresh, si se quiere un error concreto. */
+	refreshFailure?: () => Response;
 	/** Publica `revocation_endpoint` en el discovery. */
 	revocationEndpoint = true;
 	/** Sustituye los claims (o el JWT entero) del siguiente ID token. */
@@ -199,6 +201,7 @@ class FakeSumego {
 			if (form.get('grant_type') === 'refresh_token') {
 				this.calls.refresh += 1;
 				await this.beforeRefreshResponse?.();
+				if (this.refreshFailure) return this.refreshFailure();
 				if (this.refreshStatus !== 200) return Response.json({ error: 'invalid_grant' }, { status: this.refreshStatus });
 				const presented = form.get('refresh_token') ?? '';
 				const person = this.refreshTokens.get(presented);
@@ -1166,6 +1169,63 @@ describe('la sesión de Sumego se comprueba cada hora en el refresh (M1)', () =>
 		expect((await token(h, { grant_type: 'refresh_token', refresh_token: next })).status).toBe(200);
 		expect((await storedGrants(h))[0]!.sumegoCheckedAt).toBe(START + HOUR + 1);
 		expect(h.lumbre.revoked).toHaveLength(0);
+	});
+
+	it.each([
+		['401 invalid_client', () => Response.json({ error: 'invalid_client' }, { status: 401 })],
+		['400 invalid_client', () => Response.json({ error: 'invalid_client' }, { status: 400 })],
+		['400 unauthorized_client', () => Response.json({ error: 'unauthorized_client' }, { status: 400 })],
+		['400 sin JSON', () => new Response('<html>Bad Request</html>', { status: 400, headers: { 'content-type': 'text/html' } })],
+		['403 sin cuerpo', () => new Response(null, { status: 403 })]
+	])('un %s es configuración nuestra: no revoca, avisa en el log y el siguiente /token vuelve a intentar', async (_name, reply) => {
+		const h = await harness();
+		const session = await connect(h);
+		h.clock.now += HOUR + 1;
+		h.idp.refreshFailure = reply;
+		const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		let first: Response;
+		let lines: string[];
+		try {
+			first = await token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		} finally {
+			lines = logged.mock.calls.map(([line]) => String(line));
+			logged.mockRestore();
+		}
+		expect(first.status).toBe(200);
+		expect(lines).toContain(
+			'[lumbre-mcp-oauth] Sumego rechaza al cliente lumbre-mcp: revisar LUMBRE_MCP_OIDC_CLIENT_SECRET'
+		);
+		for (const line of lines) expect(line).not.toContain(CLIENT_SECRET);
+		expect(h.lumbre.revoked).toHaveLength(0);
+		expect((await storedGrants(h))[0]!.sumegoCheckedAt).toBe(START);
+		// Arreglado el secreto, el siguiente /token renueva sin más.
+		h.idp.refreshFailure = undefined;
+		const { refresh_token: next } = (await first.json()) as { refresh_token: string };
+		expect((await token(h, { grant_type: 'refresh_token', refresh_token: next })).status).toBe(200);
+		expect(h.idp.calls.refresh).toBe(2);
+		expect((await storedGrants(h))[0]!.sumegoCheckedAt).toBe(START + HOUR + 1);
+	});
+
+	it('solo un 400 con error=invalid_grant revoca: es la sesión, no la configuración', async () => {
+		const h = await harness();
+		const session = await connect(h);
+		h.clock.now += HOUR + 1;
+		h.idp.refreshFailure = () => Response.json({ error: 'invalid_grant', error_description: 'grant revocado' }, { status: 400 });
+		const response = await token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		expect(response.status).toBe(400);
+		expect(((await response.json()) as { error: string }).error).toBe('invalid_grant');
+		expect(h.lumbre.revoked).toHaveLength(1);
+		expect(await h.service.resolveAccessToken(session.access)).toBeUndefined();
+	});
+
+	it('en el LOGIN cualquier 4xx del canje del code sigue haciendo fallar la conexión', async () => {
+		const h = await harness();
+		const { location, cookie } = await startLogin(h);
+		const { code, state } = h.idp.issueCode(location);
+		h.idp.tokenStatus = 401;
+		const response = await callback(h, { code, state, iss: ISSUER }, cookie);
+		expect(response.status).toBe(502);
+		expect(await response.text()).not.toContain('name="csrf"');
 	});
 
 	it('dos /token a la vez sobre el mismo grant hacen UNA renovación en Sumego, sin reusar su refresh', async () => {
