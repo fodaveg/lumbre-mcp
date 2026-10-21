@@ -169,6 +169,33 @@ describe('Caddy — tope del cuerpo y HSTS', () => {
 		}
 	});
 
+	it('las rutas OAuth (Lumbre y Sumego) llegan al contenedor por el catch-all, sin un handle que las corte', async () => {
+		const config = await readFile('deploy/mcp-lumbre-pro.caddy', 'utf8');
+		const routes = [
+			'/authorize',
+			'/token',
+			'/revoke',
+			'/oauth/lumbre/callback',
+			'/oauth/sumego/callback',
+			'/oauth/sumego/consent',
+			'/oauth/sumego/backchannel-logout'
+		];
+		// Los únicos handles con matcher son `/readyz` y los dos del token en
+		// el path; ninguno puede casar una ruta OAuth.
+		const matchedHandles = [...config.matchAll(/^\thandle (\S+) \{$/gm)].map((match) => match[1]);
+		expect(matchedHandles).toEqual(['/readyz', '@token_en_path_con_auth', '@token_en_path_sin_auth']);
+		const tokenPath = new RegExp(/path_regexp tok_auth (\S+)/.exec(config)![1]!);
+		for (const route of routes) {
+			expect(route).not.toBe('/readyz');
+			expect(tokenPath.test(route), route).toBe(false);
+		}
+		// …y el catch-all las manda al relé.
+		expect(config).toMatch(/\n\thandle \{\n\t\treverse_proxy lumbre-mcp:8787 \{/);
+		for (const route of routes.filter((path) => path.startsWith('/oauth/'))) {
+			expect(config, route).toContain(route);
+		}
+	});
+
 	it('HSTS alcanza a los subdominios de este host, sin preload', async () => {
 		const config = await readFile('deploy/mcp-lumbre-pro.caddy', 'utf8');
 		const header = /Strict-Transport-Security\s+"([^"]+)"/.exec(config)?.[1];

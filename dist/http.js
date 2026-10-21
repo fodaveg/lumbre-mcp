@@ -620,6 +620,22 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             spawn(oauth.handleLumbreCallback(req, res, url));
             return;
         }
+        // Login con Sumego (`LUMBRE_MCP_LOGIN_PROVIDER=sumego`): vuelta del
+        // IdP, consentimiento propio y back-channel logout. Las tres se
+        // enrutan siempre, también con `lumbre`: un grant nacido con Sumego
+        // sigue vivo tras volver a `lumbre`, y su logout tiene que llegar.
+        if (url.pathname === '/oauth/sumego/callback') {
+            spawn(oauth.handleSumegoCallback(req, res, url));
+            return;
+        }
+        if (url.pathname === '/oauth/sumego/consent') {
+            spawn(oauth.handleSumegoConsent(req, res));
+            return;
+        }
+        if (url.pathname === '/oauth/sumego/backchannel-logout') {
+            spawn(oauth.handleSumegoBackchannelLogout(req, res));
+            return;
+        }
         if (url.pathname === '/token') {
             spawn(oauth.handleToken(req, res));
             return;

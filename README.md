@@ -1108,6 +1108,7 @@ con su cuenta escrita en el código):
 | Intentos FALLIDOS de `/mcp` | 30 por minuto e IP (429) | Solo cuentan los que acaban en 401. Un cliente real recibe UNO, el de descubrimiento; las ráfagas de decenas de llamadas autenticadas no gastan nada |
 | `/authorize` | 30/min por IP, 10/min por `client_id`, 60/min global (429) | Cada `/authorize` válido crea un registro real en `app.lumbre.pro`. El uso real son unas pocas autorizaciones a la hora |
 | Formulario de `/token` y `/revoke` | 16 KiB (413) | Un `grant_type=refresh_token` completo no llega a 1 KiB |
+| Back-channel logout de Sumego | 60/min por IP, 8 a la vez, 16 KiB (429, 413) | Lo llama solo el servidor de Sumego, uno por app y sesión; un `logout_token` mide unos cientos de bytes |
 | Descarga de un adjunto | 3,5 MiB (imagen) | `read_attachment` solo descarga imágenes y hasta ese tope (un base64 mayor no cabe en el contexto); el de 25 MiB es solo el de la SUBIDA |
 
 Al pasarse del tope de cuerpo la conexión se corta, pero no de golpe: se deja
@@ -1144,6 +1145,77 @@ Una denegación legítima tampoco necesita borrar: la entrada caduca sola en die
 minutos. `decision=approved` sí conserva el consumo atómico ANTES de
 `/exchange`, que es lo que garantiza una sola llamada de canje con dos
 callbacks concurrentes.
+
+**Login con Sumego (`LUMBRE_MCP_LOGIN_PROVIDER=sumego`).** El relé sigue siendo
+su propio servidor OAuth para claude.ai y Codex: Sumego (`https://id.lumbre.pro`)
+no tiene registro dinámico ni emite tokens para resource servers. Lo que cambia
+es CÓMO se identifica la persona en `/authorize`: con `lumbre` (por defecto) todo
+es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
+(`lumbre-mcp`, confidencial, `client_secret_basic`) y el flujo es este:
+
+1. `/authorize` valida lo de siempre (CIMD, redirect, PKCE, presupuesto) y pide el
+   discovery de Sumego antes de crear nada. Abre la solicitud en Lumbre por el
+   canal servidor de siempre, con `identityProvider: "sumego"` y
+   `sumegoNonceSha256` (SHA-256 del `nonce`, base64url), guarda la transacción
+   cifrada (`state`, `nonce` y `code_verifier` de un solo uso) y manda a la persona
+   a Sumego (code + PKCE S256, scopes `openid email`) con una cookie
+   `__Host-lumbre-mcp-sumego` (`Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`) que
+   ata el flujo a ese navegador.
+2. `/oauth/sumego/callback` exige `iss` igual al issuer (RFC 9207), también en las
+   respuestas de error, y si no, responde 400 sin tocar nada. Después el `state`
+   consume la transacción; sin la cookie, la transacción se quema. Un `error` de
+   Sumego vuelve al cliente con `access_denied` e `iss`. Con `code`, el relé lo
+   canjea en el token endpoint y valida el ID token: firma ES256 contra el JWKS
+   (cualquier otro `alg`, también `none` y HS*, se rechaza antes de mirar la
+   clave), `iss`, `aud` igual al client_id (y `azp` si viene, obligatorio con varias
+   audiencias), `nonce`, `exp` e `iat` con 60 s de margen, y `sid` obligatorio. La
+   persona se identifica por `sub`, nunca por email. Del canje con Sumego solo se usa
+   el ID token: su access y su refresh se tiran sin guardarlos.
+3. Consentimiento propio del relé: una página HTML mínima con el nombre del cliente
+   (el de su CIMD, escapado), el host de su `redirect_uri` y la cuenta (el email del
+   ID token, que solo se enseña). «Permitir» y «Cancelar» hacen POST a
+   `/oauth/sumego/consent` con un token CSRF atado a la transacción y la cookie. CSP
+   estricta (`default-src 'none'`, `frame-ancestors 'none'` y `form-action` solo a sí
+   mismo y al origen del cliente, porque Chrome aplica `form-action` también a la
+   redirección que sigue al envío) y `no-store`. La transacción y el consentimiento
+   son de un solo uso y caducan a los 10 minutos. Un CSRF o una cookie que no casan
+   no canjean nada (403) y tampoco queman la transacción, para que nadie pueda
+   abortar la de otra persona. «Cancelar» vuelve al cliente con `access_denied` e
+   `iss`.
+4. «Permitir» canjea en Lumbre (`POST /api/integrations/mcp/sumego/exchange`, con
+   el secreto del canal y el cuerpo `{requestId, transactionId, idToken, clientId,
+   resource, scope}`). Lumbre vuelve a validar el ID token y devuelve la misma
+   credencial dedicada que `/exchange`. Desde ahí todo sigue como con Lumbre: código
+   de autorización, `/token`, refresh y revocación. Si Lumbre rechaza, la persona ve
+   una página con una frase cerrada según el `code` (cuenta pendiente, suspendida,
+   rechazada, usuario sin cuenta, autorización caducada o ya usada, servicio de
+   cuentas caído); `invalid_request`, `payload_too_large` y el 401 del secreto son
+   fallos nuestros: frase genérica para la persona y una línea en el log del
+   servidor. Todas las frases viven en `src/sumego-messages.ts`. Un rechazo termina
+   el flujo; no se reintenta solo.
+
+El grant guarda el `sub` y el `sid` de Sumego. **Back-channel logout**: Sumego hace
+`POST /oauth/sumego/backchannel-logout` (formulario con `logout_token`) de servidor a
+servidor, sin cookies ni CSRF, pero con el mismo límite de cuerpo y de tiempo que
+`/token` y 60 por minuto e IP. El relé valida firma, `iss`, `aud`, `iat` (como mucho
+5 minutos de antigüedad), `events` con
+`http://schemas.openid.net/event/backchannel-logout`, que no lleve `nonce`, y `sub`
+o `sid`. El `jti` es de un solo uso: se guarda en el almacén (sobrevive a un
+reinicio) hasta que el token caducaría, con tope de 1.000. Con `sid` se revoca lo de
+esa sesión; con solo `sub`, todos los grants, códigos sin canjear y consentimientos
+abiertos de esa persona. La credencial de Lumbre de lo revocado se revoca allí con
+el `revoke` de siempre, y si falla, se reintenta por la outbox. Responde 200, o 400
+si el token no vale o ya se usó (503 si no pudo leer el JWKS), siempre con
+`Cache-Control: no-store`. Buscar por `sub` o `sid` recorre los grants dentro de la
+escritura del almacén. No compensa un índice, porque cada logout escribe el `jti` y
+escribir ya cuesta lo mismo.
+
+Cambiar de proveedor no corta los grants vivos: los nacidos con uno siguen
+refrescando y resolviendo con el otro, y el logout de Sumego se atiende también con
+`lumbre`. Con Sumego caído solo fallan las conexiones nuevas. El contrato de Lumbre
+para el canje con Sumego lo cerró la sesión de Lumbre el 21 oct 2026 (su commit
+a54f12c15, todavía sin desplegar): hasta que esté en producción, `sumego` no conecta
+a nadie. La configuración está en `deploy/README-deploy.md`.
 
 **La outbox de revocación** tiene tope (256) y caducidad (30 días, la misma
 vigencia absoluta que una familia de refresh). Descartar un elemento significa

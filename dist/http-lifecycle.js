@@ -28,6 +28,10 @@ export function classifyStartupFailure(error) {
         return 'secreto_backchannel';
     if (message.includes('LUMBRE_APP_BASE_URL'))
         return 'app_base_url';
+    if (message.includes('LUMBRE_MCP_LOGIN_PROVIDER') && !message.includes('LUMBRE_MCP_OIDC_'))
+        return 'proveedor_login';
+    if (message.includes('LUMBRE_MCP_OIDC_'))
+        return 'oidc_config';
     if (/OAuth (inválid[oa]|incoherente|fuera de contrato)/.test(message) ||
         /(credencial upstream|transacción OAuth|outbox OAuth) inválida/.test(message) ||
         // `validateClientIdUrl` lanza un `OAuthError` (`invalid_client`) cuando

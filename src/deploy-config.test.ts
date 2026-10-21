@@ -153,6 +153,24 @@ describe('deploy OAuth fail-closed', () => {
 		expect(deletion).toBeGreaterThan(validation);
 	});
 
+	it('compose pasa las variables de Sumego como OPCIONALES: lumbre sigue arrancando sin ellas', async () => {
+		const compose = await readFile('deploy/compose.yml', 'utf8');
+		for (const name of [
+			'LUMBRE_MCP_LOGIN_PROVIDER',
+			'LUMBRE_MCP_OIDC_ISSUER',
+			'LUMBRE_MCP_OIDC_CLIENT_ID',
+			'LUMBRE_MCP_OIDC_CLIENT_SECRET'
+		]) {
+			// `${VAR:-}` y nunca `${VAR:?…}`: compose no puede abortar por ellas;
+			// el que decide si faltan es el relé, según el proveedor.
+			expect(compose, name).toContain(`${name}: '\${${name}:-}'`);
+			expect(compose, name).not.toContain(`\${${name}:?`);
+		}
+		const example = await readFile('.env.example', 'utf8');
+		expect(example).toMatch(/^LUMBRE_MCP_LOGIN_PROVIDER=lumbre$/m);
+		expect(example).toMatch(/^LUMBRE_MCP_OIDC_CLIENT_SECRET=$/m);
+	});
+
 	it('ejecuta el precheck remoto y rechaza secretos dentro del destino antes de ssh/rsync', async () => {
 		const { sandbox, log, run, reset } = await createSandbox();
 		try {

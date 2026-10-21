@@ -7,10 +7,19 @@ import {
 	BackchannelError,
 	LUMBRE_OAUTH_CALLBACK,
 	LumbreBackchannel,
+	type ExchangedCredential,
 	type LumbreBackchannelApi,
 	isValidRequestId
 } from './lumbre-oauth-backchannel.js';
 import { forgetAccountNotesSeen, pruneStaleAccountNotesSeen } from './notes.js';
+import { SUMEGO_PERSON_MESSAGES, exchangeFailure } from './sumego-messages.js';
+import {
+	OidcError,
+	SumegoOidcClient,
+	loginConfigFromEnv,
+	type LoginConfig,
+	type SumegoOidcApi
+} from './sumego-oidc.js';
 
 export const OAUTH_ISSUER = 'https://mcp.lumbre.pro';
 export const OAUTH_RESOURCE = `${OAUTH_ISSUER}/mcp`;
@@ -142,18 +151,52 @@ const REVOCATION_OUTBOX_TTL_MS = 30 * 24 * 60 * 60_000;
 const MASS_PURGE_MIN_GRANTS = 5;
 const MASS_PURGE_MAX_RATIO = 0.5;
 
-type PublicEndpoint = 'authorize' | 'token' | 'revoke';
+type PublicEndpoint = 'authorize' | 'token' | 'revoke' | 'logout';
 
 interface PublicLimit {
 	requestsPerMinute: number;
 	concurrent: number;
 }
 
+/**
+ * `logout` es el back-channel logout de Sumego. Lo llama SU servidor, desde
+ * una sola IP (el mismo VPS), y manda uno por app y sesión: «cerrar en todas»
+ * son unos pocos de golpe. 60 por minuto cubre eso de sobra y acota lo que
+ * cuesta un POST anónimo con un JWT inventado (una verificación de firma y,
+ * como mucho una vez por minuto, una relectura del JWKS).
+ */
 const DEFAULT_PUBLIC_LIMITS: Record<PublicEndpoint, PublicLimit> = {
 	authorize: { requestsPerMinute: 30, concurrent: 8 },
 	token: { requestsPerMinute: 60, concurrent: 16 },
-	revoke: { requestsPerMinute: 60, concurrent: 16 }
+	revoke: { requestsPerMinute: 60, concurrent: 16 },
+	logout: { requestsPerMinute: 60, concurrent: 8 }
 };
+
+/**
+ * Cookie que ata una transacción de Sumego al NAVEGADOR que la abrió (SPEC
+ * de Sumego §4 y §7.3). Se pone en `/authorize` y se exige en la vuelta de
+ * Sumego y en el POST del consentimiento: quien tenga la URL de Sumego de
+ * otra persona (o le cuele la suya) no puede terminar el flujo en otro
+ * navegador. `__Host-` obliga a `Secure`, `Path=/` y sin `Domain`; `Lax`
+ * porque la vuelta es una navegación GET desde id.lumbre.pro.
+ *
+ * UNA por navegador, como las de Sumego: si se abren dos conexiones a la vez
+ * en el mismo navegador, la segunda pisa la cookie de la primera y esa
+ * primera falla al volver. Precio aceptado: es un caso raro y se arregla
+ * volviendo a conectar.
+ */
+const SUMEGO_BINDING_COOKIE = '__Host-lumbre-mcp-sumego';
+const SUMEGO_CONSENT_PATH = '/oauth/sumego/consent';
+
+/**
+ * `jti` de logout tokens ya usados que se recuerdan a la vez. Cada uno vive
+ * lo que su ventana de aceptación (`LOGOUT_TOKEN_MAX_AGE_MS` + margen, unos
+ * minutos), y solo los firma Sumego, así que el uso real son unos pocos. Si
+ * aun así se llena, se descarta el más antiguo: es el más cerca de caducar, y
+ * rechazar un logout legítimo por falta de sitio sería peor (dejaría viva una
+ * sesión que la persona quiso cerrar).
+ */
+const MAX_LOGOUT_TOKENS = 1_000;
 
 /**
  * Presupuesto de `/authorize` que se gasta justo antes de crear el registro
@@ -268,11 +311,50 @@ interface AuthorizationRequest {
 	state?: string;
 }
 
+/**
+ * Identidad de Sumego de un código o grant nacido de un login con Sumego.
+ * Ausente en los de Lumbre, y así seguirán: no se reescriben. Va en claro
+ * porque es lo que busca el back-channel logout (`sub`, `sid`); son
+ * identificadores opacos del IdP, no secretos, y el fichero es 0600 como el
+ * resto del almacén.
+ */
+interface SumegoSubject {
+	sub: string;
+	sid: string;
+}
+
 interface StoredAuthorizationCode extends AuthorizationRequest {
 	codeHash: string;
 	expiresAt: number;
 	upstream: EncryptedValue;
 	credentialId: string;
+	sumego?: SumegoSubject;
+}
+
+/**
+ * Lo que una solicitud de `/authorize` con login en Sumego guarda además de
+ * lo de siempre. Avanza en tres fases, cada una de un solo uso:
+ *   · `login`: esperando la vuelta de Sumego. La busca el `state` (su hash).
+ *   · `callback`: la vuelta ya la consumió y se está canjeando el código.
+ *     Una segunda vuelta con el mismo `state` ya no la encuentra en `login`.
+ *   · `consent`: ID token validado, página de consentimiento enseñada. La
+ *     busca el POST por `requestId`, y exige el token CSRF y la cookie.
+ * Todo caduca con la solicitud (`TRANSACTION_TTL_MS`).
+ */
+interface StoredSumegoTransaction {
+	stateHash: string;
+	/** Hash del valor de `SUMEGO_BINDING_COOKIE`. */
+	bindingHash: string;
+	phase: 'login' | 'callback' | 'consent';
+	/** `{ nonce, codeVerifier }` cifrados con `sumegoContext`. */
+	secrets: EncryptedValue;
+	/** Fase `consent`: hash del token CSRF del formulario. */
+	csrfHash?: string;
+	/** Fase `consent`: el ID token, cifrado, para el canje con Lumbre. */
+	idToken?: EncryptedValue;
+	/** Fase `consent`: a quién pertenece, para que un logout llegado en
+	 *  medio también queme la solicitud. */
+	subject?: SumegoSubject;
 }
 
 interface StoredAuthorizationRequest extends AuthorizationRequest {
@@ -280,9 +362,18 @@ interface StoredAuthorizationRequest extends AuthorizationRequest {
 	transaction: EncryptedValue;
 	clientName: string;
 	expiresAt: number;
+	sumego?: StoredSumegoTransaction;
+}
+
+/** `jti` de un logout token ya atendido (su hash), hasta que caducaría. */
+interface UsedLogoutToken {
+	jtiHash: string;
+	expiresAt: number;
 }
 
 interface StoredGrant {
+	/** Proveedor de la credencial UPSTREAM (la API de Lumbre), no del login:
+	 *  un grant nacido de un login con Sumego también es `lumbre-web`. */
 	provider: 'lumbre-web';
 	credentialId: string;
 	familyId: string;
@@ -295,6 +386,7 @@ interface StoredGrant {
 	refreshHash: string;
 	refreshExpiresAt: number;
 	upstream: EncryptedValue;
+	sumego?: SumegoSubject;
 }
 
 interface RevocationOutboxItem {
@@ -351,6 +443,10 @@ interface OAuthStore {
 	/** OPCIONAL en disco por migración, como `queuedAt`: un store anterior a
 	 *  este campo carga con la lista vacía. En memoria siempre está. */
 	redeemedCodes: RedeemedCode[];
+	/** Igual de opcional en disco que `redeemedCodes`. Un relé anterior a
+	 *  Sumego que lea este store lo ignora (y lo pierde al reescribir), lo
+	 *  que solo reabre la reproducción de un logout ya atendido. */
+	usedLogoutTokens: UsedLogoutToken[];
 }
 
 interface EncryptedValue {
@@ -399,6 +495,12 @@ export interface OAuthServiceOptions {
 	backchannel?: LumbreBackchannelApi;
 	backchannelSecret?: string;
 	lumbreAppBaseUrl?: string;
+	/** Con quién se identifica la persona en `/authorize`. Por defecto, lo
+	 *  que diga el entorno (`loginConfigFromEnv`): `lumbre` si no hay nada. */
+	login?: LoginConfig;
+	/** Cliente OIDC de Sumego. Por defecto, `SumegoOidcClient` con
+	 *  `login.sumego`, el `fetch` y el reloj de este servicio. */
+	sumego?: SumegoOidcApi;
 }
 
 export type PersistenceStep = 'temporary-file-synced' | 'store-renamed' | 'state-directory-synced';
@@ -735,6 +837,132 @@ function transactionContext(requestId: string, clientId: string, resource: strin
 	return Buffer.from(JSON.stringify(['lumbre-transaction', requestId, clientId, resource, scope]), 'utf8');
 }
 
+/** AAD de lo cifrado de una transacción de Sumego: atado a su solicitud y a
+ *  su `state`, para que no se pueda trasplantar a otra entrada del almacén. */
+function sumegoContext(kind: 'secrets' | 'id-token', request: StoredAuthorizationRequest, stateHash: string): Buffer {
+	return Buffer.from(
+		JSON.stringify(['sumego-transaction', kind, request.requestId, stateHash, request.clientId, request.resource, request.scope]),
+		'utf8'
+	);
+}
+
+function escapeHtml(value: string): string {
+	return value
+		.replaceAll('&', '&amp;')
+		.replaceAll('<', '&lt;')
+		.replaceAll('>', '&gt;')
+		.replaceAll('"', '&quot;')
+		.replaceAll("'", '&#39;');
+}
+
+const PAGE_STYLE =
+	'body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:2rem 1rem;background:#faf8f5;color:#1f1b16}' +
+	'main{max-width:28rem;margin:0 auto}h1{font-size:1.4rem;line-height:1.3;overflow-wrap:anywhere}' +
+	'p,dd{overflow-wrap:anywhere}dl{display:grid;grid-template-columns:auto 1fr;gap:.4rem 1rem}dt{font-weight:600}dd{margin:0}' +
+	'form{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1.5rem}' +
+	'button{font:inherit;padding:.6rem 1.2rem;border-radius:.5rem;border:1px solid #6b5d4f;background:#fff;color:#1f1b16;cursor:pointer}' +
+	'button[value=allow]{background:#b4451f;border-color:#b4451f;color:#fff}' +
+	'button:focus-visible{outline:3px solid #1f6feb;outline-offset:2px}';
+
+/**
+ * Página HTML mínima del relé: el consentimiento y los errores del login
+ * con Sumego. Sin scripts; todo lo variable llega ya escapado. `formAction`
+ * son los orígenes a los que puede ir el POST del formulario: Chrome aplica
+ * `form-action` también a la REDIRECCIÓN que sigue al envío (medido por
+ * Sumego, SPEC §3), así que el del cliente (claude.ai, el loopback de Codex)
+ * tiene que estar o el «Permitir» se queda en blanco.
+ */
+function htmlPage(
+	res: ServerResponse,
+	status: number,
+	page: { title: string; body: string; formAction?: string[]; headers?: Record<string, string | string[]> }
+): void {
+	const headers = securityHeaders('text/html; charset=utf-8');
+	headers['content-security-policy'] =
+		"default-src 'none'; style-src 'unsafe-inline'; " +
+		`form-action ${['\'self\'', ...(page.formAction ?? [])].join(' ')}; ` +
+		"frame-ancestors 'none'; base-uri 'none'";
+	res.writeHead(status, { ...headers, ...page.headers });
+	res.end(
+		'<!doctype html><html lang="es"><head><meta charset="utf-8">' +
+			'<meta name="viewport" content="width=device-width, initial-scale=1">' +
+			`<title>${escapeHtml(page.title)}</title><style>${PAGE_STYLE}</style></head>` +
+			`<body><main>${page.body}</main></body></html>`
+	);
+}
+
+/** Página de error del login con Sumego. Solo enseña mensajes propios: los
+ *  de `OAuthError`, que son frases nuestras, o uno genérico. */
+function sumegoErrorPage(res: ServerResponse, error: unknown): void {
+	const known = error instanceof OAuthError ? error : new OAuthError('server_error', SUMEGO_PERSON_MESSAGES.generic, 500);
+	htmlPage(res, known.status, {
+		title: 'No se pudo conectar con Lumbre',
+		body:
+			'<h1>No se pudo conectar con Lumbre</h1>' +
+			`<p>${escapeHtml(known.message)}</p>` +
+			'<p>Puedes cerrar esta ventana y volver a intentarlo desde la aplicación.</p>',
+		headers: { 'set-cookie': clearBindingCookie() }
+	});
+}
+
+function bindingCookie(value: string): string {
+	return `${SUMEGO_BINDING_COOKIE}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${TRANSACTION_TTL_MS / 1000}`;
+}
+
+function clearBindingCookie(): string {
+	return `${SUMEGO_BINDING_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+/** Valor de la cookie de atadura, si viene UNA y con la forma que emitimos. */
+function bindingFrom(req: IncomingMessage): string | undefined {
+	const values = (req.headers.cookie ?? '')
+		.split(';')
+		.map((part) => part.trim())
+		.filter((part) => part.startsWith(`${SUMEGO_BINDING_COOKIE}=`))
+		.map((part) => part.slice(SUMEGO_BINDING_COOKIE.length + 1));
+	return values.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(values[0]!) ? values[0] : undefined;
+}
+
+function validSumegoSubject(value: unknown): value is SumegoSubject {
+	if (!value || typeof value !== 'object') return false;
+	const subject = value as Partial<SumegoSubject>;
+	return (
+		Object.keys(subject).length === 2 &&
+		typeof subject.sub === 'string' &&
+		subject.sub.length > 0 &&
+		subject.sub.length <= 255 &&
+		typeof subject.sid === 'string' &&
+		subject.sid.length > 0 &&
+		subject.sid.length <= 255
+	);
+}
+
+function validSumegoTransaction(value: unknown): value is StoredSumegoTransaction {
+	if (!value || typeof value !== 'object') return false;
+	const item = value as Partial<StoredSumegoTransaction>;
+	if (
+		typeof item.stateHash !== 'string' ||
+		typeof item.bindingHash !== 'string' ||
+		!validEncryptedValue(item.secrets) ||
+		(item.phase !== 'login' && item.phase !== 'callback' && item.phase !== 'consent')
+	) {
+		return false;
+	}
+	if (item.phase === 'consent') {
+		return typeof item.csrfHash === 'string' && validEncryptedValue(item.idToken) && validSumegoSubject(item.subject);
+	}
+	return item.csrfHash === undefined && item.idToken === undefined && item.subject === undefined;
+}
+
+/** ¿Pertenece esta identidad de Sumego a lo que pide el logout? Con `sid`
+ *  manda la sesión (y si viene también `sub`, tiene que casar); con solo
+ *  `sub`, todas las de esa persona. */
+function logoutMatches(subject: SumegoSubject | undefined, claims: { sub?: string; sid?: string }): boolean {
+	if (!subject) return false;
+	if (claims.sid !== undefined) return subject.sid === claims.sid && (claims.sub === undefined || subject.sub === claims.sub);
+	return claims.sub !== undefined && subject.sub === claims.sub;
+}
+
 function encrypt(value: string, key: Buffer, context: Buffer): EncryptedValue {
 	const iv = randomBytes(12);
 	const cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -793,6 +1021,7 @@ function normalizeStore(value: unknown): OAuthStore {
 		authorizationCodes?: unknown;
 		revocationOutbox?: unknown;
 		redeemedCodes?: unknown;
+		usedLogoutTokens?: unknown;
 	};
 	if (raw.version === 1 || raw.version === 2) {
 		throw new Error('store OAuth provisional v1/v2 no compatible; archívalo y vuelve a autorizar desde la sesión web');
@@ -804,7 +1033,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		!Array.isArray(raw.authorizationRequests) ||
 		!Array.isArray(raw.authorizationCodes) ||
 		!Array.isArray(raw.revocationOutbox) ||
-		(raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes))
+		(raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes)) ||
+		(raw.usedLogoutTokens !== undefined && !Array.isArray(raw.usedLogoutTokens))
 	) {
 		throw new Error('store OAuth inválido');
 	}
@@ -824,7 +1054,8 @@ function normalizeStore(value: unknown): OAuthStore {
 			!Number.isFinite(grant.accessExpiresAt) ||
 			typeof grant.refreshHash !== 'string' ||
 			!Number.isFinite(grant.refreshExpiresAt) ||
-			!validEncryptedValue(grant.upstream)
+			!validEncryptedValue(grant.upstream) ||
+			(grant.sumego !== undefined && !validSumegoSubject(grant.sumego))
 		) {
 			throw new Error('grant OAuth inválido');
 		}
@@ -881,7 +1112,8 @@ function normalizeStore(value: unknown): OAuthStore {
 			typeof item.challenge !== 'string' ||
 			!/^[A-Za-z0-9_-]{43}$/.test(item.challenge) ||
 			(item.state !== undefined && (typeof item.state !== 'string' || item.state.length > 1024)) ||
-			!Number.isFinite(item.expiresAt)
+			!Number.isFinite(item.expiresAt) ||
+			(item.sumego !== undefined && !validSumegoTransaction(item.sumego))
 		) {
 			throw new Error('autorización OAuth inválida');
 		}
@@ -909,7 +1141,8 @@ function normalizeStore(value: unknown): OAuthStore {
 			!/^[A-Za-z0-9_-]{43}$/.test(item.challenge) ||
 			(item.state !== undefined && (typeof item.state !== 'string' || item.state.length > 1024)) ||
 			!Number.isFinite(item.expiresAt) ||
-			!validEncryptedValue(item.upstream)
+			!validEncryptedValue(item.upstream) ||
+			(item.sumego !== undefined && !validSumegoSubject(item.sumego))
 		) {
 			throw new Error('código OAuth inválido');
 		}
@@ -943,6 +1176,22 @@ function normalizeStore(value: unknown): OAuthStore {
 		}
 		return item as RedeemedCode;
 	});
+	const usedLogoutTokens = ((raw.usedLogoutTokens ?? []) as unknown[]).map((value): UsedLogoutToken => {
+		if (!value || typeof value !== 'object') throw new Error('logout OAuth inválido');
+		const item = value as Partial<UsedLogoutToken>;
+		if (typeof item.jtiHash !== 'string' || !Number.isFinite(item.expiresAt)) {
+			throw new Error('logout OAuth inválido');
+		}
+		return item as UsedLogoutToken;
+	});
+	const stateHashes = authorizationRequests.flatMap((item) => (item.sumego ? [item.sumego.stateHash] : []));
+	if (
+		usedLogoutTokens.length > MAX_LOGOUT_TOKENS ||
+		new Set(usedLogoutTokens.map((item) => item.jtiHash)).size !== usedLogoutTokens.length ||
+		new Set(stateHashes).size !== stateHashes.length
+	) {
+		throw new Error('store OAuth incoherente');
+	}
 	const credentialIds = [
 		...grants.map((item) => item.credentialId),
 		...authorizationCodes.map((item) => item.credentialId),
@@ -970,7 +1219,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		authorizationRequests,
 		authorizationCodes,
 		revocationOutbox,
-		redeemedCodes
+		redeemedCodes,
+		usedLogoutTokens
 	};
 }
 
@@ -1069,7 +1319,9 @@ export class OAuthService {
 	 *  hablando con Lumbre y aún no ha guardado su pendiente; ver
 	 *  `reservePendingSlot`. */
 	private pendingReservations = 0;
-	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0 };
+	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0, logout: 0 };
+	private readonly login: LoginConfig;
+	private readonly sumego: SumegoOidcApi;
 	private readonly clientMetadataCache = new Map<string, { metadata: ClientMetadata; expiresAt: number }>();
 	private readonly clientMetadataInFlight = new Map<string, Promise<ClientMetadata>>();
 	private readinessCache?: { expiresAt: number; error?: unknown };
@@ -1141,8 +1393,14 @@ export class OAuthService {
 		this.publicLimits = {
 			authorize: { ...DEFAULT_PUBLIC_LIMITS.authorize, ...options.publicLimits?.authorize },
 			token: { ...DEFAULT_PUBLIC_LIMITS.token, ...options.publicLimits?.token },
-			revoke: { ...DEFAULT_PUBLIC_LIMITS.revoke, ...options.publicLimits?.revoke }
+			revoke: { ...DEFAULT_PUBLIC_LIMITS.revoke, ...options.publicLimits?.revoke },
+			logout: { ...DEFAULT_PUBLIC_LIMITS.logout, ...options.publicLimits?.logout }
 		};
+		// El proveedor se fija al construir: un valor desconocido o `sumego` sin
+		// secreto lanzan aquí, y `http.ts` no abre el listener.
+		this.login = options.login ?? loginConfigFromEnv();
+		this.sumego = options.sumego ?? new SumegoOidcClient({ config: this.login.sumego, fetch: this.fetchFn, now: this.now });
+		if (this.login.provider === 'sumego') this.sumego.ensureConfigured();
 		this.authorizeBudget = { ...DEFAULT_AUTHORIZE_BUDGET, ...options.authorizeBudget };
 		this.failedMcpAttemptsPerMinute = options.failedMcpAttemptsPerMinute ?? DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE;
 		this.formReadTimeoutMs = options.formReadTimeoutMs ?? FORM_READ_TIMEOUT_MS;
@@ -1536,6 +1794,10 @@ export class OAuthService {
 			// registros creados en Lumbre que aquí ni se guardaban.
 			this.enterAuthorizeBudget(request.clientId, this.remoteAddressOf(req));
 			releaseReservation = await this.reservePendingSlot();
+			if (this.login.provider === 'sumego') {
+				await this.redirectToSumego(res, request, clientName);
+				return;
+			}
 			const transactionId = randomBytes(32).toString('base64url');
 			let created;
 			try {
@@ -1625,7 +1887,12 @@ export class OAuthService {
 			// tercero mande `decision=approved` con el UUID acertado. Si esa
 			// condición desapareciera de allí, no basta con dejar la pendiente
 			// en pie: habría que volver a validar la decisión aquí.
-			const stored = (await this.loadStore()).authorizationRequests.find((item) => item.requestId === requestId);
+			//
+			// Las solicitudes de un login con Sumego no son de este callback:
+			// su `requestId` también es de Lumbre, pero se cierran por
+			// `/oauth/sumego/consent`. Sin el filtro, quien conociera ese UUID
+			// podría quemarlas desde aquí.
+			const stored =(await this.loadStore()).authorizationRequests.find((item) => item.requestId === requestId && item.sumego === undefined);
 			if (!stored || stored.expiresAt <= this.now()) {
 				throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
 			}
@@ -1635,7 +1902,7 @@ export class OAuthService {
 			}
 			let pending: StoredAuthorizationRequest | undefined;
 			await this.mutateStore((store) => {
-				const found = store.authorizationRequests.find((item) => item.requestId === requestId);
+				const found = store.authorizationRequests.find((item) => item.requestId === requestId && item.sumego === undefined);
 				if (!found) return false;
 				pending = found;
 				store.authorizationRequests = store.authorizationRequests.filter((item) => item.requestId !== requestId);
@@ -1656,46 +1923,7 @@ export class OAuthService {
 			} catch (error) {
 				throw this.backchannelOAuthError(error, 'invalid_grant');
 			}
-			if (credential.resource !== authorized.resource || credential.scope !== authorized.scope) {
-				await this.persistCredentialRevocation(credential, authorized);
-				throw new OAuthError('server_error', 'Lumbre devolvió una credencial fuera de contrato.', 502);
-			}
-			const code = opaque('lm_code_');
-			const key = await this.key();
-			try {
-				await this.mutateStore((store) => {
-					store.authorizationCodes = store.authorizationCodes.filter((item) => item.expiresAt > this.now());
-					if (store.authorizationCodes.length >= MAX_PENDING_ITEMS) {
-						throw new OAuthError('temporarily_unavailable', 'Hay demasiados códigos pendientes.', 503);
-					}
-					store.authorizationCodes.push({
-						clientId: authorized.clientId,
-						redirectUri: authorized.redirectUri,
-						scope: authorized.scope,
-						resource: authorized.resource,
-						challenge: authorized.challenge,
-						state: authorized.state,
-						codeHash: digest(code),
-						upstream: encrypt(
-							credential.accessToken,
-							key,
-							grantContext(authorized.clientId, authorized.resource, authorized.scope)
-						),
-						credentialId: credential.credentialId,
-						expiresAt: this.now() + CODE_TTL_MS
-					});
-					return true;
-				});
-				} catch (error) {
-					try {
-						await this.persistCredentialRevocation(credential, authorized);
-					} catch {
-						// Si el propio store no puede persistir la compensación, solo queda
-						// el revoke directo idempotente. Nunca se incluye el token en el error.
-						await this.backchannel.revoke(credential.accessToken).catch(() => undefined);
-					}
-					throw error;
-			}
+			const code = await this.storeAuthorizationCode(authorized, credential);
 			this.redirectToClient(res, authorized, { code });
 		} catch (error) {
 			oauthError(res, error);
@@ -1704,17 +1932,495 @@ export class OAuthService {
 		}
 	}
 
+	/**
+	 * Guarda el código de autorización de una credencial recién canjeada en
+	 * Lumbre y lo devuelve. Común a los dos logins (Lumbre y Sumego): con
+	 * Sumego, `sumego` lleva la identidad que hereda el grant.
+	 *
+	 * Si la credencial no es la pedida, o el código no se puede guardar, se
+	 * revoca en Lumbre por la outbox antes de fallar: nunca se queda una
+	 * credencial viva allí que este relé no conozca.
+	 */
+	private async storeAuthorizationCode(
+		authorized: AuthorizationRequest,
+		credential: ExchangedCredential,
+		sumego?: SumegoSubject
+	): Promise<string> {
+		if (credential.resource !== authorized.resource || credential.scope !== authorized.scope) {
+			await this.persistCredentialRevocation(credential, authorized);
+			throw new OAuthError('server_error', 'Lumbre devolvió una credencial fuera de contrato.', 502);
+		}
+		const code = opaque('lm_code_');
+		const key = await this.key();
+		try {
+			await this.mutateStore((store) => {
+				store.authorizationCodes = store.authorizationCodes.filter((item) => item.expiresAt > this.now());
+				if (store.authorizationCodes.length >= MAX_PENDING_ITEMS) {
+					throw new OAuthError('temporarily_unavailable', 'Hay demasiados códigos pendientes.', 503);
+				}
+				store.authorizationCodes.push({
+					clientId: authorized.clientId,
+					redirectUri: authorized.redirectUri,
+					scope: authorized.scope,
+					resource: authorized.resource,
+					challenge: authorized.challenge,
+					state: authorized.state,
+					codeHash: digest(code),
+					upstream: encrypt(
+						credential.accessToken,
+						key,
+						grantContext(authorized.clientId, authorized.resource, authorized.scope)
+					),
+					credentialId: credential.credentialId,
+					expiresAt: this.now() + CODE_TTL_MS,
+					...(sumego ? { sumego: { sub: sumego.sub, sid: sumego.sid } } : {})
+				});
+				return true;
+			});
+		} catch (error) {
+			try {
+				await this.persistCredentialRevocation(credential, authorized);
+			} catch {
+				// Si el propio store no puede persistir la compensación, solo queda
+				// el revoke directo idempotente. Nunca se incluye el token en el error.
+				await this.backchannel.revoke(credential.accessToken).catch(() => undefined);
+			}
+			throw error;
+		}
+		return code;
+	}
+
+	/**
+	 * `/authorize` con `LUMBRE_MCP_LOGIN_PROVIDER=sumego`: todo lo de
+	 * `handleAuthorize` ya se ha comprobado (cliente, redirect, PKCE del
+	 * cliente, presupuesto, hueco en la cola). Aquí:
+	 *   1. Se generan `state`, `nonce`, el `code_verifier` de PKCE hacia
+	 *      Sumego y el valor de la cookie de atadura. Todos aleatorios de 256
+	 *      bits y de un solo uso.
+	 *   2. El discovery de Sumego, ANTES de crear nada en Lumbre: con Sumego
+	 *      caído el `/authorize` falla aquí, sin dejar un registro huérfano.
+	 *   3. La solicitud en Lumbre (`createSumegoAuthorizationRequest`), con el
+	 *      hash del `nonce`: Lumbre ata a ella el ID token que verá en el canje.
+	 *   4. Se guarda la transacción, cifrada como la de siempre, y se manda a
+	 *      la persona a Sumego con la cookie puesta.
+	 */
+	private async redirectToSumego(res: ServerResponse, request: AuthorizationRequest, clientName: string): Promise<void> {
+		const state = randomBytes(32).toString('base64url');
+		const nonce = randomBytes(32).toString('base64url');
+		const codeVerifier = randomBytes(32).toString('base64url');
+		const binding = randomBytes(32).toString('base64url');
+		const transactionId = randomBytes(32).toString('base64url');
+		let authorizationUrl: string;
+		try {
+			authorizationUrl = await this.sumego.authorizationUrl({
+				state,
+				nonce,
+				codeChallenge: createHash('sha256').update(codeVerifier, 'ascii').digest('base64url')
+			});
+		} catch (error) {
+			throw this.sumegoOAuthError(error);
+		}
+		let created;
+		try {
+			created = await this.backchannel.createSumegoAuthorizationRequest({
+				transactionId,
+				clientId: request.clientId,
+				clientName,
+				resource: request.resource,
+				scope: request.scope,
+				callbackUri: LUMBRE_OAUTH_CALLBACK,
+				identityProvider: 'sumego',
+				sumegoNonceSha256: createHash('sha256').update(nonce, 'utf8').digest('base64url')
+			});
+		} catch (error) {
+			throw this.backchannelOAuthError(error);
+		}
+		if (created.expiresAt <= this.now() || created.expiresAt > this.now() + TRANSACTION_TTL_MS + 5 * 60_000) {
+			throw new OAuthError('server_error', 'Lumbre devolvió una autorización fuera de contrato.', 502);
+		}
+		const expiresAt = Math.min(created.expiresAt, this.now() + TRANSACTION_TTL_MS);
+		const stateHash = digest(state);
+		const key = await this.key();
+		await this.mutateStore((store) => {
+			store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > this.now());
+			if (store.authorizationRequests.length >= MAX_PENDING_ITEMS) {
+				throw new OAuthError('temporarily_unavailable', 'Hay demasiadas autorizaciones pendientes.', 503);
+			}
+			const pending: StoredAuthorizationRequest = {
+				...request,
+				requestId: created.requestId,
+				transaction: encrypt(
+					transactionId,
+					key,
+					transactionContext(created.requestId, request.clientId, request.resource, request.scope)
+				),
+				clientName,
+				expiresAt
+			};
+			pending.sumego = {
+				stateHash,
+				bindingHash: digest(binding),
+				phase: 'login',
+				secrets: encrypt(JSON.stringify({ nonce, codeVerifier }), key, sumegoContext('secrets', pending, stateHash))
+			};
+			store.authorizationRequests.push(pending);
+			return true;
+		});
+		res.writeHead(302, {
+			...securityHeaders('text/plain; charset=utf-8'),
+			location: authorizationUrl,
+			'set-cookie': bindingCookie(binding)
+		});
+		res.end('Redirigiendo a Sumego.');
+	}
+
+	/**
+	 * Vuelta de Sumego (`/oauth/sumego/callback`). En este orden, y el orden
+	 * es la seguridad:
+	 *   1. `iss` presente e igual al issuer (RFC 9207), TAMBIÉN en una
+	 *      respuesta de error. Si no, 400 sin tocar nada: no se sabe de quién
+	 *      es la respuesta.
+	 *   2. El `state` consume la transacción (`login` → `callback`) de forma
+	 *      atómica: una segunda vuelta con el mismo `state` ya no la encuentra.
+	 *   3. La cookie de atadura. Sin ella o distinta, la transacción se quema
+	 *      (SPEC de Sumego §7.3): quien abrió el flujo no es este navegador.
+	 *   4. Un `error` de Sumego vuelve al cliente con `access_denied` (o el
+	 *      código estándar que traiga) y su `iss`.
+	 *   5. El canje del `code` y la validación del ID token
+	 *      (`SumegoOidcClient.redeemCode`).
+	 *   6. `callback` → `consent`, con el ID token cifrado y el hash de un
+	 *      token CSRF nuevo, y la página de consentimiento.
+	 * Cualquier fallo a partir del paso 2 quema la transacción.
+	 */
+	async handleSumegoCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+		let release: (() => void) | undefined;
+		let consumed: StoredAuthorizationRequest | undefined;
+		try {
+			release = this.enterPublicEndpoint(req, 'authorize');
+			if (req.method !== 'GET') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
+			const iss = one(url.searchParams, 'iss', false);
+			if (iss === undefined || iss !== this.sumego.issuer) {
+				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.wrongIssuer);
+			}
+			const state = one(url.searchParams, 'state');
+			const stateHash = digest(state!);
+			await this.mutateStore((store) => {
+				const found = store.authorizationRequests.find(
+					(item) => item.sumego !== undefined && matchesHash(item.sumego.stateHash, stateHash)
+				);
+				if (!found || found.sumego!.phase !== 'login' || found.expiresAt <= this.now()) return false;
+				found.sumego!.phase = 'callback';
+				consumed = structuredClone(found);
+				return true;
+			});
+			if (!consumed) throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.expired);
+			const pending = consumed;
+			const binding = bindingFrom(req);
+			if (!binding || !matchesHash(pending.sumego!.bindingHash, digest(binding))) {
+				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.otherBrowser);
+			}
+			const idpError = one(url.searchParams, 'error', false);
+			if (idpError !== undefined) {
+				await this.discardSumegoTransaction(pending.requestId);
+				consumed = undefined;
+				const error = idpError === 'server_error' || idpError === 'temporarily_unavailable' ? idpError : 'access_denied';
+				this.redirectToClient(res, pending, { error }, { 'set-cookie': clearBindingCookie() });
+				return;
+			}
+			const code = one(url.searchParams, 'code');
+			const key = await this.key();
+			const secrets = JSON.parse(decrypt(pending.sumego!.secrets, key, sumegoContext('secrets', pending, stateHash))) as {
+				nonce: string;
+				codeVerifier: string;
+			};
+			let redeemed;
+			try {
+				redeemed = await this.sumego.redeemCode(code!, secrets.codeVerifier, secrets.nonce);
+			} catch (error) {
+				throw this.sumegoOAuthError(error);
+			}
+			const csrf = randomBytes(32).toString('base64url');
+			let advanced = false;
+			await this.mutateStore((store) => {
+				const found = store.authorizationRequests.find(
+					(item) => item.requestId === pending.requestId && item.sumego?.phase === 'callback'
+				);
+				if (!found || found.expiresAt <= this.now() || !matchesHash(found.sumego!.stateHash, stateHash)) return false;
+				found.sumego = {
+					...found.sumego!,
+					phase: 'consent',
+					csrfHash: digest(csrf),
+					idToken: encrypt(redeemed.idToken, key, sumegoContext('id-token', found, stateHash)),
+					subject: { sub: redeemed.identity.sub, sid: redeemed.identity.sid }
+				};
+				advanced = true;
+				return true;
+			});
+			if (!advanced) throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.expired);
+			consumed = undefined;
+			this.consentPage(res, pending, csrf, redeemed.identity.email);
+		} catch (error) {
+			if (consumed) await this.discardSumegoTransaction(consumed.requestId).catch(() => undefined);
+			sumegoErrorPage(res, error);
+		} finally {
+			release?.();
+		}
+	}
+
+	/** Página de consentimiento: quién pide acceso, a dónde vuelve y con qué
+	 *  cuenta. El nombre del cliente viene de su CIMD (de fuera), así que todo
+	 *  pasa por `escapeHtml`. */
+	private consentPage(res: ServerResponse, pending: StoredAuthorizationRequest, csrf: string, email: string | undefined): void {
+		const redirect = new URL(pending.redirectUri);
+		const clientName = escapeHtml(pending.clientName);
+		htmlPage(res, 200, {
+			title: 'Conectar con Lumbre',
+			formAction: [redirect.origin],
+			body:
+				`<h1>¿Dar acceso a ${clientName} a tu Lumbre?</h1>` +
+				`<p>${clientName} podrá leer y cambiar tus tareas, proyectos y áreas de Lumbre en tu nombre, hasta que lo desconectes.</p>` +
+				'<dl>' +
+				`<dt>Aplicación</dt><dd>${clientName}</dd>` +
+				`<dt>Vuelve a</dt><dd>${escapeHtml(redirect.host)}</dd>` +
+				`<dt>Cuenta</dt><dd>${escapeHtml(email ?? 'Tu cuenta de Lumbre')}</dd>` +
+				'</dl>' +
+				`<form method="post" action="${SUMEGO_CONSENT_PATH}">` +
+				`<input type="hidden" name="request" value="${escapeHtml(pending.requestId)}">` +
+				`<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+				'<button type="submit" name="decision" value="allow">Permitir</button>' +
+				'<button type="submit" name="decision" value="deny">Cancelar</button>' +
+				'</form>'
+		});
+	}
+
+	/**
+	 * POST del consentimiento (`/oauth/sumego/consent`). Exige la cookie de
+	 * atadura y el token CSRF de ESA transacción, y la consume entera en el
+	 * mismo paso: un segundo POST ya no la encuentra. Un CSRF o una cookie
+	 * que no casan NO la queman (si no, cualquiera que adivinara el
+	 * `requestId` podría abortar el consentimiento de otra persona), pero
+	 * tampoco canjean nada.
+	 *
+	 * «Cancelar» vuelve al cliente con `access_denied` e `iss`. «Permitir»
+	 * canjea el ID token en Lumbre (`exchangeSumegoIdentity`) y sigue igual
+	 * que el callback de Lumbre: código de autorización y vuelta al cliente.
+	 */
+	async handleSumegoConsent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		let release: (() => void) | undefined;
+		try {
+			this.enterRateLimit(req, 'authorize');
+			if (req.method !== 'POST') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
+			const form = await readForm(req, this.formReadTimeoutMs);
+			release = this.enterConcurrency('authorize');
+			const requestId = one(form, 'request');
+			const csrf = one(form, 'csrf');
+			const decision = one(form, 'decision');
+			if (!isValidRequestId(requestId!) || (decision !== 'allow' && decision !== 'deny')) {
+				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.consentMalformed);
+			}
+			const binding = bindingFrom(req);
+			if (!binding) {
+				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.otherBrowser, 403);
+			}
+			let consumed: StoredAuthorizationRequest | undefined;
+			await this.mutateStore((store) => {
+				const found = store.authorizationRequests.find(
+					(item) => item.requestId === requestId && item.sumego?.phase === 'consent'
+				);
+				if (
+					!found ||
+					found.expiresAt <= this.now() ||
+					!matchesHash(found.sumego!.bindingHash, digest(binding)) ||
+					!matchesHash(found.sumego!.csrfHash!, digest(csrf!))
+				) {
+					return false;
+				}
+				consumed = structuredClone(found);
+				store.authorizationRequests = store.authorizationRequests.filter((item) => item.requestId !== requestId);
+				return true;
+			});
+			if (!consumed) {
+				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.consentInvalid, 403);
+			}
+			const authorized = consumed;
+			const clearCookie = { 'set-cookie': clearBindingCookie() };
+			if (decision === 'deny') {
+				this.redirectToClient(res, authorized, { error: 'access_denied' }, clearCookie);
+				return;
+			}
+			const key = await this.key();
+			const stateHash = authorized.sumego!.stateHash;
+			const transactionId = decrypt(
+				authorized.transaction,
+				key,
+				transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope)
+			);
+			const idToken = decrypt(authorized.sumego!.idToken!, key, sumegoContext('id-token', authorized, stateHash));
+			let credential;
+			try {
+				credential = await this.backchannel.exchangeSumegoIdentity({
+					requestId: authorized.requestId,
+					transactionId,
+					idToken,
+					clientId: authorized.clientId,
+					resource: authorized.resource,
+					scope: authorized.scope
+				});
+			} catch (error) {
+				throw this.sumegoExchangeError(error);
+			}
+			const code = await this.storeAuthorizationCode(authorized, credential, authorized.sumego!.subject);
+			this.redirectToClient(res, authorized, { code }, clearCookie);
+		} catch (error) {
+			sumegoErrorPage(res, error);
+		} finally {
+			release?.();
+		}
+	}
+
+	/**
+	 * Back-channel logout de Sumego (`/oauth/sumego/backchannel-logout`). Lo
+	 * llama el SERVIDOR de Sumego: sin cookies ni CSRF, pero con el mismo
+	 * límite de cuerpo y de tiempo que `/token` (`readForm`).
+	 *
+	 * Valida el `logout_token` (`SumegoOidcClient.validateLogoutToken`) y,
+	 * dentro de UNA escritura del almacén: rechaza un `jti` ya visto, lo
+	 * anota hasta que caducaría, y revoca lo que case. Con `sid`, lo de esa
+	 * sesión; con solo `sub`, todo lo de esa persona: grants (y sus familias
+	 * de refresh), códigos aún sin canjear y transacciones en consentimiento.
+	 * Las credenciales de Lumbre de lo revocado van a la outbox y se revocan
+	 * allí con el `revoke` de siempre; si Lumbre no contesta, se reintenta por
+	 * la outbox.
+	 *
+	 * COSTE DE BUSCAR POR `sub`/`sid`: se recorren los grants y los códigos
+	 * dentro del mutador, O(n). No compensa un índice: CADA logout escribe el
+	 * almacén (el `jti` tiene que persistir aunque no case nada, o un
+	 * reinicio reabriría su reproducción), y escribir ya cuesta O(n) (copia,
+	 * `normalizeStore` y serializar el fichero entero). Un índice no bajaría
+	 * el orden y añadiría un segundo estado que mantener coherente. Y no es
+	 * un camino caliente: solo lo dispara un token firmado por Sumego, con su
+	 * propio límite por IP.
+	 *
+	 * 200 si se atendió (case algo o no), 400 si el token no vale o ya se usó,
+	 * 503 si no se pudo leer el JWKS de Sumego. Siempre `no-store`.
+	 */
+	async handleSumegoBackchannelLogout(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		let release: (() => void) | undefined;
+		try {
+			this.enterRateLimit(req, 'logout');
+			if (req.method !== 'POST') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
+			const form = await readForm(req, this.formReadTimeoutMs);
+			release = this.enterConcurrency('logout');
+			const token = one(form, 'logout_token');
+			let claims;
+			try {
+				claims = await this.sumego.validateLogoutToken(token!);
+			} catch (error) {
+				if (error instanceof OidcError && error.kind === 'transient') {
+					throw new OAuthError('temporarily_unavailable', 'No se pudo comprobar el logout_token.', 503);
+				}
+				throw new OAuthError('invalid_request', 'logout_token inválido.');
+			}
+			const jtiHash = digest(claims.jti);
+			const revoked: string[] = [];
+			let replayed = false;
+			await this.mutateStore((store) => {
+				const now = this.now();
+				if (store.usedLogoutTokens.some((item) => matchesHash(item.jtiHash, jtiHash) && item.expiresAt > now)) {
+					replayed = true;
+					return false;
+				}
+				store.usedLogoutTokens.push({ jtiHash, expiresAt: claims.keepUntil });
+				if (store.usedLogoutTokens.length > MAX_LOGOUT_TOKENS) {
+					store.usedLogoutTokens = store.usedLogoutTokens
+						.slice()
+						.sort((a, b) => a.expiresAt - b.expiresAt)
+						.slice(-MAX_LOGOUT_TOKENS);
+				}
+				for (const grant of store.grants.filter((item) => logoutMatches(item.sumego, claims))) {
+					this.enqueueFamilyRevocation(store, grant);
+					revoked.push(grant.credentialId);
+				}
+				for (const code of store.authorizationCodes.filter((item) => logoutMatches(item.sumego, claims))) {
+					if (!store.revocationOutbox.some((item) => item.credentialId === code.credentialId)) {
+						store.revocationOutbox.push({
+							provider: 'lumbre-web',
+							credentialId: code.credentialId,
+							clientId: code.clientId,
+							resource: code.resource,
+							scope: code.scope,
+							upstream: code.upstream,
+							queuedAt: now
+						});
+					}
+					revoked.push(code.credentialId);
+				}
+				store.authorizationCodes = store.authorizationCodes.filter((item) => !logoutMatches(item.sumego, claims));
+				store.authorizationRequests = store.authorizationRequests.filter(
+					(item) => !logoutMatches(item.sumego?.subject, claims)
+				);
+				return true;
+			});
+			if (replayed) throw new OAuthError('invalid_request', 'logout_token ya usado.');
+			for (const credentialId of revoked) await this.flushRevocationOutbox(credentialId);
+			res.writeHead(200, securityHeaders('text/plain; charset=utf-8'));
+			res.end();
+		} catch (error) {
+			oauthError(res, error);
+		} finally {
+			release?.();
+		}
+	}
+
+	/** Quema una transacción de Sumego (cualquier fase). */
+	private async discardSumegoTransaction(requestId: string): Promise<void> {
+		await this.mutateStore((store) => {
+			const before = store.authorizationRequests.length;
+			store.authorizationRequests = store.authorizationRequests.filter(
+				(item) => !(item.requestId === requestId && item.sumego !== undefined)
+			);
+			return store.authorizationRequests.length !== before;
+		});
+	}
+
+	/** Fallo de Sumego (discovery, token endpoint, ID token) en palabras para
+	 *  la persona (`SUMEGO_PERSON_MESSAGES`). */
+	private sumegoOAuthError(error: unknown): OAuthError {
+		if (error instanceof OidcError && error.kind === 'transient') {
+			return new OAuthError('temporarily_unavailable', SUMEGO_PERSON_MESSAGES.accountsUnavailable, 503);
+		}
+		return new OAuthError('server_error', SUMEGO_PERSON_MESSAGES.identityRejected, 502);
+	}
+
+	/**
+	 * Fallo del canje con Lumbre en palabras para la persona
+	 * (`exchangeFailure`, `sumego-messages.ts`). Si el fallo es NUESTRO
+	 * (cuerpo mal formado, secreto del canal, contrato roto), además deja
+	 * una línea en el log del servidor: a la persona solo le llega la
+	 * genérica, y sin esa línea nadie se enteraría de que hay que arreglar
+	 * algo aquí. Sin tokens ni identificadores.
+	 */
+	private sumegoExchangeError(error: unknown): OAuthError {
+		const failure = exchangeFailure(error);
+		if (failure.log) {
+			console.error(`[lumbre-mcp-oauth] canje con Sumego: fallo del relé o de su configuración, no de la persona (${failure.log})`);
+		}
+		const code = failure.status === 503 ? 'temporarily_unavailable' : failure.status === 403 ? 'access_denied' : 'invalid_grant';
+		return new OAuthError(code, failure.message, failure.status);
+	}
+
 	private redirectToClient(
 		res: ServerResponse,
 		request: AuthorizationRequest,
-		result: { code: string } | { error: string }
+		result: { code: string } | { error: string },
+		headers: Record<string, string> = {}
 	): void {
 		const redirect = new URL(request.redirectUri);
 		if ('code' in result) redirect.searchParams.set('code', result.code);
 		else redirect.searchParams.set('error', result.error);
 		if (request.state !== undefined) redirect.searchParams.set('state', request.state);
 		redirect.searchParams.set('iss', OAUTH_ISSUER);
-		res.writeHead(302, { ...securityHeaders('text/plain; charset=utf-8'), location: redirect.toString() });
+		res.writeHead(302, { ...securityHeaders('text/plain; charset=utf-8'), ...headers, location: redirect.toString() });
 		res.end('Redirigiendo a Claude.');
 	}
 
@@ -1935,7 +2641,10 @@ export class OAuthService {
 				accessExpiresAt: accessExpiryFor(now, familyExpiresAt),
 				refreshHash: digest(refreshToken),
 				refreshExpiresAt: familyExpiresAt,
-				upstream: code.upstream
+				upstream: code.upstream,
+				// La identidad de Sumego pasa al grant: es lo que busca el
+				// back-channel logout. Un código de Lumbre no la lleva.
+				...(storedCode.sumego ? { sumego: storedCode.sumego } : {})
 			});
 			issued = true;
 			return true;
@@ -2256,6 +2965,9 @@ export class OAuthService {
 
 	async ensureReady(): Promise<void> {
 		this.backchannel.ensureConfigured();
+		// Solo la configuración: Sumego caído no impide arrancar (SPEC de
+		// Sumego §8), así que aquí no se le pregunta nada.
+		if (this.login.provider === 'sumego') this.sumego.ensureConfigured();
 		if (!this.suppliedEncryptionKey && !(await pathExists(join(this.stateDir, 'oauth.key')))) {
 			if (await pathExists(this.storePath())) throw new Error('store OAuth presente sin su clave');
 		}
@@ -2296,6 +3008,11 @@ export class OAuthService {
 				transactionContext(pending.requestId, pending.clientId, pending.resource, pending.scope)
 			);
 			if (!/^[A-Za-z0-9_-]{32,256}$/.test(transactionId)) throw new Error('transacción OAuth inválida');
+			if (pending.sumego) {
+				const stateHash = pending.sumego.stateHash;
+				decrypt(pending.sumego.secrets, key, sumegoContext('secrets', pending, stateHash));
+				if (pending.sumego.idToken) decrypt(pending.sumego.idToken, key, sumegoContext('id-token', pending, stateHash));
+			}
 		}
 		for (const code of store.authorizationCodes) {
 			validateClientIdUrl(code.clientId);
@@ -2843,7 +3560,8 @@ export class OAuthService {
 					authorizationRequests: [],
 					authorizationCodes: [],
 					revocationOutbox: [],
-					redeemedCodes: []
+					redeemedCodes: [],
+					usedLogoutTokens: []
 				};
 			}
 			throw error;
@@ -2946,10 +3664,13 @@ export class OAuthService {
 				store.authorizationRequests = store.authorizationRequests.filter((item) => item.expiresAt > now);
 				const redeemedBefore = store.redeemedCodes.length;
 				store.redeemedCodes = store.redeemedCodes.filter((item) => item.expiresAt > now);
+				const logoutsBefore = store.usedLogoutTokens.length;
+				store.usedLogoutTokens = store.usedLogoutTokens.filter((item) => item.expiresAt > now);
 				housekeeping ||=
 					usedBefore !== store.usedRefreshTokens.length ||
 					requestsBefore !== store.authorizationRequests.length ||
-					redeemedBefore !== store.redeemedCodes.length;
+					redeemedBefore !== store.redeemedCodes.length ||
+					logoutsBefore !== store.usedLogoutTokens.length;
 				changed = mutator(store) || housekeeping;
 				// La poda de la outbox va DESPUÉS del mutador: así lo que el
 				// mutador acabe de encolar entra ya en la cuenta del tope y no

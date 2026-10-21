@@ -103,6 +103,13 @@ mcp.lumbre.pro {
 		}
 	}
 
+	# Todo lo demás va al relé tal cual, y así llegan las rutas OAuth:
+	# `/authorize`, `/token`, `/revoke`, `/oauth/lumbre/callback` y las del
+	# login con Sumego, `/oauth/sumego/callback`, `/oauth/sumego/consent` y
+	# `/oauth/sumego/backchannel-logout` (esta última la llama el servidor de
+	# Sumego desde el mismo VPS). Ninguna necesita un handle propio: no
+	# llevan secretos en el path, y el log de este host está apagado (abajo).
+	# `src/caddy-config.test.ts` comprueba que ningún handle las intercepta.
 	handle {
 		reverse_proxy lumbre-mcp:8787 {
 			# Streamable HTTP mantiene abierta la respuesta SSE mientras dura

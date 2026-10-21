@@ -144,6 +144,8 @@ store):
 | `store_version` | store provisional v1/v2 |
 | `secreto_backchannel` | `LUMBRE_MCP_BACKCHANNEL_SECRET` falta o no mide 32-512 caracteres |
 | `app_base_url` | `LUMBRE_APP_BASE_URL` no es `https://app.lumbre.pro` |
+| `proveedor_login` | `LUMBRE_MCP_LOGIN_PROVIDER` no es `lumbre` ni `sumego` |
+| `oidc_config` | alguna `LUMBRE_MCP_OIDC_*` inválida, o `sumego` sin `LUMBRE_MCP_OIDC_CLIENT_SECRET` |
 | `io:<código>` | error del sistema de ficheros (`io:EACCES`, `io:ENOSPC`…) |
 | `desconocido` | ninguna de las anteriores |
 
@@ -262,6 +264,43 @@ origen, con ruta, query o credenciales) aborta el arranque con un error. En
 `deploy/compose.yml` ya va fijado a ese valor; no es lo mismo que
 `LUMBRE_BASE_URL`, que es la API de tareas a la que el relé reenvía las
 llamadas de las tools.
+
+### Login con Sumego (`LUMBRE_MCP_LOGIN_PROVIDER`)
+
+Con quién se identifica la persona al conectar Claude o Codex. Mismo patrón que
+las apps (§4.1 del `SPEC.md` de Sumego), con el prefijo del relé:
+
+| Variable | Valor | Por defecto |
+| --- | --- | --- |
+| `LUMBRE_MCP_LOGIN_PROVIDER` | `lumbre` o `sumego`; cualquier otro valor no arranca (`proveedor_login`) | `lumbre` |
+| `LUMBRE_MCP_OIDC_ISSUER` | issuer https de Sumego, sin query ni fragmento | `https://id.lumbre.pro` |
+| `LUMBRE_MCP_OIDC_CLIENT_ID` | client_id del relé en Sumego | `lumbre-mcp` |
+| `LUMBRE_MCP_OIDC_CLIENT_SECRET` | secreto de ese cliente (`client_secret_basic`) | — |
+
+Las cuatro van en `deploy/compose.yml` como opcionales (`${VAR:-}`): vacías, el
+relé se comporta exactamente como antes. El secreto solo es obligatorio con
+`sumego`; si falta, el relé no arranca (causa `oidc_config`) y el mensaje nombra
+la variable, nunca su valor. Lo pone la sesión de Sumego en
+`/srv/lumbre-mcp.env`, junto al del backchannel:
+
+```dotenv
+LUMBRE_MCP_LOGIN_PROVIDER=sumego
+LUMBRE_MCP_OIDC_CLIENT_SECRET=<secreto-del-cliente-lumbre-mcp>
+```
+
+En Sumego, el cliente `lumbre-mcp` es confidencial (`client_secret_basic`), con
+`redirect_uri` exacta `https://mcp.lumbre.pro/oauth/sumego/callback`,
+`backchannel_logout_uri` `https://mcp.lumbre.pro/oauth/sumego/backchannel-logout`
+y `backchannel_logout_session_required: true` (sin `sid` en el ID token el relé
+rechaza el login). Las tres rutas del relé (`/oauth/sumego/callback`,
+`/oauth/sumego/consent`, `/oauth/sumego/backchannel-logout`) pasan por el
+catch-all de `deploy/mcp-lumbre-pro.caddy`, igual que `/oauth/lumbre/callback`.
+
+Cambiar el proveedor es cambiar el fichero y reiniciar el contenedor (sin
+recompilar), y **no corta los grants vivos**: los nacidos con cualquiera de los
+dos siguen refrescando y resolviendo con el otro, y el back-channel logout de
+Sumego se sigue atendiendo con `lumbre`. Con Sumego caído solo fallan las
+conexiones nuevas; `/mcp`, `/token` y `/revoke` no le preguntan nada.
 
 ## Publicar una versión nueva
 

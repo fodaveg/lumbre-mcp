@@ -73,6 +73,15 @@ services:
       # `deploy/README-deploy.md`, «Límites del transporte».
       LUMBRE_MCP_MAX_TOOL_CALLS: '${LUMBRE_MCP_MAX_TOOL_CALLS:-}'
       LUMBRE_MCP_MAX_TOOL_CALLS_PER_BEARER: '${LUMBRE_MCP_MAX_TOOL_CALLS_PER_BEARER:-}'
+      # Login con Sumego (id.lumbre.pro). Opcionales: vacías = `lumbre`, el
+      # issuer `https://id.lumbre.pro` y el client_id `lumbre-mcp`. Con
+      # `LUMBRE_MCP_LOGIN_PROVIDER=sumego` el secreto es obligatorio y, si
+      # falta, el relé no arranca (causa `oidc_config`). Cambiar el proveedor
+      # no corta los grants vivos. Ver `deploy/README-deploy.md`.
+      LUMBRE_MCP_LOGIN_PROVIDER: '${LUMBRE_MCP_LOGIN_PROVIDER:-}'
+      LUMBRE_MCP_OIDC_ISSUER: '${LUMBRE_MCP_OIDC_ISSUER:-}'
+      LUMBRE_MCP_OIDC_CLIENT_ID: '${LUMBRE_MCP_OIDC_CLIENT_ID:-}'
+      LUMBRE_MCP_OIDC_CLIENT_SECRET: '${LUMBRE_MCP_OIDC_CLIENT_SECRET:-}'
       # NO hay un `LUMBRE_TOKEN` global aquí. La credencial dedicada del
       # backchannel se persiste cifrada por grant; el bearer OAuth
       # opaco se resolverá localmente y no se reenviará a Lumbre.

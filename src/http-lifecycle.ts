@@ -23,6 +23,9 @@ import type { Server } from 'node:http';
  *  · `secreto_backchannel`: `LUMBRE_MCP_BACKCHANNEL_SECRET` falta o no mide
  *    entre 32 y 512 caracteres.
  *  · `app_base_url`: `LUMBRE_APP_BASE_URL` no es exactamente la de Lumbre.
+ *  · `proveedor_login`: `LUMBRE_MCP_LOGIN_PROVIDER` no es `lumbre` ni `sumego`.
+ *  · `oidc_config`: alguna `LUMBRE_MCP_OIDC_*` inválida, o `sumego` sin
+ *    `LUMBRE_MCP_OIDC_CLIENT_SECRET` (el valor no sale nunca).
  *  · `io:<código>`: error del sistema de ficheros (`io:EACCES`, `io:ENOSPC`…).
  *  · `desconocido`: nada de lo anterior.
  */
@@ -34,6 +37,8 @@ export type StartupFailureCause =
 	| 'store_version'
 	| 'secreto_backchannel'
 	| 'app_base_url'
+	| 'proveedor_login'
+	| 'oidc_config'
 	| `io:${string}`
 	| 'desconocido';
 
@@ -63,6 +68,8 @@ export function classifyStartupFailure(error: unknown): StartupFailureCause {
 	if (message.includes('v1/v2')) return 'store_version';
 	if (message.includes('LUMBRE_MCP_BACKCHANNEL_SECRET')) return 'secreto_backchannel';
 	if (message.includes('LUMBRE_APP_BASE_URL')) return 'app_base_url';
+	if (message.includes('LUMBRE_MCP_LOGIN_PROVIDER') && !message.includes('LUMBRE_MCP_OIDC_')) return 'proveedor_login';
+	if (message.includes('LUMBRE_MCP_OIDC_')) return 'oidc_config';
 	if (
 		/OAuth (inválid[oa]|incoherente|fuera de contrato)/.test(message) ||
 		/(credencial upstream|transacción OAuth|outbox OAuth) inválida/.test(message) ||

@@ -83,7 +83,9 @@ describe('classifyStartupFailure — causa fija, contra los errores reales de OA
 				},
 				async exchange() { throw new Error('no usado'); },
 				async introspect() { throw new Error('no usado'); },
-				async revoke() {}
+				async revoke() {},
+				async createSumegoAuthorizationRequest() { throw new Error('no usado'); },
+				async exchangeSumegoIdentity() { throw new Error('no usado'); }
 			},
 			fetch: async (url) =>
 				new Response(
@@ -157,6 +159,30 @@ describe('classifyStartupFailure — causa fija, contra los errores reales de OA
 		expect(classifyStartupFailure(error)).toBe('app_base_url');
 	});
 
+	it('proveedor_login y oidc_config: el proveedor y la configuración de Sumego (lanzan al construir)', () => {
+		const causeOf = (login: unknown): string => {
+			try {
+				new OAuthService({ stateDir: '/nunca-se-usa', login: login as never });
+			} catch (error) {
+				return classifyStartupFailure(error);
+			}
+			return 'sin error';
+		};
+		const previous = { ...process.env };
+		try {
+			process.env.LUMBRE_MCP_LOGIN_PROVIDER = 'otro';
+			expect(causeOf(undefined)).toBe('proveedor_login');
+			process.env.LUMBRE_MCP_LOGIN_PROVIDER = 'sumego';
+			delete process.env.LUMBRE_MCP_OIDC_CLIENT_SECRET;
+			expect(causeOf(undefined)).toBe('oidc_config');
+			process.env.LUMBRE_MCP_LOGIN_PROVIDER = 'lumbre';
+			process.env.LUMBRE_MCP_OIDC_ISSUER = 'http://id.lumbre.pro';
+			expect(causeOf(undefined)).toBe('oidc_config');
+		} finally {
+			process.env = previous;
+		}
+	});
+
 	it('io:<código>: el store es un directorio', async () => {
 		const dir = await stateDir();
 		await writeFile(join(dir, 'oauth.key'), VALID_KEY, { mode: 0o600 });
@@ -180,7 +206,7 @@ describe('classifyStartupFailure — causa fija, contra los errores reales de OA
 		// de carga y validación del store, la clave y la configuración, que
 		// son justo los que pueden tumbar el arranque.
 		const sources = await Promise.all(
-			['src/oauth.ts', 'src/lumbre-oauth-backchannel.ts'].map((path) => readFile(path, 'utf8'))
+			['src/oauth.ts', 'src/lumbre-oauth-backchannel.ts', 'src/sumego-oidc.ts'].map((path) => readFile(path, 'utf8'))
 		);
 		const messages: string[] = [];
 		const pattern = /throw new Error\(\s*(['`])((?:(?!\1).)*)\1\s*\)/g;

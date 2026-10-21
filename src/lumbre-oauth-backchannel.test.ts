@@ -72,6 +72,112 @@ describe('backchannel web de Lumbre', () => {
 		}
 	});
 
+	it('Sumego: la solicitud lleva identityProvider y el hash del nonce, y acepta la respuesta sin authorizationUrl', async () => {
+		const bodies: unknown[] = [];
+		const replies = [
+			response({ requestId: REQUEST_ID, expiresAt: '2026-10-21T10:10:00.000Z' }),
+			response({ authorizationUrl: 'https://cualquier.cosa/que-no-se-usa', requestId: REQUEST_ID, expiresAt: '2026-10-21T10:10:00.000Z' }),
+			response({ requestId: 'no-es-uuid', expiresAt: '2026-10-21T10:10:00.000Z' })
+		];
+		const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+			expect(String(input)).toBe('https://app.lumbre.pro/api/integrations/lumbre-mcp/requests');
+			bodies.push(JSON.parse(String(init?.body)));
+			return replies.shift()!;
+		});
+		const backchannel = new LumbreBackchannel({ secret: SECRET, fetch: fetchMock });
+		const request = {
+			transactionId: 'x'.repeat(32),
+			clientId: 'https://claude.ai/client.json',
+			clientName: 'Claude',
+			resource: 'https://mcp.lumbre.pro/mcp',
+			scope: 'lumbre:mcp',
+			callbackUri: LUMBRE_OAUTH_CALLBACK,
+			identityProvider: 'sumego' as const,
+			sumegoNonceSha256: 'n'.repeat(43)
+		};
+		expect(await backchannel.createSumegoAuthorizationRequest(request)).toEqual({
+			requestId: REQUEST_ID,
+			expiresAt: Date.parse('2026-10-21T10:10:00.000Z')
+		});
+		expect(bodies[0]).toMatchObject({ identityProvider: 'sumego', sumegoNonceSha256: 'n'.repeat(43) });
+		expect((await backchannel.createSumegoAuthorizationRequest(request)).requestId).toBe(REQUEST_ID);
+		await expect(backchannel.createSumegoAuthorizationRequest(request)).rejects.toMatchObject({ kind: 'invalid' });
+	});
+
+	it('Sumego: el canje va a /api/integrations/mcp/sumego/exchange con su cuerpo y valida el 200', async () => {
+		let seen: { url: string; body: unknown } | undefined;
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async (input, init) => {
+				seen = { url: String(input), body: JSON.parse(String(init?.body)) };
+				return response({ credentialId: CREDENTIAL_ID, accessToken: TOKEN, tokenType: 'Bearer', resource: 'r', scope: 's' });
+			}) as typeof fetch
+		});
+		const request = {
+			requestId: REQUEST_ID,
+			transactionId: 'x'.repeat(32),
+			idToken: 'cabecera.cuerpo.firma',
+			clientId: 'https://claude.ai/client.json',
+			resource: 'https://mcp.lumbre.pro/mcp',
+			scope: 'lumbre:mcp'
+		};
+		expect(await backchannel.exchangeSumegoIdentity(request)).toMatchObject({ credentialId: CREDENTIAL_ID, accessToken: TOKEN });
+		expect(seen).toEqual({ url: 'https://app.lumbre.pro/api/integrations/mcp/sumego/exchange', body: request });
+	});
+
+	it.each([
+		[400, { code: 'invalid_token' }, 'invalid', 'invalid_token'],
+		[400, { code: 'unknown_account' }, 'invalid', 'unknown_account'],
+		[401, {}, 'invalid', undefined],
+		[403, { code: 'account_pending' }, 'invalid', 'account_pending'],
+		[403, { code: 'account_suspended' }, 'invalid', 'account_suspended'],
+		[403, { code: 'account_rejected' }, 'invalid', 'account_rejected'],
+		[404, { code: 'transaction_not_found' }, 'invalid', 'transaction_not_found'],
+		[409, { code: 'token_reused' }, 'invalid', 'token_reused'],
+		[401, { message: 'Unauthorized' }, 'invalid', undefined],
+		[400, { code: 'invalid_request' }, 'invalid', 'invalid_request'],
+		[413, { code: 'payload_too_large' }, 'invalid', 'payload_too_large'],
+		[413, {}, 'invalid', undefined],
+		[400, { code: '<script>no-es-de-la-lista</script>' }, 'invalid', undefined],
+		[503, { code: 'sumego_unavailable' }, 'transient', 'sumego_unavailable'],
+		[503, { code: 'jwks_unavailable' }, 'transient', undefined],
+		[500, 'no es json', 'transient', undefined]
+	] as const)('Sumego: el canje con %i %j es %s y lleva el code %s', async (status, body, kind, code) => {
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => response(body, status)) as typeof fetch
+		});
+		const error = await backchannel
+			.exchangeSumegoIdentity({
+				requestId: REQUEST_ID,
+				transactionId: 'x'.repeat(32),
+				idToken: 'a.b.c',
+				clientId: 'c',
+				resource: 'r',
+				scope: 's'
+			})
+			.catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(BackchannelError);
+		expect(error).toMatchObject({ kind, code });
+	});
+
+	it('Sumego: el canje sin respuesta a tiempo es transitorio', async () => {
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => { throw new DOMException('timeout', 'TimeoutError'); }) as typeof fetch
+		});
+		await expect(
+			backchannel.exchangeSumegoIdentity({
+				requestId: REQUEST_ID,
+				transactionId: 'x'.repeat(32),
+				idToken: 'a.b.c',
+				clientId: 'c',
+				resource: 'r',
+				scope: 's'
+			})
+		).rejects.toMatchObject({ kind: 'transient' });
+	});
+
 	it('valida exchange/introspect/revoke completos, sin aceptar contratos parciales', async () => {
 		const bodies = [
 			response({ credentialId: CREDENTIAL_ID, accessToken: TOKEN, tokenType: 'bearer', resource: 'https://mcp.lumbre.pro/mcp', scope: 'lumbre:mcp' }),
