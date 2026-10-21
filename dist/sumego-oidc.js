@@ -6,11 +6,16 @@ import { createHash, createPublicKey, timingSafeEqual, verify } from 'node:crypt
  *
  * QUÉ ES Y QUÉ NO. El relé sigue siendo SU PROPIO servidor OAuth para
  * claude.ai y Codex (`oauth.ts`): Sumego no tiene registro dinámico ni emite
- * tokens para resource servers. Sumego solo sirve para saber QUIÉN es la
- * persona en el momento de conectar (`/authorize`), y para enterarse de que
- * esa persona cerró sesión (back-channel logout). Por eso:
- *   · no se guarda refresh token de Sumego, ni su access token: del canje solo
- *     se usa el ID token, y se tira lo demás;
+ * tokens para resource servers. Sumego sirve para saber QUIÉN es la persona
+ * al conectar (`/authorize`), para enterarse de que cerró sesión
+ * (back-channel logout) y, como red de seguridad si ese aviso se pierde,
+ * para comprobar cada hora que su sesión sigue viva. Por eso:
+ *   · del canje se guarda el ID token (para Lumbre) y el REFRESH token,
+ *     cifrado en el grant: el `/token` del relé lo renueva contra Sumego como
+ *     mucho cada hora, y un 4xx (cuenta suspendida, grant revocado, SPEC
+ *     §4 y §7.7) corta el grant aunque el logout no haya llegado. Antes no se
+ *     guardaba, y un logout perdido dejaba el grant vivo 30 días (M1 de la
+ *     revisión de seguridad de c4534bc). El access token de Sumego se tira;
  *   · la persona se identifica por `sub`, NUNCA por email (el email puede
  *     cambiar y no prueba nada; aquí solo se enseña en el consentimiento);
  *   · si Sumego está caído, solo falla el login nuevo: `/mcp`, `/token` y
@@ -33,15 +38,18 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 3_000;
 /** Discovery y JWKS cambian rara vez (una rotación de claves); una hora de
  *  caché ahorra una ida a Sumego por login sin dejar una clave vieja más de
- *  lo razonable. Una clave NUEVA no espera a esto: ver `JWKS_REFRESH_COOLDOWN_MS`. */
+ *  lo razonable. Una clave NUEVA no espera a esto: ver `FETCH_COOLDOWN_MS`. */
 const METADATA_CACHE_MS = 60 * 60_000;
 /**
- * Un `kid` desconocido fuerza releer el JWKS (es como se ve una rotación),
- * pero como mucho una vez por minuto. Sin el freno, cualquiera podía mandar
- * logout tokens con `kid` inventados y convertir este endpoint público en
- * un amplificador de peticiones contra id.lumbre.pro.
+ * Freno de las lecturas de discovery y JWKS: como mucho una por minuto
+ * fuera de la caché. Un `kid` desconocido fuerza releer el JWKS (es como se
+ * ve una rotación), y sin el freno cualquiera podía mandar logout tokens con
+ * `kid` inventados y convertir este endpoint público en un amplificador de
+ * peticiones contra id.lumbre.pro. Cuenta el INTENTO, salga bien o mal (B3
+ * de la revisión de seguridad de c4534bc): antes solo frenaba tras una
+ * lectura buena, y con Sumego fallando cada petición salía a preguntarle.
  */
-const JWKS_REFRESH_COOLDOWN_MS = 60_000;
+const FETCH_COOLDOWN_MS = 60_000;
 /** Margen de reloj entre este VPS y Sumego para `exp` e `iat`. Pequeño a
  *  propósito: los dos viven en la misma máquina y con NTP. */
 export const CLOCK_SKEW_MS = 60_000;
@@ -209,8 +217,12 @@ export class SumegoOidcClient {
     timeoutMs;
     discovery;
     discoveryInFlight;
+    /** Último INTENTO de leer el discovery, saliera bien o mal (`FETCH_COOLDOWN_MS`). */
+    discoveryAttemptAt;
     jwks;
     jwksInFlight;
+    /** Último INTENTO de leer el JWKS, saliera bien o mal (`FETCH_COOLDOWN_MS`). */
+    jwksAttemptAt;
     constructor(options) {
         this.issuer = validateIssuer(options.config.issuer);
         this.clientId = options.config.clientId;
@@ -237,9 +249,10 @@ export class SumegoOidcClient {
     }
     /**
      * Canjea el `code` en el token endpoint de Sumego (`client_secret_basic`,
-     * PKCE) y valida el ID token. Lo demás que devuelva Sumego (access y
-     * refresh) se descarta sin guardarlo: el relé solo necesita la identidad
-     * de este momento.
+     * PKCE) y valida el ID token. Devuelve también el refresh token, que es
+     * obligatorio: sin él no hay comprobación horaria de la sesión, y aceptar
+     * su falta la apagaría en silencio (igual que `sid` y el logout). El access
+     * token de Sumego se descarta.
      *
      * Errores: cualquier 4xx salvo 429 es `invalid` (SPEC §4.0.3: el login
      * falla); 429, 5xx, red y timeout son `transient`.
@@ -247,38 +260,20 @@ export class SumegoOidcClient {
     async redeemCode(code, codeVerifier, nonce) {
         this.ensureConfigured();
         const { tokenEndpoint } = await this.metadata();
-        // RFC 6749 §2.3.1: id y secreto van form-urlencoded ANTES del base64.
-        const basic = Buffer.from(`${encodeURIComponent(this.clientId)}:${encodeURIComponent(this.clientSecret)}`, 'utf8').toString('base64');
-        let response;
-        try {
-            response = await this.fetchFn(tokenEndpoint, {
-                method: 'POST',
-                redirect: 'error',
-                signal: AbortSignal.timeout(this.timeoutMs),
-                headers: {
-                    authorization: `Basic ${basic}`,
-                    accept: 'application/json',
-                    'content-type': 'application/x-www-form-urlencoded'
-                },
-                body: new URLSearchParams({
-                    grant_type: 'authorization_code',
-                    code,
-                    redirect_uri: SUMEGO_CALLBACK,
-                    code_verifier: codeVerifier
-                }).toString()
-            });
-        }
-        catch {
-            throw new OidcError('transient', 'No se pudo contactar con Sumego.');
-        }
-        if (response.status !== 200) {
-            await response.body?.cancel().catch(() => undefined);
-            const transient = response.status >= 500 || response.status === 429;
-            throw new OidcError(transient ? 'transient' : 'invalid', transient ? 'Sumego no está disponible temporalmente.' : 'Sumego rechazó el canje del código.');
-        }
+        const response = await this.postForm(tokenEndpoint, {
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: SUMEGO_CALLBACK,
+            code_verifier: codeVerifier
+        });
+        if (response.status !== 200)
+            throw await this.tokenEndpointError(response, 'Sumego rechazó el canje del código.');
         const body = await readBoundedJson(response, 'Token de Sumego');
         if (!isRecord(body) || typeof body.id_token !== 'string') {
             throw new OidcError('invalid', 'Sumego no devolvió un ID token.');
+        }
+        if (!claimString(body.refresh_token, 4096)) {
+            throw new OidcError('invalid', 'Sumego no devolvió un refresh token.');
         }
         const payload = await this.verifiedPayload(body.id_token);
         const now = this.now();
@@ -296,7 +291,84 @@ export class SumegoOidcClient {
             throw new OidcError('invalid', 'ID token de Sumego fuera de contrato.');
         }
         const email = claimString(payload.email, MAX_EMAIL_LENGTH) ? payload.email : undefined;
-        return { identity: { sub: payload.sub, sid: payload.sid, ...(email ? { email } : {}) }, idToken: body.id_token };
+        return {
+            identity: { sub: payload.sub, sid: payload.sid, ...(email ? { email } : {}) },
+            idToken: body.id_token,
+            issuedAt: payload.iat * 1000,
+            refreshToken: body.refresh_token
+        };
+    }
+    /**
+     * Renueva un refresh de Sumego (`grant_type=refresh_token`). Sumego rota
+     * siempre (SPEC §4.0.1), así que el 200 trae uno nuevo y el de entrada deja
+     * de valer: quien llama tiene que guardar el nuevo, y no puede usar el
+     * mismo dos veces (lo segundo sería un `invalid_grant` legítimo).
+     *
+     * Errores: 4xx salvo 429 es `invalid` (SPEC §4.0.3: la sesión se cierra,
+     * con la cuenta suspendida, el grant revocado o el refresh ya usado); 429,
+     * 5xx, red y timeout son `transient`. Un 200 sin `refresh_token` también es
+     * `transient`: no prueba que la sesión haya muerto, y cortar por un
+     * contrato roto de Sumego desconectaría a todo el mundo.
+     */
+    async refresh(refreshToken) {
+        this.ensureConfigured();
+        const { tokenEndpoint } = await this.metadata();
+        const response = await this.postForm(tokenEndpoint, { grant_type: 'refresh_token', refresh_token: refreshToken });
+        if (response.status !== 200)
+            throw await this.tokenEndpointError(response, 'Sumego rechazó la renovación.');
+        let body;
+        try {
+            body = await readBoundedJson(response, 'Refresh de Sumego');
+        }
+        catch {
+            throw new OidcError('transient', 'Sumego devolvió una renovación ilegible.');
+        }
+        if (!isRecord(body) || !claimString(body.refresh_token, 4096)) {
+            throw new OidcError('transient', 'Sumego no devolvió el refresh rotado.');
+        }
+        return { refreshToken: body.refresh_token };
+    }
+    /**
+     * Revoca un refresh (RFC 7009) si el discovery publica
+     * `revocation_endpoint`. Sin endpoint no hay nada que hacer: la sesión ya
+     * muere sola en Sumego. Cualquier respuesta que no sea 200 lanza.
+     */
+    async revokeRefresh(refreshToken) {
+        this.ensureConfigured();
+        const { revocationEndpoint } = await this.metadata();
+        if (!revocationEndpoint)
+            return;
+        const response = await this.postForm(revocationEndpoint, { token: refreshToken, token_type_hint: 'refresh_token' });
+        await response.body?.cancel().catch(() => undefined);
+        if (response.status !== 200)
+            throw new OidcError('transient', 'Sumego no confirmó la revocación.');
+    }
+    /** POST de formulario al token endpoint (o al de revocación) con
+     *  `client_secret_basic`. Solo lanza si no hay respuesta. */
+    async postForm(endpoint, form) {
+        // RFC 6749 §2.3.1: id y secreto van form-urlencoded ANTES del base64.
+        const basic = Buffer.from(`${encodeURIComponent(this.clientId)}:${encodeURIComponent(this.clientSecret)}`, 'utf8').toString('base64');
+        try {
+            return await this.fetchFn(endpoint, {
+                method: 'POST',
+                redirect: 'error',
+                signal: AbortSignal.timeout(this.timeoutMs),
+                headers: {
+                    authorization: `Basic ${basic}`,
+                    accept: 'application/json',
+                    'content-type': 'application/x-www-form-urlencoded'
+                },
+                body: new URLSearchParams(form).toString()
+            });
+        }
+        catch {
+            throw new OidcError('transient', 'No se pudo contactar con Sumego.');
+        }
+    }
+    async tokenEndpointError(response, rejected) {
+        await response.body?.cancel().catch(() => undefined);
+        const transient = response.status >= 500 || response.status === 429;
+        return new OidcError(transient ? 'transient' : 'invalid', transient ? 'Sumego no está disponible temporalmente.' : rejected);
     }
     /**
      * Valida un `logout_token` (OIDC Back-Channel Logout 1.0 §2.4 y §2.6):
@@ -330,14 +402,15 @@ export class SumegoOidcClient {
             jti: payload.jti,
             ...(typeof payload.sub === 'string' ? { sub: payload.sub } : {}),
             ...(typeof payload.sid === 'string' ? { sid: payload.sid } : {}),
-            keepUntil: payload.iat * 1000 + LOGOUT_TOKEN_MAX_AGE_MS + CLOCK_SKEW_MS
+            keepUntil: payload.iat * 1000 + LOGOUT_TOKEN_MAX_AGE_MS + CLOCK_SKEW_MS,
+            issuedAt: payload.iat * 1000
         };
     }
     /**
      * Comprueba forma y firma de un JWS compacto y devuelve su payload. El
      * `alg` se mira ANTES de tocar ninguna clave: solo `ES256`. La clave se
      * elige por `kid`; si no está en el JWKS en caché, se relee una vez (con
-     * el freno de `JWKS_REFRESH_COOLDOWN_MS`) por si Sumego rotó.
+     * el freno de `FETCH_COOLDOWN_MS`) por si Sumego rotó.
      */
     async verifiedPayload(token) {
         if (token.length > MAX_JWT_LENGTH)
@@ -372,11 +445,27 @@ export class SumegoOidcClient {
     keysFor(keys, kid) {
         return kid === undefined ? keys : keys.filter((item) => item.kid === kid);
     }
+    /**
+     * Discovery, de la caché si está fresca. Si no, se lee, pero como mucho
+     * un intento por minuto (`FETCH_COOLDOWN_MS`): dentro de ese minuto se
+     * sirve la copia caducada si la hay, y si no, `transient` sin salir a
+     * Sumego. Así, con Sumego caído, un aluvión de `/authorize` o de logouts
+     * no se convierte en un aluvión contra él.
+     */
     async metadata() {
+        const now = this.now();
         const cached = this.discovery;
-        if (cached && cached.expiresAt > this.now())
+        if (cached && cached.expiresAt > now)
             return cached.value;
-        this.discoveryInFlight ??= this.fetchDiscovery().finally(() => {
+        if (this.discoveryInFlight)
+            return await this.discoveryInFlight;
+        if (this.discoveryAttemptAt !== undefined && this.discoveryAttemptAt + FETCH_COOLDOWN_MS > now) {
+            if (cached)
+                return cached.value;
+            throw new OidcError('transient', 'Discovery de Sumego: se reintenta en un minuto.');
+        }
+        this.discoveryAttemptAt = now;
+        this.discoveryInFlight = this.fetchDiscovery().finally(() => {
             this.discoveryInFlight = undefined;
         });
         return await this.discoveryInFlight;
@@ -403,19 +492,31 @@ export class SumegoOidcClient {
         const value = {
             authorizationEndpoint: endpoint(body.authorization_endpoint),
             tokenEndpoint: endpoint(body.token_endpoint),
-            jwksUri: endpoint(body.jwks_uri)
+            jwksUri: endpoint(body.jwks_uri),
+            // Opcional (RFC 7009): sin él, revocar el refresh no es posible y se
+            // omite; la sesión muere igual en Sumego.
+            ...(body.revocation_endpoint !== undefined ? { revocationEndpoint: endpoint(body.revocation_endpoint) } : {})
         };
         this.discovery = { value, expiresAt: this.now() + METADATA_CACHE_MS };
         return value;
     }
+    /** JWKS con el mismo freno que el discovery: fuera de la caché fresca (o
+     *  forzado por un `kid` desconocido), un intento por minuto; dentro de ese
+     *  minuto, la copia que haya o `transient`. */
     async keys(forceRefresh) {
         const now = this.now();
         const cached = this.jwks;
         if (cached && !forceRefresh && cached.expiresAt > now)
             return cached.keys;
-        if (cached && forceRefresh && cached.fetchedAt + JWKS_REFRESH_COOLDOWN_MS > now)
-            return cached.keys;
-        this.jwksInFlight ??= this.fetchJwks().finally(() => {
+        if (this.jwksInFlight)
+            return await this.jwksInFlight;
+        if (this.jwksAttemptAt !== undefined && this.jwksAttemptAt + FETCH_COOLDOWN_MS > now) {
+            if (cached)
+                return cached.keys;
+            throw new OidcError('transient', 'JWKS de Sumego: se reintenta en un minuto.');
+        }
+        this.jwksAttemptAt = now;
+        this.jwksInFlight = this.fetchJwks().finally(() => {
             this.jwksInFlight = undefined;
         });
         return await this.jwksInFlight;
@@ -448,8 +549,7 @@ export class SumegoOidcClient {
                 // Una clave que no se importa no firma nada nuestro.
             }
         }
-        const now = this.now();
-        this.jwks = { keys, expiresAt: now + METADATA_CACHE_MS, fetchedAt: now };
+        this.jwks = { keys, expiresAt: this.now() + METADATA_CACHE_MS };
         return keys;
     }
     async getJson(url, what) {

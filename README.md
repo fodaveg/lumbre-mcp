@@ -1169,8 +1169,12 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    (cualquier otro `alg`, también `none` y HS*, se rechaza antes de mirar la
    clave), `iss`, `aud` igual al client_id (y `azp` si viene, obligatorio con varias
    audiencias), `nonce`, `exp` e `iat` con 60 s de margen, y `sid` obligatorio. La
-   persona se identifica por `sub`, nunca por email. Del canje con Sumego solo se usa
-   el ID token: su access y su refresh se tiran sin guardarlos.
+   persona se identifica por `sub`, nunca por email. Del canje con Sumego se usan el
+   ID token (para Lumbre) y el refresh token, que es obligatorio y se guarda cifrado
+   (ver «comprobación horaria» abajo); el access token de Sumego se tira. Una
+   recarga de esta vuelta, ya consumida, dice «Esta página ya se usó» sin quemar nada.
+   La cookie solo se borra cuando la transacción se quema: una respuesta con otro
+   `iss` no deja sin cookie a la conexión buena.
 3. Consentimiento propio del relé: una página HTML mínima con el nombre del cliente
    (el de su CIMD, escapado), el host de su `redirect_uri` y la cuenta (el email del
    ID token, que solo se enseña). «Permitir» y «Cancelar» hacen POST a
@@ -1178,7 +1182,10 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    estricta (`default-src 'none'`, `frame-ancestors 'none'` y `form-action` solo a sí
    mismo y al origen del cliente, porque Chrome aplica `form-action` también a la
    redirección que sigue al envío) y `no-store`. La transacción y el consentimiento
-   son de un solo uso y caducan a los 10 minutos. Un CSRF o una cookie que no casan
+   son de un solo uso. La transacción caduca a los 10 minutos. El consentimiento caduca
+   antes, a los 4 min 30 s del `iat` del ID token: Lumbre no acepta ID tokens de más de
+   5 minutos (con 60 s de margen), y así un «Permitir» tardío caduca aquí sin gastar el
+   canje. La página avisa de que hay que confirmar en unos minutos. Un CSRF o una cookie que no casan
    no canjean nada (403) y tampoco queman la transacción, para que nadie pueda
    abortar la de otra persona. «Cancelar» vuelve al cliente con `access_denied` e
    `iss`.
@@ -1192,7 +1199,8 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    cuentas caído); `invalid_request`, `payload_too_large` y el 401 del secreto son
    fallos nuestros: frase genérica para la persona y una línea en el log del
    servidor. Todas las frases viven en `src/sumego-messages.ts`. Un rechazo termina
-   el flujo; no se reintenta solo.
+   el flujo; no se reintenta solo. El grant hereda el `sub`, el `sid` y el refresh de
+   Sumego.
 
 El grant guarda el `sub` y el `sid` de Sumego. **Back-channel logout**: Sumego hace
 `POST /oauth/sumego/backchannel-logout` (formulario con `logout_token`) de servidor a
@@ -1209,6 +1217,49 @@ si el token no vale o ya se usó (503 si no pudo leer el JWKS), siempre con
 `Cache-Control: no-store`. Buscar por `sub` o `sid` recorre los grants dentro de la
 escritura del almacén. No compensa un índice, porque cada logout escribe el `jti` y
 escribir ya cuesta lo mismo.
+
+Un logout que llega con la conexión a medias también la alcanza. Puede llegar
+mientras se canjea el code con Sumego o mientras se canjea con Lumbre, y en ese
+momento todavía no hay grant ni código que revocar. Por eso el mismo mutador del
+logout recuerda durante 10 minutos (con tope de 1.000, solo hashes) el `sid` o el
+`sub` cerrado y el `iat` del logout. Al pasar al consentimiento y al guardar el
+código, lo que acaba de nacer se mira contra esa lista. Si su sesión se cerró en el
+mismo segundo que se emitió su ID token o después, no sigue: la persona ve «Se cerró
+la sesión de tu cuenta» y, si Lumbre ya había emitido la credencial, se revoca por la
+outbox.
+
+**Comprobación horaria de la sesión de Sumego.** Es la red de seguridad del logout.
+Si el aviso se pierde, el grant ya no vive 30 días: en un `/token` con
+`grant_type=refresh_token`, si la última comprobación de un grant de Sumego tiene más
+de una hora, el relé renueva antes su refresh en Sumego (SPEC de Sumego §4 y §7.7):
+- **200:** guarda el refresh nuevo (Sumego rota siempre) y la hora.
+- **4xx que no sea 429:** cuenta suspendida, grant revocado o refresh ya usado. El
+  relé revoca la familia y la credencial de Lumbre por la outbox, y responde
+  `invalid_grant`.
+- **429, 5xx, timeout o Sumego caído:** no corta nada y reintenta en el siguiente
+  `/token` (SPEC §8).
+
+Hay una sola renovación en vuelo por grant: dos `/token` a la vez comparten la misma
+y nunca presentan dos veces el mismo refresh de Sumego. Además, el refresh rotado
+solo se guarda si el guardado sigue siendo el de partida. Si no lo es, se toma como
+carrera y no se revoca nada.
+
+Cuando un grant o un código de Sumego sale del almacén (logout, `/revoke`,
+`invalid_grant`, replay, caducidad, barrido) o una conexión acaba sin código
+(«Cancelar», error), su refresh se revoca en Sumego si el discovery publica
+`revocation_endpoint`. Es best-effort: un fallo no bloquea nada, y el apagado
+ordenado espera a las que haya en vuelo.
+
+Discovery y JWKS se leen como mucho una vez por minuto fuera de la caché, salga bien
+o mal. Con Sumego fallando, un aluvión de logouts con `kid` inventados o de
+`/authorize` no se convierte en un aluvión contra Sumego. Dentro de ese minuto se usa
+la copia caducada si la hay; si no, la respuesta es «no disponible».
+
+**Límite conocido (B4 de la revisión de seguridad de c4534bc):** el back-channel
+logout tiene su límite por IP (60 por minuto), pero no un 429 específico para un
+aluvión de logouts desde la IP de Sumego. Depende de qué IP de origen ve el relé
+cuando Sumego lo llama desde el mismo VPS (SPEC de Sumego §4.0.6), y eso se medirá
+en producción antes de ajustarlo.
 
 Cambiar de proveedor no corta los grants vivos: los nacidos con uno siguen
 refrescando y resolviendo con el otro, y el logout de Sumego se atiende también con

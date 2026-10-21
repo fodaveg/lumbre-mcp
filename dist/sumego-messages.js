@@ -26,8 +26,12 @@ export const SUMEGO_PERSON_MESSAGES = {
     identityRejected: 'El servicio de cuentas no pudo confirmar tu identidad. Vuelve a conectar desde la aplicación.',
     otherBrowser: 'Esta autorización se abrió en otro navegador. Vuelve a conectar desde la aplicación.',
     expired: 'La autorización ha caducado, ya se usó o no existe. Vuelve a conectar desde la aplicación.',
+    alreadyUsed: 'Esta página ya se usó. Vuelve a la ventana de confirmación o empieza de nuevo desde la aplicación.',
+    sessionClosed: 'Se cerró la sesión de tu cuenta mientras conectabas. Vuelve a conectar desde la aplicación.',
     consentInvalid: 'La confirmación ha caducado, ya se usó o no corresponde a esta autorización.',
-    consentMalformed: 'Confirmación inválida.'
+    consentMalformed: 'Confirmación inválida.',
+    // Texto fijo de la página de consentimiento.
+    consentDeadline: 'Confirma en los próximos minutos: pasado ese plazo tendrás que volver a conectar desde la aplicación.'
 };
 /** Qué se enseña por cada `code` del canje de Lumbre, y con qué estado HTTP.
  *  `ourFault`: el fallo es del relé o de su configuración, no de la persona. */

@@ -78,11 +78,43 @@ class FakeSumego {
 	jwks: Record<string, unknown>[] = [this.key.jwk];
 	discoveryIssuer = ISSUER;
 	down = false;
+	/** Estado HTTP del JWKS (500 = JWKS caído con el resto de Sumego en pie). */
+	jwksStatus = 200;
 	tokenStatus = 200;
+	/** Estado del canje de un refresh (`grant_type=refresh_token`). */
+	refreshStatus = 200;
+	/** Publica `revocation_endpoint` en el discovery. */
+	revocationEndpoint = true;
 	/** Sustituye los claims (o el JWT entero) del siguiente ID token. */
 	nextIdToken?: (claims: Record<string, unknown>) => string;
-	readonly calls = { discovery: 0, jwks: 0, token: 0 };
+	/** Se espera antes de responder a un canje de `code` (para colar algo en medio). */
+	beforeCodeResponse?: () => Promise<void>;
+	/** Se espera antes de responder a un refresh (para abrir una carrera). */
+	beforeRefreshResponse?: () => Promise<void>;
+	readonly calls = { discovery: 0, jwks: 0, token: 0, refresh: 0, refreshReused: 0 };
+	/** Refresh tokens que el relé pidió revocar en Sumego. */
+	readonly revokedRefresh: string[] = [];
 	private readonly codes = new Map<string, { nonce: string; challenge: string; person: Person }>();
+	/** Refresh vivos → de quién; Sumego los rota en cada uso (§4.0.1). */
+	private readonly refreshTokens = new Map<string, Person>();
+	private readonly usedRefresh = new Set<string>();
+
+	/** El refresh vivo de esta persona (el último que emitió). */
+	liveRefreshOf(person: Person): string | undefined {
+		return [...this.refreshTokens].filter(([, who]) => who.sid === person.sid).map(([token]) => token).at(-1);
+	}
+
+	/** Lo que hace Sumego al suspender la cuenta o revocar el grant: el
+	 *  refresh deja de valer (sin logout por canal servidor). */
+	forgetRefreshOf(person: Person): void {
+		for (const [token, who] of this.refreshTokens) if (who.sub === person.sub) this.refreshTokens.delete(token);
+	}
+
+	private issueRefresh(person: Person): string {
+		const token = `rt-${randomUUID()}`;
+		this.refreshTokens.set(token, person);
+		return token;
+	}
 
 	constructor(private readonly now: () => number) {}
 
@@ -141,22 +173,51 @@ class FakeSumego {
 				authorization_endpoint: `${ISSUER}/oidc/auth`,
 				token_endpoint: `${ISSUER}/oidc/token`,
 				jwks_uri: `${ISSUER}/oidc/jwks`,
+				...(this.revocationEndpoint ? { revocation_endpoint: `${ISSUER}/oidc/token/revocation` } : {}),
 				id_token_signing_alg_values_supported: ['ES256'],
 				authorization_response_iss_parameter_supported: true
 			});
 		}
 		if (url === `${ISSUER}/oidc/jwks`) {
 			this.calls.jwks += 1;
+			if (this.jwksStatus !== 200) return new Response('caído', { status: this.jwksStatus });
 			return Response.json({ keys: this.jwks });
 		}
-		if (url === `${ISSUER}/oidc/token`) {
-			this.calls.token += 1;
-			expect(init?.method).toBe('POST');
-			expect(new Headers(init?.headers).get('authorization')).toBe(
-				`Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`
-			);
-			if (this.tokenStatus !== 200) return Response.json({ error: 'invalid_grant' }, { status: this.tokenStatus });
+		const basic = `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`;
+		if (url === `${ISSUER}/oidc/token/revocation`) {
+			expect(new Headers(init?.headers).get('authorization')).toBe(basic);
 			const form = new URLSearchParams(String(init?.body));
+			expect(form.get('token_type_hint')).toBe('refresh_token');
+			this.revokedRefresh.push(form.get('token')!);
+			this.refreshTokens.delete(form.get('token')!);
+			return new Response(null, { status: 200 });
+		}
+		if (url === `${ISSUER}/oidc/token`) {
+			expect(init?.method).toBe('POST');
+			expect(new Headers(init?.headers).get('authorization')).toBe(basic);
+			const form = new URLSearchParams(String(init?.body));
+			if (form.get('grant_type') === 'refresh_token') {
+				this.calls.refresh += 1;
+				await this.beforeRefreshResponse?.();
+				if (this.refreshStatus !== 200) return Response.json({ error: 'invalid_grant' }, { status: this.refreshStatus });
+				const presented = form.get('refresh_token') ?? '';
+				const person = this.refreshTokens.get(presented);
+				if (!person) {
+					if (this.usedRefresh.has(presented)) this.calls.refreshReused += 1;
+					return Response.json({ error: 'invalid_grant' }, { status: 400 });
+				}
+				// Rotación siempre: el viejo deja de valer.
+				this.refreshTokens.delete(presented);
+				this.usedRefresh.add(presented);
+				return Response.json({
+					access_token: 'at-de-sumego-que-se-tira',
+					refresh_token: this.issueRefresh(person),
+					token_type: 'Bearer',
+					expires_in: 3600
+				});
+			}
+			this.calls.token += 1;
+			if (this.tokenStatus !== 200) return Response.json({ error: 'invalid_grant' }, { status: this.tokenStatus });
 			const grant = this.codes.get(form.get('code') ?? '');
 			if (
 				!grant ||
@@ -170,9 +231,10 @@ class FakeSumego {
 			const claims = this.idTokenClaims(grant.nonce, grant.person);
 			const idToken = this.nextIdToken ? this.nextIdToken(claims) : jws(claims, this.key);
 			this.nextIdToken = undefined;
+			await this.beforeCodeResponse?.();
 			return Response.json({
 				access_token: 'at-de-sumego-que-se-tira',
-				refresh_token: 'rt-de-sumego-que-se-tira',
+				refresh_token: this.issueRefresh(grant.person),
 				token_type: 'Bearer',
 				expires_in: 3600,
 				id_token: idToken
@@ -192,6 +254,8 @@ class FakeLumbre {
 	readonly sumegoExchanges: Record<string, unknown>[] = [];
 	readonly revoked: string[] = [];
 	exchangeFailure?: { status: number; body: unknown };
+	/** Se espera antes de responder al canje con Sumego. */
+	beforeSumegoExchange?: () => Promise<void>;
 	private counter = 0;
 	private readonly credentials = new Map<string, { credentialId: string; clientId: string }>();
 
@@ -223,6 +287,7 @@ class FakeLumbre {
 		}
 		if (path === 'mcp/sumego/exchange') {
 			this.sumegoExchanges.push(body);
+			await this.beforeSumegoExchange?.();
 			if (this.exchangeFailure) return Response.json(this.exchangeFailure.body, { status: this.exchangeFailure.status });
 			return Response.json(this.issue(String(body.clientId)));
 		}
@@ -248,6 +313,8 @@ interface Harness {
 	lumbre: FakeLumbre;
 	clock: { now: number };
 	clientName: string;
+	/** Costuras del servicio que un test puede enganchar. */
+	hooks: { renewalJoined?: () => void };
 }
 
 const servers: Server[] = [];
@@ -269,7 +336,7 @@ async function listen(service: OAuthService): Promise<string> {
 }
 
 function serviceFor(
-	h: Pick<Harness, 'idp' | 'lumbre' | 'clock' | 'clientName'>,
+	h: Pick<Harness, 'idp' | 'lumbre' | 'clock' | 'clientName' | 'hooks'>,
 	stateDir: string,
 	login: LoginConfig
 ): OAuthService {
@@ -292,13 +359,20 @@ function serviceFor(
 		fetch: fetchFn,
 		now: () => h.clock.now,
 		backchannelSecret: BACKCHANNEL_SECRET,
-		login
+		login,
+		sumegoRenewalJoined: () => h.hooks.renewalJoined?.()
 	});
 }
 
 async function harness(login: LoginConfig = SUMEGO_LOGIN, clientName = 'Claude'): Promise<Harness> {
 	const clock = { now: START };
-	const parts = { idp: new FakeSumego(() => clock.now), lumbre: new FakeLumbre(() => clock.now), clock, clientName };
+	const parts = {
+		idp: new FakeSumego(() => clock.now),
+		lumbre: new FakeLumbre(() => clock.now),
+		clock,
+		clientName,
+		hooks: {} as Harness['hooks']
+	};
 	const stateDir = await newDir();
 	const service = serviceFor(parts, stateDir, login);
 	return { ...parts, stateDir, service, baseUrl: await listen(service) };
@@ -407,10 +481,24 @@ async function connectWithLumbre(h: Harness): Promise<{ access: string; refresh:
 	return { access: body.access_token, refresh: body.refresh_token };
 }
 
-async function storedGrants(h: Harness): Promise<{ sumego?: { sub: string; sid: string }; credentialId: string }[]> {
-	return (JSON.parse(await readFile(join(h.stateDir, 'oauth-store.json'), 'utf8')) as {
-		grants: { sumego?: { sub: string; sid: string }; credentialId: string }[];
-	}).grants;
+interface StoredGrantView {
+	sumego?: { sub: string; sid: string };
+	credentialId: string;
+	sumegoRefresh?: { ciphertext: string };
+	sumegoCheckedAt?: number;
+}
+
+async function storedGrants(h: Harness): Promise<StoredGrantView[]> {
+	return (JSON.parse(await readFile(join(h.stateDir, 'oauth-store.json'), 'utf8')) as { grants: StoredGrantView[] }).grants;
+}
+
+/** Promesa que se resuelve desde fuera; para ordenar una carrera sin esperas. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
 }
 
 async function logout(h: Harness, logoutToken: string): Promise<Response> {
@@ -583,7 +671,7 @@ describe('cliente OIDC: logout_token', () => {
 
 	it('uno bueno devuelve jti, sub, sid y hasta cuándo recordar el jti (sin secreto de cliente)', async () => {
 		const claims = await client.validateLogoutToken(idp.logoutToken({ sub: 'sub-ana', sid: 'sid-1', jti: 'jti-1' }));
-		expect(claims).toEqual({ jti: 'jti-1', sub: 'sub-ana', sid: 'sid-1', keepUntil: START + 6 * 60_000 });
+		expect(claims).toEqual({ jti: 'jti-1', sub: 'sub-ana', sid: 'sid-1', keepUntil: START + 6 * 60_000, issuedAt: START });
 	});
 
 	it.each([
@@ -892,5 +980,279 @@ describe('cambiar de proveedor no corta los grants vivos', () => {
 		expect((await token(switched, { grant_type: 'refresh_token', refresh_token: session.refresh })).status).toBe(200);
 		const { location } = await startLogin(switched);
 		expect(location.startsWith(`${ISSUER}/oidc/auth?`)).toBe(true);
+	});
+});
+
+describe('la cookie de atadura solo se borra al quemar la transacción (B2)', () => {
+	it('una vuelta con otro iss da error sin borrar la cookie, y la vuelta buena sigue funcionando', async () => {
+		const h = await harness();
+		const { location, cookie } = await startLogin(h);
+		const { code, state } = h.idp.issueCode(location);
+		const forged = await callback(h, { code, state, iss: 'https://otro.example' }, cookie);
+		expect(forged.status).toBe(400);
+		expect(forged.headers.get('set-cookie')).toBeNull();
+		expect((await callback(h, { code, state, iss: ISSUER }, cookie)).status).toBe(200);
+	});
+
+	it('recargar la vuelta ya consumida, con el consentimiento abierto, dice que la página ya se usó y no toca la cookie', async () => {
+		const h = await harness();
+		const { location, cookie } = await startLogin(h);
+		const { code, state } = h.idp.issueCode(location);
+		const first = await callback(h, { code, state, iss: ISSUER }, cookie);
+		const html = await first.text();
+		const reload = await callback(h, { code, state, iss: ISSUER }, cookie);
+		expect(reload.status).toBe(400);
+		expect(reload.headers.get('set-cookie')).toBeNull();
+		expect(await reload.text()).toContain('Esta página ya se usó');
+		// La confirmación abierta en la otra ventana sigue valiendo.
+		const allowed = await consent(
+			h,
+			{ request: html.match(/name="request" value="([^"]+)"/)![1]!, csrf: html.match(/name="csrf" value="([^"]+)"/)![1]!, decision: 'allow' },
+			cookie
+		);
+		expect(allowed.status).toBe(302);
+	});
+});
+
+describe('un logout que llega a mitad de la conexión la alcanza (B1)', () => {
+	it('logout por sid durante el canje del code con Sumego: no se llega al consentimiento', async () => {
+		const h = await harness();
+		const { location, cookie } = await startLogin(h);
+		const { code, state } = h.idp.issueCode(location);
+		h.idp.beforeCodeResponse = async () => {
+			h.idp.beforeCodeResponse = undefined;
+			expect((await logout(h, h.idp.logoutToken({ sid: ANA.sid }))).status).toBe(200);
+		};
+		const response = await callback(h, { code, state, iss: ISSUER }, cookie);
+		const html = await response.text();
+		expect(response.status).toBe(403);
+		expect(html).toContain('Se cerró la sesión de tu cuenta');
+		expect(html).not.toContain('name="csrf"');
+		expect(h.lumbre.sumegoExchanges).toHaveLength(0);
+	});
+
+	it('logout por sub durante el canje con Lumbre: la credencial recién emitida se revoca y no sale código', async () => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		h.lumbre.beforeSumegoExchange = async () => {
+			h.lumbre.beforeSumegoExchange = undefined;
+			expect((await logout(h, h.idp.logoutToken({ sub: ANA.sub }))).status).toBe(200);
+		};
+		const response = await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie);
+		expect(response.status).toBe(403);
+		expect(response.headers.get('location')).toBeNull();
+		expect(await response.text()).toContain('Se cerró la sesión de tu cuenta');
+		// Lo que Lumbre acababa de emitir no se queda vivo allí.
+		expect(h.lumbre.revoked).toHaveLength(1);
+		expect(JSON.parse(await readFile(join(h.stateDir, 'oauth-store.json'), 'utf8')).authorizationCodes).toEqual([]);
+	});
+});
+
+describe('freno a Sumego también cuando falla (B3)', () => {
+	const clock = { now: START };
+	let idp: FakeSumego;
+	let client: SumegoOidcClient;
+	/** Toda petición que sale hacia Sumego, también las que fallan. */
+	let outgoing: string[];
+
+	beforeEach(() => {
+		clock.now = START;
+		outgoing = [];
+		idp = new FakeSumego(() => clock.now);
+		client = new SumegoOidcClient({
+			config: SUMEGO_LOGIN.sumego,
+			now: () => clock.now,
+			fetch: (async (input, init) => {
+				outgoing.push(String(input));
+				const answer = await idp.handle(String(input), init);
+				if (!answer) throw new Error(`fetch inesperado: ${String(input)}`);
+				return answer;
+			}) as typeof fetch
+		});
+	});
+
+	it('con el JWKS caído, cinco logout tokens con kid inventados hacen UNA lectura del JWKS por minuto', async () => {
+		idp.jwksStatus = 500;
+		for (let i = 0; i < 5; i += 1) {
+			const forged = signingKey(`kid-inventado-${i}`);
+			await expect(client.validateLogoutToken(idp.logoutToken({ sub: 'x' }, forged))).rejects.toBeInstanceOf(OidcError);
+		}
+		expect(idp.calls.jwks).toBe(1);
+		// Pasado el minuto se vuelve a intentar, y con Sumego de vuelta funciona.
+		idp.jwksStatus = 200;
+		clock.now += 61_000;
+		await expect(client.validateLogoutToken(idp.logoutToken({ sub: 'x' }))).resolves.toMatchObject({ sub: 'x' });
+		expect(idp.calls.jwks).toBe(2);
+	});
+
+	it('con el discovery caído, cinco intentos hacen UNA lectura del discovery por minuto', async () => {
+		const discovery = `${ISSUER}/.well-known/openid-configuration`;
+		idp.down = true;
+		for (let i = 0; i < 5; i += 1) {
+			await expect(client.authorizationUrl({ state: 's', nonce: 'n', codeChallenge: 'c' })).rejects.toMatchObject({ kind: 'transient' });
+		}
+		expect(outgoing.filter((url) => url === discovery)).toHaveLength(1);
+		// Sumego vuelve, pero dentro del minuto no se le vuelve a preguntar.
+		idp.down = false;
+		await expect(client.authorizationUrl({ state: 's', nonce: 'n', codeChallenge: 'c' })).rejects.toMatchObject({ kind: 'transient' });
+		expect(outgoing.filter((url) => url === discovery)).toHaveLength(1);
+		clock.now += 61_000;
+		await expect(client.authorizationUrl({ state: 's', nonce: 'n', codeChallenge: 'c' })).resolves.toContain('/oidc/auth');
+		expect(outgoing.filter((url) => url === discovery)).toHaveLength(2);
+	});
+});
+
+describe('la sesión de Sumego se comprueba cada hora en el refresh (M1)', () => {
+	const HOUR = 60 * 60_000;
+
+	it('el grant guarda el refresh de Sumego cifrado; dentro de la hora /token no le pregunta', async () => {
+		const h = await harness();
+		const session = await connect(h);
+		const [grant] = await storedGrants(h);
+		expect(grant!.sumegoRefresh).toBeDefined();
+		expect(grant!.sumegoCheckedAt).toBe(START);
+		const raw = await readFile(join(h.stateDir, 'oauth-store.json'), 'utf8');
+		expect(raw).not.toContain(h.idp.liveRefreshOf(ANA)!);
+		h.clock.now += HOUR - 1;
+		expect((await token(h, { grant_type: 'refresh_token', refresh_token: session.refresh })).status).toBe(200);
+		expect(h.idp.calls.refresh).toBe(0);
+	});
+
+	it('pasada la hora renueva en Sumego, guarda el refresh rotado y la hora, y no repite hasta la siguiente', async () => {
+		const h = await harness();
+		const session = await connect(h);
+		const before = (await storedGrants(h))[0]!.sumegoRefresh!.ciphertext;
+		h.clock.now += HOUR + 1;
+		const first = await token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		expect(first.status).toBe(200);
+		expect(h.idp.calls.refresh).toBe(1);
+		const [grant] = await storedGrants(h);
+		expect(grant!.sumegoRefresh!.ciphertext).not.toBe(before);
+		expect(grant!.sumegoCheckedAt).toBe(START + HOUR + 1);
+		const { refresh_token: next } = (await first.json()) as { refresh_token: string };
+		expect((await token(h, { grant_type: 'refresh_token', refresh_token: next })).status).toBe(200);
+		expect(h.idp.calls.refresh).toBe(1);
+	});
+
+	it('si Sumego ya no renueva (cuenta suspendida, logout perdido) el refresh da invalid_grant y se revoca todo', async () => {
+		const h = await harness();
+		const session = await connect(h);
+		h.idp.forgetRefreshOf(ANA);
+		h.clock.now += HOUR + 1;
+		const response = await token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		expect(response.status).toBe(400);
+		expect(((await response.json()) as { error: string }).error).toBe('invalid_grant');
+		expect(await h.service.resolveAccessToken(session.access)).toBeUndefined();
+		expect(h.lumbre.revoked).toHaveLength(1);
+		expect(await storedGrants(h)).toEqual([]);
+	});
+
+	it.each([
+		['un 503', (idp: FakeSumego) => { idp.refreshStatus = 503; }],
+		['un 429', (idp: FakeSumego) => { idp.refreshStatus = 429; }],
+		['Sumego caído', (idp: FakeSumego) => { idp.down = true; }]
+	])('con %s no se corta nada y se reintenta en el siguiente /token', async (_name, breakSumego) => {
+		const h = await harness();
+		const session = await connect(h);
+		h.clock.now += HOUR + 1;
+		// El discovery ya está en caché del login; caído, solo falla el refresh.
+		breakSumego(h.idp);
+		const first = await token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		expect(first.status).toBe(200);
+		expect((await storedGrants(h))[0]!.sumegoCheckedAt).toBe(START);
+		h.idp.refreshStatus = 200;
+		h.idp.down = false;
+		const { refresh_token: next } = (await first.json()) as { refresh_token: string };
+		expect((await token(h, { grant_type: 'refresh_token', refresh_token: next })).status).toBe(200);
+		expect((await storedGrants(h))[0]!.sumegoCheckedAt).toBe(START + HOUR + 1);
+		expect(h.lumbre.revoked).toHaveLength(0);
+	});
+
+	it('dos /token a la vez sobre el mismo grant hacen UNA renovación en Sumego, sin reusar su refresh', async () => {
+		const h = await harness();
+		const session = await connect(h);
+		h.clock.now += HOUR + 1;
+		const insideSumego = deferred();
+		const release = deferred();
+		h.idp.beforeRefreshResponse = async () => {
+			insideSumego.resolve();
+			await release.promise;
+		};
+		// La segunda petición suelta a Sumego en cuanto se suma a la renovación
+		// en vuelo. Si no se sumara y fuera a Sumego por su cuenta, entraría
+		// aquí otra vez y la soltaría igual: el test no se cuelga en ningún caso.
+		h.hooks.renewalJoined = () => release.resolve();
+		const first = token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		await insideSumego.promise;
+		h.idp.beforeRefreshResponse = async () => release.resolve();
+		const second = token(h, { grant_type: 'refresh_token', refresh_token: session.refresh });
+		const [a, b] = await Promise.all([first, second]);
+		expect(h.idp.calls.refresh).toBe(1);
+		expect(h.idp.calls.refreshReused).toBe(0);
+		// La primera rota; la segunda presentaba el MISMO refresh del relé, y eso
+		// es un replay (RFC 6749), que ya revocaba la familia antes de Sumego.
+		expect([a.status, b.status].sort()).toEqual([200, 400]);
+	});
+
+	it('al revocar un grant (/revoke o logout) se revoca también su refresh en Sumego', async () => {
+		const h = await harness();
+		const viaRevoke = await connect(h, { ...ANA, sid: 'sid-revoke' });
+		await connect(h, { ...ANA, sid: 'sid-logout' });
+		const refreshRevoke = h.idp.liveRefreshOf({ ...ANA, sid: 'sid-revoke' })!;
+		const refreshLogout = h.idp.liveRefreshOf({ ...ANA, sid: 'sid-logout' })!;
+		const revoked = await fetch(`${h.baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: viaRevoke.refresh, client_id: CLAUDE_CLIENT })
+		});
+		expect(revoked.status).toBe(200);
+		expect((await logout(h, h.idp.logoutToken({ sid: 'sid-logout' }))).status).toBe(200);
+		await h.service.whenWritesSettled();
+		expect(h.idp.revokedRefresh.sort()).toEqual([refreshLogout, refreshRevoke].sort());
+	});
+
+	it('sin revocation_endpoint en el discovery, revocar el grant no falla ni sale a Sumego', async () => {
+		const h = await harness();
+		h.idp.revocationEndpoint = false;
+		const session = await connect(h);
+		const revoked = await fetch(`${h.baseUrl}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: session.refresh, client_id: CLAUDE_CLIENT })
+		});
+		expect(revoked.status).toBe(200);
+		await h.service.whenWritesSettled();
+		expect(h.idp.revokedRefresh).toEqual([]);
+		expect(await h.service.resolveAccessToken(session.access)).toBeUndefined();
+	});
+
+	it('«Cancelar» revoca en Sumego el refresh que ya no va a usar nadie', async () => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		const refresh = h.idp.liveRefreshOf(ANA)!;
+		expect((await consent(h, { request: page.request, csrf: page.csrf, decision: 'deny' }, page.cookie)).status).toBe(302);
+		await h.service.whenWritesSettled();
+		expect(h.idp.revokedRefresh).toEqual([refresh]);
+	});
+});
+
+describe('el consentimiento caduca antes de que Lumbre rechace el ID token (M2)', () => {
+	it('la página avisa del plazo, y a los 4 min 30 s del ID token ya no canjea', async () => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		expect(page.html).toContain(SUMEGO_PERSON_MESSAGES.consentDeadline);
+		h.clock.now += 5 * 60_000 - 30_000;
+		const late = await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie);
+		expect(late.status).toBe(403);
+		expect(await late.text()).toContain(SUMEGO_PERSON_MESSAGES.consentInvalid);
+		expect(h.lumbre.sumegoExchanges).toHaveLength(0);
+	});
+
+	it('un segundo antes de ese plazo todavía canjea', async () => {
+		const h = await harness();
+		const page = await reachConsent(h);
+		h.clock.now += 5 * 60_000 - 30_000 - 1_000;
+		expect((await consent(h, { request: page.request, csrf: page.csrf, decision: 'allow' }, page.cookie)).status).toBe(302);
+		expect(h.lumbre.sumegoExchanges).toHaveLength(1);
 	});
 });

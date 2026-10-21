@@ -292,9 +292,18 @@ En Sumego, el cliente `lumbre-mcp` es confidencial (`client_secret_basic`), con
 `redirect_uri` exacta `https://mcp.lumbre.pro/oauth/sumego/callback`,
 `backchannel_logout_uri` `https://mcp.lumbre.pro/oauth/sumego/backchannel-logout`
 y `backchannel_logout_session_required: true` (sin `sid` en el ID token el relé
-rechaza el login). Las tres rutas del relé (`/oauth/sumego/callback`,
+rechaza el login). Además, Sumego tiene que emitirle refresh token
+(`issueRefreshToken`, SPEC §4.0.1): el relé lo exige al conectar y lo renueva cada
+hora como red de seguridad del logout, y sin él rechaza el login. Si el discovery
+publica `revocation_endpoint`, el relé revoca ahí el refresh de lo que desconecta.
+Las tres rutas del relé (`/oauth/sumego/callback`,
 `/oauth/sumego/consent`, `/oauth/sumego/backchannel-logout`) pasan por el
 catch-all de `deploy/mcp-lumbre-pro.caddy`, igual que `/oauth/lumbre/callback`.
+
+Si se vuelve a `lumbre` con grants de Sumego vivos, conviene dejar puesto el
+secreto: sin él, la comprobación horaria de esos grants no puede preguntar a Sumego
+y se trata como «Sumego no disponible» (no corta nada), así que solo el back-channel
+logout y la caducidad de 30 días los cierran.
 
 Cambiar el proveedor es cambiar el fichero y reiniciar el contenedor (sin
 recompilar), y **no corta los grants vivos**: los nacidos con cualquiera de los

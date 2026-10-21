@@ -199,6 +199,34 @@ const SUMEGO_CONSENT_PATH = '/oauth/sumego/consent';
 const MAX_LOGOUT_TOKENS = 1_000;
 
 /**
+ * Cuánto se recuerda una sesión de Sumego cerrada (`ClosedSumegoSession`):
+ * lo que puede durar una conexión a medias, que es la transacción
+ * (`TRANSACTION_TTL_MS`, 10 min). Con tope, como los `jti`: si se llena, se
+ * descarta la que antes caduca.
+ */
+const CLOSED_SUMEGO_SESSION_TTL_MS = 10 * 60_000;
+const MAX_CLOSED_SUMEGO_SESSIONS = 1_000;
+
+/**
+ * Cada cuánto, como mucho, el `/token` de un grant de Sumego le pregunta a
+ * Sumego si la sesión sigue viva (SPEC de Sumego §4: «la app renueva el
+ * refresh cada hora y una cuenta suspendida no renueva»). Es lo que cierra el
+ * grant si el back-channel logout se pierde.
+ */
+const SUMEGO_RECHECK_MS = 60 * 60_000;
+
+/**
+ * Margen con el que caduca en local el consentimiento antes de que Lumbre
+ * rechace el ID token por viejo (M2 de la revisión de seguridad de c4534bc).
+ * Lumbre acepta ID tokens de 5 minutos como mucho (más 60 s de margen); la
+ * transacción duraba 10. El consentimiento caduca a los 5 minutos del `iat`
+ * menos este margen, y lo que llegue tarde se queda en `consentInvalid` sin
+ * gastar el canje.
+ */
+const ID_TOKEN_MAX_AGE_FOR_LUMBRE_MS = 5 * 60_000;
+const CONSENT_EXPIRY_MARGIN_MS = 30_000;
+
+/**
  * Presupuesto de `/authorize` que se gasta justo antes de crear el registro
  * en app.lumbre.pro (ver `enterAuthorizeBudget`). Cada `/authorize` válido
  * crea un registro real allí, así que limitar solo con el límite por IP de
@@ -323,7 +351,19 @@ interface SumegoSubject {
 	sid: string;
 }
 
-interface StoredAuthorizationCode extends AuthorizationRequest {
+/**
+ * Refresh de Sumego de un código o grant nacido con Sumego (M1 de la revisión
+ * de seguridad de c4534bc): la comprobación horaria de la sesión
+ * (`renewSumegoSession`). Cifrado con `sumegoRefreshContext`, atado a la
+ * credencial de Lumbre, que no cambia al pasar de código a grant ni al rotar.
+ */
+interface SumegoSession {
+	sumegoRefresh?: EncryptedValue;
+	/** Epoch ms de la última vez que Sumego confirmó la sesión. */
+	sumegoCheckedAt?: number;
+}
+
+interface StoredAuthorizationCode extends AuthorizationRequest, SumegoSession {
 	codeHash: string;
 	expiresAt: number;
 	upstream: EncryptedValue;
@@ -355,6 +395,26 @@ interface StoredSumegoTransaction {
 	/** Fase `consent`: a quién pertenece, para que un logout llegado en
 	 *  medio también queme la solicitud. */
 	subject?: SumegoSubject;
+	/** Fase `consent`: `iat` del ID token (epoch ms). Contra él se miran los
+	 *  logouts recientes (`closedSumegoSessions`). */
+	issuedAt?: number;
+	/** Fase `consent`: refresh de Sumego, cifrado; pasa al código y al grant. */
+	refresh?: EncryptedValue;
+}
+
+/**
+ * Sesión de Sumego cerrada hace poco por un back-channel logout (B1 de la
+ * revisión de seguridad de c4534bc). El logout revoca lo que YA existe, pero
+ * no alcanza una conexión que está a mitad (canjeando el código con Sumego, o
+ * con Lumbre): esa todavía no tiene grant ni código. Se recuerda unos minutos
+ * para que, al nacer, se compruebe contra esto y se revoque. Solo hashes.
+ */
+interface ClosedSumegoSession {
+	kind: 'sid' | 'sub';
+	valueHash: string;
+	/** `iat` del logout token, epoch ms. */
+	closedAt: number;
+	expiresAt: number;
 }
 
 interface StoredAuthorizationRequest extends AuthorizationRequest {
@@ -371,7 +431,7 @@ interface UsedLogoutToken {
 	expiresAt: number;
 }
 
-interface StoredGrant {
+interface StoredGrant extends SumegoSession {
 	/** Proveedor de la credencial UPSTREAM (la API de Lumbre), no del login:
 	 *  un grant nacido de un login con Sumego también es `lumbre-web`. */
 	provider: 'lumbre-web';
@@ -447,6 +507,8 @@ interface OAuthStore {
 	 *  Sumego que lea este store lo ignora (y lo pierde al reescribir), lo
 	 *  que solo reabre la reproducción de un logout ya atendido. */
 	usedLogoutTokens: UsedLogoutToken[];
+	/** Igual de opcional en disco. Ver `ClosedSumegoSession`. */
+	closedSumegoSessions: ClosedSumegoSession[];
 }
 
 interface EncryptedValue {
@@ -501,6 +563,14 @@ export interface OAuthServiceOptions {
 	/** Cliente OIDC de Sumego. Por defecto, `SumegoOidcClient` con
 	 *  `login.sumego`, el `fetch` y el reloj de este servicio. */
 	sumego?: SumegoOidcApi;
+	/**
+	 * Se llama cuando un `/token` se suma a una renovación de Sumego que ya
+	 * estaba en vuelo para su familia (`renewSumegoSession`). Costura como
+	 * `persistenceStep`: para que un test de concurrencia sepa, sin esperas,
+	 * que la segunda petición ya está esperando a la primera. En producción no
+	 * se pasa nunca.
+	 */
+	sumegoRenewalJoined?: () => void;
 }
 
 export type PersistenceStep = 'temporary-file-synced' | 'store-renamed' | 'state-directory-synced';
@@ -540,6 +610,16 @@ export interface CredentialSweepResult {
 	/** Autorizaciones que Lumbre declaró inactivas y NO se purgaron porque
 	 *  saltó el freno de purga masiva (`MASS_PURGE_MIN_GRANTS`). */
 	heldBack: number;
+}
+
+/** Un código o grant de Sumego con su refresh, lo justo para descifrarlo
+ *  (`revokeSumegoRefreshOfRetired`). */
+interface SumegoRefreshHolder {
+	credentialId: string;
+	clientId: string;
+	resource: string;
+	scope: string;
+	sumegoRefresh: EncryptedValue;
 }
 
 /** Lo mínimo de una credencial upstream guardada (en un grant o en un código
@@ -839,10 +919,39 @@ function transactionContext(requestId: string, clientId: string, resource: strin
 
 /** AAD de lo cifrado de una transacción de Sumego: atado a su solicitud y a
  *  su `state`, para que no se pueda trasplantar a otra entrada del almacén. */
-function sumegoContext(kind: 'secrets' | 'id-token', request: StoredAuthorizationRequest, stateHash: string): Buffer {
+function sumegoContext(kind: 'secrets' | 'id-token' | 'refresh', request: StoredAuthorizationRequest, stateHash: string): Buffer {
 	return Buffer.from(
 		JSON.stringify(['sumego-transaction', kind, request.requestId, stateHash, request.clientId, request.resource, request.scope]),
 		'utf8'
+	);
+}
+
+/** AAD del refresh de Sumego de un código o grant: atado a su credencial de
+ *  Lumbre (que es la misma del código al grant y a través de las rotaciones)
+ *  y distinto del de la credencial upstream, para que no se puedan cambiar
+ *  el uno por el otro. */
+function sumegoRefreshContext(holder: { credentialId: string; clientId: string; resource: string; scope: string }): Buffer {
+	return Buffer.from(
+		JSON.stringify(['sumego-refresh', holder.credentialId, holder.clientId, holder.resource, holder.scope]),
+		'utf8'
+	);
+}
+
+/**
+ * ¿Cerró un logout reciente esta sesión de Sumego DESPUÉS de emitirse su ID
+ * token? (B1.) `>=` y no `>`: los `iat` van en segundos, y un logout en el
+ * mismo segundo que el login es justo la carrera que esto cubre. El precio,
+ * que un login hecho en el mismo segundo que un logout de su persona se corte,
+ * se arregla volviendo a conectar.
+ */
+function closedAfter(store: OAuthStore, subject: SumegoSubject, issuedAt: number, now: number): boolean {
+	const sid = digest(subject.sid);
+	const sub = digest(subject.sub);
+	return store.closedSumegoSessions.some(
+		(item) =>
+			item.expiresAt > now &&
+			item.closedAt >= issuedAt &&
+			((item.kind === 'sid' && item.valueHash === sid) || (item.kind === 'sub' && item.valueHash === sub))
 	);
 }
 
@@ -891,9 +1000,17 @@ function htmlPage(
 	);
 }
 
-/** Página de error del login con Sumego. Solo enseña mensajes propios: los
- *  de `OAuthError`, que son frases nuestras, o uno genérico. */
-function sumegoErrorPage(res: ServerResponse, error: unknown): void {
+/**
+ * Página de error del login con Sumego. Solo enseña mensajes propios: los de
+ * `OAuthError`, que son frases nuestras, o uno genérico.
+ *
+ * La cookie de atadura se borra SOLO si `burned` (la transacción se acaba de
+ * quemar, y la cookie ya no ata nada). B2 de la revisión de seguridad de
+ * c4534bc: antes la borraba siempre, y una respuesta falsificada (otro `iss`)
+ * o una recarga de la vuelta dejaban sin cookie a la conexión buena, que
+ * seguía viva en otra ventana.
+ */
+function sumegoErrorPage(res: ServerResponse, error: unknown, burned: boolean): void {
 	const known = error instanceof OAuthError ? error : new OAuthError('server_error', SUMEGO_PERSON_MESSAGES.generic, 500);
 	htmlPage(res, known.status, {
 		title: 'No se pudo conectar con Lumbre',
@@ -901,7 +1018,7 @@ function sumegoErrorPage(res: ServerResponse, error: unknown): void {
 			'<h1>No se pudo conectar con Lumbre</h1>' +
 			`<p>${escapeHtml(known.message)}</p>` +
 			'<p>Puedes cerrar esta ventana y volver a intentarlo desde la aplicación.</p>',
-		headers: { 'set-cookie': clearBindingCookie() }
+		...(burned ? { headers: { 'set-cookie': clearBindingCookie() } } : {})
 	});
 }
 
@@ -949,9 +1066,29 @@ function validSumegoTransaction(value: unknown): value is StoredSumegoTransactio
 		return false;
 	}
 	if (item.phase === 'consent') {
-		return typeof item.csrfHash === 'string' && validEncryptedValue(item.idToken) && validSumegoSubject(item.subject);
+		return (
+			typeof item.csrfHash === 'string' &&
+			validEncryptedValue(item.idToken) &&
+			validSumegoSubject(item.subject) &&
+			Number.isFinite(item.issuedAt) &&
+			validEncryptedValue(item.refresh)
+		);
 	}
-	return item.csrfHash === undefined && item.idToken === undefined && item.subject === undefined;
+	return (
+		item.csrfHash === undefined &&
+		item.idToken === undefined &&
+		item.subject === undefined &&
+		item.issuedAt === undefined &&
+		item.refresh === undefined
+	);
+}
+
+/** Campos de `SumegoSession`: los dos opcionales, y si están, bien formados. */
+function validSumegoSession(holder: SumegoSession & { sumego?: SumegoSubject }): boolean {
+	return (
+		(holder.sumegoRefresh === undefined || (holder.sumego !== undefined && validEncryptedValue(holder.sumegoRefresh))) &&
+		(holder.sumegoCheckedAt === undefined || Number.isFinite(holder.sumegoCheckedAt))
+	);
 }
 
 /** ¿Pertenece esta identidad de Sumego a lo que pide el logout? Con `sid`
@@ -1022,6 +1159,7 @@ function normalizeStore(value: unknown): OAuthStore {
 		revocationOutbox?: unknown;
 		redeemedCodes?: unknown;
 		usedLogoutTokens?: unknown;
+		closedSumegoSessions?: unknown;
 	};
 	if (raw.version === 1 || raw.version === 2) {
 		throw new Error('store OAuth provisional v1/v2 no compatible; archívalo y vuelve a autorizar desde la sesión web');
@@ -1034,7 +1172,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		!Array.isArray(raw.authorizationCodes) ||
 		!Array.isArray(raw.revocationOutbox) ||
 		(raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes)) ||
-		(raw.usedLogoutTokens !== undefined && !Array.isArray(raw.usedLogoutTokens))
+		(raw.usedLogoutTokens !== undefined && !Array.isArray(raw.usedLogoutTokens)) ||
+		(raw.closedSumegoSessions !== undefined && !Array.isArray(raw.closedSumegoSessions))
 	) {
 		throw new Error('store OAuth inválido');
 	}
@@ -1055,7 +1194,8 @@ function normalizeStore(value: unknown): OAuthStore {
 			typeof grant.refreshHash !== 'string' ||
 			!Number.isFinite(grant.refreshExpiresAt) ||
 			!validEncryptedValue(grant.upstream) ||
-			(grant.sumego !== undefined && !validSumegoSubject(grant.sumego))
+			(grant.sumego !== undefined && !validSumegoSubject(grant.sumego)) ||
+			!validSumegoSession(grant)
 		) {
 			throw new Error('grant OAuth inválido');
 		}
@@ -1142,7 +1282,8 @@ function normalizeStore(value: unknown): OAuthStore {
 			(item.state !== undefined && (typeof item.state !== 'string' || item.state.length > 1024)) ||
 			!Number.isFinite(item.expiresAt) ||
 			!validEncryptedValue(item.upstream) ||
-			(item.sumego !== undefined && !validSumegoSubject(item.sumego))
+			(item.sumego !== undefined && !validSumegoSubject(item.sumego)) ||
+			!validSumegoSession(item)
 		) {
 			throw new Error('código OAuth inválido');
 		}
@@ -1184,8 +1325,22 @@ function normalizeStore(value: unknown): OAuthStore {
 		}
 		return item as UsedLogoutToken;
 	});
+	const closedSumegoSessions = ((raw.closedSumegoSessions ?? []) as unknown[]).map((value): ClosedSumegoSession => {
+		if (!value || typeof value !== 'object') throw new Error('sesión cerrada OAuth inválida');
+		const item = value as Partial<ClosedSumegoSession>;
+		if (
+			(item.kind !== 'sid' && item.kind !== 'sub') ||
+			typeof item.valueHash !== 'string' ||
+			!Number.isFinite(item.closedAt) ||
+			!Number.isFinite(item.expiresAt)
+		) {
+			throw new Error('sesión cerrada OAuth inválida');
+		}
+		return item as ClosedSumegoSession;
+	});
 	const stateHashes = authorizationRequests.flatMap((item) => (item.sumego ? [item.sumego.stateHash] : []));
 	if (
+		closedSumegoSessions.length > MAX_CLOSED_SUMEGO_SESSIONS ||
 		usedLogoutTokens.length > MAX_LOGOUT_TOKENS ||
 		new Set(usedLogoutTokens.map((item) => item.jtiHash)).size !== usedLogoutTokens.length ||
 		new Set(stateHashes).size !== stateHashes.length
@@ -1220,7 +1375,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		authorizationCodes,
 		revocationOutbox,
 		redeemedCodes,
-		usedLogoutTokens
+		usedLogoutTokens,
+		closedSumegoSessions
 	};
 }
 
@@ -1322,6 +1478,7 @@ export class OAuthService {
 	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0, logout: 0 };
 	private readonly login: LoginConfig;
 	private readonly sumego: SumegoOidcApi;
+	private readonly sumegoRenewalJoined?: () => void;
 	private readonly clientMetadataCache = new Map<string, { metadata: ClientMetadata; expiresAt: number }>();
 	private readonly clientMetadataInFlight = new Map<string, Promise<ClientMetadata>>();
 	private readinessCache?: { expiresAt: number; error?: unknown };
@@ -1374,6 +1531,11 @@ export class OAuthService {
 	/** La limpieza de temporales huérfanos ya corrió en este proceso; ver
 	 *  `removeOrphanTemps`. */
 	private orphanTempsRemoved = false;
+	/** Renovación de Sumego en vuelo por `familyId`; ver `renewSumegoSession`. */
+	private readonly sumegoRenewals = new Map<string, Promise<'skipped' | 'ok' | 'revoked' | 'transient'>>();
+	/** Revocaciones best-effort en Sumego aún en vuelo; ver
+	 *  `revokeSumegoRefreshLater`. */
+	private readonly backgroundTasks = new Set<Promise<void>>();
 
 	constructor(options: OAuthServiceOptions = {}) {
 		this.stateDir = options.stateDir ?? defaultStateDir();
@@ -1401,6 +1563,7 @@ export class OAuthService {
 		this.login = options.login ?? loginConfigFromEnv();
 		this.sumego = options.sumego ?? new SumegoOidcClient({ config: this.login.sumego, fetch: this.fetchFn, now: this.now });
 		if (this.login.provider === 'sumego') this.sumego.ensureConfigured();
+		this.sumegoRenewalJoined = options.sumegoRenewalJoined;
 		this.authorizeBudget = { ...DEFAULT_AUTHORIZE_BUDGET, ...options.authorizeBudget };
 		this.failedMcpAttemptsPerMinute = options.failedMcpAttemptsPerMinute ?? DEFAULT_FAILED_MCP_ATTEMPTS_PER_MINUTE;
 		this.formReadTimeoutMs = options.formReadTimeoutMs ?? FORM_READ_TIMEOUT_MS;
@@ -1935,7 +2098,12 @@ export class OAuthService {
 	/**
 	 * Guarda el código de autorización de una credencial recién canjeada en
 	 * Lumbre y lo devuelve. Común a los dos logins (Lumbre y Sumego): con
-	 * Sumego, `sumego` lleva la identidad que hereda el grant.
+	 * Sumego, `sumego` lleva la identidad y el refresh que hereda el grant.
+	 *
+	 * Con Sumego, dentro del mismo mutador que lo guarda, se mira si un logout
+	 * cerró ya esa sesión después del ID token (B1): el logout pudo llegar
+	 * mientras se canjeaba con Lumbre, cuando todavía no había nada que
+	 * revocar. Entonces no se guarda, y la credencial va a la outbox.
 	 *
 	 * Si la credencial no es la pedida, o el código no se puede guardar, se
 	 * revoca en Lumbre por la outbox antes de fallar: nunca se queda una
@@ -1944,7 +2112,7 @@ export class OAuthService {
 	private async storeAuthorizationCode(
 		authorized: AuthorizationRequest,
 		credential: ExchangedCredential,
-		sumego?: SumegoSubject
+		sumego?: { subject: SumegoSubject; issuedAt: number; refreshToken: string }
 	): Promise<string> {
 		if (credential.resource !== authorized.resource || credential.scope !== authorized.scope) {
 			await this.persistCredentialRevocation(credential, authorized);
@@ -1954,10 +2122,20 @@ export class OAuthService {
 		const key = await this.key();
 		try {
 			await this.mutateStore((store) => {
-				store.authorizationCodes = store.authorizationCodes.filter((item) => item.expiresAt > this.now());
+				const now = this.now();
+				if (sumego && closedAfter(store, sumego.subject, sumego.issuedAt, now)) {
+					throw new OAuthError('access_denied', SUMEGO_PERSON_MESSAGES.sessionClosed, 403);
+				}
+				store.authorizationCodes = store.authorizationCodes.filter((item) => item.expiresAt > now);
 				if (store.authorizationCodes.length >= MAX_PENDING_ITEMS) {
 					throw new OAuthError('temporarily_unavailable', 'Hay demasiados códigos pendientes.', 503);
 				}
+				const holder = {
+					credentialId: credential.credentialId,
+					clientId: authorized.clientId,
+					resource: authorized.resource,
+					scope: authorized.scope
+				};
 				store.authorizationCodes.push({
 					clientId: authorized.clientId,
 					redirectUri: authorized.redirectUri,
@@ -1972,8 +2150,15 @@ export class OAuthService {
 						grantContext(authorized.clientId, authorized.resource, authorized.scope)
 					),
 					credentialId: credential.credentialId,
-					expiresAt: this.now() + CODE_TTL_MS,
-					...(sumego ? { sumego: { sub: sumego.sub, sid: sumego.sid } } : {})
+					expiresAt: now + CODE_TTL_MS,
+					...(sumego
+						? {
+								sumego: { sub: sumego.subject.sub, sid: sumego.subject.sid },
+								sumegoRefresh: encrypt(sumego.refreshToken, key, sumegoRefreshContext(holder)),
+								// Sumego confirmó la sesión al emitir el ID token.
+								sumegoCheckedAt: sumego.issuedAt
+							}
+						: {})
 				});
 				return true;
 			});
@@ -2088,13 +2273,24 @@ export class OAuthService {
 	 *      código estándar que traiga) y su `iss`.
 	 *   5. El canje del `code` y la validación del ID token
 	 *      (`SumegoOidcClient.redeemCode`).
-	 *   6. `callback` → `consent`, con el ID token cifrado y el hash de un
-	 *      token CSRF nuevo, y la página de consentimiento.
-	 * Cualquier fallo a partir del paso 2 quema la transacción.
+	 *   6. `callback` → `consent`, con el ID token y el refresh de Sumego
+	 *      cifrados y el hash de un token CSRF nuevo, y la página de
+	 *      consentimiento. En el mismo mutador: si un logout cerró ya esta
+	 *      sesión (B1), se quema en vez de avanzar; y el consentimiento caduca
+	 *      antes de que el ID token deje de valer para Lumbre (M2).
+	 * Cualquier fallo a partir del paso 2 quema la transacción, y solo
+	 * entonces se borra la cookie (B2). Una vuelta con el `state` de una
+	 * transacción que ya pasó de `login` (una recarga, un doble clic) no quema
+	 * nada: dice que la página ya se usó y deja la cookie, porque la
+	 * confirmación sigue abierta en la otra ventana.
 	 */
 	async handleSumegoCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
 		let release: (() => void) | undefined;
 		let consumed: StoredAuthorizationRequest | undefined;
+		let burned = false;
+		/** Refresh de Sumego recién obtenido y aún no guardado: si el flujo
+		 *  muere aquí, se revoca en Sumego (sin guardar, nadie lo usaría). */
+		let orphanRefresh: string | undefined;
 		try {
 			release = this.enterPublicEndpoint(req, 'authorize');
 			if (req.method !== 'GET') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
@@ -2104,17 +2300,23 @@ export class OAuthService {
 			}
 			const state = one(url.searchParams, 'state');
 			const stateHash = digest(state!);
+			let alreadyUsed = false;
 			await this.mutateStore((store) => {
 				const found = store.authorizationRequests.find(
 					(item) => item.sumego !== undefined && matchesHash(item.sumego.stateHash, stateHash)
 				);
-				if (!found || found.sumego!.phase !== 'login' || found.expiresAt <= this.now()) return false;
+				if (!found || found.expiresAt <= this.now()) return false;
+				if (found.sumego!.phase !== 'login') {
+					alreadyUsed = true;
+					return false;
+				}
 				found.sumego!.phase = 'callback';
 				consumed = structuredClone(found);
 				return true;
 			});
+			if (alreadyUsed) throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.alreadyUsed);
 			if (!consumed) throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.expired);
-			const pending = consumed;
+			const pending: StoredAuthorizationRequest = consumed;
 			const binding = bindingFrom(req);
 			if (!binding || !matchesHash(pending.sumego!.bindingHash, digest(binding))) {
 				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.otherBrowser);
@@ -2139,29 +2341,54 @@ export class OAuthService {
 			} catch (error) {
 				throw this.sumegoOAuthError(error);
 			}
+			orphanRefresh = redeemed.refreshToken;
+			const subject = { sub: redeemed.identity.sub, sid: redeemed.identity.sid };
 			const csrf = randomBytes(32).toString('base64url');
-			let advanced = false;
+			// `as`: se asigna dentro del mutador, y sin él TS lo estrecha a 'gone'.
+			let outcome = 'gone' as 'gone' | 'closed' | 'consent';
 			await this.mutateStore((store) => {
+				const now = this.now();
 				const found = store.authorizationRequests.find(
 					(item) => item.requestId === pending.requestId && item.sumego?.phase === 'callback'
 				);
-				if (!found || found.expiresAt <= this.now() || !matchesHash(found.sumego!.stateHash, stateHash)) return false;
+				if (!found || found.expiresAt <= now || !matchesHash(found.sumego!.stateHash, stateHash)) return false;
+				if (closedAfter(store, subject, redeemed.issuedAt, now)) {
+					store.authorizationRequests = store.authorizationRequests.filter((item) => item !== found);
+					outcome = 'closed';
+					return true;
+				}
+				found.expiresAt = Math.min(
+					found.expiresAt,
+					redeemed.issuedAt + ID_TOKEN_MAX_AGE_FOR_LUMBRE_MS - CONSENT_EXPIRY_MARGIN_MS
+				);
 				found.sumego = {
 					...found.sumego!,
 					phase: 'consent',
 					csrfHash: digest(csrf),
 					idToken: encrypt(redeemed.idToken, key, sumegoContext('id-token', found, stateHash)),
-					subject: { sub: redeemed.identity.sub, sid: redeemed.identity.sid }
+					subject,
+					issuedAt: redeemed.issuedAt,
+					refresh: encrypt(redeemed.refreshToken, key, sumegoContext('refresh', found, stateHash))
 				};
-				advanced = true;
+				outcome = 'consent';
 				return true;
 			});
-			if (!advanced) throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.expired);
+			if (outcome === 'closed') {
+				consumed = undefined;
+				burned = true;
+				throw new OAuthError('access_denied', SUMEGO_PERSON_MESSAGES.sessionClosed, 403);
+			}
+			if (outcome === 'gone') throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.expired);
 			consumed = undefined;
+			orphanRefresh = undefined;
 			this.consentPage(res, pending, csrf, redeemed.identity.email);
 		} catch (error) {
-			if (consumed) await this.discardSumegoTransaction(consumed.requestId).catch(() => undefined);
-			sumegoErrorPage(res, error);
+			if (consumed) {
+				burned = true;
+				await this.discardSumegoTransaction(consumed.requestId).catch(() => undefined);
+			}
+			if (orphanRefresh) this.revokeSumegoRefreshLater(orphanRefresh);
+			sumegoErrorPage(res, error, burned);
 		} finally {
 			release?.();
 		}
@@ -2184,6 +2411,7 @@ export class OAuthService {
 				`<dt>Vuelve a</dt><dd>${escapeHtml(redirect.host)}</dd>` +
 				`<dt>Cuenta</dt><dd>${escapeHtml(email ?? 'Tu cuenta de Lumbre')}</dd>` +
 				'</dl>' +
+				`<p>${escapeHtml(SUMEGO_PERSON_MESSAGES.consentDeadline)}</p>` +
 				`<form method="post" action="${SUMEGO_CONSENT_PATH}">` +
 				`<input type="hidden" name="request" value="${escapeHtml(pending.requestId)}">` +
 				`<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
@@ -2207,6 +2435,10 @@ export class OAuthService {
 	 */
 	async handleSumegoConsent(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		let release: (() => void) | undefined;
+		let burned = false;
+		/** Refresh de Sumego de la transacción consumida mientras no esté
+		 *  guardado en un código: si el flujo acaba sin código, se revoca. */
+		let orphanRefresh: string | undefined;
 		try {
 			this.enterRateLimit(req, 'authorize');
 			if (req.method !== 'POST') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
@@ -2242,14 +2474,16 @@ export class OAuthService {
 			if (!consumed) {
 				throw new OAuthError('invalid_request', SUMEGO_PERSON_MESSAGES.consentInvalid, 403);
 			}
-			const authorized = consumed;
+			const authorized: StoredAuthorizationRequest = consumed;
+			burned = true;
+			const key = await this.key();
+			const stateHash = authorized.sumego!.stateHash;
+			orphanRefresh = decrypt(authorized.sumego!.refresh!, key, sumegoContext('refresh', authorized, stateHash));
 			const clearCookie = { 'set-cookie': clearBindingCookie() };
 			if (decision === 'deny') {
 				this.redirectToClient(res, authorized, { error: 'access_denied' }, clearCookie);
 				return;
 			}
-			const key = await this.key();
-			const stateHash = authorized.sumego!.stateHash;
 			const transactionId = decrypt(
 				authorized.transaction,
 				key,
@@ -2269,11 +2503,19 @@ export class OAuthService {
 			} catch (error) {
 				throw this.sumegoExchangeError(error);
 			}
-			const code = await this.storeAuthorizationCode(authorized, credential, authorized.sumego!.subject);
+			const code = await this.storeAuthorizationCode(authorized, credential, {
+				subject: authorized.sumego!.subject!,
+				issuedAt: authorized.sumego!.issuedAt!,
+				refreshToken: orphanRefresh
+			});
+			orphanRefresh = undefined;
 			this.redirectToClient(res, authorized, { code }, clearCookie);
 		} catch (error) {
-			sumegoErrorPage(res, error);
+			sumegoErrorPage(res, error, burned);
 		} finally {
+			// «Cancelar» y cualquier final sin código: el refresh de Sumego de
+			// esta conexión no lo va a usar nadie.
+			if (orphanRefresh) this.revokeSumegoRefreshLater(orphanRefresh);
 			release?.();
 		}
 	}
@@ -2336,6 +2578,23 @@ export class OAuthService {
 						.slice()
 						.sort((a, b) => a.expiresAt - b.expiresAt)
 						.slice(-MAX_LOGOUT_TOKENS);
+				}
+				// La sesión (o la persona) cerrada se recuerda unos minutos, para
+				// alcanzar también la conexión que ahora mismo va por la mitad
+				// (B1; ver `ClosedSumegoSession` y `closedAfter`).
+				const closedAt = claims.issuedAt;
+				const closing = claims.sid !== undefined ? { kind: 'sid' as const, value: claims.sid } : { kind: 'sub' as const, value: claims.sub! };
+				store.closedSumegoSessions.push({
+					kind: closing.kind,
+					valueHash: digest(closing.value),
+					closedAt,
+					expiresAt: now + CLOSED_SUMEGO_SESSION_TTL_MS
+				});
+				if (store.closedSumegoSessions.length > MAX_CLOSED_SUMEGO_SESSIONS) {
+					store.closedSumegoSessions = store.closedSumegoSessions
+						.slice()
+						.sort((a, b) => a.expiresAt - b.expiresAt)
+						.slice(-MAX_CLOSED_SUMEGO_SESSIONS);
 				}
 				for (const grant of store.grants.filter((item) => logoutMatches(item.sumego, claims))) {
 					this.enqueueFamilyRevocation(store, grant);
@@ -2644,7 +2903,12 @@ export class OAuthService {
 				upstream: code.upstream,
 				// La identidad de Sumego pasa al grant: es lo que busca el
 				// back-channel logout. Un código de Lumbre no la lleva.
-				...(storedCode.sumego ? { sumego: storedCode.sumego } : {})
+				...(storedCode.sumego ? { sumego: storedCode.sumego } : {}),
+				// Y su refresh de Sumego, con el mismo cifrado: el AAD va atado a
+				// la credencial, que es la misma en el código y en el grant.
+				...(storedCode.sumegoRefresh
+					? { sumegoRefresh: storedCode.sumegoRefresh, sumegoCheckedAt: storedCode.sumegoCheckedAt }
+					: {})
 			});
 			issued = true;
 			return true;
@@ -2694,6 +2958,11 @@ export class OAuthService {
 		if (usedSnapshot) {
 			await this.revokeFamily(grantSnapshot.familyId, grantSnapshot.credentialId);
 			throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
+		}
+		// Grant de Sumego: como mucho cada hora, ¿sigue viva su sesión allí?
+		// (M1.) Si Sumego dice que no, la familia ya está revocada.
+		if ((await this.renewSumegoSession(grantSnapshot)) === 'revoked') {
+			throw new OAuthError('invalid_grant', 'La sesión de la cuenta ya no está activa.');
 		}
 		const active = await this.introspectCredential(grantSnapshot, upstreamToken);
 		if (!active) {
@@ -2761,6 +3030,140 @@ export class OAuthService {
 			refresh_token: nextRefresh,
 			scope: OAUTH_SCOPE
 		});
+	}
+
+	/**
+	 * Comprobación horaria de la sesión de Sumego de un grant (M1 de la
+	 * revisión de seguridad de c4534bc; SPEC de Sumego §4 y §7.7). Es la red
+	 * de seguridad del back-channel logout: si el aviso se pierde, la cuenta
+	 * suspendida o el grant revocado en Sumego se notan aquí, en el siguiente
+	 * `/token` pasada la hora, en vez de a los 30 días.
+	 *
+	 *   · `skipped`: no es de Sumego, no guarda refresh, o se comprobó hace
+	 *     menos de `SUMEGO_RECHECK_MS`.
+	 *   · `ok`: Sumego renovó (y rotó) el refresh; se guarda el nuevo y la hora.
+	 *   · `revoked`: Sumego respondió 4xx salvo 429. La familia se revoca y su
+	 *     credencial de Lumbre va a la outbox.
+	 *   · `transient`: 429, 5xx, timeout o Sumego caído. No se corta nada y
+	 *     se vuelve a intentar en el siguiente `/token` (SPEC §8: con Sumego
+	 *     caído las sesiones abiertas siguen).
+	 *
+	 * CONCURRENCIA, que es lo delicado: Sumego rota el refresh en cada uso, así
+	 * que dos renovaciones con el mismo refresh harían que la segunda recibiera
+	 * un `invalid_grant` legítimo, y revocaríamos por error. Por eso hay UNA
+	 * renovación en vuelo por familia (`sumegoRenewals`): la segunda petición
+	 * espera a la primera y comparte su resultado. Y el refresh rotado se guarda
+	 * solo si el guardado sigue siendo el de partida; si no, es una carrera, y
+	 * un `invalid_grant` en una carrera NO revoca.
+	 */
+	private async renewSumegoSession(grant: StoredGrant): Promise<'skipped' | 'ok' | 'revoked' | 'transient'> {
+		if (!grant.sumego || !grant.sumegoRefresh) return 'skipped';
+		if ((grant.sumegoCheckedAt ?? 0) + SUMEGO_RECHECK_MS > this.now()) return 'skipped';
+		const inFlight = this.sumegoRenewals.get(grant.familyId);
+		if (inFlight) {
+			this.sumegoRenewalJoined?.();
+			return await inFlight;
+		}
+		const pending = this.runSumegoRenewal(grant.familyId).finally(() => {
+			this.sumegoRenewals.delete(grant.familyId);
+		});
+		this.sumegoRenewals.set(grant.familyId, pending);
+		return await pending;
+	}
+
+	private async runSumegoRenewal(familyId: string): Promise<'skipped' | 'ok' | 'revoked' | 'transient'> {
+		// El estado vigente, no la copia que leyó quien llama: si otra petición
+		// acaba de renovar, aquí ya se ve el refresh nuevo y su hora.
+		const grant = (await this.loadStore()).grants.find((item) => item.familyId === familyId);
+		if (!grant?.sumego || !grant.sumegoRefresh) return 'skipped';
+		if ((grant.sumegoCheckedAt ?? 0) + SUMEGO_RECHECK_MS > this.now()) return 'skipped';
+		const startValue = grant.sumegoRefresh;
+		const key = await this.key();
+		let refreshToken: string;
+		try {
+			refreshToken = decrypt(startValue, key, sumegoRefreshContext(grant));
+		} catch {
+			// Sin poder preguntar no se corta (como en el barrido de Lumbre).
+			return 'transient';
+		}
+		const stillHolds = (store: OAuthStore): StoredGrant | undefined => {
+			const current = store.grants.find((item) => item.familyId === familyId);
+			return current?.sumegoRefresh && sameEncryptedValue(current.sumegoRefresh, startValue) ? current : undefined;
+		};
+		let renewed;
+		try {
+			renewed = await this.sumego.refresh(refreshToken);
+		} catch (error) {
+			if (!(error instanceof OidcError) || error.kind !== 'invalid') return 'transient';
+			let credentialId: string | undefined;
+			await this.mutateStore((store) => {
+				const current = stillHolds(store);
+				// Ya no es el refresh que se usó: otro lo renovó (o se revocó) en
+				// medio. Su `invalid_grant` es de la carrera, no de la sesión.
+				if (!current) return false;
+				credentialId = current.credentialId;
+				this.enqueueFamilyRevocation(store, current);
+				return true;
+			});
+			if (!credentialId) return 'ok';
+			await this.flushRevocationOutbox(credentialId);
+			return 'revoked';
+		}
+		const checkedAt = this.now();
+		let stored = false;
+		await this.mutateStore((store) => {
+			const current = stillHolds(store);
+			if (!current) return false;
+			current.sumegoRefresh = encrypt(renewed.refreshToken, key, sumegoRefreshContext(current));
+			current.sumegoCheckedAt = checkedAt;
+			stored = true;
+			return true;
+		});
+		// Nadie lo guardó (el grant se fue en medio): que no quede vivo en Sumego.
+		if (!stored) this.revokeSumegoRefreshLater(renewed.refreshToken);
+		return 'ok';
+	}
+
+	/**
+	 * Revoca un refresh de Sumego en segundo plano, best-effort: si Sumego no
+	 * tiene `revocation_endpoint` o falla, no pasa nada (la sesión muere sola
+	 * allí, y el grant local ya no existe). No bloquea a quien lo pide; el
+	 * apagado ordenado lo espera (`whenWritesSettled`).
+	 */
+	private revokeSumegoRefreshLater(refreshToken: string): void {
+		const task: Promise<void> = this.sumego
+			.revokeRefresh(refreshToken)
+			.catch(() => undefined)
+			.finally(() => {
+				this.backgroundTasks.delete(task);
+			});
+		this.backgroundTasks.add(task);
+	}
+
+	/**
+	 * Revoca en Sumego el refresh de cada código o grant de Sumego que acaba
+	 * de salir del almacén: logout, `/revoke`, `invalid_grant` de Sumego,
+	 * replay, caducidad, purga del barrido. Mismo patrón que la huella de notas
+	 * (`forgetNotesSeenOfRetired`): lo llama `mutateStore` tras confirmar la
+	 * escritura, así cubre todos los caminos. Una rotación NO cuenta: la
+	 * credencial sigue en el almacén y el refresh viejo ya lo invalidó Sumego.
+	 */
+	private async revokeSumegoRefreshOfRetired(before: SumegoRefreshHolder[], store: OAuthStore): Promise<void> {
+		const held = new Set([...store.grants, ...store.authorizationCodes].map((item) => item.credentialId));
+		const retired = before.filter((item) => !held.has(item.credentialId));
+		if (retired.length === 0) return;
+		try {
+			const key = await this.key();
+			for (const item of retired) {
+				try {
+					this.revokeSumegoRefreshLater(decrypt(item.sumegoRefresh, key, sumegoRefreshContext(item)));
+				} catch {
+					// No se descifra: no hay nada que mandar a Sumego.
+				}
+			}
+		} catch {
+			// Sin clave no hay nada que descifrar; la sesión muere sola en Sumego.
+		}
 	}
 
 	/**
@@ -3012,12 +3415,18 @@ export class OAuthService {
 				const stateHash = pending.sumego.stateHash;
 				decrypt(pending.sumego.secrets, key, sumegoContext('secrets', pending, stateHash));
 				if (pending.sumego.idToken) decrypt(pending.sumego.idToken, key, sumegoContext('id-token', pending, stateHash));
+				if (pending.sumego.refresh) decrypt(pending.sumego.refresh, key, sumegoContext('refresh', pending, stateHash));
 			}
 		}
 		for (const code of store.authorizationCodes) {
 			validateClientIdUrl(code.clientId);
 			const upstream = decrypt(code.upstream, key, grantContext(code.clientId, code.resource, code.scope));
 			if (!/^[a-f0-9]{64}$/.test(upstream)) throw new Error('credencial upstream inválida');
+		}
+		// El refresh de Sumego de grants y códigos también tiene que descifrar:
+		// si no, la comprobación horaria fallaría en silencio (`transient`).
+		for (const holder of [...store.grants, ...store.authorizationCodes]) {
+			if (holder.sumegoRefresh) decrypt(holder.sumegoRefresh, key, sumegoRefreshContext(holder));
 		}
 		for (const item of store.revocationOutbox) {
 			const upstream = decrypt(item.upstream, key, grantContext(item.clientId, item.resource, item.scope));
@@ -3561,7 +3970,8 @@ export class OAuthService {
 					authorizationCodes: [],
 					revocationOutbox: [],
 					redeemedCodes: [],
-					usedLogoutTokens: []
+					usedLogoutTokens: [],
+					closedSumegoSessions: []
 				};
 			}
 			throw error;
@@ -3614,15 +4024,18 @@ export class OAuthService {
 	 * Espera a que la cola de escritura del store quede vacía, incluidas las
 	 * escrituras que se encolen mientras se espera. La usa el apagado
 	 * ordenado de `http.ts` (SIGTERM) para no salir con un `rename` a medias
-	 * de confirmar. No lanza: el fallo de una escritura ya lo recibe quien la
-	 * pidió.
+	 * de confirmar. Espera también las revocaciones best-effort en Sumego
+	 * que haya en vuelo (`revokeSumegoRefreshLater`), cada una acotada por el
+	 * timeout del cliente OIDC. No lanza: el fallo de una escritura ya lo
+	 * recibe quien la pidió.
 	 */
 	async whenWritesSettled(): Promise<void> {
 		let queue: Promise<void>;
 		do {
 			queue = this.writeQueue;
 			await queue.catch(() => undefined);
-		} while (queue !== this.writeQueue);
+			await Promise.all([...this.backgroundTasks]);
+		} while (queue !== this.writeQueue || this.backgroundTasks.size > 0);
 	}
 
 	private async mutateStore(mutator: (store: OAuthStore) => boolean): Promise<boolean> {
@@ -3632,11 +4045,17 @@ export class OAuthService {
 			// Para `forgetNotesSeenOfRetired`: qué credenciales había en uso
 			// antes de esta pasada, y el estado que llegó a quedar en disco.
 			let heldBefore: HeldCredential[] = [];
+			// Lo mismo para `revokeSumegoRefreshOfRetired`.
+			let sumegoBefore: SumegoRefreshHolder[] = [];
 			let written: OAuthStore | undefined;
 			try {
 				const store = await this.loadStore();
 				// Antes de la poda y del mutador: las dos cosas retiran grants.
 				heldBefore = heldCredentials(store);
+				sumegoBefore = [...store.grants, ...store.authorizationCodes].flatMap(
+					({ credentialId, clientId, resource, scope, sumegoRefresh }) =>
+						sumegoRefresh ? [{ credentialId, clientId, resource, scope, sumegoRefresh }] : []
+				);
 				const now = this.now();
 				let housekeeping = false;
 				const expiredGrants = store.grants.filter((grant) => grant.refreshExpiresAt <= now);
@@ -3666,11 +4085,14 @@ export class OAuthService {
 				store.redeemedCodes = store.redeemedCodes.filter((item) => item.expiresAt > now);
 				const logoutsBefore = store.usedLogoutTokens.length;
 				store.usedLogoutTokens = store.usedLogoutTokens.filter((item) => item.expiresAt > now);
+				const closedBefore = store.closedSumegoSessions.length;
+				store.closedSumegoSessions = store.closedSumegoSessions.filter((item) => item.expiresAt > now);
 				housekeeping ||=
 					usedBefore !== store.usedRefreshTokens.length ||
 					requestsBefore !== store.authorizationRequests.length ||
 					redeemedBefore !== store.redeemedCodes.length ||
-					logoutsBefore !== store.usedLogoutTokens.length;
+					logoutsBefore !== store.usedLogoutTokens.length ||
+					closedBefore !== store.closedSumegoSessions.length;
 				changed = mutator(store) || housekeeping;
 				// La poda de la outbox va DESPUÉS del mutador: así lo que el
 				// mutador acabe de encolar entra ya en la cuenta del tope y no
@@ -3719,6 +4141,7 @@ export class OAuthService {
 			// entre el estado que se acaba de escribir y la comprobación de que
 			// nadie más usa esa credencial.
 			if (written) await this.forgetNotesSeenOfRetired(heldBefore, written);
+			if (written) await this.revokeSumegoRefreshOfRetired(sumegoBefore, written);
 		});
 		await this.writeQueue;
 		if (failure) throw failure;
