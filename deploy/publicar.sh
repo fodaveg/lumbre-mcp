@@ -335,10 +335,26 @@ if [[ -n "${LUMBRE_TOKEN:-}" ]]; then
 		echo "  $ROLLBACK" >&2
 		exit 1
 	fi
+elif [[ "${LUMBRE_MCP_SKIP_SMOKE:-}" == "1" ]]; then
+	# Única salida sin smoke: válvula explícita, con motivo, y con constancia en la salida
+	# y en el log del deploy del servidor.
+	if [[ -z "${LUMBRE_MCP_SKIP_SMOKE_MOTIVO:-}" ]]; then
+		echo "ERROR: LUMBRE_MCP_SKIP_SMOKE=1 exige LUMBRE_MCP_SKIP_SMOKE_MOTIVO=\"...\" (por qué se salta el smoke)." >&2
+		echo "El deploy YA está desplegado; sin smoke no está verificado. Rollback:" >&2
+		echo "  $ROLLBACK" >&2
+		exit 1
+	fi
+	SIN_SMOKE="SIN SMOKE: ${LUMBRE_MCP_SKIP_SMOKE_MOTIVO//[$'\r\n']/ }"
+	echo "$SIN_SMOKE"
+	printf '%s\n' "$SIN_SMOKE" | ssh "$HOST" "cat >>$DEPLOY_LOG" ||
+		echo "AVISO: no pude anotar «SIN SMOKE» en $HOST:$DEPLOY_LOG" >&2
 else
-	echo "Sin LUMBRE_TOKEN en el entorno: el smoke, que es el guardarraíl del"
-	echo "deploy, queda manual:"
-	echo "  node scripts/smoke-remote.mjs $SMOKE_URL \"\$LUMBRE_TOKEN\""
+	echo "ERROR: falta LUMBRE_TOKEN en el entorno: sin él no hay smoke y el deploy NO está verificado." >&2
+	echo "Ejecútalo con LUMBRE_TOKEN, o a mano: node scripts/smoke-remote.mjs $SMOKE_URL" >&2
+	echo "Única salida: LUMBRE_MCP_SKIP_SMOKE=1 LUMBRE_MCP_SKIP_SMOKE_MOTIVO=\"<motivo>\"." >&2
+	echo "Para volver a la versión anterior:" >&2
+	echo "  $ROLLBACK" >&2
+	exit 1
 fi
 echo "Para volver a la versión anterior:"
 echo "  $ROLLBACK"
