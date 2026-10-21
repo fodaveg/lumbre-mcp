@@ -9,6 +9,10 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
 	test: {
-		include: ['src/**/*.test.ts']
+		include: ['src/**/*.test.ts'],
+		// Los `sync()` de los tests no vacían la caché del disco: su latencia es
+		// la de toda la máquina y hacía que los tests del almacén OAuth fallaran
+		// por carga. Ver el fichero.
+		setupFiles: ['./src/test-support/no-disk-flush.ts']
 	}
 });

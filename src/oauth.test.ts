@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHttpApp } from './http.js';
 import { createAccountNotesSeenStore, saveNotesSeenState, touchNotesSeen } from './notes.js';
 import { OAuthService, OAUTH_CALLBACK, OAUTH_ISSUER, OAUTH_RESOURCE, OAUTH_RESOURCE_METADATA, OAUTH_SCOPE } from './oauth.js';
+import { closeServers } from './test-support/close-servers.js';
 
 const CLIENT_ID = 'https://claude.ai/.well-known/oauth-client/lumbre';
 const CODEX_CALLBACK_ID = 'codexCallback123';
@@ -261,7 +262,9 @@ async function refresh(baseUrl: string, token: string, overrides: Record<string,
 }
 
 afterEach(async () => {
-	await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+	// No `server.close()` a secas: con el keep-alive de 60 s de `listen`, una
+	// petición en vuelo lo dejaba un minuto sin resolver (`close-servers.ts`).
+	await closeServers(servers);
 	await Promise.all(stateDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 	delete process.env.XDG_STATE_HOME;
 });

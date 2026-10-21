@@ -9,6 +9,7 @@ import { createHttpApp } from './http.js';
 import { BackchannelError } from './lumbre-oauth-backchannel.js';
 import { OAUTH_CALLBACK, OAUTH_ISSUER, OAUTH_RESOURCE, OAUTH_SCOPE, OAuthService } from './oauth.js';
 import { SUMEGO_PERSON_MESSAGES, exchangeFailure } from './sumego-messages.js';
+import { closeServers } from './test-support/close-servers.js';
 import {
 	BACKCHANNEL_LOGOUT_EVENT,
 	OidcError,
@@ -522,7 +523,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+	// No `server.close()` a secas: con el keep-alive de 60 s de `listen`, una
+	// petición en vuelo lo dejaba un minuto sin resolver (`close-servers.ts`).
+	await closeServers(servers);
 	await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 	delete process.env.XDG_STATE_HOME;
 });
