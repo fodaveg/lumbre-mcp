@@ -7,7 +7,7 @@
 # (2) el servicio que describe es de este repo. Se publica con:
 #
 #   scp deploy/mcp-lumbre-pro.caddy lumbre:/srv/edge/conf.d/
-#   ssh lumbre 'cd /srv/edge && docker compose --env-file .env exec caddy \
+#   ssh lumbre-arm 'cd /srv/edge && docker compose --env-file .env exec caddy \
 #     caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile'
 #
 # El servicio vive en `/srv/lumbre-mcp` con su propio Compose

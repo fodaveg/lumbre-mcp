@@ -32,14 +32,14 @@
 # sigue ese log y se recoge el código de salida que deja.
 # Después, si hay `LUMBRE_TOKEN` en el entorno, corre el smoke remoto.
 #
-# Variables: LUMBRE_MCP_HOST (alias ssh, default `lumbre`), LUMBRE_MCP_DEST
+# Variables: LUMBRE_MCP_HOST (alias ssh, default `lumbre-arm`), LUMBRE_MCP_DEST
 # (default /srv/lumbre-mcp), LUMBRE_MCP_ENV_FILE (default /srv/lumbre-mcp.env),
 # LUMBRE_MCP_LOG_DIR (default /var/log/lumbre-mcp), LUMBRE_MCP_HEALTH_TIMEOUT
 # (segundos, default 90), LUMBRE_MCP_SMOKE_URL (default
 # https://mcp.lumbre.pro/mcp) y LUMBRE_TOKEN (opcional, para el smoke).
 set -euo pipefail
 
-HOST="${LUMBRE_MCP_HOST:-lumbre}"
+HOST="${LUMBRE_MCP_HOST:-lumbre-arm}"
 DEST="${LUMBRE_MCP_DEST:-/srv/lumbre-mcp}"
 ENV_FILE="${LUMBRE_MCP_ENV_FILE:-/srv/lumbre-mcp.env}"
 LOG_DIR="${LUMBRE_MCP_LOG_DIR:-/var/log/lumbre-mcp}"

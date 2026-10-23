@@ -356,14 +356,14 @@ Publica **HEAD**, no el árbol de trabajo:
 Qué commit corre en el servidor:
 
 ```bash
-ssh lumbre "docker inspect -f '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' lumbre-mcp"
+ssh lumbre-arm "docker inspect -f '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' lumbre-mcp"
 ```
 
 Volver a la versión anterior a mano (la imagen sigue en el servidor, sin
 recompilar ni red):
 
 ```bash
-ssh lumbre 'cd /srv/lumbre-mcp && docker tag lumbre-mcp:anterior lumbre-mcp:latest && \
+ssh lumbre-arm 'cd /srv/lumbre-mcp && docker tag lumbre-mcp:anterior lumbre-mcp:latest && \
   LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file /srv/lumbre-mcp.env -f deploy/compose.yml up -d --no-build'
 ```
 
@@ -394,9 +394,9 @@ de nada.
 
 ```bash
 scp deploy/mcp-lumbre-pro.caddy lumbre:/srv/edge/conf.d/
-ssh lumbre 'cd /srv/edge && docker compose --env-file .env exec -T caddy \
+ssh lumbre-arm 'cd /srv/edge && docker compose --env-file .env exec -T caddy \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
-ssh lumbre 'cd /srv/edge && docker compose --env-file .env exec -T caddy \
+ssh lumbre-arm 'cd /srv/edge && docker compose --env-file .env exec -T caddy \
   caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile'
 ```
 
@@ -476,10 +476,10 @@ atrapa no se admite dentro del bloque `log` de un sitio, solo en el global.
 estar puesto y no tapar nada; pasó dos veces el 25 ago 2026):
 
 ```bash
-ssh lumbre 'docker stop lumbre-mcp'
+ssh lumbre-arm 'docker stop lumbre-mcp'
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   https://mcp.lumbre.pro/mcp/f00dfacef00dfacef00dfacef00dface   # 502 esperado
-ssh lumbre 'docker start lumbre-mcp
+ssh lumbre-arm 'docker start lumbre-mcp
   docker logs edge-caddy --since 2m 2>&1 | grep -c f00dface'    # tiene que ser 0
 ```
 

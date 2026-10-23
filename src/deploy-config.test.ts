@@ -584,7 +584,7 @@ describe('un .env local no puede acabar en git, en la imagen ni en el servidor',
 	it('un HOST con formato inválido aborta antes de invocar ssh o rsync', async () => {
 		const { sandbox, log, run } = await createSandbox();
 		try {
-			// Una cadena vacía no cuenta: `${LUMBRE_MCP_HOST:-lumbre}` la trata como
+			// Una cadena vacía no cuenta: `${LUMBRE_MCP_HOST:-lumbre-arm}` la trata como
 			// no puesta y cae al valor por defecto, que sí es válido.
 			for (const host of ['-oProxyCommand=evil', 'lumbre;rm -rf /', ' lumbre', '.lumbre.pro']) {
 				await writeFile(log, '');
