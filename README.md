@@ -1136,7 +1136,7 @@ minutos. `decision=approved` sí conserva el consumo atómico ANTES de
 callbacks concurrentes.
 
 **Login con Sumego (`LUMBRE_MCP_LOGIN_PROVIDER=sumego`).** El relé sigue siendo
-su propio servidor OAuth para claude.ai y Codex: Sumego (`https://id.lumbre.pro`)
+su propio servidor OAuth para claude.ai y Codex: Sumego (`https://id.sumego.es`)
 no tiene registro dinámico ni emite tokens para resource servers. Lo que cambia
 es CÓMO se identifica la persona en `/authorize`: con `lumbre` (por defecto) todo
 es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio

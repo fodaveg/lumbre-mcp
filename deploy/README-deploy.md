@@ -273,7 +273,7 @@ las apps (§4.1 del `SPEC.md` de Sumego), con el prefijo del relé:
 | Variable | Valor | Por defecto |
 | --- | --- | --- |
 | `LUMBRE_MCP_LOGIN_PROVIDER` | `lumbre` o `sumego`; cualquier otro valor no arranca (`proveedor_login`) | `lumbre` |
-| `LUMBRE_MCP_OIDC_ISSUER` | issuer https de Sumego, sin query ni fragmento | `https://id.lumbre.pro` |
+| `LUMBRE_MCP_OIDC_ISSUER` | issuer de Sumego: `https://id.sumego.es`; `https://id.lumbre.pro` sigue admitido y cualquier otro valor no arranca | `https://id.lumbre.pro` |
 | `LUMBRE_MCP_OIDC_CLIENT_ID` | client_id del relé en Sumego | `lumbre-mcp` |
 | `LUMBRE_MCP_OIDC_CLIENT_SECRET` | secreto de ese cliente (`client_secret_basic`) | — |
 
