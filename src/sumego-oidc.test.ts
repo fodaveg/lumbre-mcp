@@ -14,6 +14,7 @@ import {
 	BACKCHANNEL_LOGOUT_EVENT,
 	OidcError,
 	SUMEGO_CALLBACK,
+	SUMEGO_ISSUERS,
 	SumegoOidcClient,
 	loginConfigFromEnv,
 	type LoginConfig
@@ -27,6 +28,7 @@ import {
  */
 
 const ISSUER = 'https://id.lumbre.pro';
+const NEW_ISSUER = 'https://id.sumego.es';
 const CLIENT_ID = 'lumbre-mcp';
 const CLIENT_SECRET = 'secreto-de-cliente-sumego-de-prueba';
 const BACKCHANNEL_SECRET = 'secreto-backchannel-de-prueba-32-caracteres';
@@ -77,7 +79,7 @@ const ANA: Person = { sub: 'sub-ana', sid: 'sid-ana-1', email: 'ana@example.com'
 class FakeSumego {
 	readonly key = signingKey('k1');
 	jwks: Record<string, unknown>[] = [this.key.jwk];
-	discoveryIssuer = ISSUER;
+	discoveryIssuer: string;
 	down = false;
 	/** Estado HTTP del JWKS (500 = JWKS caído con el resto de Sumego en pie). */
 	jwksStatus = 200;
@@ -119,11 +121,16 @@ class FakeSumego {
 		return token;
 	}
 
-	constructor(private readonly now: () => number) {}
+	constructor(
+		private readonly now: () => number,
+		readonly issuer: string = ISSUER
+	) {
+		this.discoveryIssuer = issuer;
+	}
 
 	issueCode(authorizeUrl: string, person: Person = ANA): { code: string; state: string; nonce: string } {
 		const url = new URL(authorizeUrl);
-		expect(`${url.origin}${url.pathname}`).toBe(`${ISSUER}/oidc/auth`);
+		expect(`${url.origin}${url.pathname}`).toBe(`${this.issuer}/oidc/auth`);
 		expect(url.searchParams.get('client_id')).toBe(CLIENT_ID);
 		expect(url.searchParams.get('redirect_uri')).toBe(SUMEGO_CALLBACK);
 		expect(url.searchParams.get('scope')).toBe('openid email');
@@ -137,7 +144,7 @@ class FakeSumego {
 	idTokenClaims(nonce: string, person: Person): Record<string, unknown> {
 		const iat = Math.floor(this.now() / 1000);
 		return {
-			iss: ISSUER,
+			iss: this.issuer,
 			aud: CLIENT_ID,
 			sub: person.sub,
 			sid: person.sid,
@@ -153,7 +160,7 @@ class FakeSumego {
 		const iat = Math.floor(this.now() / 1000);
 		return jws(
 			{
-				iss: ISSUER,
+				iss: this.issuer,
 				aud: CLIENT_ID,
 				iat,
 				exp: iat + 120,
@@ -167,27 +174,27 @@ class FakeSumego {
 	}
 
 	async handle(url: string, init?: RequestInit): Promise<Response | undefined> {
-		if (!url.startsWith(`${ISSUER}/`)) return undefined;
+		if (!url.startsWith(`${this.issuer}/`)) return undefined;
 		if (this.down) throw new TypeError('fetch failed');
-		if (url === `${ISSUER}/.well-known/openid-configuration`) {
+		if (url === `${this.issuer}/.well-known/openid-configuration`) {
 			this.calls.discovery += 1;
 			return Response.json({
 				issuer: this.discoveryIssuer,
-				authorization_endpoint: `${ISSUER}/oidc/auth`,
-				token_endpoint: `${ISSUER}/oidc/token`,
-				jwks_uri: `${ISSUER}/oidc/jwks`,
-				...(this.revocationEndpoint ? { revocation_endpoint: `${ISSUER}/oidc/token/revocation` } : {}),
+				authorization_endpoint: `${this.issuer}/oidc/auth`,
+				token_endpoint: `${this.issuer}/oidc/token`,
+				jwks_uri: `${this.issuer}/oidc/jwks`,
+				...(this.revocationEndpoint ? { revocation_endpoint: `${this.issuer}/oidc/token/revocation` } : {}),
 				id_token_signing_alg_values_supported: ['ES256'],
 				authorization_response_iss_parameter_supported: true
 			});
 		}
-		if (url === `${ISSUER}/oidc/jwks`) {
+		if (url === `${this.issuer}/oidc/jwks`) {
 			this.calls.jwks += 1;
 			if (this.jwksStatus !== 200) return new Response('caído', { status: this.jwksStatus });
 			return Response.json({ keys: this.jwks });
 		}
 		const basic = `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`;
-		if (url === `${ISSUER}/oidc/token/revocation`) {
+		if (url === `${this.issuer}/oidc/token/revocation`) {
 			expect(new Headers(init?.headers).get('authorization')).toBe(basic);
 			const form = new URLSearchParams(String(init?.body));
 			expect(form.get('token_type_hint')).toBe('refresh_token');
@@ -195,7 +202,7 @@ class FakeSumego {
 			this.refreshTokens.delete(form.get('token')!);
 			return new Response(null, { status: 200 });
 		}
-		if (url === `${ISSUER}/oidc/token`) {
+		if (url === `${this.issuer}/oidc/token`) {
 			expect(init?.method).toBe('POST');
 			expect(new Headers(init?.headers).get('authorization')).toBe(basic);
 			const form = new URLSearchParams(String(init?.body));
@@ -423,7 +430,7 @@ async function reachConsent(
 ): Promise<{ cookie: string; request: string; csrf: string; html: string; nonce: string; referrerPolicy: string | null }> {
 	const { location, cookie } = await startLogin(h);
 	const { code, state, nonce } = h.idp.issueCode(location, person);
-	const response = await callback(h, { code, state, iss: ISSUER }, cookie);
+	const response = await callback(h, { code, state, iss: h.idp.issuer }, cookie);
 	const html = await response.text();
 	expect(response.status, html).toBe(200);
 	return {
@@ -591,6 +598,41 @@ describe('configuración del login', () => {
 		expect(loginConfigFromEnv({ LUMBRE_MCP_OIDC_ISSUER: 'https://id.lumbre.pro/' }).sumego.issuer).toBe(ISSUER);
 	});
 
+	it('admite exactamente id.lumbre.pro e id.sumego.es', () => {
+		expect(SUMEGO_ISSUERS).toEqual([ISSUER, NEW_ISSUER]);
+		for (const issuer of SUMEGO_ISSUERS) {
+			expect(loginConfigFromEnv({ LUMBRE_MCP_OIDC_ISSUER: issuer }).sumego.issuer).toBe(issuer);
+			expect(loginConfigFromEnv({ LUMBRE_MCP_OIDC_ISSUER: `${issuer}/` }).sumego.issuer).toBe(issuer);
+		}
+		// `URL` iguala mayúsculas del esquema y del host y el puerto por defecto:
+		// son el mismo origen, no otro issuer.
+		expect(loginConfigFromEnv({ LUMBRE_MCP_OIDC_ISSUER: 'HTTPS://ID.SUMEGO.ES' }).sumego.issuer).toBe(NEW_ISSUER);
+		expect(loginConfigFromEnv({ LUMBRE_MCP_OIDC_ISSUER: 'https://id.sumego.es:443' }).sumego.issuer).toBe(NEW_ISSUER);
+	});
+
+	it.each([
+		['http', 'http://id.sumego.es'],
+		['otro host', 'https://id.example.com'],
+		['localhost', 'https://localhost'],
+		['un subdominio', 'https://x.id.sumego.es'],
+		['un host que lo contiene', 'https://id.sumego.es.example.com'],
+		['el dominio raíz', 'https://sumego.es'],
+		['otro puerto', 'https://id.sumego.es:8443'],
+		['una ruta', 'https://id.sumego.es/oidc'],
+		['una ruta en id.lumbre.pro', 'https://id.lumbre.pro/oidc'],
+		['credenciales', 'https://usuario@id.sumego.es'],
+		['vacío', 'esto no es una url']
+	])('rechaza %s, y el mensaje nombra la variable, no el valor', (_name, value) => {
+		let message = '';
+		try {
+			loginConfigFromEnv({ LUMBRE_MCP_OIDC_ISSUER: value });
+		} catch (error) {
+			message = (error as Error).message;
+		}
+		expect(message).toContain('LUMBRE_MCP_OIDC_ISSUER');
+		expect(message).not.toContain(value);
+	});
+
 	it('el servicio no se construye con un proveedor desconocido ni con sumego sin secreto', () => {
 		const previous = { ...process.env };
 		try {
@@ -602,6 +644,62 @@ describe('configuración del login', () => {
 		} finally {
 			process.env = previous;
 		}
+	});
+});
+
+describe('cliente OIDC con el issuer id.sumego.es', () => {
+	const clock = { now: START };
+	let idp: FakeSumego;
+	let client: SumegoOidcClient;
+
+	beforeEach(() => {
+		clock.now = START;
+		idp = new FakeSumego(() => clock.now, NEW_ISSUER);
+		client = new SumegoOidcClient({
+			config: { issuer: NEW_ISSUER, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+			now: () => clock.now,
+			fetch: (async (input, init) => (await idp.handle(String(input), init)) ?? new Response('sin sonda', { status: 404 })) as typeof fetch
+		});
+	});
+
+	async function redeemWith(rewrite?: (claims: Record<string, unknown>) => string): Promise<unknown> {
+		const url = await client.authorizationUrl({ state: 's'.repeat(43), nonce: 'nonce-bueno', codeChallenge: CHALLENGE });
+		expect(url.startsWith(`${NEW_ISSUER}/oidc/auth?`)).toBe(true);
+		const { code } = idp.issueCode(url);
+		idp.nextIdToken = rewrite;
+		return await client.redeemCode(code, VERIFIER, 'nonce-bueno').catch((error: unknown) => error);
+	}
+
+	it('discovery, endpoints e iss del ID token son los de id.sumego.es', async () => {
+		expect(await redeemWith()).toMatchObject({ identity: { sub: ANA.sub, sid: ANA.sid } });
+		expect(idp.calls).toMatchObject({ discovery: 1, jwks: 1, token: 1 });
+	});
+
+	it('un ID token con iss id.lumbre.pro se rechaza: el activo es uno solo', async () => {
+		expect(await redeemWith((claims) => jws({ ...claims, iss: ISSUER }, idp.key))).toBeInstanceOf(OidcError);
+	});
+
+	it('un discovery que se anuncia como id.lumbre.pro no se acepta', async () => {
+		idp.discoveryIssuer = ISSUER;
+		await expect(client.authorizationUrl({ state: 's', nonce: 'n', codeChallenge: 'c' })).rejects.toMatchObject({ kind: 'invalid' });
+	});
+
+	it('el iss del logout token tiene que ser id.sumego.es', async () => {
+		expect(await client.validateLogoutToken(idp.logoutToken({ sub: ANA.sub, sid: ANA.sid }))).toMatchObject({ sub: ANA.sub });
+		const old = await client.validateLogoutToken(idp.logoutToken({ sub: ANA.sub, iss: ISSUER })).catch((e: unknown) => e);
+		expect(old).toBeInstanceOf(OidcError);
+		expect((old as OidcError).kind).toBe('invalid');
+	});
+
+	it('con id.lumbre.pro configurado, un ID token y un logout token de id.sumego.es tampoco valen', async () => {
+		const legacy = new FakeSumego(() => clock.now);
+		const legacyClient = new SumegoOidcClient({
+			config: SUMEGO_LOGIN.sumego,
+			now: () => clock.now,
+			fetch: (async (input, init) => (await legacy.handle(String(input), init))!) as typeof fetch
+		});
+		const forged = await legacyClient.validateLogoutToken(legacy.logoutToken({ sub: ANA.sub, iss: NEW_ISSUER })).catch((e: unknown) => e);
+		expect(forged).toBeInstanceOf(OidcError);
 	});
 });
 
@@ -1090,6 +1188,51 @@ describe('cambiar de proveedor no corta los grants vivos', () => {
 		expect((await token(switched, { grant_type: 'refresh_token', refresh_token: session.refresh })).status).toBe(200);
 		const { location } = await startLogin(switched);
 		expect(location.startsWith(`${ISSUER}/oidc/auth?`)).toBe(true);
+	});
+});
+
+describe('cambiar el issuer de id.lumbre.pro a id.sumego.es no cambia a nadie', () => {
+	it('el mismo sub sigue casando: un logout con el issuer nuevo cierra el grant viejo y un login nuevo no abre otra identidad', async () => {
+		const h = await harness();
+		const old = await connect(h);
+		const subsBefore = (await storedGrants(h)).map((grant) => grant.sumego?.sub);
+		expect(subsBefore).toEqual([ANA.sub]);
+
+		// Se rearranca el relé sobre el MISMO store con el issuer nuevo. El IdP
+		// viejo ya no existe: cualquier llamada a id.lumbre.pro haría fallar el test.
+		const login: LoginConfig = { ...SUMEGO_LOGIN, sumego: { ...SUMEGO_LOGIN.sumego, issuer: NEW_ISSUER } };
+		const idp = new FakeSumego(() => h.clock.now, NEW_ISSUER);
+		const parts = { idp, lumbre: h.lumbre, clock: h.clock, clientName: h.clientName, hooks: h.hooks };
+		const service = serviceFor(parts, h.stateDir, login);
+		const switched: Harness = { ...parts, stateDir: h.stateDir, service, baseUrl: await listen(service) };
+		expect(await service.resolveAccessToken(old.access)).toBeDefined();
+
+		// Un login nuevo de la misma persona (mismo sub, otra sesión): el relé
+		// manda a Lumbre el ID token del issuer nuevo con el mismo sub, y el store
+		// sigue con UNA sola identidad.
+		const second = await connect(switched, { ...ANA, sid: 'sid-ana-2' });
+		const exchanged = h.lumbre.sumegoExchanges.map((body) => {
+			const payload = String(body.idToken).split('.')[1]!;
+			return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { iss: string; sub: string };
+		});
+		expect(exchanged).toEqual([
+			expect.objectContaining({ iss: ISSUER, sub: ANA.sub }),
+			expect.objectContaining({ iss: NEW_ISSUER, sub: ANA.sub })
+		]);
+		const grants = await storedGrants(switched);
+		expect(grants).toHaveLength(2);
+		expect(new Set(grants.map((grant) => grant.sumego?.sub))).toEqual(new Set([ANA.sub]));
+
+		// El relé activo es uno solo: un logout token con el iss viejo no cierra nada.
+		const stale = await logout(switched, idp.logoutToken({ sub: ANA.sub, iss: ISSUER }));
+		expect(stale.status).toBe(400);
+		expect(await service.resolveAccessToken(old.access)).toBeDefined();
+
+		// El logout con el issuer nuevo y el sub de siempre cierra el grant viejo y el nuevo.
+		expect((await logout(switched, idp.logoutToken({ sub: ANA.sub }))).status).toBe(200);
+		expect(await service.resolveAccessToken(old.access)).toBeUndefined();
+		expect(await service.resolveAccessToken(second.access)).toBeUndefined();
+		expect(h.lumbre.revoked).toHaveLength(2);
 	});
 });
 

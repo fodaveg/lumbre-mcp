@@ -298,7 +298,7 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 	 * mismos campos que `createAuthorizationRequest`, más `identityProvider` y
 	 * `sumegoNonceSha256`. La respuesta trae `requestId` y `expiresAt`, y
 	 * puede traer `authorizationUrl`: con Sumego no se usa (la persona va a
-	 * id.lumbre.pro, no a la página de Lumbre), así que ni se valida.
+	 * el issuer de Sumego, no a la página de Lumbre), así que ni se valida.
 	 */
 	async createSumegoAuthorizationRequest(
 		request: CreateSumegoAuthorizationRequest

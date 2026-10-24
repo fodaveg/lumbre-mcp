@@ -178,7 +178,7 @@ const DEFAULT_PUBLIC_LIMITS: Record<PublicEndpoint, PublicLimit> = {
  * Sumego y en el POST del consentimiento: quien tenga la URL de Sumego de
  * otra persona (o le cuele la suya) no puede terminar el flujo en otro
  * navegador. `__Host-` obliga a `Secure`, `Path=/` y sin `Domain`; `Lax`
- * porque la vuelta es una navegación GET desde id.lumbre.pro.
+ * porque la vuelta es una navegación GET desde el issuer de Sumego.
  *
  * UNA por navegador, como las de Sumego: si se abren dos conexiones a la vez
  * en el mismo navegador, la segunda pisa la cookie de la primera y esa

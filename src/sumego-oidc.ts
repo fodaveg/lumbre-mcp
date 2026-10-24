@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, timingSafeEqual, verify, type KeyObject } from 'node:crypto';
 
 /**
- * Cliente OIDC del relé contra Sumego (`https://id.lumbre.pro`), el login
+ * Cliente OIDC del relé contra Sumego (el issuer configurado), el login
  * único de las apps de Lumbre. Contrato: `SPEC.md` §4, §4.0 y §4.1 del repo
  * `sumego`.
  *
@@ -33,6 +33,13 @@ import { createHash, createPublicKey, timingSafeEqual, verify, type KeyObject } 
 export const SUMEGO_CALLBACK = 'https://mcp.lumbre.pro/oauth/sumego/callback';
 export const SUMEGO_BACKCHANNEL_LOGOUT = 'https://mcp.lumbre.pro/oauth/sumego/backchannel-logout';
 export const DEFAULT_OIDC_ISSUER = 'https://id.lumbre.pro';
+/**
+ * Los únicos orígenes que se aceptan como issuer de Sumego (SPEC de Sumego
+ * §13.6, «Transición»): el histórico y el definitivo. Comparación exacta
+ * tras normalizar, sin comodines ni otros hosts. El activo es UNO, el de
+ * `LUMBRE_MCP_OIDC_ISSUER`; nunca lo decide la build.
+ */
+export const SUMEGO_ISSUERS: readonly string[] = ['https://id.lumbre.pro', 'https://id.sumego.es'];
 export const DEFAULT_OIDC_CLIENT_ID = 'lumbre-mcp';
 export const SUMEGO_SCOPE = 'openid email';
 export const BACKCHANNEL_LOGOUT_EVENT = 'http://schemas.openid.net/event/backchannel-logout';
@@ -48,7 +55,7 @@ const METADATA_CACHE_MS = 60 * 60_000;
  * fuera de la caché. Un `kid` desconocido fuerza releer el JWKS (es como se
  * ve una rotación), y sin el freno cualquiera podía mandar logout tokens con
  * `kid` inventados y convertir este endpoint público en un amplificador de
- * peticiones contra id.lumbre.pro. Cuenta el INTENTO, salga bien o mal (B3
+ * peticiones contra el issuer de Sumego. Cuenta el INTENTO, salga bien o mal (B3
  * de la revisión de seguridad de c4534bc): antes solo frenaba tras una
  * lectura buena, y con Sumego fallando cada petición salía a preguntarle.
  */
@@ -183,9 +190,17 @@ function validateIssuer(value: string): string {
 	) {
 		throw new Error('LUMBRE_MCP_OIDC_ISSUER debe ser una URL https sin query, fragmento ni credenciales');
 	}
-	// El issuer de Sumego es la raíz SIN barra final (`https://id.lumbre.pro`,
-	// SPEC §3), y es lo que se compara byte a byte con `iss`.
-	return url.pathname === '/' ? url.origin : `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+	// El issuer de Sumego es la raíz SIN barra final (SPEC §3), y es lo que
+	// se compara byte a byte con `iss`. `URL` ya iguala mayúsculas del
+	// esquema y del host y quita el puerto por defecto (`:443`); la barra
+	// final se quita aquí. Lo que quede se compara con la lista, de modo que
+	// un subdominio, otro puerto o una ruta no pasan. El mensaje nombra la
+	// variable, no el valor.
+	const normalized = url.pathname === '/' ? url.origin : `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+	if (!SUMEGO_ISSUERS.includes(normalized)) {
+		throw new Error(`LUMBRE_MCP_OIDC_ISSUER debe ser uno de ${SUMEGO_ISSUERS.join(' o ')}`);
+	}
+	return normalized;
 }
 
 /**
