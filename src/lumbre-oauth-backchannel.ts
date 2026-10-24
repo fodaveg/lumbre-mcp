@@ -23,6 +23,7 @@ export const SUMEGO_EXCHANGE_ERROR_CODES = [
 	'account_rejected',
 	'transaction_not_found',
 	'token_reused',
+	'account_conflict',
 	'sumego_unavailable',
 	'invalid_request',
 	'payload_too_large',
@@ -338,7 +339,9 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 	 * con claves de más: fallo NUESTRO); 401 secreto del canal malo, con el
 	 * cuerpo de error de SvelteKit y SIN `code`; 403 `account_pending`,
 	 * `account_suspended` o `account_rejected`; 404 `transaction_not_found`;
-	 * 409 `token_reused`; 413 `payload_too_large`; 429 `rate_limited` (10
+	 * 409 `token_reused` o `account_conflict` (el email del `sub` ya es de otra
+	 * cuenta de Lumbre; Lumbre crea la cuenta en el primer login desde la fase 1
+	 * de Sumego); 413 `payload_too_large`; 429 `rate_limited` (10
 	 * intentos por minuto y solicitud); 503 `sumego_unavailable` si a Lumbre
 	 * le falla el discovery o el JWKS de Sumego. 4xx salvo 429 = `invalid`;
 	 * 5xx, 429 y timeout = `transient`. El `code` viaja en el

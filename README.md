@@ -1189,7 +1189,7 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    credencial dedicada que `/exchange`. Desde ahí todo sigue como con Lumbre: código
    de autorización, `/token`, refresh y revocación. Si Lumbre rechaza, la persona ve
    una página con una frase cerrada según el `code` (cuenta pendiente, suspendida,
-   rechazada, usuario sin cuenta, autorización caducada o ya usada, servicio de
+   rechazada, usuario sin cuenta, `account_conflict` (el email ya es de otra cuenta de Lumbre, 409), autorización caducada o ya usada, servicio de
    cuentas caído, o demasiados intentos con `rate_limited`, que es transitorio: Lumbre
    admite 10 por minuto y solicitud); `invalid_request`, `payload_too_large` y el 401 del secreto son
    fallos nuestros: frase genérica para la persona y una línea en el log del

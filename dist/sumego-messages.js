@@ -17,6 +17,7 @@ export const SUMEGO_PERSON_MESSAGES = {
     accountSuspended: 'Tu cuenta de Lumbre está suspendida.',
     accountRejected: 'Tu solicitud de cuenta de Lumbre no fue aprobada.',
     transactionNotFound: 'La autorización ha caducado. Vuelve a conectar desde la aplicación.',
+    accountConflict: 'Ya hay otra cuenta de Lumbre con el email de tu cuenta, así que no se ha creado ninguna. Escríbenos y lo resolvemos.',
     tokenReused: 'Esta autorización ya se usó. Vuelve a conectar desde la aplicación.',
     accountsUnavailable: 'El servicio de cuentas no responde. Inténtalo en un rato.',
     tooManyAttempts: 'Demasiados intentos. Espera un minuto y vuelve a empezar desde la aplicación.',
@@ -44,6 +45,8 @@ const EXCHANGE_CODES = {
     account_rejected: { status: 403, message: 'accountRejected' },
     transaction_not_found: { status: 400, message: 'transactionNotFound' },
     token_reused: { status: 400, message: 'tokenReused' },
+    // El email del `sub` ya es de otra cuenta: no es fallo nuestro.
+    account_conflict: { status: 409, message: 'accountConflict' },
     sumego_unavailable: { status: 503, message: 'accountsUnavailable' },
     // Transitorio: Lumbre limita a 10 intentos por minuto y solicitud. La
     // solicitud del relé ya se consumió, así que hay que empezar de nuevo.

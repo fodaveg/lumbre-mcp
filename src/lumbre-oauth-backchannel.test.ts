@@ -137,6 +137,7 @@ describe('backchannel web de Lumbre', () => {
 		[403, { code: 'account_rejected' }, 'invalid', 'account_rejected'],
 		[404, { code: 'transaction_not_found' }, 'invalid', 'transaction_not_found'],
 		[409, { code: 'token_reused' }, 'invalid', 'token_reused'],
+		[409, { code: 'account_conflict' }, 'invalid', 'account_conflict'],
 		[401, { message: 'Unauthorized' }, 'invalid', undefined],
 		[400, { code: 'invalid_request' }, 'invalid', 'invalid_request'],
 		[413, { code: 'payload_too_large' }, 'invalid', 'payload_too_large'],

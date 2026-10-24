@@ -981,6 +981,7 @@ describe('login con Sumego en el relé', () => {
 		[403, { code: 'account_rejected' }, 403, 'accountRejected', false],
 		[404, { code: 'transaction_not_found' }, 400, 'transactionNotFound', false],
 		[409, { code: 'token_reused' }, 400, 'tokenReused', false],
+		[409, { code: 'account_conflict' }, 409, 'accountConflict', false],
 		[503, { code: 'sumego_unavailable' }, 503, 'accountsUnavailable', false],
 		[400, { code: 'invalid_request' }, 502, 'generic', true],
 		[413, { code: 'payload_too_large' }, 502, 'generic', true],
@@ -1006,6 +1007,11 @@ describe('login con Sumego en el relé', () => {
 		expect(response.headers.get('content-type')).toContain('text/html');
 		const html = await response.text();
 		expect(html).toContain(SUMEGO_PERSON_MESSAGES[key]);
+		if (key === 'accountConflict') {
+			expect(SUMEGO_PERSON_MESSAGES.accountConflict).toBe(
+				'Ya hay otra cuenta de Lumbre con el email de tu cuenta, así que no se ha creado ninguna. Escríbenos y lo resolvemos.'
+			);
+		}
 		// Nada interno: ni el código de Lumbre ni su cuerpo.
 		expect(html).not.toMatch(/invalid_|unknown_account|account_|transaction_not_found|token_reused|sumego_unavailable|payload_|Unauthorized|algo_que|rate_limited/);
 		const ourFaultLines = lines.filter((line) => line.includes('fallo del relé'));
