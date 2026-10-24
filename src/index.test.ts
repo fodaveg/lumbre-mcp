@@ -5250,7 +5250,7 @@ describe('refresh_sync y list_brl_entries — handlers MCP', () => {
 		});
 	}
 
-	it('refresh_sync hace POST sin cuerpo y confirma el flush aplicado', async () => {
+	it('refresh_sync hace POST con cuerpo {} y confirma el flush aplicado', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
 		vi.stubGlobal('fetch', fetchSpy);
 		const result = await (await buildClient()).callTool({ name: 'refresh_sync', arguments: {} });
@@ -5260,7 +5260,7 @@ describe('refresh_sync y list_brl_entries — handlers MCP', () => {
 		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('https://lumbre.test/api/sync/flush');
 		expect(init.method).toBe('POST');
-		expect(init.body).toBeUndefined();
+		expect(init.body).toBe('{}');
 	});
 
 	it('refresh_sync no anuncia éxito si la app no confirma el flush', async () => {
