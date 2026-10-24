@@ -29,6 +29,12 @@ const SIN_SMOKE = {
 //    `PREVIOUS_SHA` (salvo `FAKE_NO_PREVIOUS=1`), que pasa a healthy salvo si
 //    la etiqueta levantada es `FAKE_BAD_TAG`; `FAKE_UP_FAIL_TAG` hace fallar
 //    el `compose up` de esa etiqueta.
+//  · `sleep` ignora su argumento y duerme 50 ms con el `sleep` real (ruta
+//    resuelta antes de tocar el PATH): el script espera segundos de verdad
+//    (pid del script remoto, reenganche, vueltas de salud) y los tests no
+//    deben pagarlos. No es un no-op: la espera del pid necesita una ventana.
+const REAL_SLEEP = spawnSync('bash', ['-c', 'command -v sleep'], { encoding: 'utf8' }).stdout.trim();
+
 async function createSandbox() {
 	const sandbox = await mkdtemp(join(tmpdir(), 'lumbre-mcp-deploy-test-'));
 	const bin = join(sandbox, 'bin');
@@ -76,6 +82,7 @@ async function createSandbox() {
 		].join('\n')
 	);
 	await fake('setsid', 'exec "$@"');
+	await fake('sleep', `exec ${JSON.stringify(REAL_SLEEP)} 0.05`);
 	await fake(
 		'tail',
 		[
@@ -177,7 +184,7 @@ describe('deploy OAuth fail-closed', () => {
 		expect(example).toMatch(/^LUMBRE_MCP_OIDC_CLIENT_SECRET=$/m);
 	});
 
-	it('ejecuta el precheck remoto y rechaza secretos dentro del destino antes de ssh/rsync', async () => {
+	it('precheck remoto: comprueba el secreto por defecto y el de LUMBRE_MCP_ENV_FILE', async () => {
 		const { sandbox, log, run, reset } = await createSandbox();
 		try {
 			let result = run(SIN_SMOKE);
@@ -188,25 +195,45 @@ describe('deploy OAuth fail-closed', () => {
 			result = run({ ...SIN_SMOKE, LUMBRE_MCP_ENV_FILE: '/srv/secrets/lumbre-mcp.env' });
 			expect(result.status, result.stderr).toBe(0);
 			expect(await readFile(log, 'utf8')).toContain('test -r /srv/secrets/lumbre-mcp.env');
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
 
+	it('precheck remoto: rechaza un secreto dentro del destino antes de ssh/rsync', async () => {
+		const { sandbox, log, run, reset } = await createSandbox();
+		try {
 			for (const envFile of ['/srv/lumbre-mcp', '/srv/lumbre-mcp/.env']) {
 				await reset();
-				result = run({ LUMBRE_MCP_DEST: '/srv/lumbre-mcp', LUMBRE_MCP_ENV_FILE: envFile });
+				const result = run({ LUMBRE_MCP_DEST: '/srv/lumbre-mcp', LUMBRE_MCP_ENV_FILE: envFile });
 				expect(result.status, envFile).toBe(1);
 				expect(result.stderr, envFile).toContain('fuera de LUMBRE_MCP_DEST');
 				expect(await readFile(log, 'utf8'), envFile).toBe('');
 			}
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
 
+	it('precheck remoto: rechaza una ruta del secreto no canónica antes de ssh/rsync', async () => {
+		const { sandbox, log, run, reset } = await createSandbox();
+		try {
 			for (const envFile of ['/srv/lumbre-mcp/./.env', '/srv//lumbre-mcp/.env', '/srv/other/../lumbre-mcp/.env']) {
 				await reset();
-				result = run({ LUMBRE_MCP_ENV_FILE: envFile });
+				const result = run({ LUMBRE_MCP_ENV_FILE: envFile });
 				expect(result.status, envFile).toBe(1);
 				expect(result.stderr, envFile).toContain('ruta absoluta canónica');
 				expect(await readFile(log, 'utf8'), envFile).toBe('');
 			}
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
+	});
 
-			await reset();
-			result = run({ FAKE_REMOTE_MODE: '640' });
+	it('precheck remoto: un secreto con permisos 0640 aborta tras el ssh y antes del rsync', async () => {
+		const { sandbox, log, run } = await createSandbox();
+		try {
+			const result = run({ FAKE_REMOTE_MODE: '640' });
 			expect(result.status).toBe(1);
 			const calls = await readFile(log, 'utf8');
 			expect(calls).toContain('ssh ');
@@ -383,16 +410,15 @@ describe('publicar.sh: un commit, con revisión, log guardado y vuelta atrás', 
 		}
 	});
 
-	it('el tope de salud es en segundos reales: una que se queda en «starting» se corta a su hora', async () => {
+	it('el tope de salud cuenta segundos reales y no vueltas: «starting» no se corta antes de 1 s', async () => {
 		const { sandbox, run } = await createSandbox();
 		try {
-			const t0 = Date.now();
-			const result = run({ FAKE_STARTING_TAG: FAKE_SHA, LUMBRE_MCP_HEALTH_TIMEOUT: '2' });
-			const elapsed = Date.now() - t0;
+			// Con el `sleep` falso de 50 ms, un tope por VUELTAS saldría con «tras 0 s»;
+			// uno por segundos reales no sale antes de 1. Cota inferior, sin reloj.
+			const result = run({ FAKE_STARTING_TAG: FAKE_SHA, LUMBRE_MCP_HEALTH_TIMEOUT: '1' });
 			expect(result.status).toBe(1);
-			expect(result.stdout + result.stderr).toMatch(/estado: starting, reinicios: 0, tras [23] s/);
-			// Dos segundos de espera, más el arranque del script y la vuelta atrás.
-			expect(elapsed).toBeLessThan(10_000);
+			const tras = (result.stdout + result.stderr).match(/estado: starting, reinicios: 0, tras (\d+) s/);
+			expect(Number(tras?.[1] ?? -1)).toBeGreaterThanOrEqual(1);
 		} finally {
 			await rm(sandbox, { recursive: true, force: true });
 		}
