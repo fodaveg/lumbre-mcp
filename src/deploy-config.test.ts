@@ -3,7 +3,13 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// Cada caso que corre `publicar.sh` lanza ~100 procesos (los dobles de abajo)
+// y ninguna aserción depende del reloj: los 5 s por defecto de vitest eran
+// una medida de velocidad de la máquina, no del script (una sola ejecución
+// llegó a 7,8 s con load 30). El tope queda solo contra un cuelgue.
+vi.setConfig({ testTimeout: 60_000 });
 
 const FAKE_SHA = 'c0ffee0000000000000000000000000000000001';
 const PREVIOUS_SHA = 'beef000000000000000000000000000000000002';
