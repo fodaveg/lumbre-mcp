@@ -134,12 +134,8 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
         tags: z.array(tagSchema).optional(),
         priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
         time: z.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()]).optional(),
-        // `recurrence` con regla también se rechaza sobre una subtarea (25 sep
-        // 2026, `subtaskForbiddenUpdateFields`); `null` pasa.
         recurrence: z.union([recurrencePatchSchema, z.null()]).optional(),
-        // MC6 (2026-09-24): PROHIBIDOS en una subtarea (§2.5) — rechazado en
-        // `buildBatchFromOps`, no aquí (necesita saber si el `taskId` es
-        // subtarea, que solo se resuelve tras la comprobación de existencia).
+        // Valen también sobre una subtarea (§2.5, enmienda del 23 oct 2026).
         deadline: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()]).optional(),
         reminders: z.array(z.number().int().nonnegative()).optional(),
         expectedContent: z.string().max(2000).optional(),
@@ -739,10 +735,9 @@ export function registerBatchTool(server, ctx) {
                 'interpretar fechas ni #etiquetas) · complete: taskId* ' +
                 '[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
                 'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
-                'en una semilla archivada), deadline, reminders (deadline/reminders/recurrence PROHIBIDOS sobre ' +
-                'una subtarea)] [expectedContent, expectedNotes] · ' +
+                'en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes] · ' +
                 'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
-                'set_waiting: taskId*, until* (estrictamente futura; no en subtarea) [for] · clear_waiting: taskId* · ' +
+                'set_waiting: taskId*, until* (estrictamente futura) [for] · clear_waiting: taskId* · ' +
                 'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
                 'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +
                 'register_habit: habitId* [date] (habitId, no taskId; sin server con el HOY local ' +

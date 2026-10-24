@@ -33,10 +33,10 @@ independiente. Para adjuntos o para configurar la conexión, lee además
   sección; mueve primero y reasigna después si debe conservarla.
 - **Subtareas** (definición única). Un solo nivel: viven dentro de su principal, sin
   lista ni sección propias, y su archivado lo hereda. Son tareas completas (id, notas,
-  adjuntos, tags, prioridad y fecha), pero no admiten deadline, recordatorios,
-  repetición ni «esperando»: la tarea que los necesite queda en primer nivel.
-  `set_parent` anida o saca una tarea existente, y la app lo rechaza si tiene deadline,
-  recordatorios, «esperando», repetición o subtareas propias.
+  adjuntos, tags, prioridad, fecha, deadline, recordatorios, repetición y «esperando»);
+  solo les falta lista, sección y subtareas propias. `set_parent` anida o saca una tarea
+  existente, y la app lo rechaza si es parte de una serie repetida (una serie no pasa de
+  tarea a subtarea ni al revés) o si tiene subtareas propias.
 - Leerlas: `list_tasks` no las lista, ni siquiera con fecha. `get_task` de la principal
   trae de cada una su id, su `content`, si está hecha y sus tags (basta para conocer y
   cambiar el `content` de todas), pero no su fecha, prioridad, notas ni adjuntos. Abre

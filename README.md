@@ -508,13 +508,10 @@ operaciones a la vez» más abajo):
   conector repite la comprobación de existencia con `includeArchived`. Sobre
   una archivada, `recurrence: null` va A SOLAS: con otros campos la op se
   rechaza entera, porque la app solo aplicaría el apagado.
-  **Acepta también el id de una SUBTAREA**: los cinco primeros campos son
-  accidentales PERMITIDOS en una subtarea (`docs/18-que-es-una-tarea.md` §2.5
-  del repo principal); `deadline`, `reminders` y `recurrence` con regla NO —
-  están PROHIBIDOS ahí (§2.5, «restricción del mundo/aviso sin sentido en una
-  checklist»; «la hija no repite») y el conector rechaza la op ANTES de encolar
-  si alguno viaja sobre un `taskId` de subtarea. `recurrence: null` sí pasa:
-  solo limpia y sirve para arreglar una subtarea que arrastre una regla. Si `notes` no es vacío, el informe por op avisa
+  **Acepta también el id de una SUBTAREA**, con todos sus campos
+  (`content`, `notes`, `tags`, `priority`, `time`, `deadline`, `reminders` y
+  `recurrence`): desde la enmienda del 23 oct 2026 de `docs/18-que-es-una-tarea.md`
+  §2.5 una subtarea admite todo salvo lista, sección y subtareas propias. Si `notes` no es vacío, el informe por op avisa
   siempre («aplicada; si la nota de esa tarea estaba borrada, tu texto se
   escribió pero sigue oculto…», MC8 del audit de paridad): sobre una nota YA
   BORRADA la app escribe la celda igual (cambió algo de verdad, por eso
@@ -550,11 +547,9 @@ operaciones a la vez» más abajo):
   no esa regla); `for` (opcional) es texto libre de a quién o qué se espera.
   Sale en `list_tasks`/`get_task` como `esperando:<until>` cuando el servidor
   lo manda (aún no lo hace: campo tolerado como "desconocido" hasta entonces).
-  **No acepta el id de una SUBTAREA**: «esperando» no existe en ella (§2.5) y
-  la app aún no tiene guard que lo impida, así que lo corta el conector.
+  **Acepta también el id de una SUBTAREA** (§2.5, enmienda del 23 oct 2026).
 - `{ op: "clear_waiting", taskId }` (`mutate_tasks`, MC6) — sale de
-  «esperando». Sin campos, espejo de `restore`. Acepta una subtarea, para
-  limpiar una que ya lo tenga.
+  «esperando». Sin campos, espejo de `restore`. Acepta una subtarea.
 - `{ op: "register_habit", habitId, date? }` (`mutate_tasks`, MC6) — registra
   una ocurrencia del HÁBITO `habitId` (no de una tarea: es la única op de
   `mutate_tasks`, junto a `restore`, cuyo objetivo NO se comprueba contra
@@ -816,7 +811,7 @@ cancel: taskId* [cancelled]
 update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes]
 reschedule: taskId*, date*
 set_section: taskId*, section*
-set_waiting: taskId*, until* (estrictamente futura; no en subtarea) [for]
+set_waiting: taskId*, until* (estrictamente futura) [for]
 clear_waiting: taskId*
 add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
@@ -865,23 +860,17 @@ que tenían las tools individuales). Quién lo decide: `docs/18-que-es-una-tarea
 los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 
 - **Sí**: `complete`, `cancel`, `delete`, `complete_subtask`, `set_parent`,
-  `update` (sus cinco campos —`content`, `notes`, `tags`, `priority`, `time`— son
-  accidentales permitidos; `deadline`/`reminders`/`recurrence` NO, ver abajo),
+  `update` (todos sus campos, también `deadline`, `reminders` y `recurrence`),
+  `set_waiting`,
   `reschedule`, con fecha o con `date: null` (`date` también lo es),
-  `clear_waiting` y `unarchive` (para limpiar una subtarea que ya tenga
-  «esperando» o esté archivada). Fuera de `mutate_tasks`, también la tool
+  `clear_waiting` y `unarchive` (para arreglar una subtarea archivada). Fuera de `mutate_tasks`, también la tool
   `add_attachment`. Una subtarea con `date: null` se queda sin fecha en la
   checklist de su padre; no cae a la Bandeja.
 - **No** (se descarta esa op, las demás del lote siguen): `set_section` y
   `move_to_list`, porque escriben `sectionId`/`somedayListId`, PROHIBIDOS en
   una subtarea (no tiene proyecto, área ni sección propios: vive en la checklist de su
-  padre); `set_waiting` («esperando» no existe en una subtarea, y la app aún
-  no lo impide); `archive` (el archivado se hereda de la madre: se archiva la
-  madre); `add_subtask` (un solo nivel); y un `update` que traiga `deadline`,
-  `reminders` o `recurrence` con regla (§2.5 los lista PROHIBIDOS en
-  subtarea) — sus OTROS campos, si trae alguno permitido, se rechazan con
-  ellos (la op entera se descarta). Si la tarea los necesita, sácala a primer
-  nivel con `set_parent` y `parentId: null`.
+  padre); `archive` (el archivado se hereda de la madre: se archiva la
+  madre); y `add_subtask` (un solo nivel).
 
 El rechazo es por-op y con el motivo REAL de esa op (no un error genérico):
 entra en el mismo informe de éxito PARCIAL que un `taskId` inexistente,

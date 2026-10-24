@@ -515,29 +515,23 @@ export function listNotFoundError(listId) {
  * mutación individual ya no existen y citarlas mandaba al modelo a llamar
  * algo que no está en `tools/list`.
  *
- * `op` (25 sep 2026) elige el motivo: desde que `set_waiting` y `archive`
- * también se cierran a una subtarea (ver `TASK_TARGET_ALLOW_SUBTASK`), el
+ * `op` (25 sep 2026) elige el motivo: desde que `archive`
+ * también se cierra a una subtarea (ver `TASK_TARGET_ALLOW_SUBTASK`), el
  * motivo de residencia ya no es el único. Sin `op`, o con `set_section`/
  * `move_to_list`, es el de residencia de siempre. La cola con lo que SÍ vale y
- * lo que NO es la misma para todas y tiene que coincidir con esa tabla, con
- * el guard de campos de `update` (`subtaskFieldsNotAllowedError`) y con
+ * lo que NO es la misma para todas y tiene que coincidir con esa tabla y con
  * `add_attachment`.
  */
 export function subtaskNotAllowedError(taskId, op) {
     return new Error(`El id ${taskId} es de una SUBTAREA y esta operación no aplica ahí: ${subtaskRejectionReason(op)} ` +
-        'Sobre la SUBTAREA sí valen las ops update (texto, notas, tags, prioridad, hora; no deadline, ' +
-        'reminders ni recurrence con regla), reschedule (darle fecha o quitársela con date:null), ' +
-        'complete/complete_subtask, cancel, clear_waiting, unarchive y set_parent de mutate_tasks, ' +
-        'delete de organize y la tool add_attachment. No valen move_to_list, set_section, set_waiting ' +
-        'ni archive. No se ha encolado ninguna mutación.');
+        'Sobre la SUBTAREA sí valen las ops update (texto, notas, tags, prioridad, hora, deadline, ' +
+        'reminders y recurrence), reschedule (darle fecha o quitársela con date:null), ' +
+        'complete/complete_subtask, cancel, set_waiting, clear_waiting, unarchive y set_parent de ' +
+        'mutate_tasks, delete de organize y la tool add_attachment. No valen move_to_list, ' +
+        'set_section ni archive. No se ha encolado ninguna mutación.');
 }
 /** Motivo de `subtaskNotAllowedError` según la op rechazada (docs/18 §2.5). */
 function subtaskRejectionReason(op) {
-    if (op === 'set_waiting') {
-        return ('«esperando» no existe en una subtarea (docs/18-que-es-una-tarea.md §2.5). Si la tarea lo ' +
-            'necesita, sácala a primer nivel con set_parent y parentId:null. clear_waiting sí vale, para ' +
-            'limpiar una subtarea que ya lo tenga.');
-    }
     if (op === 'archive') {
         return ('el archivado de una subtarea se hereda de su madre (docs/18-que-es-una-tarea.md §2.5, ' +
             'cascadas): archiva su tarea madre, cuyo id da get_task de la subtarea. unarchive sí vale, ' +
@@ -580,22 +574,6 @@ export function taskWithoutListNotAllowedError(taskId) {
     return new Error(`La tarea ${taskId} no pertenece a ningún proyecto o área, así que no puede tener sección. ` +
         'Muévela primero con move_to_list (organize) y repite set_section. No se ha encolado ninguna ' +
         'mutación.');
-}
-/**
- * Error uniforme cuando un `update` targetea una SUBTAREA y trae `deadline` y/o
- * `reminders` (MC6, 2026-09-24): `docs/18-que-es-una-tarea.md` §2.5 los lista
- * PROHIBIDOS en subtarea, junto con `somedayListId`/`sectionId`/`recurrence`
- * — una restricción del mundo o un aviso no tiene sentido en una checklist
- * hija de una tarea más pendiente. A diferencia de `set_section`/`add_subtask`
- * (MC2), aquí no hay un `applied` falso medido contra el materializador real:
- * se corta de todos modos, ANTES de encolar, por el mismo motivo que esos dos
- * — el cliente ya sabe de antemano que el campo no aplica al objetivo.
- */
-export function subtaskFieldsNotAllowedError(taskId, fields) {
-    return new Error(`El id ${taskId} es de una SUBTAREA: ${fields.join('/')} no aplica ahí (docs/18-que-es-una-tarea.md ` +
-        '§2.5: deadline, reminders y recurrence están prohibidos en subtarea). Quítalos del update, el ' +
-        'resto de campos sí vale sobre una subtarea; si la tarea los necesita, sácala a primer nivel ' +
-        'con set_parent y parentId:null. No se ha encolado ninguna mutación.');
 }
 /**
  * Decide si una tool puede operar sobre `task` (YA resuelto por
@@ -647,8 +625,7 @@ export function subtaskFieldsNotAllowedError(taskId, fields) {
  *    tarea de pleno derecho y la app la acepta como destino de un adjunto.
  *  - `allowSubtask: false` (default) — `set_section` y `move_to_list`
  *    (escriben `sectionId`/`somedayListId`, PROHIBIDOS en subtarea por §2.5)
- *    y, desde el 25 sep 2026, `set_waiting` y `archive` (ver
- *    `TASK_TARGET_ALLOW_SUBTASK`).
+ *    y `archive` (ver `TASK_TARGET_ALLOW_SUBTASK`).
  *
  * `reschedule` estuvo CONDICIONADO al payload (sí con fecha, no con
  * `date: null`) mientras `task-ops.unscheduleTask` de la app no tuvo guard de
@@ -1044,13 +1021,12 @@ export async function runBatch(config, ops) {
  * semilla válida), y las otras tres targetean un HÁBITO, mismo motivo que
  * `register_habit`.
  *
- * 25 sep 2026 (contrato de subtareas de pleno derecho, docs/18 §2.5 medido
- * en la app `0ae4f8624`): `set_waiting` y `archive` pasan a `false`.
- * «Esperando» está entre lo que una subtarea NO admite, y su archivado se
- * hereda de la madre (cascada de §2.5), no es propio. En la app `waiting-ops`
- * aún no tiene guard de `parentId` y lo aplicaría, así que el corte es aquí.
- * `clear_waiting` y `unarchive` siguen a `true`: son la vía para limpiar una
- * subtarea que ya lo tenga. El rechazo nombra el motivo de cada op
+ * 25 sep 2026 (contrato de subtareas de pleno derecho, docs/18 §2.5): `archive`
+ * pasa a `false`: su archivado se hereda de la madre (cascada de §2.5), no es
+ * propio. `unarchive` sigue a `true`: es la vía para arreglar una subtarea ya
+ * archivada. `set_waiting` pasó a `false` ese día y vuelve a `true` el 23 oct
+ * 2026 (enmienda de §2.5: una subtarea admite todo salvo lista, sección y
+ * subtareas propias). El rechazo nombra el motivo de cada op
  * (`subtaskNotAllowedError(taskId, op)`).
  *
  * `set_parent` (2026-09-25) entra a `true`: desanidar exige targetear una
@@ -1078,7 +1054,7 @@ const TASK_TARGET_ALLOW_SUBTASK = {
     reschedule: true,
     set_section: false,
     move_to_list: false,
-    set_waiting: false,
+    set_waiting: true,
     clear_waiting: true,
     archive: false,
     unarchive: true,
@@ -1417,24 +1393,6 @@ export function mergeRecurrencePatch(patch, current) {
         rule.streak = true;
     return { rule };
 }
-/**
- * Campos de un `update` que una SUBTAREA no admite (docs/18 §2.5): `deadline`
- * y `reminders` con cualquier valor, y `recurrence` solo con regla (`null`
- * limpia y se deja pasar, ver `buildBatchFromOps`). Vacío si la op no es un
- * `update` o no trae ninguno; quien llama decide si el objetivo es subtarea.
- */
-function subtaskForbiddenUpdateFields(op) {
-    if (op.op !== 'update')
-        return [];
-    const fields = [];
-    if (op.deadline !== undefined)
-        fields.push('deadline');
-    if (op.reminders !== undefined)
-        fields.push('reminders');
-    if (op.recurrence !== undefined && op.recurrence !== null)
-        fields.push('recurrence');
-    return fields;
-}
 /** Campos de `update` distintos de `recurrence` (ver CX7 en `buildBatchFromOps`). */
 const UPDATE_EXTRA_FIELDS = ['content', 'notes', 'tags', 'priority', 'time', 'deadline', 'reminders'];
 /** Id de la semilla si `task` es una OCURRENCIA de una serie (su `seriesId`
@@ -1543,22 +1501,8 @@ export function buildBatchFromOps(ops, existing) {
             skipped.push({ index, error: parentNotFoundError(op.parentId).message });
             return;
         }
-        // MC6: `deadline`/`reminders` son PROHIBIDOS en una subtarea (§2.5) —
-        // a diferencia del resto de campos de `update` (accidentales permitidos,
-        // ver `TASK_TARGET_ALLOW_SUBTASK`), estos dos no tienen camino de
-        // servidor "subtask-safe" documentado. Se rechaza aquí, ANTES de
-        // encolar, en vez de dejar que el materializador escriba una celda que
-        // el contrato de tarea prohíbe.
-        // `recurrence` con regla entra el 25 sep 2026: la app la ignora en
-        // silencio sobre una subtarea (`setTaskRecurrence`, «una subtarea no
-        // puede ser semilla») y el informe la daría por aplicada. `recurrence:
-        // null` sí pasa: solo limpia celdas y sirve para arreglar una subtarea
-        // que arrastre una regla, igual que `clear_waiting`.
-        const subtaskForbidden = subtaskForbiddenUpdateFields(op);
-        if (subtaskForbidden.length > 0 && op.op === 'update' && existing.get(op.taskId)?.parentId) {
-            skipped.push({ index, error: subtaskFieldsNotAllowedError(op.taskId, subtaskForbidden).message });
-            return;
-        }
+        // 23 oct 2026 (docs/18 §2.5, enmienda): una subtarea admite deadline, reminders,
+        // recurrence y esperando; ya no hay guard de campos en `update`.
         // CX7: sobre una tarea ARCHIVADA la app solo aplica el apagado de la
         // regla (`clearArchivedSeedRecurrence`, antes de su guard de tarea
         // viva); el resto de campos del mismo `update` nunca se aplicaba y el

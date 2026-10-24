@@ -4269,7 +4269,7 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 		expect(mutationBodies(fetchSpy)).toEqual([]);
 	});
 
-	it('25 sep 2026: set_waiting, archive y update.recurrence se cortan; clear_waiting y unarchive viajan', async () => {
+	it('23 oct 2026: solo archive se corta; set_waiting, update (deadline/reminders/recurrence), clear_waiting y unarchive viajan', async () => {
 		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
 			const u = String(url);
 			if (u.includes('/api/tasks?ids=')) return jsonResponse([subtaskRow()]);
@@ -4286,18 +4286,16 @@ describe('op reschedule sobre una SUBTAREA (cableado real de la tool)', () => {
 				ops: [
 					{ op: 'set_waiting', taskId: SUB_ID, until: '2099-01-01' },
 					{ op: 'archive', taskId: SUB_ID },
-					{ op: 'update', taskId: SUB_ID, recurrence: { freq: 'daily' } },
+					{ op: 'update', taskId: SUB_ID, deadline: '2099-02-01', reminders: [15], recurrence: { freq: 'daily' } },
 					{ op: 'clear_waiting', taskId: SUB_ID },
 					{ op: 'unarchive', taskId: SUB_ID }
 				]
 			}
 		});
 		const text = resultText(result);
-		expect(text).toContain('2/5 operación(es) aceptadas.');
-		expect(text).toMatch(/«esperando» no existe en una subtarea/);
+		expect(text).toContain('4/5 operación(es) aceptadas.');
 		expect(text).toMatch(/archiva su tarea madre/);
-		expect(text).toMatch(/recurrence no aplica/);
-		expect(mutationBodies(fetchSpy).map((op) => op.kind)).toEqual(['clearWaiting', 'unarchive']);
+		expect(mutationBodies(fetchSpy).map((op) => op.kind)).toEqual(['setWaiting', 'update', 'clearWaiting', 'unarchive']);
 	});
 });
 

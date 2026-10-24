@@ -38,9 +38,8 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    modo que repartir el trabajo en paralelo sea asignar principales. Su `content`
    nombra el resultado, sin la palabra «lote»: tener subtareas ya la marca como lote.
    Las piezas van como subtareas (`add_task` con `subtasks`). Si un lote depende de
-   otro, dilo en su nota. La sección, el deadline,
-   los recordatorios y la repetición van en la principal, porque las subtareas no los
-   admiten. Antes de crear otra principal, busca en ese destino una principal abierta
+   otro, dilo en su nota. La sección va en la
+   principal, porque las subtareas no la tienen. Antes de crear otra principal, busca en ese destino una principal abierta
    del mismo lote: si existe, añade las piezas nuevas como subtareas suyas
    (`add_subtask`). Una tarea sin piezas ni relación con nada queda como principal
    sin subtareas, y puede ser la principal de un lote futuro.
@@ -82,7 +81,7 @@ Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus
 - `restore` saca de la Papelera una tarea borrada; `archive` y `unarchive` cambian su
   visibilidad (no su ciclo de vida).
 - `set_waiting` y `clear_waiting` ponen y quitan el estado «esperando» (con fecha
-  futura); no existe en subtareas.
+  futura); valen también en subtareas.
 - Hábitos: `register_habit`, `skip_occurrence`, `archive_habit` y `unarchive_habit`
   actúan sobre `habitId` o `seriesId`, no sobre una tarea (para leerlos, `list_habits`).
   Borrar un hábito (`delete_habit`, en `organize`) exige confirmación como cualquier

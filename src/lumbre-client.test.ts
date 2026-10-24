@@ -25,7 +25,6 @@ import {
 	parseListNoteUrl,
 	planBatchPhases,
 	runBatch,
-	subtaskFieldsNotAllowedError,
 	subtaskNotAllowedError,
 	taskNotFoundError,
 	taskWithoutListNotAllowedError,
@@ -105,11 +104,12 @@ describe('assertTaskUsable', () => {
 		'add_subtask',
 		'update',
 		'reschedule',
+		'set_waiting',
 		'clear_waiting',
 		'unarchive',
 		'set_parent'
 	];
-	const REJECT_SUBTASK = ['set_section', 'move_to_list', 'set_waiting', 'archive'];
+	const REJECT_SUBTASK = ['set_section', 'move_to_list', 'archive'];
 
 	/** Op mínima VÁLIDA de cada tipo sobre `sub-1`, para que la matriz pase por
 	 *  `buildBatchFromOps` entero y no se quede en la validación local. */
@@ -149,11 +149,11 @@ describe('assertTaskUsable', () => {
 	it('subtaskNotAllowedError: la lista de lo que vale y no vale coincide con TASK_TARGET_ALLOW_SUBTASK', () => {
 		const message = subtaskNotAllowedError('x').message;
 		const [valid, invalid] = message.split('No valen');
-		for (const op of ['update', 'reschedule', 'complete_subtask', 'cancel', 'clear_waiting', 'unarchive', 'set_parent', 'delete', 'add_attachment']) {
+		for (const op of ['update', 'reschedule', 'complete_subtask', 'cancel', 'set_waiting', 'clear_waiting', 'unarchive', 'set_parent', 'delete', 'add_attachment']) {
 			expect(valid).toContain(op);
 		}
 		for (const op of REJECT_SUBTASK) expect(invalid).toContain(op);
-		expect(valid).toMatch(/no deadline, reminders ni recurrence con regla/);
+		expect(valid).toMatch(/deadline,\s+reminders y recurrence/);
 	});
 
 	it('los mensajes de error mencionan explícitamente cómo seguir (list_tasks/get_task/complete_subtask)', () => {
@@ -1685,14 +1685,13 @@ describe('buildBatchFromOps', () => {
 		expect(batchOps).toEqual([{ type: 'mutate', taskId: 't1', kind: 'clearWaiting', payload: {} }]);
 	});
 
-	it('subtarea en `op:"set_waiting"`: se RECHAZA («esperando» no existe en una subtarea, 25 sep 2026)', () => {
+	it('subtarea en `op:"set_waiting"`: viaja (docs/18 §2.5, enmienda del 23 oct 2026)', () => {
 		const sub = topLevel('s1', { parentId: 't1' });
 		const op: MutateTasksOp = { op: 'set_waiting', taskId: 's1', until: '2099-01-01' };
 		const { batchOps, skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
-		expect(batchOps).toEqual([]);
-		expect(skipped).toEqual([{ index: 0, error: subtaskNotAllowedError('s1', 'set_waiting').message }]);
-		expect(skipped[0].error).toMatch(/«esperando» no existe en una subtarea/);
-		expect(skipped[0].error).toMatch(/clear_waiting sí vale/);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toHaveLength(1);
+		expect(batchOps[0]).toMatchObject({ type: 'mutate', taskId: 's1', kind: 'setWaiting' });
 	});
 
 	it('subtarea en `op:"clear_waiting"`: SÍ se acepta (limpia una subtarea que ya lo tenga)', () => {
@@ -1786,37 +1785,23 @@ describe('buildBatchFromOps', () => {
 	});
 
 	it.each([
-		['deadline', { op: 'update', taskId: 's1', deadline: '2026-12-31' } satisfies MutateTasksOp],
-		['reminders', { op: 'update', taskId: 's1', reminders: [30] } satisfies MutateTasksOp]
-	])('update.%s sobre una SUBTAREA: se descarta (§2.5, PROHIBIDO)', (_name, op) => {
+		['deadline', { op: 'update', taskId: 's1', deadline: '2026-12-31' } satisfies MutateTasksOp, { deadline: '2026-12-31' }],
+		['reminders', { op: 'update', taskId: 's1', reminders: [30] } satisfies MutateTasksOp, { reminders: [30] }],
+		[
+			'recurrence',
+			{ op: 'update', taskId: 's1', recurrence: { freq: 'daily' } } satisfies MutateTasksOp,
+			{ recurrence: { freq: 'daily' } }
+		]
+	])('update.%s sobre una SUBTAREA: viaja (§2.5, enmienda del 23 oct 2026)', (_name, op, payload) => {
 		const sub = topLevel('s1', { parentId: 't1' });
 		const { batchOps, skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
-		expect(batchOps).toEqual([]);
-		expect(skipped[0].error).toMatch(/SUBTAREA/);
+		expect(skipped).toEqual([]);
+		expect(batchOps).toHaveLength(1);
+		expect(batchOps[0]).toMatchObject({ type: 'mutate', taskId: 's1', kind: 'update' });
+		expect((batchOps[0] as { payload: object }).payload).toMatchObject(payload);
 	});
 
-	it('update.recurrence con regla sobre una SUBTAREA: se descarta nombrando el campo (la app la ignoraría en silencio)', () => {
-		const sub = topLevel('s1', { parentId: 't1' });
-		const op: MutateTasksOp = { op: 'update', taskId: 's1', content: 'x', recurrence: { freq: 'daily' } };
-		const { batchOps, skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
-		expect(batchOps).toEqual([]);
-		expect(skipped).toEqual([{ index: 0, error: subtaskFieldsNotAllowedError('s1', ['recurrence']).message }]);
-	});
-
-	it('update con deadline, reminders y recurrence sobre una SUBTAREA: el rechazo nombra los tres', () => {
-		const sub = topLevel('s1', { parentId: 't1' });
-		const op: MutateTasksOp = {
-			op: 'update',
-			taskId: 's1',
-			deadline: '2026-12-31',
-			reminders: [30],
-			recurrence: { freq: 'weekly' }
-		};
-		const { skipped } = buildBatchFromOps([op], new Map([['s1', sub]]));
-		expect(skipped[0].error).toContain('deadline/reminders/recurrence no aplica');
-	});
-
-	it('update.recurrence:null sobre una SUBTAREA: SÍ viaja (solo limpia, sirve para arreglarla)', () => {
+	it('update.recurrence:null sobre una SUBTAREA: viaja', () => {
 		const sub = topLevel('s1', { parentId: 't1' });
 		const { batchOps, skipped } = buildBatchFromOps(
 			[{ op: 'update', taskId: 's1', recurrence: null }],
