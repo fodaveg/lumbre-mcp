@@ -563,7 +563,7 @@ describe('configuración del login', () => {
 	it('por defecto es lumbre, con el issuer y el client_id de Sumego por defecto', () => {
 		expect(loginConfigFromEnv({})).toEqual({
 			provider: 'lumbre',
-			sumego: { issuer: ISSUER, clientId: CLIENT_ID, clientSecret: undefined }
+			sumego: { issuer: NEW_ISSUER, clientId: CLIENT_ID, clientSecret: undefined }
 		});
 		expect(loginConfigFromEnv({ LUMBRE_MCP_LOGIN_PROVIDER: '' }).provider).toBe('lumbre');
 	});

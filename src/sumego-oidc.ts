@@ -32,7 +32,7 @@ import { createHash, createPublicKey, timingSafeEqual, verify, type KeyObject } 
 
 export const SUMEGO_CALLBACK = 'https://mcp.lumbre.pro/oauth/sumego/callback';
 export const SUMEGO_BACKCHANNEL_LOGOUT = 'https://mcp.lumbre.pro/oauth/sumego/backchannel-logout';
-export const DEFAULT_OIDC_ISSUER = 'https://id.lumbre.pro';
+export const DEFAULT_OIDC_ISSUER = 'https://id.sumego.es';
 /**
  * Los únicos orígenes que se aceptan como issuer de Sumego (SPEC de Sumego
  * §13.6, «Transición»): el histórico y el definitivo. Comparación exacta
