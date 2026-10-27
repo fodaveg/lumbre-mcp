@@ -711,6 +711,11 @@ export function createHttpApp(
 			return;
 		}
 
+		if (url.pathname === '/register') {
+			spawn(oauth.handleRegister(req, res));
+			return;
+		}
+
 		if (url.pathname === '/authorize') {
 			spawn(oauth.handleAuthorize(req, res, url));
 			return;

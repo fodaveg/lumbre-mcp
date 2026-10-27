@@ -19,7 +19,13 @@ export function classifyStartupFailure(error) {
         return 'clave_ausente';
     if (/^clave (OAuth )?inválida$/.test(message) ||
         message.includes('encryptionKey debe tener 32 bytes') ||
-        message.includes('unable to authenticate data')) {
+        // Fallo de descifrado AES-GCM con la clave equivocada. El mensaje
+        // exacto depende de la versión de OpenSSL que traiga el Node: la
+        // serie 1.x decía «unable to authenticate data» y la 3.x dice
+        // «bad decrypt» (visto en Node 22/OpenSSL 3); cualquiera de los dos
+        // significa que el store no se escribió con la clave que hay.
+        message.includes('unable to authenticate data') ||
+        message.includes('bad decrypt')) {
         return 'clave_invalida';
     }
     if (message.includes('v1/v2'))

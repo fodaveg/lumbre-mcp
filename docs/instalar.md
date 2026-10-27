@@ -18,6 +18,18 @@ codex mcp login lumbre
 En claude.ai web o móvil, añade un conector personalizado con esa misma URL. No
 añadas un bearer ni un token en el path.
 
+En Mistral Vibe:
+
+```bash
+vibe mcp add lumbre --url https://mcp.lumbre.pro/mcp
+```
+
+Vibe registra su cliente por OAuth en el primer arranque (registro dinámico
+restringido del relé); el navegador se abre solo para autorizar en Lumbre. En
+Visual Studio Code (Copilot local), añade el servidor en la vista de MCP con
+la misma URL: VS Code reintenta con su client público y termina el mismo
+flujo OAuth.
+
 Los clientes cachean `tools/list` al conectar: cuando cambia la superficie del
 MCP (la última vez, el 2026-10-08, al añadir cuatro ops de proyecto a
 `organize` —cierre, reapertura y fechas— y hacer que `list_habits` llame a

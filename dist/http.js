@@ -612,6 +612,10 @@ export function createHttpApp(baseUrl = process.env.LUMBRE_BASE_URL?.trim() || D
             res.end(body);
             return;
         }
+        if (url.pathname === '/register') {
+            spawn(oauth.handleRegister(req, res));
+            return;
+        }
         if (url.pathname === '/authorize') {
             spawn(oauth.handleAuthorize(req, res, url));
             return;

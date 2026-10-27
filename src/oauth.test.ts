@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { request as httpRequest, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -296,7 +296,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const metadata = (await (await fetch(`${baseUrl}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
 		expect(metadata.issuer).toBe(OAUTH_ISSUER);
 		expect(metadata.client_id_metadata_document_supported).toBe(true);
-		expect(metadata.registration_endpoint).toBeUndefined();
+		expect(metadata.registration_endpoint).toBe(`${OAUTH_ISSUER}/register`);
 		expect(metadata.code_challenge_methods_supported).toEqual(['S256']);
 
 		const noAuth = await fetch(`${baseUrl}/mcp`, {
@@ -2976,6 +2976,325 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 			expect(errors).not.toHaveBeenCalled();
 		} finally {
 			errors.mockRestore();
+		}
+	});
+});
+
+describe('registro dinámico restringido: Mistral Vibe y el client público de VS Code', () => {
+	const VIBE_REDIRECT = 'http://127.0.0.1:47823/callback';
+	const VSCODE_PUBLIC_CLIENT_ID = 'aebc6443-996d-45c2-90f0-388ff96faa56';
+
+	function vibeRegistration(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+		return {
+			client_name: 'Mistral Vibe',
+			redirect_uris: [VIBE_REDIRECT],
+			grant_types: ['authorization_code', 'refresh_token'],
+			response_types: ['code'],
+			token_endpoint_auth_method: 'none',
+			...overrides
+		};
+	}
+
+	async function registerClient(baseUrl: string, body: unknown, contentType = 'application/json'): Promise<Response> {
+		return await fetch(`${baseUrl}/register`, {
+			method: 'POST',
+			headers: { 'content-type': contentType },
+			body: typeof body === 'string' ? body : JSON.stringify(body)
+		});
+	}
+
+	/** oauthFetch cuyo `introspect` devuelve como `clientId` el del último
+	 *  `/requests` recibido: el canje y el refresh de CUALQUIER cliente (no
+	 *  solo el de claude.ai de la constante) casan con lo que Lumbre debe
+	 *  devolver. */
+	function echoClientIdFetch(onRequests?: (clientId: string) => void, overrides: Record<string, unknown> = {}): typeof fetch {
+		let currentClientId = CLIENT_ID;
+		// Cada canje devuelve una credencial NUEVA, como Lumbre de verdad:
+		// el almacén declara incoherente tener dos vivas con el mismo id.
+		let currentCredentialId = CREDENTIAL_ID;
+		return oauthFetch({
+			...overrides,
+			onBackchannel: (path, body) => {
+				if (path === 'requests') {
+					currentClientId = String((body as Record<string, unknown>).clientId);
+					onRequests?.(currentClientId);
+				}
+			},
+			exchangeBody: () => {
+				// Un id NUEVO por canje (como Lumbre): el almacén declara
+				// incoherente una credencial viva que ya está en la outbox de
+				// revocación, y este test comparte almacén entre servicios.
+				currentCredentialId = randomUUID();
+				return { credentialId: currentCredentialId, accessToken: UPSTREAM_TOKEN, tokenType: 'Bearer', resource: OAUTH_RESOURCE, scope: OAUTH_SCOPE };
+			},
+			introspectBody: () => ({
+				active: true,
+				credentialId: currentCredentialId,
+				clientId: currentClientId,
+				resource: OAUTH_RESOURCE,
+				scope: OAUTH_SCOPE
+			})
+		});
+	}
+
+	/** Flujo completo de código con el cliente y redirect indicados. */
+	async function authorizeWith(baseUrl: string, clientId: string, redirectUri: string): Promise<string> {
+		const consent = await beginAuthorization(baseUrl, { client_id: clientId, redirect_uri: redirectUri });
+		expect(consent.status).toBe(302);
+		const lumbre = new URL(consent.headers.get('location')!);
+		const requestId = lumbre.searchParams.get('request');
+		expect(requestId).toBeTruthy();
+		const approved = await fetch(`${baseUrl}/oauth/lumbre/callback?request=${requestId}&decision=approved`, {
+			redirect: 'manual'
+		});
+		expect(approved.status).toBe(302);
+		const callback = new URL(approved.headers.get('location')!);
+		const target = new URL(redirectUri);
+		expect(`${callback.origin}${callback.pathname}`).toBe(`${target.origin}${target.pathname}`);
+		expect(callback.searchParams.get('iss')).toBe(OAUTH_ISSUER);
+		return callback.searchParams.get('code')!;
+	}
+
+	async function exchangeWith(baseUrl: string, code: string, clientId: string, redirectUri: string): Promise<Record<string, unknown>> {
+		const response = await fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code',
+				code,
+				client_id: clientId,
+				redirect_uri: redirectUri,
+				resource: OAUTH_RESOURCE,
+				code_verifier: VERIFIER
+			})
+		});
+		expect(response.status).toBe(200);
+		return (await response.json()) as Record<string, unknown>;
+	}
+
+	it('registra a Mistral Vibe y completa code+PKCE con un puerto distinto al registrado', async () => {
+		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
+		const registered = await registerClient(baseUrl, vibeRegistration());
+		expect(registered.status).toBe(201);
+		const body = (await registered.json()) as Record<string, unknown>;
+		expect(body.client_id).toMatch(/^lm_cl_[A-Za-z0-9_-]{43}$/);
+		expect(body.client_id_issued_at).toEqual(expect.any(Number));
+		expect(body.token_endpoint_auth_method).toBe('none');
+		expect(body.scope).toBe(OAUTH_SCOPE);
+		const clientId = body.client_id as string;
+		// RFC 8252 §7.3: el puerto del redirect de loopback puede ser otro.
+		const redirectUri = 'http://127.0.0.1:49155/callback';
+		const code = await authorizeWith(baseUrl, clientId, redirectUri);
+		const tokens = await exchangeWith(baseUrl, code, clientId, redirectUri);
+		expect(tokens.access_token).toMatch(/^lm_at_/);
+		expect(tokens.refresh_token).toMatch(/^lm_rt_/);
+		const rotated = await fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'refresh_token',
+				refresh_token: String(tokens.refresh_token),
+				client_id: clientId,
+				resource: OAUTH_RESOURCE
+			})
+		});
+		expect(rotated.status).toBe(200);
+	});
+
+	it('rechaza registros fuera de forma o fuera de la lista, sin tocar el almacén', async () => {
+		const stateDir = await newStateDir();
+		// Límite holgado: este test hace 15 registros seguidos y el de serie
+		// (10/min e IP) los cortaría a mitad de la tabla de casos.
+		const baseUrl = await listen(
+			new OAuthService({ stateDir, fetch: echoClientIdFetch(), publicLimits: { register: { requestsPerMinute: 1000, concurrent: 8 } } })
+		);
+		const cases: [string, Record<string, unknown>][] = [
+			['client_name desconocido', vibeRegistration({ client_name: 'Otro Cliente' })],
+			['client_name ausente', vibeRegistration({ client_name: undefined })],
+			['redirect no loopback', vibeRegistration({ redirect_uris: ['https://vscode.dev/redirect'] })],
+			['redirect de la LAN', vibeRegistration({ redirect_uris: ['http://192.168.1.5:8080/callback'] })],
+			['redirects vacíos', vibeRegistration({ redirect_uris: [] })],
+			['cliente confidencial', vibeRegistration({ token_endpoint_auth_method: 'client_secret_basic' })],
+			['con client_secret', { ...vibeRegistration(), client_secret: 'secreto' }],
+			['grant client_credentials', vibeRegistration({ grant_types: ['client_credentials'] })],
+			['response_type token', vibeRegistration({ response_types: ['token'] })],
+			['scope ajeno', vibeRegistration({ scope: 'read' })],
+			// La forma REAL de VS Code: DCR confidencial con redirects web.
+			['DCR de VS Code', {
+				client_name: 'Visual Studio Code',
+				token_endpoint_auth_method: 'client_secret_basic',
+				client_secret: 'un-secreto',
+				redirect_uris: ['https://insiders.vscode.dev/redirect', 'https://vscode.dev/redirect', 'http://127.0.0.1:33418/'],
+				grant_types: ['authorization_code', 'refresh_token'],
+				response_types: ['code']
+			}]
+		];
+		for (const [name, requestBody] of cases) {
+			const response = await registerClient(baseUrl, requestBody);
+			expect(response.status, name).toBe(400);
+			const error = (await response.json()) as Record<string, unknown>;
+			expect(error.error, name).toBe('invalid_client_metadata');
+		}
+		// Ni JSON roto ni método ni content-type: el mismo trato.
+		expect((await registerClient(baseUrl, '{no json')).status).toBe(400);
+		expect((await registerClient(baseUrl, vibeRegistration(), 'text/plain')).status).toBe(400);
+		expect((await fetch(`${baseUrl}/register`, { method: 'GET' })).status).toBe(405);
+		// Nada de eso dejó clientes en el almacén: uno válido sigue cabiendo.
+		const later = await registerClient(baseUrl, vibeRegistration());
+		expect(later.status).toBe(201);
+	});
+
+	it('exige un registro vivo: lm_cl_ inventado o caducado no pasa de /authorize ni toca Lumbre', async () => {
+		let lumbreCalls = 0;
+		const stateDir = await newStateDir();
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: echoClientIdFetch(() => { lumbreCalls += 1; }) }));
+		const invented = `lm_cl_${'A'.repeat(43)}`;
+		const response = await beginAuthorization(baseUrl, { client_id: invented, redirect_uri: VIBE_REDIRECT });
+		expect(response.status).toBe(400);
+		const error = (await response.json()) as Record<string, unknown>;
+		expect(error.error).toBe('invalid_client');
+		expect(lumbreCalls).toBe(0);
+
+		// Caducado: registro con reloj fingido, avance de un año, y otra vez.
+		const clockStart = Date.now();
+		let clock = clockStart;
+		const dir = await newStateDir();
+		const timedBase = await listen(new OAuthService({ stateDir: dir, fetch: echoClientIdFetch(() => { lumbreCalls += 1; }), now: () => clock }));
+		const registered = (await (await registerClient(timedBase, vibeRegistration())).json()) as Record<string, unknown>;
+		const clientId = registered.client_id as string;
+		clock = clockStart + 366 * 24 * 60 * 60_000;
+		const expired = await beginAuthorization(timedBase, { client_id: clientId, redirect_uri: VIBE_REDIRECT });
+		expect(expired.status).toBe(400);
+		expect(((await expired.json()) as Record<string, unknown>).error).toBe('invalid_client');
+		expect(lumbreCalls).toBe(0);
+	});
+
+	it('el registro persiste entre reinicios y se re-registra tras caducar sin romper el almacén', async () => {
+		const clockStart = Date.now();
+		let clock = clockStart;
+		const dir = await newStateDir();
+		const fetchFirst = echoClientIdFetch();
+		const baseUrl = await listen(new OAuthService({ stateDir: dir, fetch: fetchFirst, now: () => clock }));
+		const registered = (await (await registerClient(baseUrl, vibeRegistration())).json()) as Record<string, unknown>;
+		const clientId = registered.client_id as string;
+
+		// Reinicio con el reloj real: el registro sigue vivo y autoriza.
+		const restarted = await listen(new OAuthService({ stateDir: dir, fetch: echoClientIdFetch() }));
+		const code = await authorizeWith(restarted, clientId, VIBE_REDIRECT);
+		expect(code).toBeTruthy();
+
+		// Un año después: caducado, se re-registra, y el nuevo funciona. El
+		// viejo arrastra una solicitud pendiente (la del authorize de arriba
+		// ya consumió el callback, así que aquí solo importan el alta nueva y
+		// la coherencia del almacén tras la poda).
+		const yearLater = clockStart + 366 * 24 * 60 * 60_000;
+		const futureBase = await listen(
+			new OAuthService({ stateDir: dir, fetch: echoClientIdFetch(undefined, { requestBody: pendingRequestBody(yearLater) }), now: () => yearLater })
+		);
+		const again = (await (await registerClient(futureBase, vibeRegistration())).json()) as Record<string, unknown>;
+		const newClientId = again.client_id as string;
+		expect(newClientId).not.toBe(clientId);
+		const futureCode = await authorizeWith(futureBase, newClientId, VIBE_REDIRECT);
+		expect(futureCode).toBeTruthy();
+		// El registro viejo ya no vale…
+		const oldClient = await beginAuthorization(futureBase, { client_id: clientId, redirect_uri: VIBE_REDIRECT });
+		expect(oldClient.status).toBe(400);
+		// …y el almacén sigue siendo legible y coherente.
+		const future = new OAuthService({ stateDir: dir, fetch: echoClientIdFetch(), now: () => yearLater });
+		await expect(future.checkReady()).resolves.toBeUndefined();
+	});
+
+	it('admite a VS Code (Copilot local) con su client id público y redirect loopback de puerto y path libres', async () => {
+		const stateDir = await newStateDir();
+		const baseUrl = await listen(new OAuthService({ stateDir, fetch: echoClientIdFetch() }));
+		// Como su fallback real: redirect sin path (VS Code escucha en el
+		// raíz) y con path, y con cualquier puerto.
+		for (const redirectUri of ['http://127.0.0.1:33418', 'http://localhost:33419/callback']) {
+			const code = await authorizeWith(baseUrl, VSCODE_PUBLIC_CLIENT_ID, redirectUri);
+			const tokens = await exchangeWith(baseUrl, code, VSCODE_PUBLIC_CLIENT_ID, redirectUri);
+			expect(tokens.access_token).toMatch(/^lm_at_/);
+		}
+		// Fuera de loopback, ni hablar.
+		const bad = await beginAuthorization(baseUrl, {
+			client_id: VSCODE_PUBLIC_CLIENT_ID,
+			redirect_uri: 'https://vscode.dev/redirect'
+		});
+		expect(bad.status).toBe(400);
+	});
+
+	it('limita /register por IP y expulsa al registro más antiguo al llegar al tope', async () => {
+		// Rate limit de serie: 10/min e IP. La 11ª se queda fuera.
+		const tightBase = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
+		for (let index = 0; index < 10; index += 1) {
+			expect((await registerClient(tightBase, vibeRegistration())).status).toBe(201);
+		}
+		const throttled = await registerClient(tightBase, vibeRegistration());
+		expect(throttled.status).toBe(429);
+		expect(((await throttled.json()) as Record<string, unknown>).error).toBe('temporarily_unavailable');
+
+		// Tope de clientes: un almacén ya lleno (256) conserva el tamaño y
+		// expulsa al MÁS ANTIGUO, no al recién llegado.
+		const dir = await newStateDir();
+		const oldestId = `lm_cl_${'B'.repeat(43)}`;
+		const fullStore = {
+			version: 3,
+			grants: [],
+			usedRefreshTokens: [],
+			authorizationRequests: [],
+			authorizationCodes: [],
+			revocationOutbox: [],
+			redeemedCodes: [],
+			usedLogoutTokens: [],
+			closedSumegoSessions: [],
+			registeredClients: [
+				{
+					clientId: oldestId,
+					clientName: 'Mistral Vibe',
+					redirectUris: [VIBE_REDIRECT],
+					createdAt: Date.now() - 86_400_000,
+					expiresAt: Date.now() + 86_400_000
+				},
+				...Array.from({ length: 255 }, (_, index) => {
+					const suffix = index.toString(36);
+					return {
+						clientId: `lm_cl_${'C'.repeat(43 - suffix.length)}${suffix}`,
+						clientName: 'Mistral Vibe',
+						redirectUris: [VIBE_REDIRECT],
+						createdAt: Date.now(),
+						expiresAt: Date.now() + 86_400_000
+					};
+				})
+			]
+		};
+		await writeFile(join(dir, 'oauth-store.json'), JSON.stringify(fullStore), 'utf8');
+		// La clave de cifrado, como la escribiría el relé: sin ella, un
+		// store presente se considera incoherente (falla cerrado).
+		await writeFile(join(dir, 'oauth.key'), randomBytes(32).toString('base64url'), 'utf8');
+		const cappedBase = await listen(new OAuthService({ stateDir: dir, fetch: echoClientIdFetch() }));
+		const newest = await registerClient(cappedBase, vibeRegistration());
+		expect(newest.status).toBe(201);
+		const stored = JSON.parse(await readFile(join(dir, 'oauth-store.json'), 'utf8')) as { registeredClients: { clientId: string }[] };
+		expect(stored.registeredClients).toHaveLength(256);
+		expect(stored.registeredClients.some((client) => client.clientId === oldestId)).toBe(false);
+		const evicted = await beginAuthorization(cappedBase, { client_id: oldestId, redirect_uri: VIBE_REDIRECT });
+		expect(evicted.status).toBe(400);
+	});
+
+	it('registeredClientNamesFromEnv: lista por entorno, y la lista vacía cae al de serie', async () => {
+		const { registeredClientNamesFromEnv } = await import('./oauth.js');
+		expect(registeredClientNamesFromEnv({})).toEqual(['Mistral Vibe']);
+		expect(registeredClientNamesFromEnv({ LUMBRE_MCP_DCR_CLIENT_NAMES: ' Copilot CLI , Otro ' })).toEqual(['Copilot CLI', 'Otro']);
+		expect(registeredClientNamesFromEnv({ LUMBRE_MCP_DCR_CLIENT_NAMES: ' , , ' })).toEqual(['Mistral Vibe']);
+		// Y el servicio lo usa: un nombre ampliado por entorno pasa el registro.
+		process.env.LUMBRE_MCP_DCR_CLIENT_NAMES = 'Copilot CLI';
+		try {
+			const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
+			const allowed = await registerClient(baseUrl, vibeRegistration({ client_name: 'Copilot CLI' }));
+			expect(allowed.status).toBe(201);
+			const denied = await registerClient(baseUrl, vibeRegistration());
+			expect(denied.status).toBe(400);
+		} finally {
+			delete process.env.LUMBRE_MCP_DCR_CLIENT_NAMES;
 		}
 	});
 });

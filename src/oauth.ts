@@ -67,6 +67,53 @@ const MAX_PENDING_ITEMS = 1_000;
 const MAX_CIMD_CACHE_ITEMS = 128;
 const DEFAULT_CIMD_CACHE_MS = 5 * 60_000;
 const MAX_CIMD_CACHE_MS = 60 * 60_000;
+
+/**
+ * Registro dinámico de clientes (RFC 7591) para Mistral Vibe. El `client_id`
+ * que emite este relé es opaco (`lm_cl_` + 32 bytes en base64url), igual de
+ * largo que los demás valores opacos, y SOLO se acepta si sigue vivo en el
+ * almacén: falsificarlo no vale sin el registro, y el registro no se consigue
+ * sin pasar `handleRegister`.
+ */
+const REGISTERED_CLIENT_PREFIX = 'lm_cl_';
+const REGISTERED_CLIENT_ID_PATTERN = /^lm_cl_[A-Za-z0-9_-]{43}$/;
+/**
+ * Vigencia de un cliente registrado. Un año: los clientes de verdad guardan
+ * el `client_id` para siempre (Vibe en el keyring, VS Code en su almacén de
+ * secretos) y solo lo pierden al reinstalar, y si un registro caduca, el
+ * cliente lo vuelve a pedir solo (Vibe suelta las credenciales y reintenta
+ * el alta completa). Mucho más corto castigaría a quien conecta cada cierto
+ * tiempo sin ganar nada: el registro no autoriza nada por sí mismo.
+ */
+const REGISTERED_CLIENT_TTL_MS = 365 * 24 * 60 * 60_000;
+/**
+ * Techo de clientes registrados a la vez; al llegar se descarta el más
+ * antiguo (FIFO). El uso real son 2-4. Un registro no autoriza nada: solo
+ * da derecho a pedir `/authorize`, que sigue pasando por el presupuesto,
+ * el login de Lumbre/Sumego y el consentimiento de la persona.
+ */
+const MAX_REGISTERED_CLIENTS = 256;
+/** Redirects que admite un solo registro; Vibe registra uno. */
+const MAX_REGISTERED_REDIRECTS = 8;
+/**
+ * Client id PÚBLICO de Visual Studio Code (donde vive Copilot local): VS Code
+ * intenta primero un DCR confidencial (con `client_secret` y redirects de
+ * vscode.dev), que este relé rechaza por diseño, y si el registro falla
+ * reintenta con ESTE id fijo y un redirect loopback con PKCE — el mismo que
+ * aceptan los MCP de GitHub y Microsoft. No es un secreto: es un literal del
+ * código fuente de VS Code, y aquí se admite con la MISMA restricción de
+ * forma que el DCR: solo redirects loopback.
+ */
+const VSCODE_PUBLIC_CLIENT_ID = 'aebc6443-996d-45c2-90f0-388ff96faa56';
+/**
+ * `client_name` que este relé admite en `/register`. La restricción NO es de
+ * seguridad — el nombre lo elige quien llama y se puede imitar — sino de
+ * política: sin ella, cualquier script pasaría el registro con tal de usar
+ * loopback. La forma (público + loopback + PKCE) es la barrera real; el
+ * nombre decide quién se molesta en intentarlo. Ampliable por entorno
+ * (`registeredClientNamesFromEnv`) sin tocar código.
+ */
+const DEFAULT_DCR_CLIENT_NAMES = ['Mistral Vibe'];
 const MAX_REFRESH_TOMBSTONES = 10_000;
 /**
  * Tombstones que se guardan por familia de refresh. Al llegar al tope se
@@ -151,7 +198,7 @@ const REVOCATION_OUTBOX_TTL_MS = 30 * 24 * 60 * 60_000;
 const MASS_PURGE_MIN_GRANTS = 5;
 const MASS_PURGE_MAX_RATIO = 0.5;
 
-type PublicEndpoint = 'authorize' | 'token' | 'revoke' | 'logout';
+type PublicEndpoint = 'authorize' | 'token' | 'revoke' | 'logout' | 'register';
 
 interface PublicLimit {
 	requestsPerMinute: number;
@@ -165,11 +212,19 @@ interface PublicLimit {
  * cuesta un POST anónimo con un JWT inventado (una verificación de firma y,
  * como mucho una vez por minuto, una relectura del JWKS).
  */
+/**
+ * `register` es el registro dinámico de clientes (RFC 7591), restringido a
+ * la forma de cliente público con redirect loopback (ver `handleRegister`).
+ * No toca Lumbre ni crea autorizaciones: solo una escritura del almacén, así
+ * que 10 por minuto e IP y 4 en vuelo sobran a un cliente real, que se
+ * registra UNA vez y guarda el `client_id`.
+ */
 const DEFAULT_PUBLIC_LIMITS: Record<PublicEndpoint, PublicLimit> = {
 	authorize: { requestsPerMinute: 30, concurrent: 8 },
 	token: { requestsPerMinute: 60, concurrent: 16 },
 	revoke: { requestsPerMinute: 60, concurrent: 16 },
-	logout: { requestsPerMinute: 60, concurrent: 8 }
+	logout: { requestsPerMinute: 60, concurrent: 8 },
+	register: { requestsPerMinute: 10, concurrent: 4 }
 };
 
 /**
@@ -509,6 +564,12 @@ interface OAuthStore {
 	usedLogoutTokens: UsedLogoutToken[];
 	/** Igual de opcional en disco. Ver `ClosedSumegoSession`. */
 	closedSumegoSessions: ClosedSumegoSession[];
+	/**
+	 * Clientes registrados por DCR (Mistral Vibe); ver `RegisteredClient`.
+	 * OPCIONAL en disco por migración, como `redeemedCodes`: un store anterior
+	 * al DCR carga con la lista vacía. En memoria siempre está.
+	 */
+	registeredClients: RegisteredClient[];
 }
 
 interface EncryptedValue {
@@ -524,6 +585,22 @@ interface ClientMetadata {
 	token_endpoint_auth_method?: string;
 	grant_types?: string[];
 	response_types?: string[];
+}
+
+/**
+ * Cliente registrado por DCR (`handleRegister`): Mistral Vibe. Los
+ * `redirectUris` se guardan tal y como se validaron (loopback `http`) y el
+ * `clientName` ya recortado; no hay secreto porque solo se admiten clientes
+ * públicos.
+ */
+interface RegisteredClient {
+	clientId: string;
+	clientName: string;
+	redirectUris: string[];
+	/** Epoch ms de emisión; para `client_id_issued_at` y para el FIFO del tope. */
+	createdAt: number;
+	/** Epoch ms en que caduca el registro; ver `REGISTERED_CLIENT_TTL_MS`. */
+	expiresAt: number;
 }
 
 export interface OAuthServiceOptions {
@@ -560,6 +637,9 @@ export interface OAuthServiceOptions {
 	/** Con quién se identifica la persona en `/authorize`. Por defecto, lo
 	 *  que diga el entorno (`loginConfigFromEnv`): `lumbre` si no hay nada. */
 	login?: LoginConfig;
+	/** `client_name` que `/register` admite; por defecto, lo que diga el
+	 *  entorno (`registeredClientNamesFromEnv`) y si no, Mistral Vibe solo. */
+	dcrClientNames?: string[];
 	/** Cliente OIDC de Sumego. Por defecto, `SumegoOidcClient` con
 	 *  `login.sumego`, el `fetch` y el reloj de este servicio. */
 	sumego?: SumegoOidcApi;
@@ -645,6 +725,22 @@ class OAuthError extends Error {
 function defaultStateDir(): string {
 	const root = process.env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
 	return join(root, 'lumbre-mcp');
+}
+
+/**
+ * `client_name` admitidos en `/register` (ver `DEFAULT_DCR_CLIENT_NAMES`).
+ * `LUMBRE_MCP_DCR_CLIENT_NAMES` los sustituye: una lista separada por comas
+ * que se recorta —un valor en blanco o solo comas devuelve el de serie, no
+ * una lista vacía que cerraría el registro a todo el mundo sin querer.
+ */
+export function registeredClientNamesFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+	const raw = env.LUMBRE_MCP_DCR_CLIENT_NAMES?.trim();
+	if (!raw) return [...DEFAULT_DCR_CLIENT_NAMES];
+	const names = raw
+		.split(',')
+		.map((name) => name.trim())
+		.filter((name) => name.length > 0 && name.length <= 120);
+	return names.length > 0 ? names : [...DEFAULT_DCR_CLIENT_NAMES];
 }
 
 function opaque(prefix: string): string {
@@ -871,6 +967,76 @@ function validateClientIdUrl(clientId: string): URL {
 	return url;
 }
 
+/** ¿Es un `client_id` emitido por el DCR de este relé? Solo la FORMA: el
+ *  registro vivo se mira en el almacén. */
+function isRegisteredClientId(clientId: string): boolean {
+	return REGISTERED_CLIENT_ID_PATTERN.test(clientId);
+}
+
+function isVSCodePublicClientId(clientId: string): boolean {
+	return clientId === VSCODE_PUBLIC_CLIENT_ID;
+}
+
+/**
+ * URI de redirect con la forma que este relé admite para clientes LOCALES
+ * (Vibe por DCR, VS Code por su client id público): `http` a la interface
+ * loopback (`127.0.0.1`, `localhost` o `::1`), sin query, fragment ni
+ * userinfo, y con un path sin segmentos `.`/`..`. El puerto queda LIBRE: por
+ * RFC 8252 §7.3 cada conexión abre uno nuevo y el servidor no puede fijarlo;
+ * comparar redirects de loopback por puerto exacto rompería a todo cliente
+ * real, y no protege de nada — solo el dueño de la máquina escucha ahí.
+ */
+function parseLoopbackRedirect(value: string): URL | undefined {
+	if (value.length > 1024) return undefined;
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return undefined;
+	}
+	if (url.protocol !== 'http:' || (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost' && url.hostname !== '::1')) {
+		return undefined;
+	}
+	if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') return undefined;
+	for (const segment of url.pathname.split('/')) {
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(segment);
+		} catch {
+			return undefined;
+		}
+		if (decoded === '.' || decoded === '..') return undefined;
+	}
+	if (url.pathname.length > 512) return undefined;
+	return url;
+}
+
+/**
+ * ¿Casa `requested` con `registered` para un cliente loopback? Las dos con
+ * la forma válida y el MISMO path; el puerto se ignora (RFC 8252 §7.3) y los
+ * tres literales de loopback cuentan como el mismo sitio (lo son: la
+ * interface de la propia máquina).
+ */
+function loopbackRedirectMatches(requested: string, registered: string): boolean {
+	const requestedUrl = parseLoopbackRedirect(requested);
+	const registeredUrl = parseLoopbackRedirect(registered);
+	return requestedUrl !== undefined && registeredUrl !== undefined && requestedUrl.pathname === registeredUrl.pathname;
+}
+
+/**
+ * ¿Tiene este `client_id` una forma que este relé haya podido aceptar?
+ * `validateClientIdUrl`, pero conociendo también los dos `client_id` que NO
+ * son documentos: el registro DCR (`lm_cl_…`, Mistral Vibe) y el client id
+ * público de VS Code (Copilot local). Como esa, LANZA: se usa donde un
+ * `client_id` raro debe tumbar la comprobación entera (readiness), no
+ * contestar un 400. Sin esto, la primera conexión de Vibe o VS Code dejaba
+ * el readiness en 503 para siempre.
+ */
+function validateStoredClientId(clientId: string): void {
+	if (isVSCodePublicClientId(clientId) || isRegisteredClientId(clientId)) return;
+	validateClientIdUrl(clientId);
+}
+
 function registeredRedirectMatches(clientId: string, requested: string, registered: string): boolean {
 	if (requested === registered) return true;
 	const client = validateClientIdUrl(clientId);
@@ -899,7 +1065,17 @@ function registeredRedirectMatches(clientId: string, requested: string, register
 	}
 }
 
-function validStoredRedirect(clientId: string, redirectUri: string): boolean {
+function validStoredRedirect(clientId: string, redirectUri: string, registeredClients: readonly RegisteredClient[] = []): boolean {
+	// VS Code (Copilot local) con su client id público: cualquier redirect
+	// loopback bien formado; el path lo elige su listener, no nosotros.
+	if (isVSCodePublicClientId(clientId)) return parseLoopbackRedirect(redirectUri) !== undefined;
+	// Cliente DCR: tiene que seguir registrado y el redirect tiene que casar
+	// (path exacto, puerto libre) con alguno de los que declaró al registrarse.
+	if (isRegisteredClientId(clientId)) {
+		return registeredClients.some(
+			(client) => client.clientId === clientId && client.redirectUris.some((registered) => loopbackRedirectMatches(redirectUri, registered))
+		);
+	}
 	const client = validateClientIdUrl(clientId);
 	if (client.hostname === 'claude.ai') return redirectUri === OAUTH_CALLBACK;
 	const callbackId = client.pathname.match(/^\/oauth\/codex\/([A-Za-z0-9_-]+)\/client\.json$/)?.[1];
@@ -1170,6 +1346,7 @@ function normalizeStore(value: unknown): OAuthStore {
 		redeemedCodes?: unknown;
 		usedLogoutTokens?: unknown;
 		closedSumegoSessions?: unknown;
+		registeredClients?: unknown;
 	};
 	if (raw.version === 1 || raw.version === 2) {
 		throw new Error('store OAuth provisional v1/v2 no compatible; archívalo y vuelve a autorizar desde la sesión web');
@@ -1183,7 +1360,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		!Array.isArray(raw.revocationOutbox) ||
 		(raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes)) ||
 		(raw.usedLogoutTokens !== undefined && !Array.isArray(raw.usedLogoutTokens)) ||
-		(raw.closedSumegoSessions !== undefined && !Array.isArray(raw.closedSumegoSessions))
+		(raw.closedSumegoSessions !== undefined && !Array.isArray(raw.closedSumegoSessions)) ||
+		(raw.registeredClients !== undefined && !Array.isArray(raw.registeredClients))
 	) {
 		throw new Error('store OAuth inválido');
 	}
@@ -1243,6 +1421,36 @@ function normalizeStore(value: unknown): OAuthStore {
 		[...familyCounts].filter(([, count]) => count > MAX_REFRESH_TOMBSTONES_PER_FAMILY).map(([familyId]) => familyId)
 	);
 	if (overflowFamilies.size > 0) throw new Error('store OAuth incoherente: familia sobre el límite de tombstones');
+	// Antes de las solicitudes y los códigos: ambos validan su redirect con
+	// la lista de clientes registrados (`validStoredRedirect`).
+	const registeredClients = ((raw.registeredClients ?? []) as unknown[]).map((value): RegisteredClient => {
+		if (!value || typeof value !== 'object') throw new Error('cliente registrado OAuth inválido');
+		const item = value as Partial<RegisteredClient>;
+		if (
+			typeof item.clientId !== 'string' ||
+			!isRegisteredClientId(item.clientId) ||
+			typeof item.clientName !== 'string' ||
+			item.clientName !== item.clientName.trim() ||
+			item.clientName.length === 0 ||
+			item.clientName.length > 120 ||
+			!Array.isArray(item.redirectUris) ||
+			item.redirectUris.length === 0 ||
+			item.redirectUris.length > MAX_REGISTERED_REDIRECTS ||
+			!item.redirectUris.every((redirect) => typeof redirect === 'string' && parseLoopbackRedirect(redirect) !== undefined) ||
+			typeof item.createdAt !== 'number' ||
+			typeof item.expiresAt !== 'number' ||
+			item.expiresAt <= item.createdAt
+		) {
+			throw new Error('cliente registrado OAuth inválido');
+		}
+		return item as RegisteredClient;
+	});
+	if (
+		registeredClients.length > MAX_REGISTERED_CLIENTS ||
+		new Set(registeredClients.map((client) => client.clientId)).size !== registeredClients.length
+	) {
+		throw new Error('store OAuth incoherente');
+	}
 	const authorizationRequests = raw.authorizationRequests.map((value): StoredAuthorizationRequest => {
 		if (!value || typeof value !== 'object') throw new Error('autorización OAuth inválida');
 		const item = value as Partial<StoredAuthorizationRequest>;
@@ -1256,7 +1464,7 @@ function normalizeStore(value: unknown): OAuthStore {
 			item.clientName.length > 120 ||
 			typeof item.clientId !== 'string' ||
 			typeof item.redirectUri !== 'string' ||
-			!validStoredRedirect(item.clientId, item.redirectUri) ||
+			!validStoredRedirect(item.clientId, item.redirectUri, registeredClients) ||
 			item.scope !== OAUTH_SCOPE ||
 			item.resource !== OAUTH_RESOURCE ||
 			typeof item.challenge !== 'string' ||
@@ -1284,7 +1492,7 @@ function normalizeStore(value: unknown): OAuthStore {
 			!isValidRequestId(item.credentialId) ||
 			typeof item.clientId !== 'string' ||
 			typeof item.redirectUri !== 'string' ||
-			!validStoredRedirect(item.clientId, item.redirectUri) ||
+			!validStoredRedirect(item.clientId, item.redirectUri, registeredClients) ||
 			item.scope !== OAUTH_SCOPE ||
 			item.resource !== OAUTH_RESOURCE ||
 			typeof item.challenge !== 'string' ||
@@ -1386,7 +1594,8 @@ function normalizeStore(value: unknown): OAuthStore {
 		revocationOutbox,
 		redeemedCodes,
 		usedLogoutTokens,
-		closedSumegoSessions
+		closedSumegoSessions,
+		registeredClients
 	};
 }
 
@@ -1485,8 +1694,9 @@ export class OAuthService {
 	 *  hablando con Lumbre y aún no ha guardado su pendiente; ver
 	 *  `reservePendingSlot`. */
 	private pendingReservations = 0;
-	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0, logout: 0 };
+	private readonly inFlight: Record<PublicEndpoint, number> = { authorize: 0, token: 0, revoke: 0, logout: 0, register: 0 };
 	private readonly login: LoginConfig;
+	private readonly dcrClientNames: string[];
 	private readonly sumego: SumegoOidcApi;
 	private readonly sumegoRenewalJoined?: () => void;
 	private readonly clientMetadataCache = new Map<string, { metadata: ClientMetadata; expiresAt: number }>();
@@ -1566,11 +1776,13 @@ export class OAuthService {
 			authorize: { ...DEFAULT_PUBLIC_LIMITS.authorize, ...options.publicLimits?.authorize },
 			token: { ...DEFAULT_PUBLIC_LIMITS.token, ...options.publicLimits?.token },
 			revoke: { ...DEFAULT_PUBLIC_LIMITS.revoke, ...options.publicLimits?.revoke },
-			logout: { ...DEFAULT_PUBLIC_LIMITS.logout, ...options.publicLimits?.logout }
+			logout: { ...DEFAULT_PUBLIC_LIMITS.logout, ...options.publicLimits?.logout },
+			register: { ...DEFAULT_PUBLIC_LIMITS.register, ...options.publicLimits?.register }
 		};
 		// El proveedor se fija al construir: un valor desconocido o `sumego` sin
 		// secreto lanzan aquí, y `http.ts` no abre el listener.
 		this.login = options.login ?? loginConfigFromEnv();
+		this.dcrClientNames = options.dcrClientNames ?? registeredClientNamesFromEnv();
 		this.sumego = options.sumego ?? new SumegoOidcClient({ config: this.login.sumego, fetch: this.fetchFn, now: this.now });
 		if (this.login.provider === 'sumego') this.sumego.ensureConfigured();
 		this.sumegoRenewalJoined = options.sumegoRenewalJoined;
@@ -1594,6 +1806,7 @@ export class OAuthService {
 			authorization_endpoint: `${OAUTH_ISSUER}/authorize`,
 			token_endpoint: `${OAUTH_ISSUER}/token`,
 			revocation_endpoint: `${OAUTH_ISSUER}/revoke`,
+			registration_endpoint: `${OAUTH_ISSUER}/register`,
 			response_types_supported: ['code'],
 			grant_types_supported: ['authorization_code', 'refresh_token'],
 			code_challenge_methods_supported: ['S256'],
@@ -1945,20 +2158,43 @@ export class OAuthService {
 			release = this.enterPublicEndpoint(req, 'authorize');
 			if (req.method !== 'GET') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
 			const request = this.authorizationRequest(url.searchParams);
-			const metadata = await this.clientMetadata(request.clientId);
-			if (!metadata.redirect_uris.some((registered) => registeredRedirectMatches(request.clientId, request.redirectUri, registered))) {
-				throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
+			// Tres clases de cliente: el documento de metadatos (CIMD) de
+			// claude.ai o Codex, el DCR de Mistral Vibe (`lm_cl_…`, que tiene
+			// que seguir VIVO en el almacén), y el client id público de VS
+			// Code (Copilot local), al que VS Code cae cuando su DCR
+			// confidencial se rechaza. Los tres acaban igual: un `clientName`
+			// para el consentimiento y un redirect que el almacén va a poder
+			// guardar (B2 del audit de seguridad del 10 oct 2026: se comprueba
+			// AQUÍ y no solo en `normalizeStore`, antes de gastar presupuesto
+			// y de crear el registro en Lumbre).
+			let clientName: string;
+			let redirectAdmitted: boolean;
+			if (isVSCodePublicClientId(request.clientId)) {
+				clientName = 'Visual Studio Code';
+				redirectAdmitted = validStoredRedirect(request.clientId, request.redirectUri);
+			} else if (isRegisteredClientId(request.clientId)) {
+				const registeredClients = (await this.loadStore()).registeredClients;
+				const registered = registeredClients.find(
+					(client) => client.clientId === request.clientId && client.expiresAt > this.now()
+				);
+				if (!registered) {
+					throw new OAuthError('invalid_client', 'Cliente no registrado o con el registro caducado; vuelve a conectar.');
+				}
+				clientName = registered.clientName;
+				redirectAdmitted =
+					registered.redirectUris.some((uri) => loopbackRedirectMatches(request.redirectUri, uri)) &&
+					validStoredRedirect(request.clientId, request.redirectUri, registeredClients);
+			} else {
+				const metadata = await this.clientMetadata(request.clientId);
+				if (!metadata.redirect_uris.some((registered) => registeredRedirectMatches(request.clientId, request.redirectUri, registered))) {
+					throw new OAuthError('invalid_request', 'redirect_uri no registrado.');
+				}
+				clientName = metadata.client_name!.trim().slice(0, 120);
+				redirectAdmitted = validStoredRedirect(request.clientId, request.redirectUri);
 			}
-			// La URI que el almacén aceptará guardar para este cliente, mirada
-			// AQUÍ y no solo en `normalizeStore` (B2 del audit de seguridad del
-			// 10 oct 2026). Si el CIMD de un `client_id` de claude.ai registraba
-			// otra URI, la comprobación de arriba pasaba, se creaba el registro
-			// en Lumbre y el rechazo llegaba al guardar: un 500 y un registro
-			// huérfano allí. Ahora es un 400 antes de gastar presupuesto.
-			if (!validStoredRedirect(request.clientId, request.redirectUri)) {
+			if (!redirectAdmitted) {
 				throw new OAuthError('invalid_request', 'redirect_uri no admitido para este cliente.');
 			}
-			const clientName = metadata.client_name!.trim().slice(0, 120);
 			// Las DOS puertas antes de tocar app.lumbre.pro: el presupuesto
 			// (por IP, por `client_id` y global; el límite por IP de
 			// `enterPublicEndpoint` no basta, se reparte entre IPs), y un hueco
@@ -2712,6 +2948,139 @@ export class OAuthService {
 		);
 	}
 
+	/**
+	 * `POST /register` (RFC 7591): registro dinámico de clientes, restringido
+	 * a la forma que este relé admite — cliente PÚBLICO (sin secreto) con
+	 * redirect loopback y `client_name` en la lista (`DEFAULT_DCR_CLIENT_NAMES`,
+	 * ampliable por `LUMBRE_MCP_DCR_CLIENT_NAMES`). Es el alta de Mistral
+	 * Vibe; VS Code no pasa por aquí (su DCR es confidencial y con redirects
+	 * de vscode.dev: se rechaza y cae a su client id público, pre-admitido en
+	 * `handleAuthorize`), y claude.ai y Codex usan el documento CIMD.
+	 *
+	 * Lo que NO hace: no emite secreto, no autoriza nada, no habla con
+	 * Lumbre. El registro solo da derecho a pedir `/authorize`, donde siguen
+	 * el presupuesto, el login de la persona y el consentimiento.
+	 */
+	async handleRegister(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		let release: (() => void) | undefined;
+		try {
+			// Primero el cuerpo, después la ranura: como en `/token` (M3 del
+			// audit de seguridad), una conexión lenta no puede ir ocupando las
+			// 4 ranuras mientras manda bytes. La lectura ya está acotada en
+			// tamaño y tiempo (`readLimitedBody`).
+			this.enterRateLimit(req, 'register');
+			if (req.method !== 'POST') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
+			const contentType = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
+			if (contentType !== 'application/json') {
+				throw new OAuthError('invalid_client_metadata', 'Se requiere application/json.');
+			}
+			let requested: unknown;
+			try {
+				requested = JSON.parse(await readLimitedBody(req, MAX_FORM_BYTES, this.formReadTimeoutMs));
+			} catch (error) {
+				if (error instanceof OAuthError) throw error;
+				throw new OAuthError('invalid_client_metadata', 'La solicitud de registro no es JSON válido.');
+			}
+			release = this.enterConcurrency('register');
+			const registration = this.registrationRequest(requested);
+			// La clave ANTES de persistir: un registro puede ser lo PRIMERO
+			// que escriba este almacén, y el invariant es que el store nunca
+			// existe sin su clave (`loadOrCreateKey` falla cerrado si no).
+			await this.key();
+			const client = await this.persistRegisteredClient(registration);
+			json(res, 201, {
+				client_id: client.clientId,
+				client_id_issued_at: Math.floor(client.createdAt / 1000),
+				client_name: client.clientName,
+				redirect_uris: client.redirectUris,
+				grant_types: ['authorization_code', 'refresh_token'],
+				response_types: ['code'],
+				token_endpoint_auth_method: 'none',
+				scope: OAUTH_SCOPE
+			});
+		} catch (error) {
+			oauthError(res, error);
+		} finally {
+			release?.();
+		}
+	}
+
+	/**
+	 * Valida el cuerpo de `/register` y devuelve lo que se guarda. Cada
+	 * rechazo es `invalid_client_metadata` (RFC 7591 §3.2.2): el registro
+	 * está restringido a propósito y el motivo exacto es lo de menos para
+	 * quien llama; los mensajes son para quien depura.
+	 */
+	private registrationRequest(requested: unknown): { clientName: string; redirectUris: string[] } {
+		const metadataError = (message: string): OAuthError => new OAuthError('invalid_client_metadata', message);
+		if (!requested || typeof requested !== 'object' || Array.isArray(requested)) {
+			throw metadataError('Solicitud de registro inválida.');
+		}
+		const candidate = requested as Record<string, unknown>;
+		// Nada de clientes confidenciales: no hay `client_secret` que guardar
+		// ni `client_secret_basic` que soportar, y no se van a admitir.
+		if (
+			candidate.client_secret !== undefined ||
+			(candidate.token_endpoint_auth_method !== undefined && candidate.token_endpoint_auth_method !== 'none')
+		) {
+			throw metadataError('Solo se admiten clientes públicos sin secreto.');
+		}
+		if (typeof candidate.client_name !== 'string' || !this.dcrClientNames.includes(candidate.client_name.trim())) {
+			throw metadataError('Cliente no admitido.');
+		}
+		const redirectUris = candidate.redirect_uris;
+		if (
+			!Array.isArray(redirectUris) ||
+			redirectUris.length === 0 ||
+			redirectUris.length > MAX_REGISTERED_REDIRECTS ||
+			!redirectUris.every((redirect) => typeof redirect === 'string' && parseLoopbackRedirect(redirect) !== undefined)
+		) {
+			throw metadataError('Solo se admiten redirect_uri de loopback http.');
+		}
+		if (
+			candidate.grant_types !== undefined &&
+			(!Array.isArray(candidate.grant_types) ||
+				!candidate.grant_types.every((grant) => grant === 'authorization_code' || grant === 'refresh_token') ||
+				!candidate.grant_types.includes('authorization_code'))
+		) {
+			throw metadataError('Solo se admiten los grants authorization_code y refresh_token.');
+		}
+		if (
+			candidate.response_types !== undefined &&
+			(!Array.isArray(candidate.response_types) || candidate.response_types.length !== 1 || candidate.response_types[0] !== 'code')
+		) {
+			throw metadataError('Solo se admite response_type=code.');
+		}
+		if (candidate.scope !== undefined && candidate.scope !== OAUTH_SCOPE) {
+			throw metadataError(`El scope debe ser ${OAUTH_SCOPE}.`);
+		}
+		return { clientName: candidate.client_name.trim().slice(0, 120), redirectUris: redirectUris as string[] };
+	}
+
+	/**
+	 * Emite el `client_id` y lo persiste. La poda de caducados corre en el
+	 * housekeeping de `mutateStore`; el tope (`MAX_REGISTERED_CLIENTS`) se
+	 * aplica aquí expulsando al MÁS ANTIGUO (FIFO por `createdAt`): un
+	 * registro no autoriza nada, así que expulsar uno solo obliga a su cliente
+	 * a darse de alta otra vez.
+	 */
+	private async persistRegisteredClient(registration: { clientName: string; redirectUris: string[] }): Promise<RegisteredClient> {
+		const now = this.now();
+		const client: RegisteredClient = {
+			clientId: opaque(REGISTERED_CLIENT_PREFIX),
+			clientName: registration.clientName,
+			redirectUris: registration.redirectUris,
+			createdAt: now,
+			expiresAt: now + REGISTERED_CLIENT_TTL_MS
+		};
+		await this.mutateStore((store) => {
+			while (store.registeredClients.length >= MAX_REGISTERED_CLIENTS) store.registeredClients.shift();
+			store.registeredClients.push(client);
+			return true;
+		});
+		return client;
+	}
+
 	async handleToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		let release: (() => void) | undefined;
 		try {
@@ -3407,7 +3776,7 @@ export class OAuthService {
 		const generation = this.storeGeneration;
 		const store = await this.readStore();
 		for (const grant of store.grants) {
-			validateClientIdUrl(grant.clientId);
+			validateStoredClientId(grant.clientId);
 			if (
 				grant.provider !== 'lumbre-web' ||
 				!isValidRequestId(grant.credentialId) ||
@@ -3424,7 +3793,7 @@ export class OAuthService {
 			if (!/^[a-f0-9]{64}$/.test(upstream)) throw new Error('credencial upstream inválida');
 		}
 		for (const pending of store.authorizationRequests) {
-			validateClientIdUrl(pending.clientId);
+			validateStoredClientId(pending.clientId);
 			const transactionId = decrypt(
 				pending.transaction,
 				key,
@@ -3439,7 +3808,7 @@ export class OAuthService {
 			}
 		}
 		for (const code of store.authorizationCodes) {
-			validateClientIdUrl(code.clientId);
+			validateStoredClientId(code.clientId);
 			const upstream = decrypt(code.upstream, key, grantContext(code.clientId, code.resource, code.scope));
 			if (!/^[a-f0-9]{64}$/.test(upstream)) throw new Error('credencial upstream inválida');
 		}
@@ -3991,7 +4360,8 @@ export class OAuthService {
 					revocationOutbox: [],
 					redeemedCodes: [],
 					usedLogoutTokens: [],
-					closedSumegoSessions: []
+					closedSumegoSessions: [],
+					registeredClients: []
 				};
 			}
 			throw error;
@@ -4107,12 +4477,46 @@ export class OAuthService {
 				store.usedLogoutTokens = store.usedLogoutTokens.filter((item) => item.expiresAt > now);
 				const closedBefore = store.closedSumegoSessions.length;
 				store.closedSumegoSessions = store.closedSumegoSessions.filter((item) => item.expiresAt > now);
+				const registeredBefore = store.registeredClients.length;
+				const expiredClientIds = new Set(
+					store.registeredClients.filter((client) => client.expiresAt <= now).map((client) => client.clientId)
+				);
+				if (expiredClientIds.size > 0) {
+					// Los pendientes de un registro caducado no pueden quedar
+					// colgando: `normalizeStore` valida el redirect de
+					// solicitudes y códigos contra la lista de registrados, así
+					// que se retiran aquí, en el MISMO mutador. Sus códigos se
+					// tratan como los caducados (revocación en la outbox y
+					// fuera); los grants no tocan nada: no guardan redirect y el
+					// registro no autentica a nadie (el refresh y el
+					// backchannel, sí).
+					store.registeredClients = store.registeredClients.filter((client) => client.expiresAt > now);
+					store.authorizationRequests = store.authorizationRequests.filter(
+						(item) => !isRegisteredClientId(item.clientId) || !expiredClientIds.has(item.clientId)
+					);
+					const orphanCodes = store.authorizationCodes.filter(
+						(item) => isRegisteredClientId(item.clientId) && expiredClientIds.has(item.clientId)
+					);
+					for (const code of orphanCodes) {
+						if (!store.revocationOutbox.some((item) => item.credentialId === code.credentialId)) {
+							store.revocationOutbox.push({
+								provider: 'lumbre-web', credentialId: code.credentialId, clientId: code.clientId,
+								resource: code.resource, scope: code.scope, upstream: code.upstream, queuedAt: now
+							});
+						}
+					}
+					if (orphanCodes.length > 0) {
+						const orphanHashes = new Set(orphanCodes.map((code) => code.codeHash));
+						store.authorizationCodes = store.authorizationCodes.filter((code) => !orphanHashes.has(code.codeHash));
+					}
+				}
 				housekeeping ||=
 					usedBefore !== store.usedRefreshTokens.length ||
 					requestsBefore !== store.authorizationRequests.length ||
 					redeemedBefore !== store.redeemedCodes.length ||
 					logoutsBefore !== store.usedLogoutTokens.length ||
-					closedBefore !== store.closedSumegoSessions.length;
+					closedBefore !== store.closedSumegoSessions.length ||
+					registeredBefore !== store.registeredClients.length;
 				changed = mutator(store) || housekeeping;
 				// La poda de la outbox va DESPUÉS del mutador: así lo que el
 				// mutador acabe de encolar entra ya en la cuenta del tope y no

@@ -137,17 +137,17 @@ async function main() {
 	const asBody = await as.json().catch(() => undefined);
 	check('AS metadata responde HTTP 200', as.status === 200, `status=${as.status}`);
 	check(
-		'AS metadata anuncia code+refresh, PKCE S256, cliente público y CIMD sin DCR',
+		'AS metadata anuncia code+refresh, PKCE S256, cliente público, CIMD y DCR',
 		asBody?.issuer === issuer &&
 			asBody?.authorization_endpoint === `${issuer}/authorize` &&
 			asBody?.token_endpoint === `${issuer}/token` &&
 			asBody?.revocation_endpoint === `${issuer}/revoke` &&
+			asBody?.registration_endpoint === `${issuer}/register` &&
 			Array.isArray(asBody?.grant_types_supported) && asBody.grant_types_supported.includes('authorization_code') && asBody.grant_types_supported.includes('refresh_token') &&
 			Array.isArray(asBody?.code_challenge_methods_supported) && asBody.code_challenge_methods_supported.join(',') === 'S256' &&
 			Array.isArray(asBody?.token_endpoint_auth_methods_supported) && asBody.token_endpoint_auth_methods_supported.join(',') === 'none' &&
 			asBody?.client_id_metadata_document_supported === true &&
-			asBody?.authorization_response_iss_parameter_supported === true &&
-			asBody?.registration_endpoint === undefined,
+			asBody?.authorization_response_iss_parameter_supported === true,
 		JSON.stringify(asBody).slice(0, 400)
 	);
 

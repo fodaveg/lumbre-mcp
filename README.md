@@ -1049,7 +1049,7 @@ servidor a servidor, se cifra antes de persistir y nunca aparece en HTML,
 
 | Forma | Cómo | Para qué cliente |
 |---|---|---|
-| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Codex y claude.ai web/móvil |
+| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Codex, claude.ai web/móvil, Mistral Vibe y VS Code (Copilot local) |
 | Bearer directo (compatibilidad temporal) | `Authorization: Bearer <token-de-Lumbre>` contra `POST /mcp` | Clientes heredados |
 | Path (compatibilidad temporal) | `POST /mcp/<token-de-Lumbre>` | Conectores antiguos de claude.ai; no usar en configuraciones nuevas |
 
@@ -1070,9 +1070,14 @@ emitida con él, por diseño (RFC 6749 §4.1.2, SHOULD), y obliga a reconectar.
 
 El recurso y permiso son exactos: `https://mcp.lumbre.pro/mcp` y
 `lumbre:mcp`. Los callbacks se validan contra la identidad del cliente: el
-callback oficial de claude.ai y el loopback efímero issuer-bound de Codex. El
-servidor usa documentos de metadata de cliente (CIMD); no inventa un
-`client_id` ni anuncia registro dinámico. La caché CIMD respeta
+callback oficial de claude.ai y el loopback efímero issuer-bound de Codex. Hay
+tres clases de `client_id`, y las tres exigen cliente público con PKCE:
+claude.ai y Codex traen un documento de metadata de cliente (CIMD alojado en
+su propio dominio, sin registro dinámico); Mistral Vibe se registra por DCR
+(RFC 7591, `POST /register`) restringido a la forma loopback y a su
+`client_name`, con alta caducable y tope de clientes; y VS Code (Copilot
+local) cae a su client id público cuando su DCR confidencial se rechaza, con
+redirect loopback de puerto y path libres. La caché CIMD respeta
 `Cache-Control: no-store` y `no-cache` y no reutiliza esas respuestas.
 
 El callback Lumbre es one-shot: se consume durablemente antes de `/exchange`,
