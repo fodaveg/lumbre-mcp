@@ -290,6 +290,28 @@ retención en «Qué guarda el relé»).
   **403 mudo** que dispara `is_form_content_type` de SvelteKit cuando una
   petición sin `Origin` (el caso de este MCP, que corre fuera del navegador)
   trae uno de sus cuatro Content-Type de formulario.
+- `prepare_attachment_upload({ taskId, filename })` — para subir un fichero
+  **local o grande** (tope 25 MB) **sin pasar sus bytes por el modelo**. El
+  conector remoto no ve tu disco: esta tool pide a Lumbre
+  (`POST /api/attachments/upload-permits`, con la misma credencial OAuth que
+  el resto de tools) un **permiso de subida de un solo uso, válido 10 min**, y
+  devuelve `uploadUrl`, `permit`, `expiresAt`, `maxBytes`, las cabeceras y un
+  comando `curl` listo (`--fail-with-body -sS --data-binary @"<ruta local>"`)
+  en el que el agente sustituye `<ruta local>` y que ejecuta desde su
+  terminal. El nombre va URL-encodeado en `x-lumbre-filename` y el mime se
+  deduce de la extensión de `filename` (`application/octet-stream` si no se
+  conoce) y viaja en `x-lumbre-content-type`, con `Content-Type:
+  application/octet-stream` fijo. Flujo: **prepare → curl → `get_task`** para
+  comprobar el adjunto. Códigos de la subida: 401 (permiso caducado o ya
+  usado), 413 (tamaño o cuota) y 404 → pedir otro permiso; 403 → el `taskId`
+  no es el del permiso; 429 → reintentar con el MISMO permiso mientras no
+  caduque. Errores de la emisión: 400 (`taskId` inválido), 401 (autorización
+  OAuth), 404 (tarea inexistente, ajena, borrada o archivada), 429 (máx. 30
+  permisos/min). El permiso es un secreto: solo aparece en la respuesta de la
+  tool, nunca en una URL, un log ni un mensaje de error (los errores del
+  servidor no se reflejan). Usa `add_attachment` solo para ficheros pequeños
+  (`content_base64`) o con el conector local (`file_path`); este último no
+  expone `prepare_attachment_upload` (ya sube por `file_path`).
 - `delete_attachment({ attachment_id })` — elimina de forma **destructiva y
   sin deshacer** un adjunto propio mediante `DELETE /api/attachments/:id`.
   Obtén antes el id desde `get_task`/`list_tasks` y confirma el objetivo con el
@@ -1362,10 +1384,10 @@ stdio **acotado a adjuntos** para `file_path`.
 
 `LUMBRE_MCP_TOOLSET=attachments` (env) hace que este segundo conector
 registre SOLO `add_attachment`/`read_attachment`/`delete_attachment` en vez
-de las 17 tools de siempre — así no duplicas la superficie de `tools/list` en
+de las 18 tools de siempre — así no duplicas la superficie de `tools/list` en
 el contexto de cada sesión (pesa ~24 KB de JSON; dos copias son el doble, y el
 modelo encima tendría que acertar cuál `add_task`/`list_tasks` de los dos usar).
-Cualquier otro valor (o no ponerla) registra las 17, igual que siempre.
+Cualquier otro valor (o no ponerla) registra las 18, igual que siempre.
 
 ```bash
 claude mcp add lumbre-adjuntos --env LUMBRE_TOKEN=tu-token --env LUMBRE_MCP_TOOLSET=attachments -- node /ruta/absoluta/a/lumbre-mcp/dist/index.js

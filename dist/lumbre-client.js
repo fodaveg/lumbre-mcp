@@ -853,6 +853,51 @@ async function uploadAttachmentOnce(config, input, signal) {
     return body;
 }
 /**
+ * `POST /api/attachments/upload-permits`: pide, con la credencial de la
+ * concesión del MCP, un permiso de 10 min y un solo uso para que el AGENTE
+ * suba un fichero local por `curl` sin pasar los bytes por el modelo (ver
+ * `prepare_attachment_upload`). Pasa por `request()` (misma credencial que
+ * `/api/tasks`, timeout y 401/429 ya mapeados). Los 400 y 404 se reescriben
+ * aquí y NO se refleja el cuerpo del servidor en ningún error: la respuesta
+ * 200 es la única que lleva el permiso, y ningún mensaje lo repite.
+ */
+export async function requestUploadPermit(config, taskId) {
+    let body;
+    try {
+        body = await request(config, '/api/attachments/upload-permits', {
+            method: 'POST',
+            body: JSON.stringify({ taskId })
+        });
+    }
+    catch (err) {
+        if (err instanceof LumbreApiError && err.status === 400) {
+            throw new LumbreApiError('Lumbre rechazó la petición del permiso: el taskId no es un uuid válido.', 400);
+        }
+        if (err instanceof LumbreApiError && err.status === 404) {
+            throw new LumbreApiError(`La tarea ${taskId} no existe, no es tuya o está borrada o archivada: no se puede pedir permiso de subida.`, 404);
+        }
+        throw err;
+    }
+    const b = body;
+    if (!b ||
+        typeof b !== 'object' ||
+        typeof b.permit !== 'string' ||
+        !b.permit ||
+        typeof b.uploadUrl !== 'string' ||
+        !b.uploadUrl ||
+        typeof b.expiresAt !== 'string' ||
+        typeof b.maxBytes !== 'number') {
+        throw new LumbreApiError('Lumbre no devolvió un permiso de subida válido (respuesta inesperada).');
+    }
+    return {
+        permit: b.permit,
+        uploadUrl: b.uploadUrl,
+        method: typeof b.method === 'string' ? b.method : 'POST',
+        expiresAt: b.expiresAt,
+        maxBytes: b.maxBytes
+    };
+}
+/**
  * `POST /api/sync/flush`: fuerza el flush del sync ANTES de leer (bug:
  * ventana de debounce del persister — ver ese endpoint en el repo
  * principal). Cuerpo `{}` (la app exige Content-Type en mutaciones). Útil justo antes de un `listTasks` cuando importa

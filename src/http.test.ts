@@ -144,7 +144,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		expect(body.result.instructions).toContain('https://lumbre.pro/ayuda/');
 	});
 
-	it('tools/list responde con las 17 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
+	it('tools/list responde con las 18 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, {
 			method: 'POST',
 			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
@@ -152,7 +152,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: Array<{ name: string; inputSchema: unknown }> } };
-		expect(body.result.tools).toHaveLength(17);
+		expect(body.result.tools).toHaveLength(18);
 		expect(JSON.stringify(body.result.tools)).not.toMatch(/\$schema/);
 		// Mismo techo que `index.test.ts` (medido allí sobre transporte
 		// in-memory) — aquí se confirma que el mismo `stripToolsListSchema`
@@ -164,7 +164,8 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// no es de este lote, ya existía antes). Techo 26.700 (2026-10-02: medido
 		// 26.468 en `index.test.ts` + ~1%), el mismo que allí. Subido a 27.100 el
 		// 2026-10-14 con `index.test.ts` (expectedContent/expectedNotes: 26.863).
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(27100);
+		// Subido a 27.800 el 2026-10-27 con `index.test.ts` (prepare_attachment_upload: 27.520).
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(27800);
 	});
 
 	it('el log solo identifica métodos MCP conocidos y nunca copia un method arbitrario del body', async () => {
@@ -596,7 +597,7 @@ describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)'
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: unknown[] } };
-		expect(body.result.tools).toHaveLength(17);
+		expect(body.result.tools).toHaveLength(18);
 	});
 
 	it('si vienen las dos formas, gana la cabecera', async () => {

@@ -109,6 +109,7 @@ describe('tools/list — superficie completa', () => {
 		'get_task',
 		'read_attachment',
 		'add_attachment',
+		'prepare_attachment_upload',
 		'delete_attachment',
 		'mutate_tasks',
 		'organize',
@@ -117,12 +118,12 @@ describe('tools/list — superficie completa', () => {
 		'list_habits'
 	];
 
-	it('sigue exponiendo las 17 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 18 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27; ' +
 		'añadida get_list el 2026-09-16, tarea 827a7878; retiradas las nueve sueltas de mutación ' +
 		'individual y partido el lote en mutate_tasks/organize el 2026-09-19, tarea 6f62c877; ' +
-		'añadida list_habits MC6 el 2026-09-24)', () => {
-		expect(tools).toHaveLength(17);
+		'añadida list_habits MC6 el 2026-09-24; añadida prepare_attachment_upload el 2026-10-27)', () => {
+		expect(tools).toHaveLength(18);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -194,7 +195,7 @@ describe('tools/list — superficie completa', () => {
 		expect(tools.filter((t) => ann(t).destructiveHint === true).map((t) => t.name).sort()).toEqual(DESTRUCTIVE);
 		expect(tools.filter((t) => ann(t).idempotentHint === true).map((t) => t.name).sort()).toEqual(IDEMPOTENT);
 		// Las 4 de escritura puramente aditiva lo declaran explícitamente (el default MCP es true).
-		for (const name of ['add_task', 'add_attachment', 'link_list_note', 'refresh_sync']) {
+		for (const name of ['add_task', 'add_attachment', 'prepare_attachment_upload', 'link_list_note', 'refresh_sync']) {
 			expect(ann(tools.find((t) => t.name === name)!).destructiveHint).toBe(false);
 		}
 		// `mutate_tasks` (update reemplaza contenido y notas) y `unlink_list_note` (retira un
@@ -219,7 +220,7 @@ describe('tools/list — superficie completa', () => {
 		expect(schema.properties).not.toHaveProperty('fullNotes');
 	});
 
-	it('techo de bytes de las 17 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 18 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -375,7 +376,11 @@ describe('tools/list — superficie completa', () => {
 		// precondición de texto, estado `conflict`): 26.863 (+171, dos campos
 		// planos y su mención en `ops`; sin `.max()` en el esquema plano, que ya
 		// impone el estricto). Techo = medido + ~1% (27.100).
-		const CHAR_CEILING = 27100;
+		// Re-medido el 2026-10-27 (`prepare_attachment_upload`, tool 18: permiso de
+		// subida de un solo uso + curl para ficheros locales/grandes; `add_attachment`
+		// remite a ella en una frase): 27.520 (+657 sobre los 26.863 de arriba).
+		// Techo = medido + ~1% (27.800).
+		const CHAR_CEILING = 27800;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -4874,8 +4879,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 17 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(17);
+	it('sin `toolset` (default): las 18 tools de siempre', async () => {
+		expect(await toolNamesOf()).toHaveLength(18);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -4886,8 +4891,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 17, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(17);
+	it('`toolset: "all"` (explícito): las 18, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(18);
 	});
 });
 
@@ -5293,5 +5298,171 @@ describe('refresh_sync y list_brl_entries — handlers MCP', () => {
 		expect(JSON.stringify(empty.content)).toContain('está vacío');
 		expect(invalid.isError).toBe(true);
 		expect(JSON.stringify(invalid.content)).toContain('respuesta inesperada');
+	});
+});
+
+describe('prepare_attachment_upload — permiso de subida de un solo uso para que el agente suba con curl', () => {
+	const TASK_ID = '22222222-2222-2222-2222-222222222222';
+	const PERMIT = 'lup_PermisoDePruebaQueNoDebeAparecerEnNingunLog0123';
+	const UPLOAD_URL = `https://app.lumbre.pro/api/attachments?taskId=${TASK_ID}`;
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+	}
+
+	function textOf(result: unknown): string {
+		const first = (result as { content: { type: string; text?: string }[] }).content[0];
+		return first && first.type === 'text' && typeof first.text === 'string' ? first.text : '';
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG, {});
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'prepare-upload-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	function permitBody() {
+		return {
+			permit: PERMIT,
+			uploadUrl: UPLOAD_URL,
+			method: 'POST',
+			expiresAt: '2026-10-27T10:10:00.000Z',
+			maxBytes: 26214400
+		};
+	}
+
+	let logs: ReturnType<typeof vi.spyOn>[];
+	beforeEach(() => {
+		logs = (['log', 'error', 'warn', 'info', 'debug'] as const).map((m) =>
+			vi.spyOn(console, m).mockImplementation(() => {})
+		);
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+	});
+
+	function loggedText(): string {
+		return logs.map((l) => JSON.stringify(l.mock.calls)).join('');
+	}
+
+	it('emite el permiso con la credencial de la concesión y el cuerpo {taskId}, y devuelve curl listo', async () => {
+		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			expect(String(url)).toBe('https://lumbre.test/api/attachments/upload-permits');
+			expect(init?.method).toBe('POST');
+			const headers = init?.headers as Record<string, string>;
+			expect(headers.authorization).toBe('Bearer test-token-para-index-test');
+			expect(JSON.parse(String(init?.body))).toEqual({ taskId: TASK_ID });
+			return jsonResponse(permitBody());
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'prepare_attachment_upload',
+			arguments: { taskId: TASK_ID, filename: 'Factura año.pdf' }
+		});
+		expect(result.isError).not.toBe(true);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const text = textOf(result);
+		expect(text).toContain(UPLOAD_URL);
+		expect(text).toContain(PERMIT);
+		expect(text).toContain('2026-10-27T10:10:00.000Z');
+		expect(text).toContain('26214400');
+		expect(text).toContain('curl --fail-with-body -sS -X POST');
+		expect(text).toContain('--data-binary @"<ruta local>"');
+		expect(text).toContain(`-H 'Authorization: Bearer ${PERMIT}'`);
+		expect(text).toContain("-H 'Content-Type: application/octet-stream'");
+		expect(text).toContain("-H 'x-lumbre-content-type: application/pdf'");
+		expect(text).toContain("-H 'x-lumbre-filename: Factura%20a%C3%B1o.pdf'");
+		expect(text).toContain('get_task');
+		expect(text).toMatch(/401.*413/s);
+		expect(text).toContain('429');
+		// El permiso viaja SOLO en cabecera: ni en la URL de subida ni en la de emisión.
+		expect(UPLOAD_URL).not.toContain(PERMIT);
+		expect(String(fetchSpy.mock.calls[0][0])).not.toContain(PERMIT);
+		expect(loggedText()).not.toContain(PERMIT);
+	});
+
+	it('mime desconocido → application/octet-stream', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(permitBody())));
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'prepare_attachment_upload',
+			arguments: { taskId: TASK_ID, filename: 'dump.xyz' }
+		});
+		expect(textOf(result)).toContain("-H 'x-lumbre-content-type: application/octet-stream'");
+	});
+
+	it('taskId inválido: la tool lo rechaza y no hay ninguna llamada de red', async () => {
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'prepare_attachment_upload',
+			arguments: { taskId: 'no-es-uuid', filename: 'a.pdf' }
+		});
+		expect(result.isError).toBe(true);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		[400, /taskId no es un uuid/],
+		[401, /autorizaci[oó]n|Token inv/i],
+		[404, new RegExp(`${TASK_ID}.*no existe`)],
+		[429, /Demasiadas peticiones/]
+	])('error %i del endpoint: mensaje útil, sin reflejar el cuerpo del servidor ni el permiso', async (status, expected) => {
+		// El cuerpo de error lleva un marcador: no debe salir al modelo ni a logs.
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () => jsonResponse({ message: `ECO_DEL_SERVIDOR ${PERMIT}` }, status))
+		);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'prepare_attachment_upload',
+			arguments: { taskId: TASK_ID, filename: 'a.pdf' }
+		});
+		expect(result.isError).toBe(true);
+		const text = textOf(result);
+		expect(text).toMatch(expected);
+		if (status === 400 || status === 404 || status === 429 || status === 401) {
+			expect(text).not.toContain('ECO_DEL_SERVIDOR');
+		}
+		expect(text).not.toContain(PERMIT);
+		expect(loggedText()).not.toContain(PERMIT);
+	});
+
+	it('respuesta 200 sin permiso: error de respuesta inesperada', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })));
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'prepare_attachment_upload',
+			arguments: { taskId: TASK_ID, filename: 'a.pdf' }
+		});
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain('respuesta inesperada');
+	});
+
+	it('`add_attachment` remite a prepare_attachment_upload y el modo acotado a adjuntos NO la expone', async () => {
+		const indexModule = await import('./index.js');
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const server = indexModule.createServer(TEST_CONFIG, { toolset: 'attachments' });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'toolset-prepare-test', version: '0.0.0' });
+		await client.connect(clientTransport);
+		const names = (await client.listTools()).tools.map((t) => t.name);
+		expect(names).not.toContain('prepare_attachment_upload');
+		const full = await (await buildClient()).listTools();
+		const add = full.tools.find((t) => t.name === 'add_attachment')!;
+		expect(add.description).toContain('prepare_attachment_upload');
 	});
 });

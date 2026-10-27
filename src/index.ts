@@ -275,7 +275,7 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	// quedan solas en `toolset: 'attachments'`, ver `CreateServerOptions`. Sus
 	// tres handles no se usan aquí (no entran en el filtro de abajo — son las
 	// que SE QUEDAN cuando `toolset` acota), así que no se desestructuran.
-	registerAttachmentTools(server, ctx);
+	const { prepareAttachmentUploadTool } = registerAttachmentTools(server, ctx);
 
 	// Familia «BRL» (`src/tools/brl.ts`, add-on experimental de registro del
 	// día).
@@ -300,6 +300,8 @@ export function createServer(config: LumbreConfig, opts: CreateServerOptions = {
 	if (toolset === 'attachments') {
 		for (const tool of [
 			addTaskTool,
+			// El conector local acotado ya sube por `file_path`: no necesita permiso.
+			prepareAttachmentUploadTool,
 			refreshSyncTool,
 			listTasksTool,
 			listListsTool,

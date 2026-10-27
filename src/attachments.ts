@@ -55,6 +55,60 @@ export function mimeForFilename(filename: string): string {
 	return EXTENSION_MIME[ext] ?? 'application/octet-stream';
 }
 
+/** Entrecomilla para shell POSIX con comillas simples (un `'` interno se cierra y reabre). */
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Lo que `prepare_attachment_upload` entrega al agente para subir con `curl`. */
+export interface UploadCommand {
+	/** Nombre limpio (sin directorios) que se guardará en Lumbre. */
+	filename: string;
+	mime: string;
+	/** Valor de `x-lumbre-filename`: el nombre URL-encodeado. */
+	encodedFilename: string;
+	/** Cabeceras de la subida, ya con el permiso en `Authorization`. */
+	headers: Record<string, string>;
+	/** Comando `curl` listo; la ruta local va como `@"<ruta local>"` para sustituir. */
+	curl: string;
+}
+
+/** Marcador de la ruta local que el agente sustituye en el comando `curl`. */
+export const LOCAL_PATH_PLACEHOLDER = '<ruta local>';
+
+/**
+ * Construye las cabeceras y el `curl` de la subida con permiso (contrato:
+ * `docs/82-permiso-subida-adjuntos.md`): cuerpo binario crudo con
+ * `--data-binary @fichero`, `Content-Type` fijo a `application/octet-stream` y
+ * el mime real en `x-lumbre-content-type`. Pura: sin red ni disco. El permiso
+ * solo entra en la cabecera `Authorization`, jamás en la URL. El nombre se
+ * reduce a su basename (acepta `/` y `\`) y `'` se codifica también (%27) para
+ * que no rompa las comillas simples del shell.
+ */
+export function buildUploadCommand(input: { uploadUrl: string; permit: string; filename: string }): UploadCommand {
+	const base = input.filename.trim().split(/[\\/]/).pop() ?? '';
+	const filename = base.trim();
+	if (!filename) {
+		throw new Error('filename no puede estar vacío.');
+	}
+	const mime = mimeForFilename(filename);
+	const encodedFilename = encodeURIComponent(filename).replace(/'/g, '%27');
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${input.permit}`,
+		'Content-Type': 'application/octet-stream',
+		'x-lumbre-content-type': mime,
+		'x-lumbre-filename': encodedFilename
+	};
+	const curl =
+		'curl --fail-with-body -sS -X POST ' +
+		`--data-binary @"${LOCAL_PATH_PLACEHOLDER}" ` +
+		Object.entries(headers)
+			.map(([name, value]) => `-H ${shellQuote(`${name}: ${value}`)}`)
+			.join(' ') +
+		` ${shellQuote(input.uploadUrl)}`;
+	return { filename, mime, encodedFilename, headers, curl };
+}
+
 /**
  * Expande `~`/`~/…` a `os.homedir()` (mismo criterio en Mac/Linux/Windows) y
  * EXIGE que el resultado sea una ruta absoluta: una relativa se resolvería

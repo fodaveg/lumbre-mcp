@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { deleteAttachment, getAttachment, MAX_IMAGE_ATTACHMENT_BYTES, uploadAttachment } from '../lumbre-client.js';
-import { decodeBase64Attachment, readLocalAttachment } from '../attachments.js';
+import { deleteAttachment, getAttachment, MAX_IMAGE_ATTACHMENT_BYTES, requestUploadPermit, uploadAttachment } from '../lumbre-client.js';
+import { buildUploadCommand, decodeBase64Attachment, LOCAL_PATH_PLACEHOLDER, readLocalAttachment } from '../attachments.js';
 import { requireTaskExists } from './task-existence.js';
 import { errorResult, textResult } from './shared.js';
 /**
@@ -107,7 +107,7 @@ export function registerAttachmentTools(server, ctx) {
             'siempre, pero es SOLO para ficheros de unos KB (un .txt, un .log): el argumento lo emites ' +
             'TÚ como modelo, y una imagen de unos cientos de KB son ~100-200k tokens en base64 — tope ' +
             '1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
-            'sacar un nombre). Ver README para el detalle de mimes/límites y el conector local dedicado.',
+            'sacar un nombre). Para un fichero grande o local usa prepare_attachment_upload.',
         inputSchema: {
             taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks; de una subtarea, get_task de su madre)'),
             file_path: z
@@ -178,6 +178,48 @@ export function registerAttachmentTools(server, ctx) {
             return errorResult(err);
         }
     });
+    // Remite aquí `add_attachment` para ficheros grandes o locales (David, 27 oct
+    // 2026: «mandarle al mcp un archivo local... así no gastas tokens»). El MCP
+    // remoto no ve el disco: pide el permiso y el AGENTE sube con curl. El
+    // permiso solo sale en `text` de la respuesta: ni URL, ni log, ni error.
+    const prepareAttachmentUploadTool = server.registerTool('prepare_attachment_upload', {
+        annotations: { destructiveHint: false },
+        description: 'Para subir un fichero LOCAL o grande (hasta 25 MB) sin pasar sus bytes por el modelo: ' +
+            'devuelve un permiso de un solo uso (10 min) y un comando curl que ejecutas tú en tu ' +
+            'terminal. Luego comprueba con get_task.',
+        inputSchema: {
+            taskId: z.string().guid().describe('Id de la tarea o subtarea destino'),
+            filename: z.string().min(1).describe('Nombre con el que se guardará (su extensión fija el mime)')
+        }
+    }, async (input) => {
+        try {
+            const upload = await requestUploadPermit(ctx.config, input.taskId);
+            const cmd = buildUploadCommand({
+                uploadUrl: upload.uploadUrl,
+                permit: upload.permit,
+                filename: input.filename
+            });
+            const mb = (upload.maxBytes / (1024 * 1024)).toFixed(0);
+            return textResult(`Permiso de subida para "${cmd.filename}" en la tarea ${input.taskId}. Un solo uso, ` +
+                `caduca ${upload.expiresAt}, tope ${upload.maxBytes} bytes (${mb} MB). El permiso es un ` +
+                'secreto: no lo copies a tareas, notas ni logs.\n' +
+                `uploadUrl: ${upload.uploadUrl}\n` +
+                `permit: ${upload.permit}\n` +
+                `mime: ${cmd.mime}\n` +
+                `Cabeceras (${upload.method}, cuerpo binario crudo):\n` +
+                Object.entries(cmd.headers)
+                    .map(([name, value]) => `  ${name}: ${value}`)
+                    .join('\n') +
+                `\n\nEjecútalo en tu terminal sustituyendo ${LOCAL_PATH_PLACEHOLDER} por la ruta del fichero:\n\n` +
+                `${cmd.curl}\n\n` +
+                'Respuesta 200: el adjunto ya está enlazado; compruébalo con get_task. Errores: 401 ' +
+                '(caducado o ya usado), 413 (tamaño o cuota) o 404 → pide otro permiso; 403 → el ' +
+                'taskId no es el del permiso; 429 → reintenta con el mismo mientras no caduque.');
+        }
+        catch (err) {
+            return errorResult(err);
+        }
+    });
     const deleteAttachmentTool = server.registerTool('delete_attachment', {
         annotations: { destructiveHint: true },
         description: 'Elimina un adjunto de Lumbre por su id (ver `attachments` en get_task/list_tasks). ' +
@@ -197,6 +239,6 @@ export function registerAttachmentTools(server, ctx) {
             return errorResult(err);
         }
     });
-    return { readAttachmentTool, addAttachmentTool, deleteAttachmentTool };
+    return { readAttachmentTool, addAttachmentTool, prepareAttachmentUploadTool, deleteAttachmentTool };
 }
 //# sourceMappingURL=attachments.js.map

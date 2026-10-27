@@ -3,6 +3,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+	buildUploadCommand,
 	decodeBase64Attachment,
 	MAX_ATTACHMENT_BYTES,
 	MAX_BASE64_ATTACHMENT_BYTES,
@@ -155,5 +156,40 @@ describe('decodeBase64Attachment', () => {
 	it('supera el tope de 1 MiB decodificado: el mensaje trae el tamaño REAL', () => {
 		const oversized = Buffer.alloc(MAX_BASE64_ATTACHMENT_BYTES + 1).toString('base64');
 		expect(() => decodeBase64Attachment(oversized, 'grande.bin')).toThrow(/1\.0 MB/);
+	});
+});
+
+describe('buildUploadCommand', () => {
+	const base = { uploadUrl: 'https://app.lumbre.pro/api/attachments?taskId=abc', permit: 'lup_SECRETO' };
+
+	it('arma curl y cabeceras del contrato: octet-stream fijo, mime real aparte, permiso solo en Authorization', () => {
+		const cmd = buildUploadCommand({ ...base, filename: 'informe.pdf' });
+		expect(cmd.mime).toBe('application/pdf');
+		expect(cmd.headers).toEqual({
+			Authorization: 'Bearer lup_SECRETO',
+			'Content-Type': 'application/octet-stream',
+			'x-lumbre-content-type': 'application/pdf',
+			'x-lumbre-filename': 'informe.pdf'
+		});
+		expect(cmd.curl).toContain('curl --fail-with-body -sS -X POST');
+		expect(cmd.curl).toContain('--data-binary @"<ruta local>"');
+		expect(cmd.curl).toContain("-H 'Authorization: Bearer lup_SECRETO'");
+		expect(cmd.curl.endsWith(" 'https://app.lumbre.pro/api/attachments?taskId=abc'")).toBe(true);
+		expect(base.uploadUrl).not.toContain('lup_');
+	});
+
+	it('URL-encodea nombres con espacios, acentos y comillas simples', () => {
+		const cmd = buildUploadCommand({ ...base, filename: "Factura año 'final'.png" });
+		expect(cmd.encodedFilename).toBe('Factura%20a%C3%B1o%20%27final%27.png');
+		expect(cmd.mime).toBe('image/png');
+		expect(cmd.curl).toContain("'x-lumbre-filename: Factura%20a%C3%B1o%20%27final%27.png'");
+	});
+
+	it('mime desconocido → octet-stream; descarta directorios del nombre; vacío falla', () => {
+		expect(buildUploadCommand({ ...base, filename: '/tmp/x/dump.xyz' })).toMatchObject({
+			filename: 'dump.xyz',
+			mime: 'application/octet-stream'
+		});
+		expect(() => buildUploadCommand({ ...base, filename: '  ' })).toThrow('vacío');
 	});
 });
