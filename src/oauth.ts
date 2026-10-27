@@ -3716,7 +3716,11 @@ export class OAuthService {
 				grant.resource !== OAUTH_RESOURCE ||
 				grant.scope !== OAUTH_SCOPE
 			) return undefined;
-			validateClientIdUrl(grant.clientId);
+			// `validateStoredClientId` y no `validateClientIdUrl`: los grants DCR
+			// llevan un `client_id` `lm_cl_…` que no es documento HTTPS. Con el
+			// validador de solo-URL, cada `/mcp` con un token de Vibe caía en el
+			// `catch` y volvía 401 aunque el token acabara de emitirse.
+			validateStoredClientId(grant.clientId);
 			return decrypt(grant.upstream, await this.key(), grantContext(grant.clientId, grant.resource, grant.scope));
 		} catch {
 			return undefined;

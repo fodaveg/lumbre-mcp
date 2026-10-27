@@ -3073,7 +3073,8 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 	}
 
 	it('registra a Mistral Vibe y completa code+PKCE con un puerto distinto al registrado', async () => {
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
+		const service = new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() });
+		const baseUrl = await listen(service);
 		const registered = await registerClient(baseUrl, vibeRegistration());
 		expect(registered.status).toBe(201);
 		const body = (await registered.json()) as Record<string, unknown>;
@@ -3088,6 +3089,10 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		const tokens = await exchangeWith(baseUrl, code, clientId, redirectUri);
 		expect(tokens.access_token).toMatch(/^lm_at_/);
 		expect(tokens.refresh_token).toMatch(/^lm_rt_/);
+		// Regresión: el Bearer emitido a un cliente DCR (`lm_cl_…`) tiene que
+		// resolver como el de cualquiera: `resolveAccessToken` validaba el
+		// client_id del grant como documento HTTPS y devolvía undefined.
+		expect(await service.resolveAccessToken(String(tokens.access_token))).toBe(UPSTREAM_TOKEN);
 		const rotated = await fetch(`${baseUrl}/token`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
