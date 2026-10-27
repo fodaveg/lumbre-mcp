@@ -62,8 +62,10 @@ const scope = 'lumbre:mcp';
 // medido + ~1% = 26.700, el mismo en los tres sitios.
 // 2026-10-14 (expectedContent/expectedNotes en `update`): medido 26.863; techo
 // 27.100, el mismo en `index.test.ts` y `http.test.ts`.
-const CHAR_CEILING = 27100;
-const EXPECTED_TOOL_COUNT = 17;
+// 2026-10-27 (`prepare_attachment_upload`, 90c358e): 18 tools, medido 27.520;
+// techo 27.800, el mismo en `index.test.ts` y `http.test.ts`.
+const CHAR_CEILING = 27800;
+const EXPECTED_TOOL_COUNT = 18;
 
 if (!url) {
 	console.error('smoke-remote: falta la URL. Uso: node scripts/smoke-remote.mjs <url> <token>');
