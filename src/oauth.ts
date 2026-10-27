@@ -634,6 +634,13 @@ export interface OAuthServiceOptions {
 	backchannel?: LumbreBackchannelApi;
 	backchannelSecret?: string;
 	lumbreAppBaseUrl?: string;
+	/**
+	 * Esperas de reintento del backchannel por defecto (ver `RETRY_DELAYS_MS`
+	 * en `lumbre-oauth-backchannel.ts`). Los tests ponen `[]` para probar la
+	 * semántica OAuth de un fallo transitorio sin dormir; en producción no se
+	 * pasa y aplica el default.
+	 */
+	backchannelRetryDelaysMs?: number[];
 	/** Con quién se identifica la persona en `/authorize`. Por defecto, lo
 	 *  que diga el entorno (`loginConfigFromEnv`): `lumbre` si no hay nada. */
 	login?: LoginConfig;
@@ -1767,7 +1774,8 @@ export class OAuthService {
 		this.backchannel = options.backchannel ?? new LumbreBackchannel({
 			baseUrl: options.lumbreAppBaseUrl ?? process.env.LUMBRE_APP_BASE_URL,
 			secret: options.backchannelSecret ?? process.env.LUMBRE_MCP_BACKCHANNEL_SECRET,
-			fetch: this.fetchFn
+			fetch: this.fetchFn,
+			retryDelaysMs: options.backchannelRetryDelaysMs
 		});
 		if (options.encryptionKey && options.encryptionKey.length !== 32) throw new Error('OAuth encryptionKey debe tener 32 bytes');
 		this.suppliedEncryptionKey = options.encryptionKey !== undefined;

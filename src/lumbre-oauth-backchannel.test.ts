@@ -60,6 +60,9 @@ describe('backchannel web de Lumbre', () => {
 	});
 
 	it('clasifica 4xx/5xx/red y rechaza JSON malformado o sobredimensionado', async () => {
+		// `retryDelaysMs: []`: este test mide la CLASIFICACIÓN de un único
+		// intento (`postOnce`); los reintentos de lo transitorio tienen su
+		// propio describe abajo.
 		for (const [fetchFn, kind] of [
 			[async () => response({}, 401), 'invalid'],
 			[async () => response({}, 503), 'transient'],
@@ -67,7 +70,7 @@ describe('backchannel web de Lumbre', () => {
 			[async () => response('{', 200), 'invalid'],
 			[async () => response('x'.repeat(65 * 1024), 200), 'invalid']
 		] as const) {
-			const backchannel = new LumbreBackchannel({ secret: SECRET, fetch: fetchFn as typeof fetch });
+			const backchannel = new LumbreBackchannel({ secret: SECRET, fetch: fetchFn as typeof fetch, retryDelaysMs: [] });
 			await expect(backchannel.introspect(TOKEN)).rejects.toMatchObject({ kind });
 		}
 	});
@@ -193,5 +196,87 @@ describe('backchannel web de Lumbre', () => {
 		const introspection = await backchannel.introspect(TOKEN);
 		expect(introspection).toMatchObject({ active: true, resource: 'otro' });
 		await expect(backchannel.revoke(TOKEN)).rejects.toMatchObject({ kind: 'invalid' });
+	});
+});
+
+describe('reintento de lo transitorio (ventana de deploy de lumbre-web)', () => {
+	/** El mismo 502/503 que devuelve el borde mientras el contenedor de la
+	 *  app se recrea en un despliegue. */
+	function edgeDown(): Response {
+		return response({}, 503);
+	}
+
+	it('introspect reintenta un 503 y sale bien cuando la app vuelve (el refresh de un cliente ya no muere)', async () => {
+		const replies = [edgeDown(), edgeDown(), response({ active: false })];
+		const sleeps: number[] = [];
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => replies.shift()!) as typeof fetch,
+			retryDelaysMs: [10, 20],
+			sleepFn: async (ms) => {
+				sleeps.push(ms);
+			}
+		});
+		await expect(backchannel.introspect(TOKEN)).resolves.toEqual({ active: false });
+		expect(sleeps).toEqual([10, 20]);
+	});
+
+	it('introspect agota los reintentos y devuelve el fallo transitorio, con una espera por intento agotado', async () => {
+		const sleeps: number[] = [];
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => edgeDown()) as typeof fetch,
+			retryDelaysMs: [5, 5],
+			sleepFn: async (ms) => {
+				sleeps.push(ms);
+			}
+		});
+		await expect(backchannel.introspect(TOKEN)).rejects.toMatchObject({ kind: 'transient' });
+		expect(sleeps).toEqual([5, 5]);
+	});
+
+	it('un 4xx no se reintenta ni una vez (sigue siendo invalid al primer intento)', async () => {
+		let calls = 0;
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => {
+				calls++;
+				return response({}, 401);
+			}) as typeof fetch,
+			retryDelaysMs: [5],
+			sleepFn: async () => {
+				throw new Error('no debería dormir');
+			}
+		});
+		await expect(backchannel.introspect(TOKEN)).rejects.toMatchObject({ kind: 'invalid' });
+		expect(calls).toBe(1);
+	});
+
+	it('el canje de una transacción de un solo uso nunca reintenta (token_reused al segundo intento)', async () => {
+		let calls = 0;
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => {
+				calls++;
+				return edgeDown();
+			}) as typeof fetch,
+			retryDelaysMs: [5],
+			sleepFn: async () => {
+				throw new Error('no debería dormir');
+			}
+		});
+		await expect(backchannel.exchange(REQUEST_ID, 'x'.repeat(32))).rejects.toMatchObject({ kind: 'transient' });
+		expect(calls).toBe(1);
+	});
+
+	it('revoke también reintenta lo transitorio', async () => {
+		const replies = [edgeDown(), response({ ok: true })];
+		const backchannel = new LumbreBackchannel({
+			secret: SECRET,
+			fetch: (async () => replies.shift()!) as typeof fetch,
+			retryDelaysMs: [1],
+			sleepFn: async () => {}
+		});
+		await expect(backchannel.revoke(TOKEN)).resolves.toBeUndefined();
 	});
 });

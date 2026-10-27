@@ -6,6 +6,31 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const TRANSACTION_PATTERN = /^[A-Za-z0-9_-]{32,256}$/;
 const ACCESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 /**
+ * Esperas entre intentos de las llamadas del backchannel REINTENTABLES
+ * (`introspect`, `revoke`). Por qué existen (28 oct 2026, «el MCP se
+ * desconecta en cada deploy»): un despliegue de lumbre-web recrea el
+ * contenedor de la app y deja ~30-60 s en los que el backchannel recibe
+ * 502/503 del borde; sin reintento, ese único fallo transitorio subía como
+ * `server_error` HTTP 500 hasta el cliente OAuth en pleno refresh, y el
+ * cliente (medido con Mistral Vibe) daba la sesión por muerta y no se
+ * recuperaba sin reconexión manual. Con estos reintentos, la ventana de un
+ * despliegue se absorbe AQUÍ: el refresh del cliente simplemente tarda un
+ * poco más y sale bien.
+ *
+ * La suma de las esperas (56 s) más los seis intentos de 3 s cabe en los 90 s
+ * de `response_header_timeout` del borde de Caddy (`deploy/mcp-lumbre-pro.caddy`):
+ * el cliente ve una respuesta (buena o 503) siempre antes de que el borde
+ * corte por su cuenta.
+ *
+ * SOLO reintentan `introspect` y `revoke`: `exchange` y
+ * `exchangeSumegoIdentity` consumen una transacción de un solo uso y un
+ * reintento tras un fallo de red podría llegar como `token_reused` aunque el
+ * primer intento hubiera prosperado (ver el JSDoc de `exchangeSumegoIdentity`);
+ * `createAuthorizationRequest` deja transacciones huérfanas si el primer
+ * intento prosperó y la respuesta se perdió.
+ */
+export const RETRY_DELAYS_MS = [1_000, 3_000, 7_000, 15_000, 30_000];
+/**
  * Códigos de error del canje con identidad de Sumego (`{ code }` en el
  * cuerpo de un 4xx/5xx de `/api/integrations/lumbre-mcp/sumego/exchange`). Lista
  * CERRADA: un `code` que no esté aquí se trata como si no viniera, para que
@@ -162,11 +187,15 @@ export class LumbreBackchannel {
     secret;
     fetchFn;
     timeoutMs;
+    retryDelaysMs;
+    sleepFn;
     constructor(options = {}) {
         this.baseUrl = validateBaseUrl(options.baseUrl?.trim() || LUMBRE_APP_ORIGIN);
         this.secret = options.secret?.trim() ?? '';
         this.fetchFn = options.fetch ?? globalThis.fetch;
         this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        this.retryDelaysMs = options.retryDelaysMs ?? RETRY_DELAYS_MS;
+        this.sleepFn = options.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     }
     ensureConfigured() {
         if (this.secret.length < 32 || this.secret.length > 512 || /[\r\n]/.test(this.secret)) {
@@ -255,7 +284,7 @@ export class LumbreBackchannel {
         return exchangedCredential(await this.post(SUMEGO_EXCHANGE_PATH, request, { readErrorCode: true }));
     }
     async introspect(accessToken) {
-        const body = await this.post(`${LUMBRE_MCP_PATH}introspect`, { accessToken });
+        const body = await this.post(`${LUMBRE_MCP_PATH}introspect`, { accessToken }, { retryTransient: true });
         if (exactObject(body, ['active']) && body.active === false)
             return { active: false };
         if (!exactObject(body, ['active', 'credentialId', 'clientId', 'resource', 'scope']) ||
@@ -270,16 +299,32 @@ export class LumbreBackchannel {
         return body;
     }
     async revoke(accessToken) {
-        const body = await this.post(`${LUMBRE_MCP_PATH}revoke`, { accessToken });
+        const body = await this.post(`${LUMBRE_MCP_PATH}revoke`, { accessToken }, { retryTransient: true });
         if (!exactObject(body, ['ok']) || body.ok !== true) {
             throw new BackchannelError('invalid', 'Respuesta de revocación fuera de contrato.');
         }
     }
     /** `path` es la ruta absoluta en Lumbre; el origen es siempre el cerrado
      *  de `LUMBRE_APP_BASE_URL`. `readErrorCode` lee el `{ code }` de un error
-     *  (solo el canje con Sumego lo manda). */
+     *  (solo el canje con Sumego lo manda). `retryTransient` reintenta los
+     *  fallos TRANSITORIOS (ver `RETRY_DELAYS_MS`); solo lo piden las
+     *  llamadas seguras de repetir (`introspect`, `revoke`). */
     async post(path, body, options = {}) {
         this.ensureConfigured();
+        const delays = options.retryTransient ? this.retryDelaysMs : [];
+        for (let attempt = 0;; attempt++) {
+            try {
+                return await this.postOnce(path, body, options);
+            }
+            catch (error) {
+                if (!(error instanceof BackchannelError) || error.kind !== 'transient' || attempt >= delays.length) {
+                    throw error;
+                }
+                await this.sleepFn(delays[attempt] ?? 0);
+            }
+        }
+    }
+    async postOnce(path, body, options = {}) {
         let response;
         try {
             response = await this.fetchFn(`${this.baseUrl}${path}`, {

@@ -282,7 +282,7 @@ beforeEach(async () => {
 
 describe('OAuth 2.1 para claude.ai', () => {
 	it('publica descubrimiento path-specific/alias y challenge RFC 9728', async () => {
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch() }));
 		for (const path of ['/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-protected-resource']) {
 			const response = await fetch(`${baseUrl}${path}`);
 			expect(response.status).toBe(200);
@@ -325,7 +325,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const stateDir = await newStateDir();
 		let currentTime = 1_000_000;
 		const now = () => currentTime;
-		const first = new OAuthService({
+		const first = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ requestBody: {
 				authorizationUrl: 'https://app.lumbre.pro/integrations/lumbre-mcp?request=10000000-0000-4000-8000-000000000001',
@@ -379,7 +379,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect((await stat(join(stateDir, 'oauth-store.json'))).mode & 0o777).toBe(0o600);
 		expect((await stat(join(stateDir, 'oauth.key'))).mode & 0o777).toBe(0o600);
 
-		const second = new OAuthService({ stateDir, fetch: oauthFetch(), now });
+		const second = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), now });
 		const secondBase = await listen(second);
 		expect(await second.resolveAccessToken(access)).toBe(UPSTREAM_TOKEN);
 		// La familia tiene una vigencia absoluta: rotar no prolonga ni el grant
@@ -394,7 +394,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await second.resolveAccessToken(rotatedTokens.access_token)).toBe(UPSTREAM_TOKEN);
 
 		currentTime += 12 * 60 * 60_000;
-		const third = new OAuthService({ stateDir, fetch: oauthFetch(), now });
+		const third = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), now });
 		const thirdBase = await listen(third);
 		// Replay después de reiniciar revoca la familia completa, incluido el
 		// refresh vigente.
@@ -402,7 +402,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await third.resolveAccessToken(rotatedTokens.access_token)).toBeUndefined();
 		expect((await refresh(thirdBase, rotatedTokens.refresh_token)).status).toBe(400);
 
-		const fourth = new OAuthService({ stateDir, fetch: oauthFetch(), now });
+		const fourth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), now });
 		const fourthBase = await listen(fourth);
 		expect((await refresh(fourthBase, rotatedTokens.refresh_token)).status).toBe(400);
 	});
@@ -417,14 +417,14 @@ describe('OAuth 2.1 para claude.ai', () => {
 				if (path === 'exchange') exchangeCalls += 1;
 			}
 		});
-		const firstBase = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const firstBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn }));
 		const started = await beginAuthorization(firstBase);
 		const requestId = new URL(started.headers.get('location')!).searchParams.get('request')!;
 		const persisted = await readFile(join(stateDir, 'oauth-store.json'), 'utf8');
 		expect(persisted).not.toContain(transactionId);
 		expect(persisted).not.toContain(UPSTREAM_TOKEN);
 
-		const restartedBase = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const restartedBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn }));
 		const approved = await fetch(
 			`${restartedBase}/oauth/lumbre/callback?request=${requestId}&decision=approved`,
 			{ redirect: 'manual' }
@@ -453,7 +453,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		let currentTime = Date.now();
 		let exchangeCalls = 0;
 		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'exchange') exchangeCalls += 1; } });
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(), fetch: fetchFn, now: () => currentTime
 		}));
 		const started = await beginAuthorization(baseUrl);
@@ -468,7 +468,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	});
 
 	it('requests/exchange fallan cerrados ante redirect, 5xx y contrato alterado', async () => {
-		const malicious = new OAuthService({
+		const malicious = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ requestBody: {
 				authorizationUrl: 'https://app.lumbre.pro/integrations/lumbre-mcp?request=11111111-1111-4111-8111-111111111111&extra=1',
@@ -481,7 +481,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(rejected.status).toBe(502);
 		expect(rejected.headers.get('location')).toBeNull();
 
-		const unavailableBase = await listen(new OAuthService({
+		const unavailableBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(), fetch: oauthFetch({ requestStatus: 503 })
 		}));
 		expect((await beginAuthorization(unavailableBase)).status).toBe(503);
@@ -494,7 +494,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			},
 			revokeStatus: 503
 		});
-		const mismatchBase = await listen(new OAuthService({ stateDir, fetch: mismatchFetch }));
+		const mismatchBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: mismatchFetch }));
 		const started = await beginAuthorization(mismatchBase);
 		const requestId = new URL(started.headers.get('location')!).searchParams.get('request')!;
 		const callback = await fetch(
@@ -506,7 +506,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect((JSON.parse(store) as { revocationOutbox: unknown[] }).revocationOutbox).toHaveLength(1);
 
 		let ambiguousExchangeCalls = 0;
-		const ambiguousBase = await listen(new OAuthService({
+		const ambiguousBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({
 				exchangeError: true,
@@ -526,7 +526,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('dos refresh concurrentes detectan replay y dejan toda la familia revocada', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const initial = await exchangeCode(baseUrl, code);
@@ -561,7 +561,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 				scope: OAUTH_SCOPE
 			})
 		});
-		const oauth = new OAuthService({ stateDir, fetch: contractFetch });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: contractFetch });
 		const baseUrl = await listen(oauth);
 		const grants: Array<{ access: string; refresh: string }> = [];
 		for (let index = 0; index < 3; index += 1) {
@@ -590,7 +590,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		];
 		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
 
-		const capped = new OAuthService({ stateDir, fetch: contractFetch });
+		const capped = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: contractFetch });
 		const cappedBase = await listen(capped);
 		// Rotar al cap revoca fail-safe en vez de responder 503 o dejar el grant.
 		expect((await refresh(cappedBase, grants[0]!.refresh)).status).toBe(400);
@@ -605,7 +605,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		const persisted = JSON.parse(await readFile(storePath, 'utf8')) as { grants: unknown[] };
 		expect(persisted.grants).toEqual([]);
-		const restarted = new OAuthService({ stateDir, fetch: contractFetch });
+		const restarted = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: contractFetch });
 		const restartedBase = await listen(restarted);
 		expect((await refresh(restartedBase, grants[0]!.refresh)).status).toBe(400);
 		expect((await refresh(restartedBase, rotatedTokens.refresh_token)).status).toBe(400);
@@ -614,7 +614,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('el cap por familia descarta la tombstone más antigua (FIFO) sin crecer ni revocar', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const issued = await exchangeCode(baseUrl, code);
@@ -631,7 +631,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		}));
 		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
 
-		const capped = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const capped = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const cappedBase = await listen(capped);
 		expect((await refresh(cappedBase, String(issued.refresh_token))).status).toBe(200);
 		const persisted = JSON.parse(await readFile(storePath, 'utf8')) as {
@@ -649,7 +649,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('65 rotaciones legítimas seguidas no revocan la familia (M1)', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch(),
 			// Este test mide el tope de tombstones, no el límite por IP de `/token`.
@@ -687,7 +687,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('store v3 ya sobre cap se rechaza intacto y no pierde la credencial', async () => {
 		const stateDir = await newStateDir();
-		const firstBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+		const firstBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 		const { code } = await authorize(firstBase);
 		await exchangeCode(firstBase, code);
 		const storePath = join(stateDir, 'oauth-store.json');
@@ -704,7 +704,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const exactText = JSON.stringify(store);
 		await writeFile(storePath, exactText, { mode: 0o600 });
 		let backchannelCalls = 0;
-		const corrupt = new OAuthService({
+		const corrupt = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ onBackchannel: () => { backchannelCalls += 1; } })
 		});
@@ -715,7 +715,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('revoke invalida access y refresh de la familia y persiste tras reinicio', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const tokens = await exchangeCode(baseUrl, code);
@@ -730,19 +730,19 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await oauth.resolveAccessToken(access)).toBeUndefined();
 		expect((await refresh(baseUrl, refreshToken)).status).toBe(400);
 
-		const restarted = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const restarted = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const restartedBase = await listen(restarted);
 		expect((await refresh(restartedBase, refreshToken)).status).toBe(400);
 	});
 
 	it('introspect inactive invalida familia y conserva revoke en outbox hasta ACK tras reinicio', async () => {
 		const stateDir = await newStateDir();
-		const healthy = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const healthy = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const healthyBase = await listen(healthy);
 		const { code } = await authorize(healthyBase);
 		const issued = await exchangeCode(healthyBase, code);
 
-		const inactive = new OAuthService({
+		const inactive = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ introspectBody: { active: false }, revokeStatus: 503 })
 		});
@@ -757,7 +757,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(queued.revocationOutbox).toHaveLength(1);
 		expect(JSON.stringify(queued)).not.toContain(UPSTREAM_TOKEN);
 
-		const restarted = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const restarted = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		await restarted.ensureReady();
 		const drained = JSON.parse(await readFile(join(stateDir, 'oauth-store.json'), 'utf8')) as { revocationOutbox: unknown[] };
 		expect(drained.revocationOutbox).toEqual([]);
@@ -765,25 +765,25 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('introspect 5xx/malformed falla temporalmente sin rotar el refresh', async () => {
 		const stateDir = await newStateDir();
-		const firstBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+		const firstBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 		const { code } = await authorize(firstBase);
 		const issued = await exchangeCode(firstBase, code);
 		for (const brokenFetch of [
 			oauthFetch({ introspectStatus: 503 }),
 			oauthFetch({ introspectBody: { active: true } })
 		]) {
-			const brokenBase = await listen(new OAuthService({ stateDir, fetch: brokenFetch }));
+			const brokenBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: brokenFetch }));
 			const failed = await refresh(brokenBase, String(issued.refresh_token));
 			expect(failed.status).toBe(503);
 			expect((await failed.json()) as { error: string }).toMatchObject({ error: 'temporarily_unavailable' });
 		}
-		const recoveredBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+		const recoveredBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 		expect((await refresh(recoveredBase, String(issued.refresh_token))).status).toBe(200);
 	});
 
 	it('refresh/revoke aleatorios no reescriben el store', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		await exchangeCode(baseUrl, code);
@@ -804,7 +804,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('refresh/revoke desconocidos no amplifican un outbox pendiente', async () => {
 		const stateDir = await newStateDir();
-		const firstBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+		const firstBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 		const { code } = await authorize(firstBase);
 		const issued = await exchangeCode(firstBase, code);
 		let revokeCalls = 0;
@@ -812,7 +812,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			revokeStatus: 503,
 			onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; }
 		});
-		const pendingBase = await listen(new OAuthService({ stateDir, fetch: pendingFetch }));
+		const pendingBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: pendingFetch }));
 		expect((await fetch(`${pendingBase}/revoke`, {
 			method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ token: String(issued.access_token), client_id: CLIENT_ID })
@@ -831,10 +831,10 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('readiness reintenta como máximo una revocación pendiente por pasada', async () => {
 		const stateDir = await newStateDir();
-		const firstBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+		const firstBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 		const { code } = await authorize(firstBase);
 		const access = String((await exchangeCode(firstBase, code)).access_token);
-		const failingBase = await listen(new OAuthService({
+		const failingBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir, fetch: oauthFetch({ revokeStatus: 503 })
 		}));
 		expect((await fetch(`${failingBase}/revoke`, {
@@ -851,7 +851,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		);
 		await writeFile(storePath, JSON.stringify(queued), { mode: 0o600 });
 		let revokeCalls = 0;
-		const restarted = new OAuthService({
+		const restarted = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
 		});
@@ -869,7 +869,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		let metadataStarted!: () => void;
 		const gate = new Promise<void>((resolve) => (releaseMetadata = resolve));
 		const started = new Promise<void>((resolve) => (metadataStarted = resolve));
-		const concurrent = new OAuthService({
+		const concurrent = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ metadataGate: gate, onMetadata: metadataStarted }),
 			publicLimits: { authorize: { concurrent: 1, requestsPerMinute: 10 } }
@@ -882,7 +882,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect((await first).status).toBe(302);
 
 		let metadataCalls = 0;
-		const cached = new OAuthService({
+		const cached = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ onMetadata: () => (metadataCalls += 1) }),
 			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 1 } }
@@ -894,7 +894,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(metadataCalls).toBe(1);
 
 		let cacheHits = 0;
-		const cacheOnly = new OAuthService({
+		const cacheOnly = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ onMetadata: () => (cacheHits += 1) }),
 			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 10 } }
@@ -906,7 +906,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		for (const directive of ['no-store', 'no-cache']) {
 			let uncachedCalls = 0;
-			const uncached = new OAuthService({
+			const uncached = new OAuthService({ backchannelRetryDelaysMs: [],
 				stateDir: await newStateDir(),
 				fetch: oauthFetch({
 					metadataCacheControl: `${directive}, max-age=3600`,
@@ -920,7 +920,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			expect(uncachedCalls).toBe(2);
 		}
 
-		const tokenAndRevoke = new OAuthService({
+		const tokenAndRevoke = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch(),
 			publicLimits: {
@@ -957,7 +957,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 				{ status: 200, headers: { 'content-type': 'application/json' } }
 			);
 		};
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: dynamicFetch,
 			publicLimits: { authorize: { concurrent: 2, requestsPerMinute: 300 } },
@@ -982,13 +982,13 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('al arrancar borra los temporales huérfanos del store y de la clave, y nada más (I3/H10)', async () => {
 		const stateDir = await newStateDir();
-		await new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady();
+		await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }).ensureReady();
 		const orphans = ['oauth-store.json.4242.0123456789ab.tmp', 'oauth.key.77.abcdefabcdef.tmp'];
 		const foreign = ['.notes-seen-0123456789abcdef.json.1.tmp', 'oauth-store.json.bak', 'oauth-store.json.tmp'];
 		for (const name of [...orphans, ...foreign]) await writeFile(join(stateDir, name), '{}', { mode: 0o600 });
 		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			const restarted = new OAuthService({ stateDir, fetch: oauthFetch() });
+			const restarted = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 			await restarted.ensureReady();
 			const names = await readdir(stateDir);
 			for (const name of orphans) expect(names).not.toContain(name);
@@ -1006,8 +1006,8 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('la clave se publica completa y sin temporal; dos arranques a la vez acaban con la MISMA (H9)', async () => {
 		const stateDir = await newStateDir();
-		const first = new OAuthService({ stateDir, fetch: oauthFetch() });
-		const second = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const first = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
+		const second = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		await Promise.all([first.ensureReady(), second.ensureReady()]);
 		const names = await readdir(stateDir);
 		expect(names.filter((name) => name.endsWith('.tmp'))).toEqual([]);
@@ -1026,7 +1026,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			linkCalls += 1;
 			throw Object.assign(new Error('sin enlaces duros'), { code });
 		};
-		const first = new OAuthService({ stateDir, fetch: oauthFetch(), linkFile });
+		const first = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), linkFile });
 		await first.ensureReady();
 		expect(linkCalls).toBe(1);
 		const keyPath = join(stateDir, 'oauth.key');
@@ -1035,12 +1035,12 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect((await readdir(stateDir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
 		// Es la clave que usa el proceso: lo que cifra lo lee otro desde disco.
 		await issueTokens(await listen(first));
-		await expect(new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady()).resolves.toBeUndefined();
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }).ensureReady()).resolves.toBeUndefined();
 	});
 
 	it('store sin clave o con clave incoherente falla cerrado en readiness', async () => {
 		const stateDir = await newStateDir();
-		const first = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const first = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(first);
 		const { code } = await authorize(baseUrl);
 		await exchangeCode(baseUrl, code);
@@ -1056,18 +1056,18 @@ describe('OAuth 2.1 para claude.ai', () => {
 			expiresAt: corrupted.grants[0]!.refreshExpiresAt
 		});
 		await writeFile(storePath, JSON.stringify(corrupted), { mode: 0o600 });
-		await expect(new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady()).rejects.toThrow(/incoherente/);
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }).ensureReady()).rejects.toThrow(/incoherente/);
 		await writeFile(storePath, originalStore, { mode: 0o600 });
 
 		await unlink(join(stateDir, 'oauth.key'));
-		const missingKey = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const missingKey = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		await expect(missingKey.ensureReady()).rejects.toThrow(/clave/);
 		const missingBase = await listen(missingKey);
 		expect((await fetch(`${missingBase}/readyz`)).status).toBe(503);
 		await expect(stat(join(stateDir, 'oauth.key'))).rejects.toMatchObject({ code: 'ENOENT' });
 
 		await writeFile(join(stateDir, 'oauth.key'), Buffer.alloc(32, 7).toString('base64url'), { mode: 0o600 });
-		const wrongKey = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const wrongKey = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		await expect(wrongKey.ensureReady()).rejects.toThrow();
 		const wrongBase = await listen(wrongKey);
 		expect((await fetch(`${wrongBase}/readyz`)).status).toBe(503);
@@ -1075,8 +1075,8 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('readiness falla cerrado con secreto backchannel ausente o corto', async () => {
 		delete process.env.LUMBRE_MCP_BACKCHANNEL_SECRET;
-		await expect(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }).ensureReady()).rejects.toThrow(/SECRET/);
-		await expect(new OAuthService({
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch() }).ensureReady()).rejects.toThrow(/SECRET/);
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(), fetch: oauthFetch(), backchannelSecret: 'corto'
 		}).ensureReady()).rejects.toThrow(/SECRET/);
 		process.env.LUMBRE_MCP_BACKCHANNEL_SECRET = BACKCHANNEL_SECRET;
@@ -1084,7 +1084,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('store provisional v2 se rechaza intacto y nunca toca el backchannel', async () => {
 		const stateDir = await newStateDir();
-		const firstBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+		const firstBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 		const { code } = await authorize(firstBase);
 		const issued = await exchangeCode(firstBase, code);
 		const storePath = join(stateDir, 'oauth-store.json');
@@ -1100,7 +1100,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const exactText = JSON.stringify(provisional);
 		await writeFile(storePath, exactText, { mode: 0o600 });
 		let backchannelCalls = 0;
-		const legacy = new OAuthService({
+		const legacy = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ onBackchannel: () => { backchannelCalls += 1; } })
 		});
@@ -1123,14 +1123,14 @@ describe('OAuth 2.1 para claude.ai', () => {
 			'grants', 'usedRefreshTokens', 'authorizationRequests', 'authorizationCodes', 'revocationOutbox'
 		] as const) {
 			const stateDir = await newStateDir();
-			await new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady();
+			await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }).ensureReady();
 			const storePath = join(stateDir, 'oauth-store.json');
 			const incompleteStore: Partial<typeof complete> = structuredClone(complete);
 			delete incompleteStore[missing];
 			const exactText = JSON.stringify(incompleteStore);
 			await writeFile(storePath, exactText, { mode: 0o600 });
 			let backchannelCalls = 0;
-			const incomplete = new OAuthService({
+			const incomplete = new OAuthService({ backchannelRetryDelaysMs: [],
 				stateDir,
 				fetch: oauthFetch({ onBackchannel: () => { backchannelCalls += 1; } })
 			});
@@ -1191,7 +1191,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		];
 		for (const testCase of cases) {
 			const stateDir = await newStateDir();
-			const baseUrl = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+			const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 			const { code } = await authorize(baseUrl);
 			const storePath = join(stateDir, 'oauth-store.json');
 			const codeStore = JSON.parse(await readFile(storePath, 'utf8')) as Record<string, Array<Record<string, unknown>>>;
@@ -1202,7 +1202,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			const exactText = JSON.stringify(store);
 			await writeFile(storePath, exactText, { mode: 0o600 });
 			let backchannelCalls = 0;
-			const corrupted = new OAuthService({
+			const corrupted = new OAuthService({ backchannelRetryDelaysMs: [],
 				stateDir,
 				fetch: oauthFetch({ onBackchannel: () => { backchannelCalls += 1; } })
 			});
@@ -1212,7 +1212,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		}
 
 		const pendingDir = await newStateDir();
-		const pendingBase = await listen(new OAuthService({ stateDir: pendingDir, fetch: oauthFetch() }));
+		const pendingBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: pendingDir, fetch: oauthFetch() }));
 		await beginAuthorization(pendingBase);
 		const pendingPath = join(pendingDir, 'oauth-store.json');
 		const pendingStore = JSON.parse(await readFile(pendingPath, 'utf8')) as {
@@ -1222,7 +1222,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const exactPending = JSON.stringify(pendingStore);
 		await writeFile(pendingPath, exactPending, { mode: 0o600 });
 		let pendingCalls = 0;
-		await expect(new OAuthService({
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: pendingDir,
 			fetch: oauthFetch({ onBackchannel: () => { pendingCalls += 1; } })
 		}).ensureReady()).rejects.toThrow(/store OAuth incoherente/);
@@ -1235,7 +1235,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const expectedName = 'C'.repeat(120);
 		let sentName: unknown;
 		const stateDir = await newStateDir();
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({
 				metadataBody: JSON.stringify({
@@ -1257,13 +1257,13 @@ describe('OAuth 2.1 para claude.ai', () => {
 			authorizationRequests: Array<{ clientName: string }>;
 		};
 		expect(store.authorizationRequests[0]!.clientName).toBe(expectedName);
-		await expect(new OAuthService({ stateDir, fetch: oauthFetch() }).ensureReady()).resolves.toBeUndefined();
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }).ensureReady()).resolves.toBeUndefined();
 	});
 
 	it('readiness rechaza redirects alterados en pending/code sin tocar backchannel', async () => {
 		for (const kind of ['pending', 'code'] as const) {
 			const stateDir = await newStateDir();
-			const baseUrl = await listen(new OAuthService({ stateDir, fetch: oauthFetch() }));
+			const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }));
 			if (kind === 'pending') await beginAuthorization(baseUrl);
 			else await authorize(baseUrl);
 			const storePath = join(stateDir, 'oauth-store.json');
@@ -1275,7 +1275,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			else store.authorizationCodes[0]!.redirectUri = 'https://evil.example/callback';
 			await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
 			let backchannelCalls = 0;
-			const tampered = new OAuthService({
+			const tampered = new OAuthService({ backchannelRetryDelaysMs: [],
 				stateDir,
 				fetch: oauthFetch({ onBackchannel: () => { backchannelCalls += 1; } })
 			});
@@ -1286,7 +1286,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('readyz valida Host y deduplica/cachea comprobaciones concurrentes', async () => {
 		let currentTime = 10_000;
-		const oauth = new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch(), now: () => currentTime });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch(), now: () => currentTime });
 		const readySpy = vi.spyOn(oauth, 'ensureReady');
 		const baseUrl = await listen(oauth);
 		expect(await getStatusWithHost(`${baseUrl}/readyz`, 'evil.example')).toBe(403);
@@ -1306,7 +1306,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	it('persiste en orden flush temporal, rename y flush del directorio; aborta antes de rename', async () => {
 		const steps: string[] = [];
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch(),
 			persistenceStep: (step) => {
@@ -1326,7 +1326,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		const sabotagedDir = await newStateDir();
 		let temporarySyncs = 0;
-		const sabotaged = new OAuthService({
+		const sabotaged = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: sabotagedDir,
 			fetch: oauthFetch(),
 			persistenceStep: (step) => {
@@ -1352,7 +1352,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	});
 
 	it('PKCE incorrecto no consume ni revoca; el correcto canjea una sola vez', async () => {
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch() }));
 		const { code } = await authorize(baseUrl);
 		const invalid = await fetch(`${baseUrl}/token`, {
 			method: 'POST',
@@ -1387,14 +1387,14 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const stateDir = await newStateDir();
 		let revokeCalls = 0;
 		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } });
-		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn }));
 		const { code } = await authorize(baseUrl);
 		const issued = await exchangeCode(baseUrl, code);
 		const storeText = await readFile(join(stateDir, 'oauth-store.json'), 'utf8');
 		expect(storeText).not.toContain(code);
 
 		// Un código cualquiera no toca nada.
-		const restarted = new OAuthService({ stateDir, fetch: fetchFn });
+		const restarted = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn });
 		const restartedBase = await listen(restarted);
 		const replay = (value: string) => fetch(`${restartedBase}/token`, {
 			method: 'POST',
@@ -1425,7 +1425,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('dos canjes concurrentes del mismo código: uno recibe tokens, el otro 400, y la familia queda revocada (B3)', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const redeem = () => fetch(`${baseUrl}/token`, {
@@ -1449,7 +1449,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const stateDir = await newStateDir();
 		let currentTime = 3_000_000;
 		const fetchFn = oauthFetch({ requestBody: pendingRequestBody(currentTime) });
-		const oauth = new OAuthService({ stateDir, fetch: fetchFn, now: () => currentTime });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn, now: () => currentTime });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const issued = await exchangeCode(baseUrl, code);
@@ -1469,7 +1469,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	it('el access emitido en la última hora de la familia no la sobrevive (I1)', async () => {
 		const stateDir = await newStateDir();
 		let currentTime = 4_000_000;
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ requestBody: pendingRequestBody(currentTime) }),
 			now: () => currentTime
@@ -1490,26 +1490,26 @@ describe('OAuth 2.1 para claude.ai', () => {
 	});
 
 	it('rechaza resource distinto, client_id fuera de claude.ai y redirects de CIMD', async () => {
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch() }));
 		expect((await beginAuthorization(baseUrl, { resource: `${OAUTH_ISSUER}/otro` })).status).toBe(400);
 		expect((await beginAuthorization(baseUrl, { scope: 'otro:scope' })).status).toBe(400);
 		expect((await beginAuthorization(baseUrl, { redirect_uri: 'https://claude.ai/otro-callback' })).status).toBe(400);
 		expect((await beginAuthorization(baseUrl, { client_id: 'https://evil.example/client.json' })).status).toBe(400);
 		expect((await beginAuthorization(baseUrl, { client_id: 'https://claude.ai/a/../client.json' })).status).toBe(400);
 
-		const redirectedBase = await listen(new OAuthService({
+		const redirectedBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ metadataStatus: 302, metadataLocation: 'https://claude.ai/otro' })
 		}));
 		expect((await beginAuthorization(redirectedBase)).status).toBe(400);
 
-		const wrongContentBase = await listen(new OAuthService({
+		const wrongContentBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ metadataContentType: 'text/application/json-evil' })
 		}));
 		expect((await beginAuthorization(wrongContentBase)).status).toBe(400);
 
-		const oversizedBase = await listen(new OAuthService({
+		const oversizedBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ metadataBody: 'x'.repeat(64 * 1024 + 1) })
 		}));
@@ -1531,7 +1531,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			}
 			return await fallback(input, init);
 		};
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: codexFetch }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: codexFetch }));
 		const accepted = await beginAuthorization(baseUrl, { client_id: CODEX_CLIENT_ID, redirect_uri: CODEX_REDIRECT });
 		expect(accepted.status).toBe(302);
 		expect(accepted.headers.get('location')).toMatch(/^https:\/\/app\.lumbre\.pro\/integrations\/lumbre-mcp\?request=/);
@@ -1570,7 +1570,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			return await fallback(input, init);
 		};
 		const stateDir = await newStateDir();
-		const baseUrl = await listen(new OAuthService({ stateDir, fetch: codexFetch }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: codexFetch }));
 		const accepted = await beginAuthorization(baseUrl, {
 			client_id: CODEX_STABLE_CLIENT_ID,
 			redirect_uri: CODEX_STABLE_REDIRECT
@@ -1598,11 +1598,11 @@ describe('OAuth 2.1 para claude.ai', () => {
 			})
 		});
 		expect(token.status).toBe(200);
-		await expect(new OAuthService({ stateDir, fetch: codexFetch }).ensureReady()).resolves.toBeUndefined();
+		await expect(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: codexFetch }).ensureReady()).resolves.toBeUndefined();
 	});
 
 	it('authorize no acepta formulario ni entrada de tokens en el navegador', async () => {
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch() }));
 		const response = await fetch(`${baseUrl}/authorize`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -1619,7 +1619,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		// la caché no se queda vieja es que un `revoke` —que sí escribe— se ve
 		// en el acto en la MISMA instancia.
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const tokens = await exchangeCode(baseUrl, code);
@@ -1639,7 +1639,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('resolveAccessToken no clona el store en cada petición (R10) y no contamina la caché', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { code } = await authorize(baseUrl);
 		const tokens = await exchangeCode(baseUrl, code);
@@ -1666,7 +1666,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	it('el índice por accessHash sigue a altas, rotaciones, revocaciones y relecturas del disco (abuso #9)', async () => {
 		const stateDir = await newStateDir();
 		const farm = credentialFarm();
-		const oauth = new OAuthService({ stateDir, fetch: farm.fetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: farm.fetch() });
 		const baseUrl = await listen(oauth);
 		const first = await issueTokens(baseUrl);
 		const [firstUpstream] = [...farm.credentials.keys()];
@@ -1685,13 +1685,13 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
 		// Cambio externo del fichero (otro proceso revoca): la relectura de
 		// `ensureReady` lo adopta y el índice lo sigue.
-		const other = new OAuthService({ stateDir, fetch: farm.fetch() });
+		const other = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: farm.fetch() });
 		expect((await revokeFromClient(await listen(other), rotated.access)).status).toBe(200);
 		expect(await oauth.resolveAccessToken(rotated.access)).toBe(firstUpstream);
 		await oauth.ensureReady();
 		expect(await oauth.resolveAccessToken(rotated.access)).toBeUndefined();
 		// Y un proceso nuevo carga del disco con el índice vacío.
-		expect(await new OAuthService({ stateDir, fetch: farm.fetch() }).resolveAccessToken(rotated.access)).toBeUndefined();
+		expect(await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: farm.fetch() }).resolveAccessToken(rotated.access)).toBeUndefined();
 	});
 
 	it('una lectura en vuelo NO pisa una escritura que termina antes (caché por generación)', async () => {
@@ -1711,7 +1711,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const stateDir = await newStateDir();
 		let releaseRead: (() => void) | undefined;
 		let onRead: (() => void) | undefined;
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch(),
 			storeRead: async () => {
@@ -1761,11 +1761,11 @@ describe('OAuth 2.1 para claude.ai', () => {
 		expect(persisted.grants).toHaveLength(0);
 		// Una instancia nueva, que solo ve el disco, coincide: la revocación no
 		// se perdió al serializar desde la caché.
-		expect(await new OAuthService({ stateDir, fetch: oauthFetch() }).resolveAccessToken(newAccess)).toBeUndefined();
+		expect(await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() }).resolveAccessToken(newAccess)).toBeUndefined();
 	});
 
 	it('/mcp limita los intentos FALLIDOS por IP y no gasta presupuesto con los que autentican', async () => {
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch(),
 			failedMcpAttemptsPerMinute: 2
@@ -1818,7 +1818,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('una credencial que Lumbre rechazó se recuerda por su hash unos segundos, no en claro', () => {
 		let currentTime = 5_000_000;
-		const oauth = new OAuthService({ stateDir: '/nunca-se-usa', fetch: oauthFetch(), now: () => currentTime });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: '/nunca-se-usa', fetch: oauthFetch(), now: () => currentTime });
 		const req = { headers: {}, socket: { remoteAddress: '192.0.2.9' } } as unknown as IncomingMessage;
 		expect(oauth.isRejectedCredential('token-rechazado')).toBe(false);
 		oauth.recordUpstreamRejection(req, 'token-rechazado');
@@ -1838,7 +1838,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		 * `mcp-failed:<ip>` es gratis de llenar— para reiniciar justo el
 		 * presupuesto que tiene que resistir eso.
 		 */
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch(),
 			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } },
@@ -1865,7 +1865,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	});
 
 	it('un formulario descomunal se corta con 413 y el servidor deja de recibirlo', async () => {
-		const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: oauthFetch() }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: oauthFetch() }));
 		const url = new URL(`${baseUrl}/token`);
 
 		// (1) `content-length` declarado por encima del tope: se rechaza ANTES
@@ -1920,7 +1920,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	}, 20_000);
 
 	it('un formulario lento no ocupa la ranura de /token y se corta con 408 al vencer el plazo (M3)', async () => {
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch(),
 			publicLimits: { token: { concurrent: 1, requestsPerMinute: 60 } },
@@ -1957,7 +1957,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		let currentTime = 1_000_000;
 		const storePath = join(stateDir, 'oauth-store.json');
 		// Un revoke con Lumbre caída deja la credencial en la outbox.
-		const failing = new OAuthService({
+		const failing = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ revokeStatus: 503, requestBody: pendingRequestBody(currentTime) }),
 			now: () => currentTime
@@ -1981,7 +1981,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		currentTime += 30 * 24 * 60 * 60_000 + 1;
 		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			await new OAuthService({ stateDir, fetch: oauthFetch(), now: () => currentTime }).ensureReady();
+			await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), now: () => currentTime }).ensureReady();
 			expect(errors.mock.calls.map((call) => call.join(' ')).join('\n')).toMatch(/outbox de revocación: 1/);
 		} finally {
 			errors.mockRestore();
@@ -1995,7 +1995,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const stateDir = await newStateDir();
 		let currentTime = 2_000_000;
 		const storePath = join(stateDir, 'oauth-store.json');
-		const first = new OAuthService({
+		const first = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ revokeStatus: 503, requestBody: pendingRequestBody(currentTime) }),
 			now: () => currentTime
@@ -2024,7 +2024,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			await new OAuthService({
+			await new OAuthService({ backchannelRetryDelaysMs: [],
 				stateDir, fetch: oauthFetch({ revokeStatus: 503 }), now: () => currentTime
 			}).ensureReady();
 		} finally {
@@ -2060,7 +2060,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 				{ status: 200, headers: { 'content-type': 'application/json' } }
 			);
 		};
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: twoClientsFetch,
 			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } },
@@ -2082,7 +2082,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		const stateDir = await newStateDir();
 		let requests = 0;
 		const fetchFn = oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } });
-		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn }));
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
 		expect(requests).toBe(1);
 
@@ -2098,7 +2098,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
 
 		// Instancia nueva para que lea del disco esa cola llena.
-		const full = await listen(new OAuthService({ stateDir, fetch: fetchFn }));
+		const full = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn }));
 		expect((await beginAuthorization(full)).status).toBe(503);
 		// Antes el 503 llegaba DESPUÉS del backchannel: llenar la cola dejaba
 		// mil registros creados en Lumbre que aquí ni se guardaban.
@@ -2113,7 +2113,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 16 } },
 			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
 		};
-		const baseUrl = await listen(new OAuthService({ stateDir, fetch: fetchFn, ...limits }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn, ...limits }));
 		expect((await beginAuthorization(baseUrl)).status).toBe(302);
 		const storePath = join(stateDir, 'oauth-store.json');
 		const store = JSON.parse(await readFile(storePath, 'utf8')) as {
@@ -2127,7 +2127,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 		await writeFile(storePath, JSON.stringify(store), { mode: 0o600 });
 		requests = 0;
 
-		const nearlyFull = await listen(new OAuthService({ stateDir, fetch: fetchFn, ...limits }));
+		const nearlyFull = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: fetchFn, ...limits }));
 		const statuses = (await Promise.all(Array.from({ length: 8 }, () => beginAuthorization(nearlyFull))))
 			.map((response) => response.status)
 			.sort();
@@ -2140,7 +2140,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('el presupuesto de authorize es por IP primero: el client_id público no se agota desde 12 IPs (abuso #4)', async () => {
 		let requests = 0;
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'requests') requests += 1; } }),
 			publicLimits: { authorize: { requestsPerMinute: 300, concurrent: 8 } }
@@ -2163,7 +2163,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	it('PKCE: rechaza code_challenge_method=plain y su ausencia antes de leer el CIMD', async () => {
 		let metadataCalls = 0;
 		let backchannelCalls = 0;
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ onMetadata: () => (metadataCalls += 1), onBackchannel: () => (backchannelCalls += 1) })
 		}));
@@ -2183,7 +2183,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 	it('un CIMD de claude.ai que registra otra redirect_uri da 400 sin tocar Lumbre (B2)', async () => {
 		let backchannelCalls = 0;
 		const otherRedirect = 'https://claude.ai/api/otro_callback';
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({
 				metadataBody: JSON.stringify({
@@ -2207,7 +2207,7 @@ describe('OAuth 2.1 para claude.ai', () => {
 
 	it('un decision=denied falsificado no aborta la autorización de otro', async () => {
 		let exchangeCalls = 0;
-		const baseUrl = await listen(new OAuthService({
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: await newStateDir(),
 			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'exchange') exchangeCalls += 1; } })
 		}));
@@ -2360,7 +2360,7 @@ function credentialFarm() {
 async function seedTwoGrants() {
 	const stateDir = await newStateDir();
 	const farm = credentialFarm();
-	const baseUrl = await listen(new OAuthService({ stateDir, fetch: farm.fetch() }));
+	const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: farm.fetch() }));
 	const grants = [await issueTokens(baseUrl), await issueTokens(baseUrl)];
 	const tokens = [...farm.credentials.keys()];
 	expect(tokens).toHaveLength(2);
@@ -2380,7 +2380,7 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 	it('`/revoke` del cliente borra la huella que escribió ESA credencial; la outbox se vacía con el ACK como antes', async () => {
 		const stateDir = await newStateDir();
 		let revokeCalls = 0;
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
 		});
@@ -2436,9 +2436,9 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 
 	it('`/revoke` con Lumbre caída: la huella se borra igual y la revocación upstream queda en la outbox', async () => {
 		const stateDir = await newStateDir();
-		const { access } = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const { access } = await issueTokens(await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() })));
 		const file = await seedNotesFile(UPSTREAM_TOKEN);
-		const downBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch({ revokeStatus: 503 }) }));
+		const downBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch({ revokeStatus: 503 }) }));
 
 		expect((await revokeFromClient(downBase, access)).status).toBe(200);
 
@@ -2450,9 +2450,9 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 
 	it('refresh con la credencial inactiva en Lumbre: se va la familia y también su huella', async () => {
 		const stateDir = await newStateDir();
-		const issued = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const issued = await issueTokens(await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() })));
 		const file = await seedNotesFile(UPSTREAM_TOKEN);
-		const inactiveBase = await listen(new OAuthService({
+		const inactiveBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir, fetch: oauthFetch({ introspectBody: { active: false } })
 		}));
 
@@ -2464,7 +2464,7 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 
 	it('reutilizar un refresh ya usado revoca la familia y borra su huella', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const issued = await issueTokens(baseUrl);
 		const rotated = await rotate(baseUrl, issued.refresh);
@@ -2483,19 +2483,19 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 		const stateDir = await newStateDir();
 		let currentTime = 3_000_000;
 		const now = () => currentTime;
-		await issueTokens(await listen(new OAuthService({
+		await issueTokens(await listen(new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir, fetch: oauthFetch({ requestBody: pendingRequestBody(currentTime) }), now
 		})));
 		const file = await seedNotesFile(UPSTREAM_TOKEN);
 
 		// Un día antes de caducar, la poda no toca ni el grant ni la huella.
 		currentTime += 29 * 24 * 60 * 60_000;
-		await new OAuthService({ stateDir, fetch: oauthFetch(), now }).ensureReady();
+		await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), now }).ensureReady();
 		expect((await readStoredState(stateDir)).grants).toHaveLength(1);
 		expect(await notesFiles()).toContain(file);
 
 		currentTime += 24 * 60 * 60_000 + 1;
-		await new OAuthService({ stateDir, fetch: oauthFetch(), now }).ensureReady();
+		await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch(), now }).ensureReady();
 		expect((await readStoredState(stateDir)).grants).toEqual([]);
 		expect(await notesFiles()).not.toContain(file);
 	});
@@ -2508,7 +2508,7 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 		const sharedToken = 'c'.repeat(64);
 		let counter = 0;
 		let latestCredentialId = '';
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({
 				exchangeBody: () => {
@@ -2540,7 +2540,7 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 
 	it('si la huella no se puede borrar, la revocación NO falla y queda dicho en el log con un recuento, sin nombres', async () => {
 		const stateDir = await newStateDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		const baseUrl = await listen(oauth);
 		const { access } = await issueTokens(baseUrl);
 		// Un DIRECTORIO con el nombre de la huella: `unlink` falla con algo que
@@ -2565,7 +2565,7 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 	it('si la escritura del almacén falla ANTES del rename, el grant sigue y su huella también', async () => {
 		const stateDir = await newStateDir();
 		let sabotage = false;
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch(),
 			persistenceStep: (step) => {
@@ -2589,7 +2589,7 @@ describe('una autorización que sale del almacén se lleva su huella de notas', 
 	it('si falla un paso POSTERIOR al rename, el grant ya salió del disco y su huella se borra igual', async () => {
 		const stateDir = await newStateDir();
 		let sabotage = false;
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch(),
 			persistenceStep: (step) => {
@@ -2613,7 +2613,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 	it('una credencial que Lumbre declara inactiva pierde grant, tombstones y huella; la de OTRA credencial activa queda intacta', async () => {
 		const seeded = await seedTwoGrants();
 		let revokeCalls = 0;
-		const oauth = new OAuthService({
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: seeded.stateDir,
 			fetch: seeded.farm.fetch({ onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
 		});
@@ -2658,7 +2658,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		// llama: lo que borra es el barrido, no el arranque ni la readiness.
 		const seeded = await seedTwoGrants();
 		seeded.farm.inactive.add(seeded.tokens[0]!);
-		const oauth = new OAuthService({ stateDir: seeded.stateDir, fetch: seeded.farm.fetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: seeded.stateDir, fetch: seeded.farm.fetch() });
 		await listen(oauth);
 
 		await oauth.ensureReady();
@@ -2683,7 +2683,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		// `{active:false}` limpio con 2xx: no se puede saber, no se purga.
 		for (const token of seeded.tokens) seeded.farm.inactive.add(token);
 		let introspections = 0;
-		const sweeper = new OAuthService({
+		const sweeper = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: seeded.stateDir,
 			fetch: seeded.farm.fetch({ ...overrides, onBackchannel: (path) => { if (path === 'introspect') introspections += 1; } })
 		});
@@ -2699,7 +2699,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 	it('freno de purga masiva: más de la mitad inactivas en una pasada (con 5 o más) no purga ninguna (I4)', async () => {
 		const stateDir = await newStateDir();
 		const farm = credentialFarm();
-		const issuing = new OAuthService({
+		const issuing = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: farm.fetch(),
 			authorizeBudget: { perIpPerMinute: 300, perClientPerMinute: 300, globalPerMinute: 300 }
@@ -2736,7 +2736,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			let revokeCalls = 0;
-			const held = await new OAuthService({
+			const held = await new OAuthService({ backchannelRetryDelaysMs: [],
 				stateDir,
 				fetch: farm.fetch({ revokeStatus: 503, onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
 			}).sweepInactiveCredentials();
@@ -2751,7 +2751,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 
 			// Con Lumbre aceptando el revoke, el freno sigue puesto pero la
 			// outbox se vacía igual.
-			const flushed = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+			const flushed = await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
 			expect(flushed).toMatchObject({ aborted: true, purgedGrants: 0, heldBack: 3 });
 			const afterFlush = await readStoredState(stateDir);
 			expect(afterFlush.revocationOutbox).toEqual([]);
@@ -2762,7 +2762,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 
 		// 2 de 5 no pasan de la mitad: se purgan como siempre.
 		farm.inactive.delete(tokens[2]!);
-		const purged = await new OAuthService({ stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
+		const purged = await new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: farm.fetch() }).sweepInactiveCredentials();
 		expect(purged).toMatchObject({ aborted: false, purgedGrants: 2, heldBack: 0 });
 		expect((await readStoredState(stateDir)).grants).toHaveLength(3);
 	});
@@ -2771,7 +2771,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		const seeded = await seedTwoGrants();
 		const inner = seeded.farm.fetch();
 		let introspections = 0;
-		const sweeper = new OAuthService({
+		const sweeper = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: seeded.stateDir,
 			fetch: async (input, init) => {
 				if (String(input).endsWith('/introspect')) {
@@ -2798,7 +2798,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 	] as Array<[string, Record<string, string>]>)('una introspección activa pero con %s no purga y deja seguir con las demás', async (_label, mismatch) => {
 		const seeded = await seedTwoGrants();
 		let introspections = 0;
-		const sweeper = new OAuthService({
+		const sweeper = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir: seeded.stateDir,
 			fetch: seeded.farm.fetch({
 				introspectBody: (body: Record<string, unknown>) => ({
@@ -2825,13 +2825,13 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 
 	it('un elemento de la outbox cuya credencial Lumbre declara inactiva se retira; si sigue activa o no se sabe, se queda', async () => {
 		const stateDir = await newStateDir();
-		const { access } = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
-		const downBase = await listen(new OAuthService({ stateDir, fetch: oauthFetch({ revokeStatus: 503 }) }));
+		const { access } = await issueTokens(await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() })));
+		const downBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch({ revokeStatus: 503 }) }));
 		expect((await revokeFromClient(downBase, access)).status).toBe(200);
 		expect((await readStoredState(stateDir)).revocationOutbox).toHaveLength(1);
 
 		// Lumbre no acepta el `revoke` y no se puede introspeccionar: se queda.
-		const unknown = await new OAuthService({
+		const unknown = await new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir, fetch: oauthFetch({ revokeStatus: 503, introspectStatus: 503 })
 		}).sweepInactiveCredentials();
 		expect(unknown).toMatchObject({ aborted: true, retiredOutboxItems: 0 });
@@ -2840,7 +2840,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		// Lumbre no acepta el `revoke` y la credencial sigue ACTIVA: se queda,
 		// porque todavía hay algo que revocar.
 		let revokeCalls = 0;
-		const stillActive = await new OAuthService({
+		const stillActive = await new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: oauthFetch({ revokeStatus: 503, onBackchannel: (path) => { if (path === 'revoke') revokeCalls += 1; } })
 		}).sweepInactiveCredentials();
@@ -2849,7 +2849,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		expect((await readStoredState(stateDir)).revocationOutbox).toHaveLength(1);
 
 		// Lumbre la declara inactiva: ya no hay nada que revocar, se retira.
-		const inactive = await new OAuthService({
+		const inactive = await new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir, fetch: oauthFetch({ revokeStatus: 503, introspectBody: { active: false } })
 		}).sweepInactiveCredentials();
 		expect(inactive).toMatchObject({ aborted: false, purgedGrants: 0, retiredOutboxItems: 1 });
@@ -2859,7 +2859,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 	it('borra una huella con más de 30 días aunque nadie guarde nada, y no toca notes-seen.json, oauth-store.json ni oauth.key', async () => {
 		// Como en producción: el almacén OAuth y las huellas comparten directorio.
 		const stateDir = notesDir();
-		const oauth = new OAuthService({ stateDir, fetch: oauthFetch() });
+		const oauth = new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() });
 		await issueTokens(await listen(oauth));
 		const liveFile = await seedNotesFile(UPSTREAM_TOKEN);
 		// La conexión antigua por token de la API: el relé no guarda credencial
@@ -2881,12 +2881,12 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 
 	it('dos barridos solapados: el segundo no hace nada', async () => {
 		const stateDir = await newStateDir();
-		await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		await issueTokens(await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() })));
 		let release!: () => void;
 		const gate = new Promise<void>((resolve) => { release = resolve; });
 		const inner = oauthFetch();
 		let introspections = 0;
-		const sweeper = new OAuthService({
+		const sweeper = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: async (input, init) => {
 				if (String(input).endsWith('/introspect')) {
@@ -2912,12 +2912,12 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 
 	it('carrera: el cliente revoca entre la introspección y la retirada; el barrido no retira nada ni lanza', async () => {
 		const stateDir = await newStateDir();
-		const { access } = await issueTokens(await listen(new OAuthService({ stateDir, fetch: oauthFetch() })));
+		const { access } = await issueTokens(await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: oauthFetch() })));
 		const file = await seedNotesFile(UPSTREAM_TOKEN);
 		const inner = oauthFetch({ introspectBody: { active: false } });
 		let racingBase = '';
 		let revokedInBetween = 0;
-		const racing = new OAuthService({
+		const racing = new OAuthService({ backchannelRetryDelaysMs: [],
 			stateDir,
 			fetch: async (input, init) => {
 				if (String(input).endsWith('/introspect')) {
@@ -2947,7 +2947,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 		seeded.farm.inactive.add(seeded.tokens[0]!);
 		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			const sweeper = new OAuthService({ stateDir: seeded.stateDir, fetch: seeded.farm.fetch() });
+			const sweeper = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: seeded.stateDir, fetch: seeded.farm.fetch() });
 			expect(await sweeper.sweepInactiveCredentials()).toMatchObject({ purgedGrants: 1 });
 			const lines = errors.mock.calls.map((call) => call.join(' '));
 			const sweepLines = lines.filter((line) => line.includes('barrido'));
@@ -2971,7 +2971,7 @@ describe('barrido periódico de credenciales (sweepInactiveCredentials)', () => 
 			expect(errors).not.toHaveBeenCalled();
 
 			// Tampoco el que se corta por un fallo del canal sin haber purgado.
-			const down = new OAuthService({ stateDir: seeded.stateDir, fetch: seeded.farm.fetch({ introspectStatus: 503 }) });
+			const down = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: seeded.stateDir, fetch: seeded.farm.fetch({ introspectStatus: 503 }) });
 			expect(await down.sweepInactiveCredentials()).toMatchObject({ purgedGrants: 0, aborted: true });
 			expect(errors).not.toHaveBeenCalled();
 		} finally {
@@ -3073,7 +3073,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 	}
 
 	it('registra a Mistral Vibe y completa code+PKCE con un puerto distinto al registrado', async () => {
-		const service = new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() });
+		const service = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: echoClientIdFetch() });
 		const baseUrl = await listen(service);
 		const registered = await registerClient(baseUrl, vibeRegistration());
 		expect(registered.status).toBe(201);
@@ -3111,7 +3111,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		// Límite holgado: este test hace 15 registros seguidos y el de serie
 		// (10/min e IP) los cortaría a mitad de la tabla de casos.
 		const baseUrl = await listen(
-			new OAuthService({ stateDir, fetch: echoClientIdFetch(), publicLimits: { register: { requestsPerMinute: 1000, concurrent: 8 } } })
+			new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: echoClientIdFetch(), publicLimits: { register: { requestsPerMinute: 1000, concurrent: 8 } } })
 		);
 		const cases: [string, Record<string, unknown>][] = [
 			['client_name desconocido', vibeRegistration({ client_name: 'Otro Cliente' })],
@@ -3152,7 +3152,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 	it('exige un registro vivo: lm_cl_ inventado o caducado no pasa de /authorize ni toca Lumbre', async () => {
 		let lumbreCalls = 0;
 		const stateDir = await newStateDir();
-		const baseUrl = await listen(new OAuthService({ stateDir, fetch: echoClientIdFetch(() => { lumbreCalls += 1; }) }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: echoClientIdFetch(() => { lumbreCalls += 1; }) }));
 		const invented = `lm_cl_${'A'.repeat(43)}`;
 		const response = await beginAuthorization(baseUrl, { client_id: invented, redirect_uri: VIBE_REDIRECT });
 		expect(response.status).toBe(400);
@@ -3164,7 +3164,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		const clockStart = Date.now();
 		let clock = clockStart;
 		const dir = await newStateDir();
-		const timedBase = await listen(new OAuthService({ stateDir: dir, fetch: echoClientIdFetch(() => { lumbreCalls += 1; }), now: () => clock }));
+		const timedBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: echoClientIdFetch(() => { lumbreCalls += 1; }), now: () => clock }));
 		const registered = (await (await registerClient(timedBase, vibeRegistration())).json()) as Record<string, unknown>;
 		const clientId = registered.client_id as string;
 		clock = clockStart + 366 * 24 * 60 * 60_000;
@@ -3179,12 +3179,12 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		let clock = clockStart;
 		const dir = await newStateDir();
 		const fetchFirst = echoClientIdFetch();
-		const baseUrl = await listen(new OAuthService({ stateDir: dir, fetch: fetchFirst, now: () => clock }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: fetchFirst, now: () => clock }));
 		const registered = (await (await registerClient(baseUrl, vibeRegistration())).json()) as Record<string, unknown>;
 		const clientId = registered.client_id as string;
 
 		// Reinicio con el reloj real: el registro sigue vivo y autoriza.
-		const restarted = await listen(new OAuthService({ stateDir: dir, fetch: echoClientIdFetch() }));
+		const restarted = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: echoClientIdFetch() }));
 		const code = await authorizeWith(restarted, clientId, VIBE_REDIRECT);
 		expect(code).toBeTruthy();
 
@@ -3194,7 +3194,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		// la coherencia del almacén tras la poda).
 		const yearLater = clockStart + 366 * 24 * 60 * 60_000;
 		const futureBase = await listen(
-			new OAuthService({ stateDir: dir, fetch: echoClientIdFetch(undefined, { requestBody: pendingRequestBody(yearLater) }), now: () => yearLater })
+			new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: echoClientIdFetch(undefined, { requestBody: pendingRequestBody(yearLater) }), now: () => yearLater })
 		);
 		const again = (await (await registerClient(futureBase, vibeRegistration())).json()) as Record<string, unknown>;
 		const newClientId = again.client_id as string;
@@ -3205,13 +3205,13 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		const oldClient = await beginAuthorization(futureBase, { client_id: clientId, redirect_uri: VIBE_REDIRECT });
 		expect(oldClient.status).toBe(400);
 		// …y el almacén sigue siendo legible y coherente.
-		const future = new OAuthService({ stateDir: dir, fetch: echoClientIdFetch(), now: () => yearLater });
+		const future = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: echoClientIdFetch(), now: () => yearLater });
 		await expect(future.checkReady()).resolves.toBeUndefined();
 	});
 
 	it('admite a VS Code (Copilot local) con su client id público y redirect loopback de puerto y path libres', async () => {
 		const stateDir = await newStateDir();
-		const baseUrl = await listen(new OAuthService({ stateDir, fetch: echoClientIdFetch() }));
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: echoClientIdFetch() }));
 		// Como su fallback real: redirect sin path (VS Code escucha en el
 		// raíz) y con path, y con cualquier puerto.
 		for (const redirectUri of ['http://127.0.0.1:33418', 'http://localhost:33419/callback']) {
@@ -3229,7 +3229,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 
 	it('limita /register por IP y expulsa al registro más antiguo al llegar al tope', async () => {
 		// Rate limit de serie: 10/min e IP. La 11ª se queda fuera.
-		const tightBase = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
+		const tightBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
 		for (let index = 0; index < 10; index += 1) {
 			expect((await registerClient(tightBase, vibeRegistration())).status).toBe(201);
 		}
@@ -3275,7 +3275,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		// La clave de cifrado, como la escribiría el relé: sin ella, un
 		// store presente se considera incoherente (falla cerrado).
 		await writeFile(join(dir, 'oauth.key'), randomBytes(32).toString('base64url'), 'utf8');
-		const cappedBase = await listen(new OAuthService({ stateDir: dir, fetch: echoClientIdFetch() }));
+		const cappedBase = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: echoClientIdFetch() }));
 		const newest = await registerClient(cappedBase, vibeRegistration());
 		expect(newest.status).toBe(201);
 		const stored = JSON.parse(await readFile(join(dir, 'oauth-store.json'), 'utf8')) as { registeredClients: { clientId: string }[] };
@@ -3293,7 +3293,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		// Y el servicio lo usa: un nombre ampliado por entorno pasa el registro.
 		process.env.LUMBRE_MCP_DCR_CLIENT_NAMES = 'Copilot CLI';
 		try {
-			const baseUrl = await listen(new OAuthService({ stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
+			const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: echoClientIdFetch() }));
 			const allowed = await registerClient(baseUrl, vibeRegistration({ client_name: 'Copilot CLI' }));
 			expect(allowed.status).toBe(201);
 			const denied = await registerClient(baseUrl, vibeRegistration());

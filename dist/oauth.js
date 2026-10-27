@@ -1299,7 +1299,8 @@ export class OAuthService {
         this.backchannel = options.backchannel ?? new LumbreBackchannel({
             baseUrl: options.lumbreAppBaseUrl ?? process.env.LUMBRE_APP_BASE_URL,
             secret: options.backchannelSecret ?? process.env.LUMBRE_MCP_BACKCHANNEL_SECRET,
-            fetch: this.fetchFn
+            fetch: this.fetchFn,
+            retryDelaysMs: options.backchannelRetryDelaysMs
         });
         if (options.encryptionKey && options.encryptionKey.length !== 32)
             throw new Error('OAuth encryptionKey debe tener 32 bytes');
