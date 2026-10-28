@@ -3144,10 +3144,17 @@ export class OAuthService {
 		) {
 			throw metadataError(web ? 'redirect_uri no admitido para este cliente.' : 'Solo se admiten redirect_uri de loopback http.');
 		}
-		// RFC 7591 §2 / OIDC DCR: opcional. Al cliente web solo se le admite
-		// `web`; a los de loopback no se les mira (Vibe queda como estaba).
-		if (web && candidate.application_type !== undefined && candidate.application_type !== 'web') {
-			throw metadataError('Solo se admite application_type=web para este cliente.');
+		// RFC 7591 §2 / OIDC DCR: opcional. Al cliente web se le admite ausente,
+		// `web` o `native` (Le Chat manda `native` aunque su redirect es https);
+		// la barrera de seguridad es el redirect https exacto, no este campo.
+		// A los de loopback no se les mira (Vibe queda como estaba).
+		if (
+			web &&
+			candidate.application_type !== undefined &&
+			candidate.application_type !== 'web' &&
+			candidate.application_type !== 'native'
+		) {
+			throw metadataError('Solo se admite application_type=web o native para este cliente.');
 		}
 		if (
 			candidate.grant_types !== undefined &&

@@ -1087,7 +1087,7 @@ web de Mistral) usa ese mismo DCR con una segunda forma cerrada: `client_name`
 exactamente `mistral-mcp-client` y todos sus `redirect_uris` exactamente
 `https://callback.mistral.ai/v1/integrations_auth/oauth2_callback`
 (comparación exacta de string, sin prefijos, comodines, query ni fragmento),
-`application_type` ausente o `web`, y en el consentimiento de Lumbre se
+`application_type` ausente, `web` o `native` (Le Chat manda `native`), y en el consentimiento de Lumbre se
 muestra como «Le Chat»; ese nombre nunca se registra con loopback, tampoco se
 admite un `Mistral Vibe` con redirect `https`, y esta forma no depende de
 `LUMBRE_MCP_DCR_CLIENT_NAMES`; y VS Code (Copilot

@@ -3385,7 +3385,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 	const LE_CHAT_REDIRECT = 'https://callback.mistral.ai/v1/integrations_auth/oauth2_callback';
 
 	/** El registro REAL de Le Chat (web de Mistral), tal y como lo dejó el log
-	 *  de `/register` en producción el 28 oct 2026, con `application_type`. */
+	 *  de `/register` en producción el 28 oct 2026: manda `application_type: native`. */
 	function leChatRegistration(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 		return {
 			response_types: ['code'],
@@ -3394,7 +3394,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 			redirect_uris: [LE_CHAT_REDIRECT],
 			token_endpoint_auth_method: 'none',
 			grant_types: ['authorization_code', 'refresh_token'],
-			application_type: 'web',
+			application_type: 'native',
 			...overrides
 		};
 	}
@@ -3465,7 +3465,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 			['mistral-mcp-client por http', leChatRegistration({ redirect_uris: [LE_CHAT_REDIRECT.replace('https:', 'http:')] })],
 			['mistral-mcp-client con el host en mayúsculas', leChatRegistration({ redirect_uris: [LE_CHAT_REDIRECT.replace('callback.mistral.ai', 'CALLBACK.mistral.ai')] })],
 			['mistral-mcp-client con lista mixta', leChatRegistration({ redirect_uris: [LE_CHAT_REDIRECT, VIBE_REDIRECT] })],
-			['mistral-mcp-client nativo', leChatRegistration({ application_type: 'native' })],
+			['mistral-mcp-client con application_type no admitido', leChatRegistration({ application_type: 'browser' })],
 			['mistral-mcp-client confidencial', leChatRegistration({ token_endpoint_auth_method: 'client_secret_post' })],
 			['nombre parecido', leChatRegistration({ client_name: 'Mistral-MCP-Client' })],
 			['Mistral Vibe con el redirect de Le Chat', vibeRegistration({ redirect_uris: [LE_CHAT_REDIRECT] })]
@@ -3475,6 +3475,9 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 			expect(response.status, name).toBe(400);
 			expect(((await response.json()) as Record<string, unknown>).error, name).toBe('invalid_client_metadata');
 		}
+		// `web` también vale.
+		const asWeb = await registerClient(baseUrl, leChatRegistration({ application_type: 'web' }));
+		expect(asWeb.status).toBe(201);
 		// Sin `application_type` también vale: es opcional (RFC 7591 §2).
 		const withoutType = await registerClient(baseUrl, leChatRegistration({ application_type: undefined }));
 		expect(withoutType.status).toBe(201);
