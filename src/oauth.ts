@@ -114,6 +114,24 @@ const VSCODE_PUBLIC_CLIENT_ID = 'aebc6443-996d-45c2-90f0-388ff96faa56';
  * (`registeredClientNamesFromEnv`) sin tocar código.
  */
 const DEFAULT_DCR_CLIENT_NAMES = ['Mistral Vibe'];
+/**
+ * Clientes DCR WEB: `client_name` exacto → redirects `https` exactos que
+ * puede registrar, y el nombre que ve la persona en el consentimiento. Es una
+ * lista CERRADA en código, aparte de `DEFAULT_DCR_CLIENT_NAMES` y ajena a
+ * `LUMBRE_MCP_DCR_CLIENT_NAMES`: un redirect web no lo protege el loopback,
+ * así que aquí la barrera es el string exacto (sin prefijos, comodines,
+ * query ni fragmento). Un nombre de esta lista solo se registra con estos
+ * redirects, aunque el entorno lo admita también como cliente loopback.
+ *
+ * - `mistral-mcp-client`: el conector personalizado de Le Chat (la web de
+ *   Mistral). Se muestra como «Le Chat».
+ */
+const DCR_WEB_CLIENTS: ReadonlyMap<string, { displayName: string; redirectUris: readonly string[] }> = new Map([
+	[
+		'mistral-mcp-client',
+		{ displayName: 'Le Chat', redirectUris: ['https://callback.mistral.ai/v1/integrations_auth/oauth2_callback'] }
+	]
+]);
 const MAX_REFRESH_TOMBSTONES = 10_000;
 /**
  * Tombstones que se guardan por familia de refresh. Al llegar al tope se
@@ -588,10 +606,11 @@ interface ClientMetadata {
 }
 
 /**
- * Cliente registrado por DCR (`handleRegister`): Mistral Vibe. Los
- * `redirectUris` se guardan tal y como se validaron (loopback `http`) y el
- * `clientName` ya recortado; no hay secreto porque solo se admiten clientes
- * públicos.
+ * Cliente registrado por DCR (`handleRegister`): Mistral Vibe o Le Chat. Los
+ * `redirectUris` se guardan tal y como se validaron (loopback `http`, o los
+ * `https` exactos de `DCR_WEB_CLIENTS`; ver `registeredRedirectAdmitted`) y
+ * el `clientName` ya recortado; no hay secreto porque solo se admiten
+ * clientes públicos.
  */
 interface RegisteredClient {
 	clientId: string;
@@ -759,6 +778,7 @@ export function describeRejectedRegistration(requested: unknown, reason: string)
 	if (body.grant_types !== undefined) out.grant_types = clipList(body.grant_types);
 	if (body.response_types !== undefined) out.response_types = clipList(body.response_types);
 	if (body.scope !== undefined) out.scope = clip(body.scope, 300);
+	if (body.application_type !== undefined) out.application_type = clip(body.application_type, 60);
 	if (body.client_uri !== undefined) out.client_uri = clip(body.client_uri, 300);
 	out.keys = Object.keys(body).slice(0, 50).map((key) => key.slice(0, 60));
 	return out;
@@ -1061,6 +1081,37 @@ function loopbackRedirectMatches(requested: string, registered: string): boolean
 }
 
 /**
+ * ¿Puede un cliente DCR con este `clientName` registrar este redirect? Si el
+ * nombre está en `DCR_WEB_CLIENTS`, solo sus `https` exactos (comparación de
+ * string); si no, solo loopback (`parseLoopbackRedirect`). Lo usan el alta
+ * (`registrationRequest`) y la carga del almacén (`normalizeStore`), para que
+ * un `mistral-mcp-client` con loopback o un Vibe con `https` no pasen nunca.
+ */
+function registeredRedirectAdmitted(clientName: string, redirectUri: string): boolean {
+	const web = DCR_WEB_CLIENTS.get(clientName);
+	if (web) return web.redirectUris.includes(redirectUri);
+	return parseLoopbackRedirect(redirectUri) !== undefined;
+}
+
+/**
+ * ¿Casa el redirect pedido con alguno de los que registró este cliente DCR?
+ * Cliente web: string exacto, y además tiene que seguir en
+ * `DCR_WEB_CLIENTS`. Cliente loopback: `loopbackRedirectMatches` (path
+ * exacto, puerto libre).
+ */
+function registeredClientRedirectMatches(client: RegisteredClient, requested: string): boolean {
+	const web = DCR_WEB_CLIENTS.get(client.clientName);
+	if (web) return web.redirectUris.includes(requested) && client.redirectUris.includes(requested);
+	return client.redirectUris.some((registered) => loopbackRedirectMatches(requested, registered));
+}
+
+/** Nombre que ve la persona en el consentimiento para un cliente DCR: el de
+ *  `DCR_WEB_CLIENTS` si lo tiene («Le Chat»), si no el registrado. */
+function registeredClientDisplayName(client: RegisteredClient): string {
+	return DCR_WEB_CLIENTS.get(client.clientName)?.displayName ?? client.clientName;
+}
+
+/**
  * ¿Tiene este `client_id` una forma que este relé haya podido aceptar?
  * `validateClientIdUrl`, pero conociendo también los dos `client_id` que NO
  * son documentos: el registro DCR (`lm_cl_…`, Mistral Vibe) y el client id
@@ -1107,11 +1158,10 @@ function validStoredRedirect(clientId: string, redirectUri: string, registeredCl
 	// loopback bien formado; el path lo elige su listener, no nosotros.
 	if (isVSCodePublicClientId(clientId)) return parseLoopbackRedirect(redirectUri) !== undefined;
 	// Cliente DCR: tiene que seguir registrado y el redirect tiene que casar
-	// (path exacto, puerto libre) con alguno de los que declaró al registrarse.
+	// con alguno de los que declaró al registrarse (loopback: path exacto y
+	// puerto libre; web: string exacto). Ver `registeredClientRedirectMatches`.
 	if (isRegisteredClientId(clientId)) {
-		return registeredClients.some(
-			(client) => client.clientId === clientId && client.redirectUris.some((registered) => loopbackRedirectMatches(redirectUri, registered))
-		);
+		return registeredClients.some((client) => client.clientId === clientId && registeredClientRedirectMatches(client, redirectUri));
 	}
 	const client = validateClientIdUrl(clientId);
 	if (client.hostname === 'claude.ai') return redirectUri === OAUTH_CALLBACK;
@@ -1473,7 +1523,7 @@ function normalizeStore(value: unknown): OAuthStore {
 			!Array.isArray(item.redirectUris) ||
 			item.redirectUris.length === 0 ||
 			item.redirectUris.length > MAX_REGISTERED_REDIRECTS ||
-			!item.redirectUris.every((redirect) => typeof redirect === 'string' && parseLoopbackRedirect(redirect) !== undefined) ||
+			!item.redirectUris.every((redirect) => typeof redirect === 'string' && registeredRedirectAdmitted(item.clientName!, redirect)) ||
 			typeof item.createdAt !== 'number' ||
 			typeof item.expiresAt !== 'number' ||
 			item.expiresAt <= item.createdAt
@@ -2197,8 +2247,9 @@ export class OAuthService {
 			if (req.method !== 'GET') throw new OAuthError('invalid_request', 'Método no permitido.', 405);
 			const request = this.authorizationRequest(url.searchParams);
 			// Tres clases de cliente: el documento de metadatos (CIMD) de
-			// claude.ai o Codex, el DCR de Mistral Vibe (`lm_cl_…`, que tiene
-			// que seguir VIVO en el almacén), y el client id público de VS
+			// claude.ai o Codex, el DCR de Mistral Vibe o Le Chat (`lm_cl_…`,
+			// que tiene que seguir VIVO en el almacén; Le Chat se muestra con
+			// el nombre de `DCR_WEB_CLIENTS`), y el client id público de VS
 			// Code (Copilot local), al que VS Code cae cuando su DCR
 			// confidencial se rechaza. Los tres acaban igual: un `clientName`
 			// para el consentimiento y un redirect que el almacén va a poder
@@ -2218,9 +2269,9 @@ export class OAuthService {
 				if (!registered) {
 					throw new OAuthError('invalid_client', 'Cliente no registrado o con el registro caducado; vuelve a conectar.');
 				}
-				clientName = registered.clientName;
+				clientName = registeredClientDisplayName(registered);
 				redirectAdmitted =
-					registered.redirectUris.some((uri) => loopbackRedirectMatches(request.redirectUri, uri)) &&
+					registeredClientRedirectMatches(registered, request.redirectUri) &&
 					validStoredRedirect(request.clientId, request.redirectUri, registeredClients);
 			} else {
 				const metadata = await this.clientMetadata(request.clientId);
@@ -3076,7 +3127,12 @@ export class OAuthService {
 		) {
 			throw metadataError('Solo se admiten clientes públicos sin secreto.');
 		}
-		if (typeof candidate.client_name !== 'string' || !this.dcrClientNames.includes(candidate.client_name.trim())) {
+		// Dos formas: un nombre de `dcrClientNames` con redirects loopback
+		// (Vibe), o un nombre de `DCR_WEB_CLIENTS` con sus `https` exactos
+		// (Le Chat). La web manda: su nombre nunca se registra con loopback.
+		const clientName = typeof candidate.client_name === 'string' ? candidate.client_name.trim() : undefined;
+		const web = clientName === undefined ? undefined : DCR_WEB_CLIENTS.get(clientName);
+		if (clientName === undefined || (!web && !this.dcrClientNames.includes(clientName))) {
 			throw metadataError('Cliente no admitido.');
 		}
 		const redirectUris = candidate.redirect_uris;
@@ -3084,9 +3140,14 @@ export class OAuthService {
 			!Array.isArray(redirectUris) ||
 			redirectUris.length === 0 ||
 			redirectUris.length > MAX_REGISTERED_REDIRECTS ||
-			!redirectUris.every((redirect) => typeof redirect === 'string' && parseLoopbackRedirect(redirect) !== undefined)
+			!redirectUris.every((redirect) => typeof redirect === 'string' && registeredRedirectAdmitted(clientName, redirect))
 		) {
-			throw metadataError('Solo se admiten redirect_uri de loopback http.');
+			throw metadataError(web ? 'redirect_uri no admitido para este cliente.' : 'Solo se admiten redirect_uri de loopback http.');
+		}
+		// RFC 7591 §2 / OIDC DCR: opcional. Al cliente web solo se le admite
+		// `web`; a los de loopback no se les mira (Vibe queda como estaba).
+		if (web && candidate.application_type !== undefined && candidate.application_type !== 'web') {
+			throw metadataError('Solo se admite application_type=web para este cliente.');
 		}
 		if (
 			candidate.grant_types !== undefined &&
@@ -3105,7 +3166,7 @@ export class OAuthService {
 		if (candidate.scope !== undefined && candidate.scope !== OAUTH_SCOPE) {
 			throw metadataError(`El scope debe ser ${OAUTH_SCOPE}.`);
 		}
-		return { clientName: candidate.client_name.trim().slice(0, 120), redirectUris: redirectUris as string[] };
+		return { clientName: clientName.slice(0, 120), redirectUris: redirectUris as string[] };
 	}
 
 	/**

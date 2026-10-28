@@ -3007,7 +3007,10 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 	 *  `/requests` recibido: el canje y el refresh de CUALQUIER cliente (no
 	 *  solo el de claude.ai de la constante) casan con lo que Lumbre debe
 	 *  devolver. */
-	function echoClientIdFetch(onRequests?: (clientId: string) => void, overrides: Record<string, unknown> = {}): typeof fetch {
+	function echoClientIdFetch(
+		onRequests?: (clientId: string, body: Record<string, unknown>) => void,
+		overrides: Record<string, unknown> = {}
+	): typeof fetch {
 		let currentClientId = CLIENT_ID;
 		// Cada canje devuelve una credencial NUEVA, como Lumbre de verdad:
 		// el almacén declara incoherente tener dos vivas con el mismo id.
@@ -3017,7 +3020,7 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 			onBackchannel: (path, body) => {
 				if (path === 'requests') {
 					currentClientId = String((body as Record<string, unknown>).clientId);
-					onRequests?.(currentClientId);
+					onRequests?.(currentClientId, body as Record<string, unknown>);
 				}
 			},
 			exchangeBody: () => {
@@ -3220,7 +3223,8 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 				client_name: 'Le Chat',
 				redirect_uris: ['https://chat.mistral.ai/x/callback?state=abc#f'],
 				client_secret: 'valor-secreto-no-logueable',
-				grant_types: ['authorization_code']
+				grant_types: ['authorization_code'],
+				application_type: 'native'
 			});
 			expect(rejected.status).toBe(400);
 			expect(lines()).toHaveLength(1);
@@ -3234,7 +3238,8 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 				client_name: 'Le Chat',
 				redirect_uris: ['https://chat.mistral.ai/x/callback'],
 				grant_types: ['authorization_code'],
-				keys: ['client_name', 'redirect_uris', 'client_secret', 'grant_types']
+				application_type: 'native',
+				keys: ['client_name', 'redirect_uris', 'client_secret', 'grant_types', 'application_type']
 			});
 		} finally {
 			errors.mockRestore();
@@ -3375,6 +3380,140 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		expect(stored.registeredClients.some((client) => client.clientId === oldestId)).toBe(false);
 		const evicted = await beginAuthorization(cappedBase, { client_id: oldestId, redirect_uri: VIBE_REDIRECT });
 		expect(evicted.status).toBe(400);
+	});
+
+	const LE_CHAT_REDIRECT = 'https://callback.mistral.ai/v1/integrations_auth/oauth2_callback';
+
+	/** El registro REAL de Le Chat (web de Mistral), tal y como lo dejó el log
+	 *  de `/register` en producción el 28 oct 2026, con `application_type`. */
+	function leChatRegistration(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+		return {
+			response_types: ['code'],
+			scope: OAUTH_SCOPE,
+			client_name: 'mistral-mcp-client',
+			redirect_uris: [LE_CHAT_REDIRECT],
+			token_endpoint_auth_method: 'none',
+			grant_types: ['authorization_code', 'refresh_token'],
+			application_type: 'web',
+			...overrides
+		};
+	}
+
+	it('Le Chat: register → authorize → callback → token → refresh con y sin resource, y se muestra como Le Chat', async () => {
+		const shownNames: string[] = [];
+		const service = new OAuthService({
+			backchannelRetryDelaysMs: [],
+			stateDir: await newStateDir(),
+			fetch: echoClientIdFetch((_clientId, body) => shownNames.push(String(body.clientName)))
+		});
+		const baseUrl = await listen(service);
+		const registered = await registerClient(baseUrl, leChatRegistration());
+		expect(registered.status).toBe(201);
+		const body = (await registered.json()) as Record<string, unknown>;
+		expect(body.client_id).toMatch(/^lm_cl_[A-Za-z0-9_-]{43}$/);
+		// El registro guarda y devuelve el nombre tal cual…
+		expect(body.client_name).toBe('mistral-mcp-client');
+		expect(body.redirect_uris).toEqual([LE_CHAT_REDIRECT]);
+		expect(body.token_endpoint_auth_method).toBe('none');
+		const clientId = body.client_id as string;
+
+		const code = await authorizeWith(baseUrl, clientId, LE_CHAT_REDIRECT);
+		// …pero el consentimiento de Lumbre dice «Le Chat».
+		expect(shownNames).toEqual(['Le Chat']);
+		const tokens = await exchangeWith(baseUrl, code, clientId, LE_CHAT_REDIRECT);
+		expect(tokens.access_token).toMatch(/^lm_at_/);
+		expect(await service.resolveAccessToken(String(tokens.access_token))).toBe(UPSTREAM_TOKEN);
+
+		const leChatRefresh = async (refreshToken: string, extra: Record<string, string> = {}): Promise<Response> =>
+			await fetch(`${baseUrl}/token`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId, ...extra })
+			});
+		const withoutResource = await leChatRefresh(String(tokens.refresh_token));
+		expect(withoutResource.status).toBe(200);
+		const rotated = (await withoutResource.json()) as Record<string, unknown>;
+		expect(await service.resolveAccessToken(String(rotated.access_token))).toBe(UPSTREAM_TOKEN);
+		const withResource = await leChatRefresh(String(rotated.refresh_token), { resource: OAUTH_RESOURCE });
+		expect(withResource.status).toBe(200);
+		const again = (await withResource.json()) as Record<string, unknown>;
+		expect(await service.resolveAccessToken(String(again.access_token))).toBe(UPSTREAM_TOKEN);
+
+		// Vibe, en el mismo relé, sigue mostrándose con su nombre.
+		const vibe = (await (await registerClient(baseUrl, vibeRegistration())).json()) as Record<string, unknown>;
+		await authorizeWith(baseUrl, vibe.client_id as string, VIBE_REDIRECT);
+		expect(shownNames).toEqual(['Le Chat', 'Mistral Vibe']);
+	});
+
+	it('Le Chat solo con su redirect exacto: cualquier otra forma se rechaza en /register y en /authorize', async () => {
+		let lumbreCalls = 0;
+		const baseUrl = await listen(
+			new OAuthService({
+				backchannelRetryDelaysMs: [],
+				stateDir: await newStateDir(),
+				fetch: echoClientIdFetch(() => { lumbreCalls += 1; }),
+				publicLimits: { register: { requestsPerMinute: 1000, concurrent: 8 } }
+			})
+		);
+		const cases: [string, Record<string, unknown>][] = [
+			['mistral-mcp-client con loopback', leChatRegistration({ redirect_uris: [VIBE_REDIRECT] })],
+			['mistral-mcp-client con otro https', leChatRegistration({ redirect_uris: ['https://callback.mistral.ai/v1/otra'] })],
+			['mistral-mcp-client con otro host', leChatRegistration({ redirect_uris: ['https://evil.example/v1/integrations_auth/oauth2_callback'] })],
+			['mistral-mcp-client con query', leChatRegistration({ redirect_uris: [`${LE_CHAT_REDIRECT}?x=1`] })],
+			['mistral-mcp-client con fragmento', leChatRegistration({ redirect_uris: [`${LE_CHAT_REDIRECT}#f`] })],
+			['mistral-mcp-client con barra final', leChatRegistration({ redirect_uris: [`${LE_CHAT_REDIRECT}/`] })],
+			['mistral-mcp-client por http', leChatRegistration({ redirect_uris: [LE_CHAT_REDIRECT.replace('https:', 'http:')] })],
+			['mistral-mcp-client con el host en mayúsculas', leChatRegistration({ redirect_uris: [LE_CHAT_REDIRECT.replace('callback.mistral.ai', 'CALLBACK.mistral.ai')] })],
+			['mistral-mcp-client con lista mixta', leChatRegistration({ redirect_uris: [LE_CHAT_REDIRECT, VIBE_REDIRECT] })],
+			['mistral-mcp-client nativo', leChatRegistration({ application_type: 'native' })],
+			['mistral-mcp-client confidencial', leChatRegistration({ token_endpoint_auth_method: 'client_secret_post' })],
+			['nombre parecido', leChatRegistration({ client_name: 'Mistral-MCP-Client' })],
+			['Mistral Vibe con el redirect de Le Chat', vibeRegistration({ redirect_uris: [LE_CHAT_REDIRECT] })]
+		];
+		for (const [name, requestBody] of cases) {
+			const response = await registerClient(baseUrl, requestBody);
+			expect(response.status, name).toBe(400);
+			expect(((await response.json()) as Record<string, unknown>).error, name).toBe('invalid_client_metadata');
+		}
+		// Sin `application_type` también vale: es opcional (RFC 7591 §2).
+		const withoutType = await registerClient(baseUrl, leChatRegistration({ application_type: undefined }));
+		expect(withoutType.status).toBe(201);
+		const clientId = ((await withoutType.json()) as Record<string, unknown>).client_id as string;
+		// Registrado, el authorize solo acepta el redirect exacto.
+		for (const redirectUri of [`${LE_CHAT_REDIRECT}?x=1`, `${LE_CHAT_REDIRECT}/`, VIBE_REDIRECT]) {
+			const response = await beginAuthorization(baseUrl, { client_id: clientId, redirect_uri: redirectUri });
+			expect(response.status, redirectUri).toBe(400);
+		}
+		expect(lumbreCalls).toBe(0);
+	});
+
+	it('el almacén solo admite a mistral-mcp-client con su redirect https y a Vibe con loopback', async () => {
+		const storeWith = async (clientName: string, redirectUris: string[]): Promise<string> => {
+			const dir = await newStateDir();
+			const store = {
+				version: 3,
+				grants: [],
+				usedRefreshTokens: [],
+				authorizationRequests: [],
+				authorizationCodes: [],
+				revocationOutbox: [],
+				redeemedCodes: [],
+				usedLogoutTokens: [],
+				closedSumegoSessions: [],
+				registeredClients: [
+					{ clientId: `lm_cl_${'D'.repeat(43)}`, clientName, redirectUris, createdAt: Date.now(), expiresAt: Date.now() + 86_400_000 }
+				]
+			};
+			await writeFile(join(dir, 'oauth-store.json'), JSON.stringify(store), 'utf8');
+			await writeFile(join(dir, 'oauth.key'), randomBytes(32).toString('base64url'), 'utf8');
+			return dir;
+		};
+		const ready = async (dir: string): Promise<void> =>
+			await new OAuthService({ backchannelRetryDelaysMs: [], stateDir: dir, fetch: echoClientIdFetch() }).ensureReady();
+		await expect(ready(await storeWith('mistral-mcp-client', [LE_CHAT_REDIRECT]))).resolves.toBeUndefined();
+		await expect(ready(await storeWith('Mistral Vibe', [VIBE_REDIRECT]))).resolves.toBeUndefined();
+		await expect(ready(await storeWith('mistral-mcp-client', [VIBE_REDIRECT]))).rejects.toThrow(/cliente registrado/);
+		await expect(ready(await storeWith('Mistral Vibe', [LE_CHAT_REDIRECT]))).rejects.toThrow(/cliente registrado/);
 	});
 
 	it('registeredClientNamesFromEnv: lista por entorno, y la lista vacía cae al de serie', async () => {

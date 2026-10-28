@@ -1049,7 +1049,7 @@ servidor a servidor, se cifra antes de persistir y nunca aparece en HTML,
 
 | Forma | Cómo | Para qué cliente |
 |---|---|---|
-| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Codex, claude.ai web/móvil, Mistral Vibe y VS Code (Copilot local) |
+| OAuth 2.1 | Añadir solo `https://mcp.lumbre.pro/mcp`; Authorization Code + PKCE S256 | Codex, claude.ai web/móvil, Mistral Vibe, Le Chat (web de Mistral) y VS Code (Copilot local) |
 | Bearer directo (compatibilidad temporal) | `Authorization: Bearer <token-de-Lumbre>` contra `POST /mcp` | Clientes heredados |
 | Path (compatibilidad temporal) | `POST /mcp/<token-de-Lumbre>` | Conectores antiguos de claude.ai; no usar en configuraciones nuevas |
 
@@ -1081,8 +1081,16 @@ claude.ai y Codex traen un documento de metadata de cliente (CIMD alojado en
 su propio dominio, sin registro dinámico); Mistral Vibe se registra por DCR
 (RFC 7591, `POST /register`) restringido a la forma loopback y a su
 `client_name`, con alta caducable y tope de clientes (cada registro rechazado
-deja una línea en el log con el nombre del cliente y sus redirects, sin
-secretos); y VS Code (Copilot
+deja una línea en el log con el nombre del cliente, sus redirects y su
+`application_type`, sin secretos); Le Chat (el conector personalizado de la
+web de Mistral) usa ese mismo DCR con una segunda forma cerrada: `client_name`
+exactamente `mistral-mcp-client` y todos sus `redirect_uris` exactamente
+`https://callback.mistral.ai/v1/integrations_auth/oauth2_callback`
+(comparación exacta de string, sin prefijos, comodines, query ni fragmento),
+`application_type` ausente o `web`, y en el consentimiento de Lumbre se
+muestra como «Le Chat»; ese nombre nunca se registra con loopback, tampoco se
+admite un `Mistral Vibe` con redirect `https`, y esta forma no depende de
+`LUMBRE_MCP_DCR_CLIENT_NAMES`; y VS Code (Copilot
 local) cae a su client id público cuando su DCR confidencial se rechaza, con
 redirect loopback de puerto y path libres. La caché CIMD respeta
 `Cache-Control: no-store` y `no-cache` y no reutiliza esas respuestas.
