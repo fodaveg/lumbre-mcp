@@ -3324,7 +3324,12 @@ export class OAuthService {
 	private async exchangeRefresh(form: URLSearchParams, res: ServerResponse): Promise<void> {
 		const refreshToken = one(form, 'refresh_token');
 		const clientId = one(form, 'client_id');
-		const resource = one(form, 'resource');
+		// `resource` es OPCIONAL en el refresh (RFC 8707 §2.2): si falta, vale el
+		// del grant; si viene, tiene que ser ese. Mistral Vibe (SDK `mcp` de
+		// Python) no lo manda al refrescar desde un proceso que no ha hecho el
+		// descubrimiento, y exigirlo le daba `invalid_request` cada hora.
+		const requestedResource = one(form, 'resource', false);
+		const sameResource = (granted: string): boolean => requestedResource === undefined || granted === requestedResource;
 		const requestedScope = one(form, 'scope', false);
 		const oldHash = digest(refreshToken!);
 		const accessToken = opaque(ACCESS_PREFIX);
@@ -3340,7 +3345,7 @@ export class OAuthService {
 			grantSnapshot.provider !== 'lumbre-web' ||
 			!isValidRequestId(grantSnapshot.credentialId) ||
 			grantSnapshot.clientId !== clientId ||
-			grantSnapshot.resource !== resource ||
+			!sameResource(grantSnapshot.resource) ||
 			(requestedScope !== undefined && requestedScope !== grantSnapshot.scope)
 		) {
 			throw new OAuthError('invalid_grant', 'Refresh token inválido, usado o caducado.');
@@ -3375,7 +3380,7 @@ export class OAuthService {
 				if (
 					!familyGrant ||
 					familyGrant.clientId !== clientId ||
-					familyGrant.resource !== resource ||
+					!sameResource(familyGrant.resource) ||
 					(requestedScope !== undefined && requestedScope !== familyGrant.scope)
 				) {
 					return false;
@@ -3391,7 +3396,7 @@ export class OAuthService {
 				grant.credentialId !== grantSnapshot.credentialId ||
 				grant.refreshExpiresAt <= now ||
 				grant.clientId !== clientId ||
-				grant.resource !== resource ||
+				!sameResource(grant.resource) ||
 				(requestedScope !== undefined && requestedScope !== grant.scope)
 			) {
 				return false;

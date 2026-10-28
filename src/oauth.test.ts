@@ -3106,6 +3106,64 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		expect(rotated.status).toBe(200);
 	});
 
+	it('Mistral Vibe refresca SIN resource ni scope: se toma el del grant y la familia sigue atada', async () => {
+		// Lo que manda de verdad Vibe 3.0.3 (SDK `mcp` 1.30.0): su
+		// `app_server/_mcp_auth.py::_refresh_oauth` crea un proveedor nuevo y hace
+		// un `GET` sin `MCP-Protocol-Version` ni metadata descubierta, así que
+		// `should_include_resource_param()` da False y el formulario lleva solo
+		// grant_type, refresh_token y client_id. Exigir `resource` le devolvía
+		// `invalid_request`, que Vibe trata como transitorio: borraba el cliente y
+		// rehacía DCR + login cada hora.
+		const service = new OAuthService({ backchannelRetryDelaysMs: [], stateDir: await newStateDir(), fetch: echoClientIdFetch() });
+		const baseUrl = await listen(service);
+		const registered = await registerClient(baseUrl, vibeRegistration());
+		expect(registered.status).toBe(201);
+		const clientId = ((await registered.json()) as Record<string, unknown>).client_id as string;
+		const code = await authorizeWith(baseUrl, clientId, VIBE_REDIRECT);
+		const tokens = await exchangeWith(baseUrl, code, clientId, VIBE_REDIRECT);
+		const vibeRefresh = async (refreshToken: string, extra: Record<string, string> = {}): Promise<Response> =>
+			await fetch(`${baseUrl}/token`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId, ...extra })
+			});
+
+		const first = await vibeRefresh(String(tokens.refresh_token));
+		expect(first.status).toBe(200);
+		const rotated = (await first.json()) as Record<string, unknown>;
+		expect(rotated.access_token).toMatch(/^lm_at_/);
+		expect(rotated.refresh_token).toMatch(/^lm_rt_/);
+		expect(rotated.scope).toBe(OAUTH_SCOPE);
+		expect(await service.resolveAccessToken(String(rotated.access_token))).toBe(UPSTREAM_TOKEN);
+
+		// Un `resource` PRESENTE y distinto sigue siendo `invalid_grant`, y otro
+		// client_id con el refresh bueno, también: la ausencia no abre nada más.
+		const otherResource = await vibeRefresh(String(rotated.refresh_token), { resource: `${OAUTH_ISSUER}/otro` });
+		expect(otherResource.status).toBe(400);
+		expect(((await otherResource.json()) as Record<string, unknown>).error).toBe('invalid_grant');
+		const otherClient = await fetch(`${baseUrl}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: String(rotated.refresh_token), client_id: CLIENT_ID })
+		});
+		expect(otherClient.status).toBe(400);
+		expect(((await otherClient.json()) as Record<string, unknown>).error).toBe('invalid_grant');
+
+		// Segunda rotación, también sin resource: la cadena aguanta.
+		const second = await vibeRefresh(String(rotated.refresh_token));
+		expect(second.status).toBe(200);
+		const again = (await second.json()) as Record<string, unknown>;
+		expect(await service.resolveAccessToken(String(again.access_token))).toBe(UPSTREAM_TOKEN);
+
+		// La detección de reuso sigue: el primer refresh, ya rotado y sin
+		// resource, revoca la familia entera.
+		const replay = await vibeRefresh(String(tokens.refresh_token));
+		expect(replay.status).toBe(400);
+		expect(((await replay.json()) as Record<string, unknown>).error).toBe('invalid_grant');
+		expect(await service.resolveAccessToken(String(again.access_token))).toBeUndefined();
+		expect((await vibeRefresh(String(again.refresh_token))).status).toBe(400);
+	});
+
 	it('rechaza registros fuera de forma o fuera de la lista, sin tocar el almacén', async () => {
 		const stateDir = await newStateDir();
 		// Límite holgado: este test hace 15 registros seguidos y el de serie

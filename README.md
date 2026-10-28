@@ -1069,7 +1069,12 @@ un reintento de `/token` cuya primera respuesta se perdió) revoca la familia
 emitida con él, por diseño (RFC 6749 §4.1.2, SHOULD), y obliga a reconectar.
 
 El recurso y permiso son exactos: `https://mcp.lumbre.pro/mcp` y
-`lumbre:mcp`. Los callbacks se validan contra la identidad del cliente: el
+`lumbre:mcp`. En `grant_type=refresh_token`, `resource` y `scope` son
+opcionales (RFC 8707 §2.2, RFC 6749 §6): si faltan, valen los del grant; si
+vienen, tienen que ser exactamente esos o la respuesta es `invalid_grant`. El
+`client_id` sí es obligatorio y tiene que ser el de la familia. Mistral Vibe
+refresca sin `resource` (el SDK `mcp` de Python solo lo añade cuando ha
+descubierto la metadata en ese mismo proceso). Los callbacks se validan contra la identidad del cliente: el
 callback oficial de claude.ai y el loopback efímero issuer-bound de Codex. Hay
 tres clases de `client_id`, y las tres exigen cliente público con PKCE:
 claude.ai y Codex traen un documento de metadata de cliente (CIMD alojado en
