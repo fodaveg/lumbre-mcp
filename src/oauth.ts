@@ -735,6 +735,36 @@ function defaultStateDir(): string {
 }
 
 /**
+ * Qué log dejar de un `/register` rechazado: motivo, nombre del cliente,
+ * redirects sin query ni fragmento y los metadatos de forma. NUNCA valores de
+ * `client_secret` u otros campos: de ellos solo el nombre de la clave.
+ */
+export function describeRejectedRegistration(requested: unknown, reason: string): Record<string, unknown> {
+	const clip = (value: unknown, max: number): unknown => (typeof value === 'string' ? value.slice(0, max) : typeof value);
+	const clipList = (value: unknown): unknown =>
+		Array.isArray(value) ? value.slice(0, 10).map((item) => clip(item, 120)) : clip(value, 120);
+	const out: Record<string, unknown> = { reason };
+	if (!requested || typeof requested !== 'object' || Array.isArray(requested)) {
+		out.body = Array.isArray(requested) ? 'array' : requested === null ? 'null' : typeof requested;
+		return out;
+	}
+	const body = requested as Record<string, unknown>;
+	out.client_name = clip(body.client_name, 120);
+	if (body.redirect_uris !== undefined) {
+		out.redirect_uris = Array.isArray(body.redirect_uris)
+			? body.redirect_uris.slice(0, 10).map((uri) => (typeof uri === 'string' ? uri.split(/[?#]/, 1)[0]!.slice(0, 300) : typeof uri))
+			: typeof body.redirect_uris;
+	}
+	if (body.token_endpoint_auth_method !== undefined) out.token_endpoint_auth_method = clip(body.token_endpoint_auth_method, 120);
+	if (body.grant_types !== undefined) out.grant_types = clipList(body.grant_types);
+	if (body.response_types !== undefined) out.response_types = clipList(body.response_types);
+	if (body.scope !== undefined) out.scope = clip(body.scope, 300);
+	if (body.client_uri !== undefined) out.client_uri = clip(body.client_uri, 300);
+	out.keys = Object.keys(body).slice(0, 50).map((key) => key.slice(0, 60));
+	return out;
+}
+
+/**
  * `client_name` admitidos en `/register` (ver `DEFAULT_DCR_CLIENT_NAMES`).
  * `LUMBRE_MCP_DCR_CLIENT_NAMES` los sustituye: una lista separada por comas
  * que se recorta —un valor en blanco o solo comas devuelve el de serie, no
@@ -2990,7 +3020,20 @@ export class OAuthService {
 				throw new OAuthError('invalid_client_metadata', 'La solicitud de registro no es JSON válido.');
 			}
 			release = this.enterConcurrency('register');
-			const registration = this.registrationRequest(requested);
+			let registration: { clientName: string; redirectUris: string[] };
+			try {
+				registration = this.registrationRequest(requested);
+			} catch (error) {
+				// Un rechazo no deja rastro en la respuesta (el motivo es para
+				// quien depura): una línea en el log con lo que mandó el cliente
+				// para poder admitirlo después. Ver `describeRejectedRegistration`.
+				if (error instanceof OAuthError) {
+					console.error(
+						`[lumbre-mcp-oauth] registro DCR rechazado: ${JSON.stringify(describeRejectedRegistration(requested, error.message))}`
+					);
+				}
+				throw error;
+			}
 			// La clave ANTES de persistir: un registro puede ser lo PRIMERO
 			// que escriba este almacén, y el invariant es que el store nunca
 			// existe sin su clave (`loadOrCreateKey` falla cerrado si no).

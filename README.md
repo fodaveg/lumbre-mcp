@@ -1080,7 +1080,9 @@ tres clases de `client_id`, y las tres exigen cliente público con PKCE:
 claude.ai y Codex traen un documento de metadata de cliente (CIMD alojado en
 su propio dominio, sin registro dinámico); Mistral Vibe se registra por DCR
 (RFC 7591, `POST /register`) restringido a la forma loopback y a su
-`client_name`, con alta caducable y tope de clientes; y VS Code (Copilot
+`client_name`, con alta caducable y tope de clientes (cada registro rechazado
+deja una línea en el log con el nombre del cliente y sus redirects, sin
+secretos); y VS Code (Copilot
 local) cae a su client id público cuando su DCR confidencial se rechaza, con
 redirect loopback de puerto y path libres. La caché CIMD respeta
 `Cache-Control: no-store` y `no-cache` y no reutiliza esas respuestas.

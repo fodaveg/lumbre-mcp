@@ -3207,6 +3207,40 @@ describe('registro dinámico restringido: Mistral Vibe y el client público de V
 		expect(later.status).toBe(201);
 	});
 
+	it('deja una línea de log por registro rechazado, sin secretos, y ninguna por uno válido', async () => {
+		const stateDir = await newStateDir();
+		const baseUrl = await listen(new OAuthService({ backchannelRetryDelaysMs: [], stateDir, fetch: echoClientIdFetch() }));
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const lines = (): string[] => errors.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('registro DCR rechazado'));
+			const valid = await registerClient(baseUrl, vibeRegistration());
+			expect(valid.status).toBe(201);
+			expect(lines()).toEqual([]);
+			const rejected = await registerClient(baseUrl, {
+				client_name: 'Le Chat',
+				redirect_uris: ['https://chat.mistral.ai/x/callback?state=abc#f'],
+				client_secret: 'valor-secreto-no-logueable',
+				grant_types: ['authorization_code']
+			});
+			expect(rejected.status).toBe(400);
+			expect(lines()).toHaveLength(1);
+			const line = lines()[0]!;
+			expect(line.startsWith('[lumbre-mcp-oauth] registro DCR rechazado: ')).toBe(true);
+			expect(line).not.toContain('valor-secreto-no-logueable');
+			expect(line).not.toContain('state=abc');
+			const logged = JSON.parse(line.slice(line.indexOf('{')));
+			expect(logged).toMatchObject({
+				reason: 'Solo se admiten clientes públicos sin secreto.',
+				client_name: 'Le Chat',
+				redirect_uris: ['https://chat.mistral.ai/x/callback'],
+				grant_types: ['authorization_code'],
+				keys: ['client_name', 'redirect_uris', 'client_secret', 'grant_types']
+			});
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
 	it('exige un registro vivo: lm_cl_ inventado o caducado no pasa de /authorize ni toca Lumbre', async () => {
 		let lumbreCalls = 0;
 		const stateDir = await newStateDir();
