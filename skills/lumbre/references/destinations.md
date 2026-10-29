@@ -1,7 +1,7 @@
 # Destinos: dónde va cada cosa
 
-Cárgala cuando el encargo produce un documento (audit, spec, plan) o una decisión que hay
-que guardar. Lo que el usuario o el repositorio digan sobre dónde guardar manda sobre
+Cárgala cuando el encargo produce un documento (audit, spec, plan), un relevo o changelog,
+o una decisión que hay que guardar. Lo que el usuario o el repositorio digan sobre dónde guardar manda sobre
 esta tabla.
 
 ## Detección
@@ -18,6 +18,7 @@ dilo y sigue por la columna «Sin Hebra»; no bloquees el encargo.
 | Tareas | Lumbre | Lumbre |
 | Audit, spec, plan | Nota de Hebra; vínculo al proyecto o área de destino con `link_list_note` y `hebra://note/<uuid>`, comprobado con `get_list_links` | Si hay disco y repositorio: fichero donde el repo guarde esos documentos, y en la nota de la tarea principal del lote la ruta y el commit. Si no hay disco: adjunto `.md` a la principal (`add_attachment`). La entrega dice que no hay nota vinculada |
 | Decisiones | La nota de decisiones que el usuario o el repo designen, en Hebra | El mecanismo persistente que el repo o el runtime declaren (fichero de instrucciones o de decisiones del repo, memoria del agente). Sin almacenamiento escribible: en la respuesta y en la nota de la tarea afectada. Nunca como tarea nueva |
+| Relevos, changelogs y documentos efímeros (partes de estado, notas de trabajo de un lote, borradores que se van a tirar) | Nota en la carpeta `.05` de la categoría del proyecto, dentro de una subcarpeta con el nombre del proyecto sin número (por ejemplo `21.05 memoria de agentes para productos de software/lumbre/`), nunca en la carpeta del ID del proyecto. Si la categoría no tiene `.05`, no la crees: avisa al usuario. El resto (por qué la subcarpeta va sin número, la marca "Ocultar del listado general") está en el apartado "Relevos, changelogs y documentos efímeros" de la skill `hebra`. Lo que dura no va ahí: decisiones a su nota, audits a la carpeta del ID | El sitio donde el repo o el runtime guarden relevos (fichero de relevo del repo, memoria del agente). Sin almacenamiento escribible: en la nota de la tarea principal del lote. Nunca en la carpeta de audits ni como tarea nueva |
 
 ## Tareas que salen de un audit
 
