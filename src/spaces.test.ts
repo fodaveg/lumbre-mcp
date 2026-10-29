@@ -198,6 +198,47 @@ describe('C5-g — contrato de lectura y presentación', () => {
 	});
 });
 
+describe('C5-g — nombres nulos o vacíos y list ambiguo', () => {
+	const unnamed: LumbreSpace = { spaceId: SPACE, name: '', members: [{ accountId: MEMBER, name: null }] };
+
+	it('miembro con name null se pinta (sin nombre) en catálogo y asignación', () => {
+		const out = formatTaskFull({ ...task, space: unnamed });
+		expect(out).toContain(`asignado: (sin nombre) (${MEMBER})`);
+		expect(out).not.toContain('null');
+	});
+
+	it('espacio con name vacío pinta (sin nombre) y conserva el spaceId', () => {
+		expect(formatTaskFull({ ...task, space: unnamed })).toContain(`espacio: (sin nombre) (spaceId: ${SPACE})`);
+		expect(formatTaskFull({ ...task, spaceName: '' })).toContain(`espacio: (sin nombre) (spaceId: ${SPACE})`);
+		expect(formatTaskFull({ ...task, spaceName: undefined })).toContain(`espacio: ${SPACE} (spaceId: ${SPACE})`);
+	});
+
+	const OTHER_LIST = '44444444-4444-4444-8444-444444444444';
+	it('list por nombre con respuesta vacía y dos listas homónimas lanza error con ids', async () => {
+		const fetch = vi.fn(async (url: string) => json(url.includes('includeLists')
+			? { lists: [{ ...list, name: 'Trabajo' }, { id: OTHER_LIST, name: 'trabajo', taskCount: 0, storeId: null, spaceId: null, spaceName: null }], spaces: [unnamed] }
+			: []));
+		vi.stubGlobal('fetch', fetch);
+		const err = await listTasks(CONFIG, { list: 'TRABAJO' }).catch((e: Error) => e);
+		expect(err).toBeInstanceOf(Error);
+		const message = (err as Error).message;
+		expect(message).toContain('ambiguo'); expect(message).toContain('listId');
+		expect(message).toContain(LIST); expect(message).toContain(OTHER_LIST);
+		expect(message).toContain('(sin nombre)'); expect(message).toContain('personal');
+	});
+
+	it('list vacío con una sola lista homónima no lanza error', async () => {
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => json(url.includes('includeLists') ? { lists: [list] } : [])));
+		expect(await listTasks(CONFIG, { list: 'Trabajo' })).toEqual([]);
+	});
+
+	it('el camino normal no consulta el catálogo', async () => {
+		const fetch = vi.fn(async () => json([task])); vi.stubGlobal('fetch', fetch);
+		expect(await listTasks(CONFIG, { list: 'Trabajo' })).toEqual([task]);
+		expect(fetch).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe('C5-g — asignación, altas y éxito parcial', () => {
 	it.each([MEMBER, ''])('set_assignee traduce accountId=%s incluso en subtarea', (assigneeId) => {
 		const op = { op: 'set_assignee' as const, taskId: TASK, assigneeId };

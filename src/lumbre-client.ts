@@ -100,7 +100,7 @@ export interface RecurrencePatch {
 export interface LumbreSpace {
 	spaceId: string;
 	name: string;
-	members?: { accountId: string; name: string }[];
+	members?: { accountId: string; name: string | null }[];
 	storeId?: string;
 	role?: string;
 	agentAccess?: boolean;
@@ -108,7 +108,7 @@ export interface LumbreSpace {
 
 /** Procedencia añadida por C5; ausente con servidores personales anteriores. */
 export interface StoreMetadata {
-	storeId?: string;
+	storeId?: string | null;
 	spaceId?: string | null;
 	spaceName?: string | null;
 	/** Catálogo autorizado de /api/tasks?includeLists=1, solo para presentación. */
@@ -551,6 +551,22 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	}
 	if (input.assignee && tasks.some((t) => t.assignedToMe !== true)) {
 		throw new LumbreApiError('La API no confirmó assignee=me: faltan metadatos de asignación o llegaron tareas no asignadas a ti. Actualiza Lumbre.');
+	}
+	if (input.list && !input.listId && tasks.length === 0) {
+		// El servidor responde 200 con [] cuando el nombre coincide con listas de
+		// dos o más stores compartidos. Solo entonces se consulta el catálogo.
+		const wanted = input.list.trim().toLowerCase();
+		const { lists } = await getListCatalog(config);
+		const matches = lists.filter((l) => l.name.trim().toLowerCase() === wanted);
+		if (matches.length >= 2) {
+			const where = (l: LumbreListSummary) =>
+				l.spaceId ? (l.space?.name ?? l.spaceName ?? '').trim() || '(sin nombre)' : 'personal';
+			const candidates = matches.map((l) => `"${l.name}" (listId: ${l.id}, espacio: ${where(l)})`).join('; ');
+			throw new LumbreApiError(
+				`El nombre de lista "${input.list}" es ambiguo entre espacios: coincide con ${matches.length} listas. ` +
+					`Usa listId con una de ellas: ${candidates}.`
+			);
+		}
 	}
 	if ((input.listId || input.assignee) && tasks.length === 0 && (await getListCatalog(config, { notes: 'length' })).spaces === undefined) {
 		throw new LumbreApiError('La API no confirmó soporte de espacios para el filtro pedido: respuesta vacía sin catálogo spaces. Actualiza Lumbre.');

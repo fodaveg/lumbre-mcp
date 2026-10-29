@@ -27,7 +27,7 @@ export interface CachedTask {
 	parentId: string | null | undefined;
 	archivedAt: string | null | undefined;
 	/** Procedencia mínima para enrutar adjuntos; no acredita permisos. */
-	storeId?: string;
+	storeId?: string | null;
 	spaceId?: string | null;
 }
 

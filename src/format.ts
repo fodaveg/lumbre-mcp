@@ -21,9 +21,16 @@ import { LIST_TASKS_LIMIT } from './lumbre-client.js';
 import { refCounts, renderRefs, type RefResolution } from './refs.js';
 import { formatTags } from './tag-format.js';
 
+/** Nombre mostrable: un nombre vacío (espacio creado sin nombre) se pinta
+ *  «(sin nombre)»; solo la ausencia total cae al id. */
+function displayName(name: string | null | undefined, fallback: string): string {
+	if (name === undefined || name === null) return fallback;
+	return name.trim() === '' ? '(sin nombre)' : name;
+}
+
 /** Procedencia explícita solo cuando el servidor la conoce. */
 function spaceLabel(entity: StoreMetadata): string | null {
-	if (entity.spaceId) return `espacio: ${entity.space?.name ?? entity.spaceName ?? entity.spaceId} (spaceId: ${entity.spaceId})`;
+	if (entity.spaceId) return `espacio: ${displayName(entity.space?.name ?? entity.spaceName, entity.spaceId)} (spaceId: ${entity.spaceId})`;
 	return null;
 }
 
@@ -32,7 +39,7 @@ function assignmentLabels(entity: AssignmentMetadata, space?: LumbreSpace, perso
 	const labels: string[] = [];
 	if (!personal && entity.assigneeId !== undefined) {
 		const member = space?.members?.find((member) => member.accountId === entity.assigneeId);
-		labels.push(entity.assigneeId ? `asignado: ${member ? `${member.name} (${entity.assigneeId})` : entity.assigneeId}` : 'sin asignar');
+		labels.push(entity.assigneeId ? `asignado: ${member ? `${member.name ?? '(sin nombre)'} (${entity.assigneeId})` : entity.assigneeId}` : 'sin asignar');
 	}
 	if (!personal && entity.assignedToMe !== undefined) labels.push(`asignada a mí: ${entity.assignedToMe ? 'sí' : 'no'}`);
 	if (!personal && entity.inViewerToday !== undefined) labels.push(`en mi Hoy: ${entity.inViewerToday ? 'sí' : 'no'}`);
@@ -43,9 +50,9 @@ function assignmentLabels(entity: AssignmentMetadata, space?: LumbreSpace, perso
 /** Catálogo entregado por /api/tasks, sin correos ni consultas de membresía propias. */
 function formatSpaces(spaces: LumbreSpace[]): string[] {
 	return spaces.flatMap((space) => [
-		`· espacio "${space.name}" — spaceId: ${space.spaceId}${space.storeId ? ` · storeId: ${space.storeId}` : ''}` +
+		`· espacio "${displayName(space.name, space.spaceId)}" — spaceId: ${space.spaceId}${space.storeId ? ` · storeId: ${space.storeId}` : ''}` +
 			`${space.role !== undefined ? ` · rol: ${space.role}` : ''}${space.agentAccess !== undefined ? ` · agentAccess: ${space.agentAccess}` : ''}`,
-		...(space.members ?? []).map((member) => `  miembro: ${member.name} — accountId: ${member.accountId}`)
+		...(space.members ?? []).map((member) => `  miembro: ${member.name ?? '(sin nombre)'} — accountId: ${member.accountId}`)
 	]);
 }
 
@@ -565,7 +572,7 @@ export function formatTaskList(
 	const groups: { key: string; label: string; tasks: LumbreTask[] }[] = [];
 	for (const t of tasks) {
 		const sectionLabel = t.section ?? '(sin sección)';
-		const listLabel = (t.list ?? '(sin proyecto ni área)') + (t.spaceId ? ` · ${t.space?.name ?? t.spaceName ?? t.spaceId}` : '');
+		const listLabel = (t.list ?? '(sin proyecto ni área)') + (t.spaceId ? ` · ${displayName(t.space?.name ?? t.spaceName, t.spaceId)}` : '');
 		const label = showList ? `${listLabel} · ${sectionLabel}` : sectionLabel;
 		// Clave de agrupación separada de la etiqueta visible: JSON.stringify
 		// evita colisiones si un nombre de lista/sección contiene el separador.
