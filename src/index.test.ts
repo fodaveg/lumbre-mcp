@@ -380,7 +380,9 @@ describe('tools/list — superficie completa', () => {
 		// subida de un solo uso + curl para ficheros locales/grandes; `add_attachment`
 		// remite a ella en una frase): 27.520 (+657 sobre los 26.863 de arriba).
 		// Techo = medido + ~1% (27.800).
-		const CHAR_CEILING = 27800;
+		// C5-g: 28.390 caracteres (+870): espacios/asignación y alcance personal de refresh.
+		// Techo = medido + ~1%; sigue sin herramientas nuevas.
+		const CHAR_CEILING = 28700;
 		const size = JSON.stringify(tools).length;
 		expect(size).toBeLessThan(CHAR_CEILING);
 	});
@@ -418,7 +420,7 @@ describe('tools/list — superficie completa', () => {
 	 * se vigila aquí es que esa tabla siga NOMBRANDO las ops de cada tool —
 	 * si alguien añade una op y no la documenta, el modelo no puede llamarla.
 	 */
-	it('`mutate_tasks` y `organize` documentan sus ops (18+10, MC7 y set_parent) en la description de `ops`', () => {
+	it('`mutate_tasks` y `organize` documentan sus ops de tarea y organización, incluida set_assignee en la description de `ops`', () => {
 		const opsDescription = (name: string) => {
 			const tool = tools.find((t) => t.name === name);
 			expect(tool).toBeDefined();
@@ -448,7 +450,8 @@ describe('tools/list — superficie completa', () => {
 			'skip_occurrence',
 			'archive_habit',
 			'unarchive_habit',
-			'set_parent'
+			'set_parent',
+			'set_assignee'
 		]) {
 			expect(mutateTasksOps).toContain(`${op}:`);
 		}
@@ -5258,7 +5261,7 @@ describe('refresh_sync y list_brl_entries — handlers MCP', () => {
 		vi.stubGlobal('fetch', fetchSpy);
 		const result = await (await buildClient()).callTool({ name: 'refresh_sync', arguments: {} });
 		expect(result.isError).not.toBe(true);
-		expect(JSON.stringify(result.content)).toContain('Sync de Lumbre refrescado');
+		expect(JSON.stringify(result.content)).toContain('Sync personal de Lumbre refrescado');
 		expect(fetchSpy).toHaveBeenCalledOnce();
 		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('https://lumbre.test/api/sync/flush');
@@ -5355,6 +5358,7 @@ describe('prepare_attachment_upload — permiso de subida de un solo uso para qu
 
 	it('emite el permiso con la credencial de la concesión y el cuerpo {taskId}, y devuelve curl listo', async () => {
 		const fetchSpy = vi.fn(async (url: string | URL, init?: RequestInit) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, parentId: null }]);
 			expect(String(url)).toBe('https://lumbre.test/api/attachments/upload-permits');
 			expect(init?.method).toBe('POST');
 			const headers = init?.headers as Record<string, string>;
@@ -5370,7 +5374,7 @@ describe('prepare_attachment_upload — permiso de subida de un solo uso para qu
 			arguments: { taskId: TASK_ID, filename: 'Factura año.pdf' }
 		});
 		expect(result.isError).not.toBe(true);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
 		const text = textOf(result);
 		expect(text).toContain(UPLOAD_URL);
 		expect(text).toContain(PERMIT);
@@ -5392,7 +5396,7 @@ describe('prepare_attachment_upload — permiso de subida de un solo uso para qu
 	});
 
 	it('mime desconocido → application/octet-stream', async () => {
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(permitBody())));
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('/api/tasks?') ? jsonResponse([{ id: TASK_ID, parentId: null }]) : jsonResponse(permitBody())));
 		const client = await buildClient();
 		const result = await client.callTool({
 			name: 'prepare_attachment_upload',
@@ -5422,7 +5426,7 @@ describe('prepare_attachment_upload — permiso de subida de un solo uso para qu
 		// El cuerpo de error lleva un marcador: no debe salir al modelo ni a logs.
 		vi.stubGlobal(
 			'fetch',
-			vi.fn(async () => jsonResponse({ message: `ECO_DEL_SERVIDOR ${PERMIT}` }, status))
+			vi.fn(async (url: string) => url.includes('/api/tasks?') ? jsonResponse([{ id: TASK_ID, parentId: null }]) : jsonResponse({ message: `ECO_DEL_SERVIDOR ${PERMIT}` }, status))
 		);
 		const client = await buildClient();
 		const result = await client.callTool({
@@ -5440,7 +5444,7 @@ describe('prepare_attachment_upload — permiso de subida de un solo uso para qu
 	});
 
 	it('respuesta 200 sin permiso: error de respuesta inesperada', async () => {
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })));
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('/api/tasks?') ? jsonResponse([{ id: TASK_ID, parentId: null }]) : jsonResponse({ ok: true })));
 		const client = await buildClient();
 		const result = await client.callTool({
 			name: 'prepare_attachment_upload',

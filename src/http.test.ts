@@ -164,8 +164,8 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// no es de este lote, ya existía antes). Techo 26.700 (2026-10-02: medido
 		// 26.468 en `index.test.ts` + ~1%), el mismo que allí. Subido a 27.100 el
 		// 2026-10-14 con `index.test.ts` (expectedContent/expectedNotes: 26.863).
-		// Subido a 27.800 el 2026-10-27 con `index.test.ts` (prepare_attachment_upload: 27.520).
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(27800);
+		// C5-g: 28.390 caracteres en index.test.ts; techo 28.700 (~1%) con espacios/asignación.
+		expect(JSON.stringify(body.result.tools).length).toBeLessThan(28700);
 	});
 
 	it('el log solo identifica métodos MCP conocidos y nunca copia un method arbitrario del body', async () => {

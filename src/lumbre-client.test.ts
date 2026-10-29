@@ -107,7 +107,8 @@ describe('assertTaskUsable', () => {
 		'set_waiting',
 		'clear_waiting',
 		'unarchive',
-		'set_parent'
+		'set_parent',
+		'set_assignee'
 	];
 	const REJECT_SUBTASK = ['set_section', 'move_to_list', 'archive'];
 
@@ -123,6 +124,7 @@ describe('assertTaskUsable', () => {
 		reschedule: { op: 'reschedule', taskId: 'sub-1', date: '2026-10-01' },
 		clear_waiting: { op: 'clear_waiting', taskId: 'sub-1' },
 		unarchive: { op: 'unarchive', taskId: 'sub-1' },
+		set_assignee: { op: 'set_assignee', taskId: 'sub-1', assigneeId: '' },
 		set_parent: { op: 'set_parent', taskId: 'sub-1', parentId: null },
 		set_section: { op: 'set_section', taskId: 'sub-1', section: 'Bugs' },
 		move_to_list: { op: 'move_to_list', taskId: 'sub-1', listId: 'top-1' },

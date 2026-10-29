@@ -20,12 +20,15 @@ import type { LumbreBrlEntry, LumbreTask } from './lumbre-client.js';
 export const EXISTENCE_CACHE_TTL_MS = 5000;
 
 /** Lo ÚNICO que se retiene de una tarea: lo que lee `assertTaskUsable`
- *  (`parentId`) más `archivedAt`. Sin título ni nota: la caché vive en memoria
+ *  (`parentId`), `archivedAt` y procedencia de adjuntos. Sin título ni nota: la caché vive en memoria
  *  del relé compartido y no debe acumular contenido de la persona usuaria. */
 export interface CachedTask {
 	id: string;
 	parentId: string | null | undefined;
 	archivedAt: string | null | undefined;
+	/** Procedencia mínima para enrutar adjuntos; no acredita permisos. */
+	storeId?: string;
+	spaceId?: string | null;
 }
 
 interface CacheEntry<T> {
@@ -80,7 +83,9 @@ export class TaskExistenceCache {
 	}
 
 	private put(task: LumbreTask): void {
-		const value: CachedTask = { id: task.id, parentId: task.parentId, archivedAt: task.archivedAt };
+		const value: CachedTask = { id: task.id, parentId: task.parentId, archivedAt: task.archivedAt,
+			...(task.storeId !== undefined ? { storeId: task.storeId } : {}),
+			...(task.spaceId !== undefined ? { spaceId: task.spaceId } : {}) };
 		this.entries.set(task.id, { value, expiresAt: this.now() + this.ttlMs });
 	}
 

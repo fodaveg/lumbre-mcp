@@ -109,3 +109,16 @@ flush de cambios ya recibidos y no autoriza nuevas escrituras.
 
 Un dispositivo offline no puede forzarse a enviar cambios que aún no alcanzaron el
 servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicado.
+
+## Espacios y asignación
+
+Usa `listId` para destinos compartidos y comprueba el espacio: lo creado allí lo ven
+TODOS sus miembros. `set_assignee` usa `assigneeId` como `accountId` de
+`spaces[].members` (64 hex minúsculas); `""` desasigna. Vale también sobre subtareas,
+con asignado propio. En un alta requiere `listId` compartida y miembro activo; si
+la app lo ignora, su aviso prevalece sobre la intención enviada. No envíes `null`.
+La autorización y las ambigüedades de nombres se resuelven en el servidor, sin
+fall back a otra credencial ni filtros de membresía en cliente. Las operaciones de
+mover o anidar no trasladan entre stores. La subida de adjuntos y los permisos de
+subida envían el store compartido de la tarea resuelta; sin store, son personales.
+`refresh_sync` solo fuerza el personal; no lo uses para prometer frescura compartida.

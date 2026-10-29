@@ -6,6 +6,9 @@ import type {
 	LumbreListClosure,
 	LumbreListSummary,
 	LumbreTask,
+	LumbreSpace,
+	StoreMetadata,
+	AssignmentMetadata,
 	TaskScope
 } from './lumbre-client.js';
 import {
@@ -17,6 +20,34 @@ import {
 import { LIST_TASKS_LIMIT } from './lumbre-client.js';
 import { refCounts, renderRefs, type RefResolution } from './refs.js';
 import { formatTags } from './tag-format.js';
+
+/** Procedencia explícita solo cuando el servidor la conoce. */
+function spaceLabel(entity: StoreMetadata): string | null {
+	if (entity.spaceId) return `espacio: ${entity.space?.name ?? entity.spaceName ?? entity.spaceId} (spaceId: ${entity.spaceId})`;
+	return null;
+}
+
+/** El asignado es propio también en subtareas; no se infiere del padre. */
+function assignmentLabels(entity: AssignmentMetadata, space?: LumbreSpace, personal = false): string[] {
+	const labels: string[] = [];
+	if (!personal && entity.assigneeId !== undefined) {
+		const member = space?.members?.find((member) => member.accountId === entity.assigneeId);
+		labels.push(entity.assigneeId ? `asignado: ${member ? `${member.name} (${entity.assigneeId})` : entity.assigneeId}` : 'sin asignar');
+	}
+	if (!personal && entity.assignedToMe !== undefined) labels.push(`asignada a mí: ${entity.assignedToMe ? 'sí' : 'no'}`);
+	if (!personal && entity.inViewerToday !== undefined) labels.push(`en mi Hoy: ${entity.inViewerToday ? 'sí' : 'no'}`);
+	if (entity.crossStoreDuplicate) labels.push('⚠ crossStoreDuplicate: id duplicado entre stores; servidor resolvió la copia');
+	return labels;
+}
+
+/** Catálogo entregado por /api/tasks, sin correos ni consultas de membresía propias. */
+function formatSpaces(spaces: LumbreSpace[]): string[] {
+	return spaces.flatMap((space) => [
+		`· espacio "${space.name}" — spaceId: ${space.spaceId}${space.storeId ? ` · storeId: ${space.storeId}` : ''}` +
+			`${space.role !== undefined ? ` · rol: ${space.role}` : ''}${space.agentAccess !== undefined ? ` · agentAccess: ${space.agentAccess}` : ''}`,
+		...(space.members ?? []).map((member) => `  miembro: ${member.name} — accountId: ${member.accountId}`)
+	]);
+}
 
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority: LumbreTask['priority']): string {
@@ -233,6 +264,9 @@ function duplicateTitleKeys(tasks: LumbreTask[]): Set<string> {
 function formatTask(t: LumbreTask, opts: FormatTaskOptions, isDuplicateTitle: boolean): string {
 	const box = stateBox(t);
 	const metadata = formatTags(t.tags, t.effectiveTags);
+	const space = spaceLabel(t);
+	if (space) metadata.push(space);
+	metadata.push(...assignmentLabels(t, t.space, t.spaceId === null));
 	if (t.cancelledAt) metadata.push('cancelada');
 	const prio = priorityLabel(t.priority);
 	if (prio) metadata.push(prio);
@@ -297,6 +331,9 @@ export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 	const lines = [
 		`Tarea ${t.id}`,
 		`- contenido: ${renderRefs(t.content, refs)}`,
+		...(spaceLabel(t) ? [`- ${spaceLabel(t)}`] : []),
+		...(t.storeId && t.spaceId !== null ? [`- storeId: ${t.storeId}`] : []),
+		...assignmentLabels(t, t.space, t.spaceId === null).map((label) => `- ${label}`),
 		// Subtarea: el id de su madre (`parentId` de `GET /api/tasks?id=`). Es lo
 		// que necesita `set_parent` para moverla o sacarla de la checklist.
 		...(t.parentId ? [`- subtarea de: ${t.parentId} (parentId)`] : []),
@@ -346,7 +383,7 @@ export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 	if (t.subtasks && t.subtasks.length > 0) {
 		lines.push('- subtareas:');
 		for (const s of t.subtasks) {
-			const tags = formatTags(s.tags, s.effectiveTags);
+			const tags = [...formatTags(s.tags, s.effectiveTags), ...assignmentLabels(s, t.space, t.spaceId === null)];
 			const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
 			lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}${suffix}  · id: ${s.id}`);
 		}
@@ -356,7 +393,7 @@ export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 		// para que el modelo abra la subtarea en vez de dar por hecho que no.
 		lines.push('  (fecha, prioridad, notas y adjuntos de una subtarea: get_task con su id)');
 	}
-	return lines.join('\n');
+	return [...lines, ...formatSpaces(t.space ? [t.space] : [])].join('\n');
 }
 
 /**
@@ -374,10 +411,10 @@ function listLegend(tasks: LumbreTask[]): string[] {
 	const lines: string[] = [];
 	for (const t of tasks) {
 		if (!t.list || !t.somedayListId) continue;
-		const key = `${t.list} ${t.somedayListId}`;
+		const key = JSON.stringify([t.storeId, t.spaceId, t.somedayListId]);
 		if (seen.has(key)) continue;
 		seen.add(key);
-		lines.push(`· proyecto/área "${t.list}" — listId: ${t.somedayListId}`);
+		lines.push(`· proyecto/área "${t.list}" — listId: ${t.somedayListId}${spaceLabel(t) ? ` · ${spaceLabel(t)}` : ''}`);
 	}
 	return lines;
 }
@@ -507,7 +544,8 @@ export function formatTaskList(
 		...(truncatedLine ? [truncatedLine] : []),
 		...(notesHeaderLine ? [notesHeaderLine] : []),
 		...(refsLine ? [refsLine] : []),
-		...legend
+		...legend,
+		...formatSpaces([...new Map(tasks.filter((t) => t.space).map((t) => [t.space!.spaceId, t.space!])).values()])
 	];
 	const prefix = prefixLines.length > 0 ? [...prefixLines, ''] : [];
 
@@ -521,17 +559,17 @@ export function formatTaskList(
 
 	// "Listas distintas" = valores de t.list no nulos, deduplicados. Si el lote
 	// solo toca una (o ninguna, todas null), no hace falta desambiguar.
-	const distinctLists = new Set(tasks.map((t) => t.list).filter((l): l is string => !!l));
+	const distinctLists = new Set(tasks.filter((t) => t.list).map((t) => JSON.stringify([t.storeId, t.spaceId, t.somedayListId ?? t.list])));
 	const showList = distinctLists.size > 1;
 
 	const groups: { key: string; label: string; tasks: LumbreTask[] }[] = [];
 	for (const t of tasks) {
 		const sectionLabel = t.section ?? '(sin sección)';
-		const listLabel = t.list ?? '(sin proyecto ni área)';
+		const listLabel = (t.list ?? '(sin proyecto ni área)') + (t.spaceId ? ` · ${t.space?.name ?? t.spaceName ?? t.spaceId}` : '');
 		const label = showList ? `${listLabel} · ${sectionLabel}` : sectionLabel;
 		// Clave de agrupación separada de la etiqueta visible: JSON.stringify
 		// evita colisiones si un nombre de lista/sección contiene el separador.
-		const key = JSON.stringify([showList ? listLabel : null, sectionLabel]);
+		const key = JSON.stringify([t.storeId, t.spaceId, t.somedayListId ?? t.list, t.sectionId ?? sectionLabel]);
 		const group = groups.find((g) => g.key === key);
 		if (group) group.tasks.push(t);
 		else groups.push({ key, label, tasks: [t] });
@@ -606,7 +644,8 @@ function listKindMark(l: LumbreListSummary): string {
  * formateador: tras recorrer desde las raíces, las listas aún sin pintar se
  * toman como raíces en su orden de llegada y `visited` corta el bucle.
  */
-export function formatListSummaries(lists: LumbreListSummary[]): string {
+export function formatListSummaries(lists: LumbreListSummary[], spaces: LumbreSpace[] = []): string {
+	if (lists.length === 0 && spaces.length > 0) return ['Sin proyectos ni áreas.', ...formatSpaces(spaces)].join('\n');
 	if (lists.length === 0) return 'Sin proyectos ni áreas.';
 	const header =
 		`Proyectos y áreas (${lists.length}): la sangría indica el padre; ` +
@@ -635,14 +674,14 @@ export function formatListSummaries(lists: LumbreListSummary[]): string {
 		const suffix = tags.length > 0 ? ` · ${tags.join(', ')}` : '';
 		body.push(
 			`${'  '.repeat(depth)}· ${l.name}${listKindMark(l)} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} ` +
-				`(listId: ${l.id})${suffix}${listNoteMarkerSuffix(l)}`
+				`(listId: ${l.id})${spaceLabel(l) ? ` · ${spaceLabel(l)}` : ''}${suffix}${listNoteMarkerSuffix(l)}`
 		);
 		for (const child of children.get(l.id) ?? []) render(child, depth + 1);
 	};
 	for (const r of roots) render(r, 0);
 	// Ciclos: sus miembros no cuelgan de ninguna raíz; se pintan en la raíz.
 	for (const l of lists) render(l, 0);
-	return [header, ...body].join('\n');
+	return [header, ...formatSpaces(spaces), ...body].join('\n');
 }
 
 /**
@@ -662,7 +701,10 @@ export function formatListSummaries(lists: LumbreListSummary[]): string {
  * la respuesta pero son de PRESENTACIÓN en la app: se omiten a propósito.
  */
 export function formatListDetail(l: LumbreListSummary, parentName?: string | null): string {
-	const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`];
+	const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`,
+		...(spaceLabel(l) ? [`- ${spaceLabel(l)}`] : []),
+		...(l.storeId && l.spaceId !== null ? [`- storeId: ${l.storeId}`] : []),
+		...formatSpaces(l.space ? [l.space] : [])];
 
 	if (l.kind !== undefined) lines.push(`- tipo: ${l.kind === 'area' ? 'área' : 'proyecto'}`);
 	if (l.parentListId !== undefined) {

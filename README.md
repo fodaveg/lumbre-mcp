@@ -25,6 +25,46 @@ máximo): dice qué es el servidor, que cargues la skill `lumbre` si la tienes, 
 dónde están las reglas de uso, la guía de instalación y el manual de la app
 (`https://lumbre.pro/ayuda/`). No añade tools.
 
+## Espacios compartidos (C5-g)
+
+Las lecturas conservan su formato personal cuando el servidor no manda campos de
+espacios. Cuando los trae, enseñan `storeId`, `spaceId` y el nombre del espacio de
+cada tarea/lista compartida, su asignado y las marcas `assignedToMe`, `inViewerToday` y
+`crossStoreDuplicate`. El catálogo `GET /api/tasks?includeLists=1` añade `spaces[]`
+con miembros `{accountId, name}` y metadata opcional (`storeId`, `role`, `agentAccess`).
+`list_lists` los muestra incluso sin listas; `get_list` muestra los de su espacio.
+`list_tasks` y `get_task` consultan ese mismo catálogo solo si hay tareas compartidas.
+No se consulta `/api/spaces`. Los nombres de miembro llegan del servidor, sin emails.
+
+Si una API anterior ignora un filtro nuevo o no acredita su soporte, el MCP da
+un error explícito; no presenta un listado general como filtrado.
+
+`list_tasks` acepta `listId` (exacto, preferente sobre `list`) y `assignee: "me"`.
+Para la vista «asignadas a mí», combina `scope: "all"` con `assignee: "me"`;
+`scope: "today"` restringe a Hoy. Ambos filtros los evalúa el servidor. Los nombres iguales favorecen
+la lista personal; si solo hay compartidas empatadas, resuelve con `listId`. No hay
+sintaxis `Espacio/Lista`. Sin destino, el alta sigue en el personal. Crear en una
+lista compartida lo ven TODOS los miembros del espacio.
+
+`mutate_tasks` añade `{op: "set_assignee", taskId, assigneeId}` → `setAssignee`.
+`assigneeId` es un `accountId` de `spaces[].members`: 64 hex en minúsculas o `""`
+para desasignar; nunca UUID, email, mayúsculas ni `null`. Se admite también sobre
+subtareas, con asignado propio (la madre no hereda ni agrega). Las altas de
+`add_task` (suelta o batch) aceptan ese campo: el servidor solo lo aplica con
+`listId` compartida y miembro activo; en otro caso lo ignora con aviso. El MCP
+conserva esos avisos y el éxito parcial por op.
+
+La puerta del servidor aplica `agentAccess` a OAuth MCP y al token personal de
+compatibilidad; el conector no duplica autorización ni cambia a credenciales de
+sesión/widget ante una denegación. Las mutaciones resuelven store por `taskId` o
+`listId`; mover/anidar y `set_parent` siguen dentro de un store, sin traslados.
+Las subidas y permisos de adjuntos mandan `?store=` para tareas compartidas
+resueltas. BRL, hábitos y `refresh_sync` siguen siendo personales. La deduplicación
+entre stores la decide el servidor; el MCP muestra `crossStoreDuplicate` cuando llega.
+
+Estos campos dependen de las rutas C5 de Lumbre; las pruebas de este repo fijan el
+contrato con fixtures y no acreditan su despliegue ni una integración real.
+
 ## Qué hace (Fase 1 — crear/leer)
 
 Todas las tools llevan `annotations` de MCP: `readOnlyHint` en las de lectura
@@ -194,7 +234,7 @@ retención en «Qué guarda el relé»).
   de presentación: se omiten a propósito. Da error explícito si el `listId` no
   existe entre los proyectos/áreas visibles del usuario. Pide `listId=<id>`
   (R6) para bajar solo esa lista con la nota íntegra. Solo un 404 cuyo cuerpo
-  dice `Lista no encontrada` significa «no existe»; cualquier otro 404 da un
+  dice `Lista no encontrada` o trae `code: "not_found"` significa «no existe»; cualquier otro 404 da un
   error aparte (ruta sin ese mensaje: `LUMBRE_BASE_URL` equivocado o app sin la
   ruta). Contra una app anterior, que ignora el parámetro, filtra por id en
   cliente con el mismo resultado.
@@ -807,13 +847,13 @@ resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y 
 de un `add_task`, su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
-28 ops entre las dos tools (MC7, 2026-09-24, añade `archive`…`unarchive_habit`
+33 ops entre las dos tools (MC7, 2026-09-24, añade `archive`…`unarchive_habit`
 en la primera fila y la última de la segunda; `set_parent` llega el
 2026-09-25):
 
 | tool | ops |
 | --- | --- |
-| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `set_parent` |
+| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `set_parent`, `set_assignee` |
 | `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit`, `close_project`, `reopen_project`, `set_project_when`, `set_project_deadline` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
@@ -827,7 +867,7 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
 # mutate_tasks
-add_task: text* [list|listId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
+add_task: text* [list|listId, assigneeId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
 update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes]
@@ -844,6 +884,7 @@ unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
 skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
 archive_habit: habitId* (sin comprobación de existencia de tarea)
 unarchive_habit: habitId* (sin comprobación de existencia de tarea)
+set_assignee: taskId*, assigneeId* (accountId de miembro o ""; también en subtarea)
 set_parent: taskId*, parentId* (uuid de la madre, o null para sacarla; taskId puede ser subtarea; el resto de reglas, en la app)
 
 # organize
@@ -881,7 +922,7 @@ que tenían las tools individuales). Quién lo decide: `docs/18-que-es-una-tarea
 §2.5 del repo principal, no este conector — una op vale sobre una subtarea si
 los campos que escribe están entre los ACCIDENTALES PERMITIDOS de esa sección:
 
-- **Sí**: `complete`, `cancel`, `delete`, `complete_subtask`, `set_parent`,
+- **Sí**: `set_assignee`, `complete`, `cancel`, `delete`, `complete_subtask`, `set_parent`,
   `update` (todos sus campos, también `deadline`, `reminders` y `recurrence`),
   `set_waiting`,
   `reschedule`, con fecha o con `date: null` (`date` también lo es),

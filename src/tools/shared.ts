@@ -206,6 +206,12 @@ export function formatOutcomeReport(entries: OpOutcomeEntry[], notices: string[]
 	return lines.join('\n');
 }
 
+/** Forma de accountId de Hebra; UUID, email, mayúsculas y null no son wire válido. */
+export const assigneeIdSchema = z.string().regex(/^(?:[0-9a-f]{64})?$/).describe(
+	'accountId (64 hex minúsculas) de spaces[].members en list_lists/get_list; "" quita asignación. ' +
+	'add_task exige listId compartida; el servidor valida membresía y avisa si ignora el asignado'
+);
+
 /**
  * Mapa op → tool que la implementa, con las ops de tarea repartidas entre
  * las DOS tools de lote (2026-09-19, tarea 6f62c877): `mutate_tasks` opera
@@ -243,6 +249,7 @@ export const TASK_OP_TOOL: Record<string, 'mutate_tasks' | 'organize'> = {
 	unarchive_habit: 'mutate_tasks',
 	// 2026-09-25: anidar/desanidar opera sobre UNA tarea y no destruye nada.
 	set_parent: 'mutate_tasks',
+	set_assignee: 'mutate_tasks',
 	delete: 'organize',
 	remove_section: 'organize',
 	create_list: 'organize',

@@ -69,6 +69,16 @@ inferir alcance o taxonomía, muestra primero una propuesta breve.
 Si el encargo produce un documento (audit, spec, plan) o una decisión que hay que guardar,
 lee [references/destinations.md](references/destinations.md).
 
+## Espacios compartidos
+Crear en una lista compartida lo ven TODOS sus miembros. Resuelve el espacio y usa
+`listId` de `list_lists`/`get_list`; sin destino, el alta sigue siendo personal.
+Para «asignadas a mí», `list_tasks({scope:"all",assignee:"me"})`. `set_assignee` usa el
+`accountId` de `spaces[].members` (64 hex minúsculas); `""` desasigna, nunca email,
+UUID ni `null`. También vale en subtareas, con asignado propio. El servidor aplica
+`agentAccess`: no cambies credenciales ni consultes `/api/spaces` para eludirlo.
+BRL y hábitos son personales. Detalles de altas, ambigüedad, avisos y límites en
+la referencia del modo elegido y, al escribir, `mcp-safe-operations.md`.
+
 ## Subagentes opcionales
 
 La skill funciona íntegramente sin subagentes. Solo si el runtime expone alguno de

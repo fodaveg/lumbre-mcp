@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { getListById, getListLinks, linkListNote, listLists, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
+import { getListById, getListLinks, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, textResult, type ToolCtx } from './shared.js';
 
@@ -37,8 +37,8 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 		},
 		async () => {
 			try {
-				const lists = await listLists(ctx.config, { notes: 'length' });
-				return textResult(formatListSummaries(lists));
+				const { lists, spaces } = await getListCatalog(ctx.config, { notes: 'length' });
+				return textResult(formatListSummaries(lists, spaces));
 			} catch (err) {
 				return errorResult(err);
 			}

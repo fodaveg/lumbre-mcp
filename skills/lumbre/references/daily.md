@@ -78,6 +78,10 @@ así y dónde quedó.
 
 Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus campos.
 
+- `set_assignee` asigna una tarea o subtarea compartida al `accountId` de un miembro
+  de su espacio (consulta `list_lists`/`get_list`); `""` desasigna y `null` es inválido.
+  No uses email, UUID ni el asignado de la madre como sustituto. En altas,
+  `assigneeId` se envía junto a `listId` compartida; comunica los avisos del servidor.
 - `restore` saca de la Papelera una tarea borrada; `archive` y `unarchive` cambian su
   visibilidad (no su ciclo de vida).
 - `set_waiting` y `clear_waiting` ponen y quitan el estado «esperando» (con fecha

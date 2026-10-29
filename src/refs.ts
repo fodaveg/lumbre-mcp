@@ -1,4 +1,4 @@
-import { findTasksByIds, listLists, type LumbreConfig, type LumbreTask } from './lumbre-client.js';
+import { findTasksByIds, listLists, type LumbreConfig, type LumbreTask, type StoreMetadata } from './lumbre-client.js';
 import { formatNoteMarker } from './notes.js';
 import { formatTags } from './tag-format.js';
 
@@ -83,6 +83,8 @@ export interface RefResolution {
 	lists: Map<string, string>;
 	/** Tags de listas resueltas, separados del mapa histórico de nombres. */
 	listTags: Map<string, { own?: string[]; effective?: string[] }>;
+	/** Procedencia conservada aparte del nombre para mantener compatibilidad. */
+	listStores?: Map<string, StoreMetadata>;
 	checkedTasks: Set<string>;
 	checkedLists: Set<string>;
 	/** Todos los ids referenciados en el lote (comprobados o no) — solo para
@@ -99,6 +101,7 @@ export function emptyRefResolution(): RefResolution {
 		tasks: new Map(),
 		lists: new Map(),
 		listTags: new Map(),
+		listStores: new Map(),
 		checkedTasks: new Set(),
 		checkedLists: new Set(),
 		refTaskIds: [],
@@ -179,6 +182,7 @@ export async function resolveRefs(
 			const lists = await listLists(config);
 			for (const l of lists) {
 				resolution.lists.set(l.id, l.name);
+				resolution.listStores!.set(l.id, l);
 				resolution.listTags.set(l.id, { own: l.tags, effective: l.effectiveTags });
 			}
 			// `listLists` trae TODAS las listas vivas, así que cualquier id de lista
@@ -233,6 +237,12 @@ function flattenRefTokens(text: string): string {
 	return text.replace(REF_TOKEN, (_m, _kind: string, _id: string, label: string) => label);
 }
 
+/** Una referencia compartida conserva procedencia aunque no haya nombre resuelto. */
+function refSpaceHint(entity?: StoreMetadata): string {
+	if (entity?.spaceId) return ` espacio:"${entity.space?.name ?? entity.spaceName ?? entity.spaceId}" (spaceId:${entity.spaceId})`;
+	return '';
+}
+
 /**
  * Sustituye cada referencia de `text` por su forma RESUELTA. Pura (la red ya la
  * hizo `resolveRefs`) y sin coste si el texto no lleva ninguna referencia — el
@@ -261,7 +271,7 @@ export function renderRefs(text: string, resolution?: RefResolution): string {
 			const task = resolution.tasks.get(id);
 			if (!task) return `→tarea[ROTA] id:${id}`;
 			const title = flattenRefTokens(task.content);
-			return `→tarea[${taskStateLabel(task)}] "${title}"${tagHint(task)}${noteHint(task)} id:${id}`;
+			return `→tarea[${taskStateLabel(task)}] "${title}"${tagHint(task)}${noteHint(task)}${refSpaceHint(task)} id:${id}`;
 		}
 		if (!resolution.checkedLists.has(id)) return `→proyecto/área[sin resolver] id:${id}`;
 		const name = resolution.lists.get(id);
@@ -269,7 +279,7 @@ export function renderRefs(text: string, resolution?: RefResolution): string {
 		const listTags = resolution.listTags.get(id);
 		const tags = formatTags(listTags?.own, listTags?.effective);
 		const tagSuffix = tags.length > 0 ? ` ${tags.join(',')}` : '';
-		return `→proyecto/área "${flattenRefTokens(name)}"${tagSuffix} id:${id}`;
+		return `→proyecto/área "${flattenRefTokens(name)}"${tagSuffix}${refSpaceHint(resolution.listStores?.get(id))} id:${id}`;
 	});
 }
 

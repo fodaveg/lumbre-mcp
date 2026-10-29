@@ -16,6 +16,7 @@ import {
 	type MutateTasksOp
 } from '../lumbre-client.js';
 import {
+	assigneeIdSchema,
 	errorResult,
 	exposedRecurrenceSchema,
 	formatOpShapeError,
@@ -117,12 +118,14 @@ function opWritesVisibleNotes(raw: Record<string, unknown>): boolean {
  * `add_task` con `list` por NOMBRE, que crea la lista si no existe.
  */
 export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
+	z.object({ op: z.literal('set_assignee'), taskId: z.string().guid(), assigneeId: assigneeIdSchema }).strict(),
 	z
 		.object({
 			op: z.literal('add_task'),
 			text: z.string().min(1).max(2000),
 			list: z.string().max(200).optional(),
 			listId: z.string().guid().optional(),
+			assigneeId: assigneeIdSchema.optional(),
 			section: z.string().max(200).optional(),
 			priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional(),
 			date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -405,8 +408,10 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
  */
 export const mutateTasksOpSchema = z
 	.object({
-		op: z.string().describe('Operación — las 18 de esta tool, con su contrato, en la description de `ops`'),
+		op: z.string().describe('Operación — las 19 de esta tool, con su contrato, en la description de `ops`'),
 		taskId: z.string().guid().optional().describe('Id de la tarea — ver list_tasks/get_task'),
+		// La forma se valida por-op para conservar éxito parcial.
+		assigneeId: z.unknown().optional().describe(assigneeIdSchema.description!),
 		subtaskId: z.string().guid().optional().describe('Id de la subtarea — ver get_task de su tarea padre'),
 		parentId: z
 			.union([z.string().guid(), z.null()])
@@ -781,13 +786,14 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.max(200)
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
-							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, section, ' +
+							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, assigneeId, section, ' +
 							'priority, date, deadline, time, recurrence, subtasks, notes, tags] (text literal, sin ' +
 							'interpretar fechas ni #etiquetas) · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
 							'en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes] · ' +
 							'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
+							'set_assignee: taskId*, assigneeId* (accountId de miembro; \"\" desasigna; también subtareas) · ' +
 							'set_waiting: taskId*, until* (estrictamente futura) [for] · clear_waiting: taskId* · ' +
 							'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
 							'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +

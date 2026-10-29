@@ -14,6 +14,7 @@ import {
 	LOCAL_PATH_PLACEHOLDER,
 	readLocalAttachment
 } from '../attachments.js';
+import type { CachedTask } from '../existence-cache.js';
 import { requireTaskExists } from './task-existence.js';
 import { errorResult, textResult, type ToolCtx } from './shared.js';
 
@@ -190,6 +191,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 				}
 
 				let file: { bytes: Buffer; filename: string; mime: string };
+				let task: CachedTask;
 				if (hasBase64) {
 					if (!input.filename?.trim()) {
 						return errorResult(
@@ -201,14 +203,14 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 					// llamada de existencia.
 					file = decodeBase64Attachment(input.content_base64!, input.filename);
 					// Una subtarea vale (25 sep 2026, ver `SUBTASK_ATTACHMENTS`).
-					await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
+					task = await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
 				} else if (!ctx.localFilesystem) {
 					// Ni requireTaskExists ni uploadAttachment: contra este disco NO
 					// existe una ruta correcta que probar (ver `remoteFileAccessError`),
 					// así que ni se toca la red.
 					return errorResult(new Error(remoteFileAccessError()));
 				} else {
-					await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
+					task = await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
 					file = await readLocalAttachment(input.file_path!, input.filename);
 				}
 
@@ -216,6 +218,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 					taskId: input.taskId,
 					filename: file.filename,
 					mime: file.mime,
+					store: task.spaceId ? task.storeId ?? task.spaceId : undefined,
 					bytes: file.bytes
 				});
 				return textResult(
@@ -248,7 +251,8 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		},
 		async (input) => {
 			try {
-				const upload = await requestUploadPermit(ctx.config, input.taskId);
+				const task = await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
+				const upload = await requestUploadPermit(ctx.config, input.taskId, task.spaceId ? task.storeId ?? task.spaceId : undefined);
 				const cmd = buildUploadCommand({
 					uploadUrl: upload.uploadUrl,
 					permit: upload.permit,
