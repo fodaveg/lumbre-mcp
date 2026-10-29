@@ -40,9 +40,10 @@ Si una API anterior ignora un filtro nuevo o no acredita su soporte, el MCP da
 un error explícito; no presenta un listado general como filtrado.
 
 `list_tasks` acepta `listId` (exacto, preferente sobre `list`) y `assignee: "me"`.
-Si `list` por nombre devuelve vacío y ese nombre coincide con dos o más listas
-(por ejemplo de distintos espacios), el MCP lanza un error que lo declara ambiguo
-y enumera cada candidata con su `listId` y su espacio; hay que repetir con `listId`.
+Si `list` por nombre devuelve vacío, no hay ninguna lista personal con ese nombre
+y coincide con dos o más listas de espacios compartidos, el MCP lanza un error que
+lo declara ambiguo y enumera cada candidata con su `listId` y su espacio; hay que
+repetir con `listId`. Una personal con ese nombre gana y no es ambigua.
 Una sola coincidencia con lista vacía sigue devolviendo vacío.
 Para la vista «asignadas a mí», combina `scope: "all"` con `assignee: "me"`;
 `scope: "today"` restringe a Hoy. Ambos filtros los evalúa el servidor. Los nombres iguales favorecen

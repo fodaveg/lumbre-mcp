@@ -214,17 +214,33 @@ describe('C5-g — nombres nulos o vacíos y list ambiguo', () => {
 	});
 
 	const OTHER_LIST = '44444444-4444-4444-8444-444444444444';
-	it('list por nombre con respuesta vacía y dos listas homónimas lanza error con ids', async () => {
-		const fetch = vi.fn(async (url: string) => json(url.includes('includeLists')
-			? { lists: [{ ...list, name: 'Trabajo' }, { id: OTHER_LIST, name: 'trabajo', taskCount: 0, storeId: null, spaceId: null, spaceName: null }], spaces: [unnamed] }
-			: []));
+	const PERSONAL_LIST = '55555555-5555-4555-8555-555555555555';
+	const shared2 = { ...list, id: OTHER_LIST, name: 'trabajo', storeId: OTHER, spaceId: OTHER, spaceName: '' };
+	const personalList = { id: PERSONAL_LIST, name: 'Trabajo', taskCount: 0, storeId: null, spaceId: null, spaceName: null };
+	const emptyWith = (lists: unknown[]) => {
+		const fetch = vi.fn(async (url: string) => json(url.includes('includeLists') ? { lists, spaces: [space] } : []));
 		vi.stubGlobal('fetch', fetch);
+		return fetch;
+	};
+
+	it('dos compartidas homónimas sin personal con respuesta vacía lanzan error con ids', async () => {
+		emptyWith([{ ...list, name: 'Trabajo' }, shared2]);
 		const err = await listTasks(CONFIG, { list: 'TRABAJO' }).catch((e: Error) => e);
 		expect(err).toBeInstanceOf(Error);
 		const message = (err as Error).message;
 		expect(message).toContain('ambiguo'); expect(message).toContain('listId');
 		expect(message).toContain(LIST); expect(message).toContain(OTHER_LIST);
-		expect(message).toContain('(sin nombre)'); expect(message).toContain('personal');
+		expect(message).toContain('(sin nombre)'); expect(message).toContain('Equipo');
+	});
+
+	it('personal vacía más una compartida homónima no es ambiguo', async () => {
+		emptyWith([personalList, { ...list, name: 'Trabajo' }]);
+		expect(await listTasks(CONFIG, { list: 'Trabajo' })).toEqual([]);
+	});
+
+	it('una personal más dos compartidas homónimas no es ambiguo (gana la personal)', async () => {
+		emptyWith([personalList, { ...list, name: 'Trabajo' }, shared2]);
+		expect(await listTasks(CONFIG, { list: 'Trabajo' })).toEqual([]);
 	});
 
 	it('list vacío con una sola lista homónima no lanza error', async () => {

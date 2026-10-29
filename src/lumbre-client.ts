@@ -553,14 +553,17 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 		throw new LumbreApiError('La API no confirmó assignee=me: faltan metadatos de asignación o llegaron tareas no asignadas a ti. Actualiza Lumbre.');
 	}
 	if (input.list && !input.listId && tasks.length === 0) {
-		// El servidor responde 200 con [] cuando el nombre coincide con listas de
-		// dos o más stores compartidos. Solo entonces se consulta el catálogo.
+		// El servidor responde 200 con [] cuando el nombre empata entre dos o más
+		// stores compartidos; una coincidencia personal gana y no es ambigua.
+		// Solo entonces se consulta el catálogo.
 		const wanted = input.list.trim().toLowerCase();
-		const { lists } = await getListCatalog(config);
-		const matches = lists.filter((l) => l.name.trim().toLowerCase() === wanted);
-		if (matches.length >= 2) {
+		const { lists } = await getListCatalog(config, { notes: 'length' });
+		const named = lists.filter((l) => l.name.trim().toLowerCase() === wanted);
+		const matches = named.filter((l) => l.spaceId);
+		const personal = named.length - matches.length;
+		if (personal === 0 && matches.length >= 2) {
 			const where = (l: LumbreListSummary) =>
-				l.spaceId ? (l.space?.name ?? l.spaceName ?? '').trim() || '(sin nombre)' : 'personal';
+				(l.space?.name ?? l.spaceName ?? '').trim() || '(sin nombre)';
 			const candidates = matches.map((l) => `"${l.name}" (listId: ${l.id}, espacio: ${where(l)})`).join('; ');
 			throw new LumbreApiError(
 				`El nombre de lista "${input.list}" es ambiguo entre espacios: coincide con ${matches.length} listas. ` +
