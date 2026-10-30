@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { addTask, findTaskById, findTasksByIds, LIST_TASKS_LIMIT, listTasks, reservedStatusTagsError, reservedStatusTagsIn, taskNotFoundError } from '../lumbre-client.js';
+import { addTask, describeTaskSpaces, findTaskById, findTasksByIds, LIST_TASKS_LIMIT, listTasks, reservedStatusTagsError, reservedStatusTagsIn, taskNotFoundError } from '../lumbre-client.js';
 import { formatTaskFull, formatTaskList } from '../format.js';
 import { resolveRefs } from '../refs.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, hasNotes, parseNotesSince, recordNotesSeen } from '../notes.js';
-import { errorResult, formatOutcomeReport, recurrenceSchema, subtasksSchema, tagSchema, textResult } from './shared.js';
+import { assigneeIdSchema, errorResult, formatOutcomeReport, recurrenceSchema, subtasksSchema, tagSchema, textResult } from './shared.js';
 /**
  * Alcance EFECTIVO de `list_tasks`, el que va en la cabecera de
  * `formatTaskList` — tiene que ser el mismo default que aplica el SERVIDOR
@@ -17,7 +17,7 @@ import { errorResult, formatOutcomeReport, recurrenceSchema, subtasksSchema, tag
  * sin red — mismo patrón que `effectiveNotesMode`.
  */
 export function effectiveScopeLabel(input) {
-    return input.scope ?? (input.list ? 'all' : 'today');
+    return input.scope ?? (input.list || input.listId ? 'all' : 'today');
 }
 /**
  * Textos del lote que hay que escanear en busca de referencias
@@ -78,6 +78,7 @@ export function registerTaskTools(server, ctx) {
                 .optional()
                 .describe('Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
                 'de list_lists.'),
+            assigneeId: assigneeIdSchema.optional(),
             section: z
                 .string()
                 .max(200)
@@ -123,7 +124,7 @@ export function registerTaskTools(server, ctx) {
     const listTasksTool = server.registerTool('list_tasks', {
         annotations: { readOnlyHint: true },
         description: 'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
-            'all (auto "all" si usas `list` sin `scope`). `list` filtra por nombre; si no existe da ' +
+            'all (auto "all" si usas `list`/`listId` sin `scope`). `list` filtra por nombre; si no existe da ' +
             'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
             'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
             '`notes` decide qué notas trae cada tarea (criterio completo en ese campo; ' +
@@ -134,7 +135,7 @@ export function registerTaskTools(server, ctx) {
             scope: z
                 .enum(['today', 'week', 'upcoming', 'inbox', 'someday', 'overdue', 'all'])
                 .optional()
-                .describe('Alcance temporal; default "today" ("all" si se usa `list` sin `scope`). "week" es la ' +
+                .describe('Alcance temporal; default "today" ("all" si se usa `list`/`listId` sin `scope`). "week" es la ' +
                 'semana de CALENDARIO; "upcoming" es una ventana rodante que siempre empieza hoy'),
             days: z
                 .number()
@@ -147,6 +148,8 @@ export function registerTaskTools(server, ctx) {
                 .string()
                 .optional()
                 .describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
+            listId: z.string().guid().optional().describe('Id exacto de lista personal o compartida, preferente sobre list'),
+            assignee: z.literal('me').optional().describe('Solo las asignadas a mí; filtro del servidor: si no lo confirma, error, nunca el listado general'),
             section: z
                 .string()
                 .optional()
@@ -201,7 +204,7 @@ export function registerTaskTools(server, ctx) {
                 const refs = await resolveRefs(ctx.config, refTexts(tasks, 'auto', autoRender), {
                     includeArchived: input.includeArchived
                 });
-                return textResult(formatTaskList(tasks, effectiveScopeLabel(input), {
+                return textResult(formatTaskList(await describeTaskSpaces(ctx.config, tasks), effectiveScopeLabel(input), {
                     notesMode: 'auto',
                     autoRender,
                     notesSinceLabel: input.notesSince,
@@ -222,14 +225,14 @@ export function registerTaskTools(server, ctx) {
                 const refs = await resolveRefs(ctx.config, refTexts(tasks, notesMode), {
                     includeArchived: input.includeArchived
                 });
-                return textResult(formatTaskList(tasks, effectiveScopeLabel(input), { notesMode, refs }));
+                return textResult(formatTaskList(await describeTaskSpaces(ctx.config, tasks), effectiveScopeLabel(input), { notesMode, refs }));
             }
             if (notesMode === 'auto') {
                 const { list, autoRender } = await listTasksAutoTwoPhase(input);
                 const refs = await resolveRefs(ctx.config, refTexts(list, notesMode, autoRender), {
                     includeArchived: input.includeArchived
                 });
-                return textResult(formatTaskList(list, effectiveScopeLabel(input), {
+                return textResult(formatTaskList(await describeTaskSpaces(ctx.config, list), effectiveScopeLabel(input), {
                     notesMode,
                     autoRender,
                     notesWindowHours: input.notesRecentHours,
@@ -253,7 +256,7 @@ export function registerTaskTools(server, ctx) {
             const refs = await resolveRefs(ctx.config, refTexts(tasks, notesMode), {
                 includeArchived: input.includeArchived
             });
-            return textResult(formatTaskList(tasks, effectiveScopeLabel(input), { notesMode, refs }));
+            return textResult(formatTaskList(await describeTaskSpaces(ctx.config, tasks), effectiveScopeLabel(input), { notesMode, refs }));
         }
         catch (err) {
             return errorResult(err);
@@ -403,7 +406,7 @@ export function registerTaskTools(server, ctx) {
             // y las subtareas — ver `refs.ts`. Cero peticiones extra si no hay
             // ninguna referencia, que es el caso normal.
             const refs = await resolveRefs(ctx.config, [task.content, task.notes, ...(task.subtasks ?? []).map((s) => s.content)], { includeArchived: input.includeArchived });
-            return textResult(formatTaskFull(task, refs));
+            return textResult(formatTaskFull((await describeTaskSpaces(ctx.config, [task]))[0], refs));
         }
         catch (err) {
             return errorResult(err);

@@ -538,7 +538,25 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if (input.limit) params.set('limit', String(input.limit));
 	if (input.notesQuery) params.set('notes', input.notesQuery);
 	const qs = params.toString();
-	const body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
+	let body: unknown;
+	try {
+		body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
+	} catch (err) {
+		// `?listId=` sin `includeLists` (servidor C5): una lista inexistente, borrada,
+		// mal formada o de un espacio que esta credencial no ve responde el MISMO 404
+		// «Lista no encontrada», nunca el listado general. Se traduce a «no existe»
+		// sin distinguir los casos; cualquier otro 404 (URL base equivocada) sigue
+		// siendo el error original.
+		if (input.listId && isListNotFound(err)) {
+			throw new LumbreApiError(
+				`El listId ${input.listId} no está entre los proyectos/áreas que el servidor deja ver a esta ` +
+					'credencial: no existe, se borró o es de un espacio sin acceso para agentes. Resuélvelo de ' +
+					'nuevo con list_lists.',
+				404
+			);
+		}
+		throw err;
+	}
 	if (!Array.isArray(body)) {
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks.');
 	}
@@ -549,15 +567,30 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if (input.listId && tasks.some((t) => t.spaceId === undefined || t.somedayListId !== input.listId)) {
 		throw new LumbreApiError('La API no confirmó el filtro listId: respuesta sin procedencia o con tareas de otro destino. Actualiza Lumbre o consulta por un filtro compatible.');
 	}
+	// El servidor C5 de `release/fase3-cand3` (6dc35f62c, 30 oct 2026) todavía no
+	// manda `assigneeId`/`assignedToMe` ni aplica `?assignee=me`: lo ignora y
+	// devuelve el listado del scope. Mientras sea así, este filtro da error con
+	// cualquier respuesta no vacía; nunca se presenta ese listado como filtrado.
 	if (input.assignee && tasks.some((t) => t.assignedToMe !== true)) {
-		throw new LumbreApiError('La API no confirmó assignee=me: faltan metadatos de asignación o llegaron tareas no asignadas a ti. Actualiza Lumbre.');
+		throw new LumbreApiError(
+			'El servidor de Lumbre no confirmó el filtro assignee=me: sus tareas no traen assignedToMe ' +
+				'(versión que aún no aplica ese filtro) o llegaron tareas no asignadas a ti. No se presenta el ' +
+				'listado general como «asignadas a mí»; repite sin assignee.'
+		);
 	}
 	if (input.list && !input.listId && tasks.length === 0) {
 		// El servidor responde 200 con [] cuando el nombre empata entre dos o más
 		// stores compartidos; una coincidencia personal gana y no es ambigua.
-		// Solo entonces se consulta el catálogo.
+		// Solo entonces se consulta el catálogo. Es un diagnóstico auxiliar: si el
+		// catálogo falla, se devuelve el vacío como antes de C5 en vez de convertir
+		// una lectura correcta en un error.
 		const wanted = input.list.trim().toLowerCase();
-		const { lists } = await getListCatalog(config, { notes: 'length' });
+		let lists: LumbreListSummary[];
+		try {
+			({ lists } = await getListCatalog(config, { notes: 'length' }));
+		} catch {
+			return tasks;
+		}
 		const named = lists.filter((l) => l.name.trim().toLowerCase() === wanted);
 		const matches = named.filter((l) => l.spaceId);
 		const personal = named.length - matches.length;
@@ -797,6 +830,22 @@ export async function describeTaskSpaces(config: LumbreConfig, tasks: LumbreTask
 const LIST_NOT_FOUND_MESSAGE = 'Lista no encontrada';
 
 /**
+ * `true` si `err` es el 404 con que `GET /api/tasks?listId=` dice «esa lista no
+ * existe para esta credencial» (con o sin `includeLists`). `request` conserva el
+ * cuerpo en `err.message` («Lumbre respondió 404: <cuerpo>»): JSON `{message}` si
+ * la petición negocia JSON, o la página de error HTML de SvelteKit con el mensaje
+ * dentro (`<title>` y `<h1>`). C5 añade el code uniforme `not_found`; un 404 HTML
+ * genérico (URL base equivocada, app sin la ruta) NO cuenta.
+ */
+function isListNotFound(err: unknown): boolean {
+	return (
+		err instanceof LumbreApiError &&
+		err.status === 404 &&
+		(err.message.includes(LIST_NOT_FOUND_MESSAGE) || err.code === 'not_found')
+	);
+}
+
+/**
  * Un solo proyecto o área con su nota ÍNTEGRA (R6: `GET /api/tasks?includeLists=1&listId=`),
  * o `null` si no existe. App nueva: 404 «Lista no encontrada» o code `not_found` → `null`;
  * cualquier otro 404 (URL base equivocada, app sin la ruta) es un error. App
@@ -810,11 +859,8 @@ export async function getListById(config: LumbreConfig, listId: string): Promise
 		body = await request(config, path);
 	} catch (err) {
 		if (err instanceof LumbreApiError && err.status === 404) {
-			// `request` conserva el cuerpo en `err.message` («Lumbre respondió 404: <cuerpo>»):
-			// JSON `{message}` si la petición negocia JSON, o la página de error HTML de
-			// SvelteKit con el mensaje dentro (`<title>` y `<h1>`). C5 añade el
-			// code uniforme `not_found`; un 404 HTML genérico sigue siendo error.
-			if (err.message.includes(LIST_NOT_FOUND_MESSAGE) || err.code === 'not_found') return null;
+			// Solo el 404 de «Lista no encontrada» significa «no existe» (`isListNotFound`).
+			if (isListNotFound(err)) return null;
 			throw new LumbreApiError(
 				'La ruta /api/tasks respondió 404 sin el mensaje «Lista no encontrada»: ' +
 					'puede ser un LUMBRE_BASE_URL equivocado o una app sin esa ruta. ' +

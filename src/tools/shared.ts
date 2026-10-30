@@ -209,7 +209,7 @@ export function formatOutcomeReport(entries: OpOutcomeEntry[], notices: string[]
 /** Forma de accountId de Hebra; UUID, email, mayúsculas y null no son wire válido. */
 export const assigneeIdSchema = z.string().regex(/^(?:[0-9a-f]{64})?$/).describe(
 	'accountId (64 hex minúsculas) de spaces[].members en list_lists/get_list; "" quita asignación. ' +
-	'add_task exige listId compartida; el servidor valida membresía y avisa si ignora el asignado'
+	'add_task exige listId compartida y miembro activo: si no, el servidor rechaza el alta sin crearla'
 );
 
 /**

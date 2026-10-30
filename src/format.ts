@@ -47,6 +47,19 @@ function assignmentLabels(entity: AssignmentMetadata, space?: LumbreSpace, perso
 	return labels;
 }
 
+/**
+ * Identidad de la lista de una tarea para agrupar `list_tasks` por lista y sección.
+ * En lo personal es el NOMBRE, como antes de C5: una cuenta sin espacios agrupa
+ * exactamente igual (dos listas personales homónimas comparten encabezado y una
+ * tarea sin lista cae en el mismo «(sin sección)» que las de la única lista). En un
+ * espacio compartido es el espacio y el id, para no fundir listas homónimas de
+ * espacios distintos ni una compartida con la personal del mismo nombre.
+ */
+function listGroupIdentity(t: LumbreTask): string | null {
+	if (!t.spaceId) return t.list;
+	return JSON.stringify([t.spaceId, t.somedayListId ?? t.list]);
+}
+
 /** Catálogo entregado por /api/tasks, sin correos ni consultas de membresía propias. */
 function formatSpaces(spaces: LumbreSpace[]): string[] {
 	return spaces.flatMap((space) => [
@@ -566,7 +579,7 @@ export function formatTaskList(
 
 	// "Listas distintas" = valores de t.list no nulos, deduplicados. Si el lote
 	// solo toca una (o ninguna, todas null), no hace falta desambiguar.
-	const distinctLists = new Set(tasks.filter((t) => t.list).map((t) => JSON.stringify([t.storeId, t.spaceId, t.somedayListId ?? t.list])));
+	const distinctLists = new Set(tasks.filter((t) => t.list).map(listGroupIdentity));
 	const showList = distinctLists.size > 1;
 
 	const groups: { key: string; label: string; tasks: LumbreTask[] }[] = [];
@@ -576,7 +589,9 @@ export function formatTaskList(
 		const label = showList ? `${listLabel} · ${sectionLabel}` : sectionLabel;
 		// Clave de agrupación separada de la etiqueta visible: JSON.stringify
 		// evita colisiones si un nombre de lista/sección contiene el separador.
-		const key = JSON.stringify([t.storeId, t.spaceId, t.somedayListId ?? t.list, t.sectionId ?? sectionLabel]);
+		// La parte de lista es la etiqueta de siempre en lo personal y la
+		// identidad (espacio y lista) en un espacio compartido.
+		const key = JSON.stringify([showList ? (t.spaceId ? listGroupIdentity(t) : listLabel) : null, sectionLabel]);
 		const group = groups.find((g) => g.key === key);
 		if (group) group.tasks.push(t);
 		else groups.push({ key, label, tasks: [t] });

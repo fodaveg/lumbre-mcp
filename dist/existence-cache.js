@@ -62,7 +62,9 @@ export class TaskExistenceCache {
         this.put(task);
     }
     put(task) {
-        const value = { id: task.id, parentId: task.parentId, archivedAt: task.archivedAt };
+        const value = { id: task.id, parentId: task.parentId, archivedAt: task.archivedAt,
+            ...(task.storeId !== undefined ? { storeId: task.storeId } : {}),
+            ...(task.spaceId !== undefined ? { spaceId: task.spaceId } : {}) };
         this.entries.set(task.id, { value, expiresAt: this.now() + this.ttlMs });
     }
     /** Poda las entradas ya caducadas: sin esto una tarea que no se vuelve a

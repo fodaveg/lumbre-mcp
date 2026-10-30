@@ -2,6 +2,55 @@ import { DEFAULT_NOTES_RECENT_HOURS, formatNoteMarker } from './notes.js';
 import { LIST_TASKS_LIMIT } from './lumbre-client.js';
 import { refCounts, renderRefs } from './refs.js';
 import { formatTags } from './tag-format.js';
+/** Nombre mostrable: un nombre vacío (espacio creado sin nombre) se pinta
+ *  «(sin nombre)»; solo la ausencia total cae al id. */
+function displayName(name, fallback) {
+    if (name === undefined || name === null)
+        return fallback;
+    return name.trim() === '' ? '(sin nombre)' : name;
+}
+/** Procedencia explícita solo cuando el servidor la conoce. */
+function spaceLabel(entity) {
+    if (entity.spaceId)
+        return `espacio: ${displayName(entity.space?.name ?? entity.spaceName, entity.spaceId)} (spaceId: ${entity.spaceId})`;
+    return null;
+}
+/** El asignado es propio también en subtareas; no se infiere del padre. */
+function assignmentLabels(entity, space, personal = false) {
+    const labels = [];
+    if (!personal && entity.assigneeId !== undefined) {
+        const member = space?.members?.find((member) => member.accountId === entity.assigneeId);
+        labels.push(entity.assigneeId ? `asignado: ${member ? `${member.name ?? '(sin nombre)'} (${entity.assigneeId})` : entity.assigneeId}` : 'sin asignar');
+    }
+    if (!personal && entity.assignedToMe !== undefined)
+        labels.push(`asignada a mí: ${entity.assignedToMe ? 'sí' : 'no'}`);
+    if (!personal && entity.inViewerToday !== undefined)
+        labels.push(`en mi Hoy: ${entity.inViewerToday ? 'sí' : 'no'}`);
+    if (entity.crossStoreDuplicate)
+        labels.push('⚠ crossStoreDuplicate: id duplicado entre stores; servidor resolvió la copia');
+    return labels;
+}
+/**
+ * Identidad de la lista de una tarea para agrupar `list_tasks` por lista y sección.
+ * En lo personal es el NOMBRE, como antes de C5: una cuenta sin espacios agrupa
+ * exactamente igual (dos listas personales homónimas comparten encabezado y una
+ * tarea sin lista cae en el mismo «(sin sección)» que las de la única lista). En un
+ * espacio compartido es el espacio y el id, para no fundir listas homónimas de
+ * espacios distintos ni una compartida con la personal del mismo nombre.
+ */
+function listGroupIdentity(t) {
+    if (!t.spaceId)
+        return t.list;
+    return JSON.stringify([t.spaceId, t.somedayListId ?? t.list]);
+}
+/** Catálogo entregado por /api/tasks, sin correos ni consultas de membresía propias. */
+function formatSpaces(spaces) {
+    return spaces.flatMap((space) => [
+        `· espacio "${displayName(space.name, space.spaceId)}" — spaceId: ${space.spaceId}${space.storeId ? ` · storeId: ${space.storeId}` : ''}` +
+            `${space.role !== undefined ? ` · rol: ${space.role}` : ''}${space.agentAccess !== undefined ? ` · agentAccess: ${space.agentAccess}` : ''}`,
+        ...(space.members ?? []).map((member) => `  miembro: ${member.name ?? '(sin nombre)'} — accountId: ${member.accountId}`)
+    ]);
+}
 /** Etiqueta corta de prioridad, o '' si p4/ninguna (mismo criterio que la app). */
 function priorityLabel(priority) {
     return priority ? `p${priority}` : '';
@@ -189,6 +238,10 @@ function duplicateTitleKeys(tasks) {
 function formatTask(t, opts, isDuplicateTitle) {
     const box = stateBox(t);
     const metadata = formatTags(t.tags, t.effectiveTags);
+    const space = spaceLabel(t);
+    if (space)
+        metadata.push(space);
+    metadata.push(...assignmentLabels(t, t.space, t.spaceId === null));
     if (t.cancelledAt)
         metadata.push('cancelada');
     const prio = priorityLabel(t.priority);
@@ -263,6 +316,9 @@ export function formatTaskFull(t, refs) {
     const lines = [
         `Tarea ${t.id}`,
         `- contenido: ${renderRefs(t.content, refs)}`,
+        ...(spaceLabel(t) ? [`- ${spaceLabel(t)}`] : []),
+        ...(t.storeId && t.spaceId !== null ? [`- storeId: ${t.storeId}`] : []),
+        ...assignmentLabels(t, t.space, t.spaceId === null).map((label) => `- ${label}`),
         // Subtarea: el id de su madre (`parentId` de `GET /api/tasks?id=`). Es lo
         // que necesita `set_parent` para moverla o sacarla de la checklist.
         ...(t.parentId ? [`- subtarea de: ${t.parentId} (parentId)`] : []),
@@ -307,7 +363,7 @@ export function formatTaskFull(t, refs) {
     if (t.subtasks && t.subtasks.length > 0) {
         lines.push('- subtareas:');
         for (const s of t.subtasks) {
-            const tags = formatTags(s.tags, s.effectiveTags);
+            const tags = [...formatTags(s.tags, s.effectiveTags), ...assignmentLabels(s, t.space, t.spaceId === null)];
             const suffix = tags.length > 0 ? ` (${tags.join(', ')})` : '';
             lines.push(`  ${s.done ? '[x]' : '[ ]'} ${renderRefs(s.content, refs)}${suffix}  · id: ${s.id}`);
         }
@@ -317,7 +373,7 @@ export function formatTaskFull(t, refs) {
         // para que el modelo abra la subtarea en vez de dar por hecho que no.
         lines.push('  (fecha, prioridad, notas y adjuntos de una subtarea: get_task con su id)');
     }
-    return lines.join('\n');
+    return [...lines, ...formatSpaces(t.space ? [t.space] : [])].join('\n');
 }
 /**
  * Leyenda de proyectos y áreas: una línea por destino DISTINTO presente en
@@ -335,11 +391,11 @@ function listLegend(tasks) {
     for (const t of tasks) {
         if (!t.list || !t.somedayListId)
             continue;
-        const key = `${t.list} ${t.somedayListId}`;
+        const key = JSON.stringify([t.storeId, t.spaceId, t.somedayListId]);
         if (seen.has(key))
             continue;
         seen.add(key);
-        lines.push(`· proyecto/área "${t.list}" — listId: ${t.somedayListId}`);
+        lines.push(`· proyecto/área "${t.list}" — listId: ${t.somedayListId}${spaceLabel(t) ? ` · ${spaceLabel(t)}` : ''}`);
     }
     return lines;
 }
@@ -461,7 +517,8 @@ export function formatTaskList(tasks, scope, opts = {}) {
         ...(truncatedLine ? [truncatedLine] : []),
         ...(notesHeaderLine ? [notesHeaderLine] : []),
         ...(refsLine ? [refsLine] : []),
-        ...legend
+        ...legend,
+        ...formatSpaces([...new Map(tasks.filter((t) => t.space).map((t) => [t.space.spaceId, t.space])).values()])
     ];
     const prefix = prefixLines.length > 0 ? [...prefixLines, ''] : [];
     const duplicateTitles = duplicateTitleKeys(tasks);
@@ -472,16 +529,18 @@ export function formatTaskList(tasks, scope, opts = {}) {
     }
     // "Listas distintas" = valores de t.list no nulos, deduplicados. Si el lote
     // solo toca una (o ninguna, todas null), no hace falta desambiguar.
-    const distinctLists = new Set(tasks.map((t) => t.list).filter((l) => !!l));
+    const distinctLists = new Set(tasks.filter((t) => t.list).map(listGroupIdentity));
     const showList = distinctLists.size > 1;
     const groups = [];
     for (const t of tasks) {
         const sectionLabel = t.section ?? '(sin sección)';
-        const listLabel = t.list ?? '(sin proyecto ni área)';
+        const listLabel = (t.list ?? '(sin proyecto ni área)') + (t.spaceId ? ` · ${displayName(t.space?.name ?? t.spaceName, t.spaceId)}` : '');
         const label = showList ? `${listLabel} · ${sectionLabel}` : sectionLabel;
         // Clave de agrupación separada de la etiqueta visible: JSON.stringify
         // evita colisiones si un nombre de lista/sección contiene el separador.
-        const key = JSON.stringify([showList ? listLabel : null, sectionLabel]);
+        // La parte de lista es la etiqueta de siempre en lo personal y la
+        // identidad (espacio y lista) en un espacio compartido.
+        const key = JSON.stringify([showList ? (t.spaceId ? listGroupIdentity(t) : listLabel) : null, sectionLabel]);
         const group = groups.find((g) => g.key === key);
         if (group)
             group.tasks.push(t);
@@ -556,7 +615,9 @@ function listKindMark(l) {
  * formateador: tras recorrer desde las raíces, las listas aún sin pintar se
  * toman como raíces en su orden de llegada y `visited` corta el bucle.
  */
-export function formatListSummaries(lists) {
+export function formatListSummaries(lists, spaces = []) {
+    if (lists.length === 0 && spaces.length > 0)
+        return ['Sin proyectos ni áreas.', ...formatSpaces(spaces)].join('\n');
     if (lists.length === 0)
         return 'Sin proyectos ni áreas.';
     const header = `Proyectos y áreas (${lists.length}): la sangría indica el padre; ` +
@@ -586,7 +647,7 @@ export function formatListSummaries(lists) {
         const tags = formatTags(l.tags, l.effectiveTags);
         const suffix = tags.length > 0 ? ` · ${tags.join(', ')}` : '';
         body.push(`${'  '.repeat(depth)}· ${l.name}${listKindMark(l)} — ${l.taskCount} tarea${l.taskCount === 1 ? '' : 's'} ` +
-            `(listId: ${l.id})${suffix}${listNoteMarkerSuffix(l)}`);
+            `(listId: ${l.id})${spaceLabel(l) ? ` · ${spaceLabel(l)}` : ''}${suffix}${listNoteMarkerSuffix(l)}`);
         for (const child of children.get(l.id) ?? [])
             render(child, depth + 1);
     };
@@ -595,7 +656,7 @@ export function formatListSummaries(lists) {
     // Ciclos: sus miembros no cuelgan de ninguna raíz; se pintan en la raíz.
     for (const l of lists)
         render(l, 0);
-    return [header, ...body].join('\n');
+    return [header, ...formatSpaces(spaces), ...body].join('\n');
 }
 /**
  * Formatea el detalle completo de UN proyecto o área para `get_list`: nombre,
@@ -614,7 +675,10 @@ export function formatListSummaries(lists) {
  * la respuesta pero son de PRESENTACIÓN en la app: se omiten a propósito.
  */
 export function formatListDetail(l, parentName) {
-    const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`];
+    const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`,
+        ...(spaceLabel(l) ? [`- ${spaceLabel(l)}`] : []),
+        ...(l.storeId && l.spaceId !== null ? [`- storeId: ${l.storeId}`] : []),
+        ...formatSpaces(l.space ? [l.space] : [])];
     if (l.kind !== undefined)
         lines.push(`- tipo: ${l.kind === 'area' ? 'área' : 'proyecto'}`);
     if (l.parentListId !== undefined) {

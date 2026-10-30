@@ -209,7 +209,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.optional()
 					.describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
 				listId: z.string().guid().optional().describe('Id exacto de lista personal o compartida, preferente sobre list'),
-				assignee: z.literal('me').optional().describe('Solo las asignadas a mí; filtro del servidor'),
+				assignee: z.literal('me').optional().describe('Solo las asignadas a mí; filtro del servidor: si no lo confirma, error, nunca el listado general'),
 				section: z
 					.string()
 					.optional()

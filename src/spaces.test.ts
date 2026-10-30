@@ -160,7 +160,7 @@ describe('C5-g — contrato de lectura y presentación', () => {
 		const fetch = vi.fn(async (_url: string) => json([{ ...task, spaceId: undefined, assignedToMe: undefined }]));
 		vi.stubGlobal('fetch', fetch);
 		const result = await (await client()).callTool({ name: 'list_tasks', arguments: { notes: 'none', ...(filter === 'listId' ? { listId: LIST, list: 'Nombre obsoleto' } : { assignee: 'me' }) } });
-		expect(result.isError).toBe(true); expect(text(result)).toContain('La API no confirmó');
+		expect(result.isError).toBe(true); expect(text(result)).toMatch(/no confirmó (el filtro )?(listId|assignee=me)/);
 		expect(text(result)).not.toContain(task.content); expect(fetch).toHaveBeenCalledTimes(1);
 		if (filter === 'listId') {
 			const url = new URL(fetch.mock.calls[0]![0]);
@@ -294,12 +294,12 @@ describe('C5-g — asignación, altas y éxito parcial', () => {
 		let body: unknown;
 		vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
 			body = JSON.parse(String(init?.body));
-			return json(name === 'add_task' ? { ok: true, notices: ['asignado ignorado'] }
-				: { ok: true, results: [{ index: 0, ok: true, id: TASK }], notices: ['asignado ignorado'] });
+			return json(name === 'add_task' ? { ok: true, notices: ['aviso del servidor'] }
+				: { ok: true, results: [{ index: 0, ok: true, id: TASK }], notices: ['aviso del servidor'] });
 		}));
 		const input = { text: 'Alta', listId: LIST, assigneeId: MEMBER };
 		const result = await (await client()).callTool({ name, arguments: name === 'add_task' ? input : { ops: [{ op: 'add_task', ...input }] } });
-		expect(result.isError).not.toBe(true); expect(text(result)).toContain('asignado ignorado');
+		expect(result.isError).not.toBe(true); expect(text(result)).toContain('aviso del servidor');
 		expect(body).toEqual(name === 'add_task' ? { ...input, literal: true } : { ops: [{ type: 'ingest', task: { ...input, literal: true } }] });
 	});
 

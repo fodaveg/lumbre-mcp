@@ -62,6 +62,7 @@ export function emptyRefResolution() {
         tasks: new Map(),
         lists: new Map(),
         listTags: new Map(),
+        listStores: new Map(),
         checkedTasks: new Set(),
         checkedLists: new Set(),
         refTaskIds: [],
@@ -144,6 +145,7 @@ export async function resolveRefs(config, texts, opts = {}) {
             const lists = await listLists(config);
             for (const l of lists) {
                 resolution.lists.set(l.id, l.name);
+                resolution.listStores.set(l.id, l);
                 resolution.listTags.set(l.id, { own: l.tags, effective: l.effectiveTags });
             }
             // `listLists` trae TODAS las listas vivas, así que cualquier id de lista
@@ -195,6 +197,12 @@ function tagHint(t) {
 function flattenRefTokens(text) {
     return text.replace(REF_TOKEN, (_m, _kind, _id, label) => label);
 }
+/** Una referencia compartida conserva procedencia aunque no haya nombre resuelto. */
+function refSpaceHint(entity) {
+    if (entity?.spaceId)
+        return ` espacio:"${entity.space?.name ?? entity.spaceName ?? entity.spaceId}" (spaceId:${entity.spaceId})`;
+    return '';
+}
 /**
  * Sustituye cada referencia de `text` por su forma RESUELTA. Pura (la red ya la
  * hizo `resolveRefs`) y sin coste si el texto no lleva ninguna referencia — el
@@ -226,7 +234,7 @@ export function renderRefs(text, resolution) {
             if (!task)
                 return `→tarea[ROTA] id:${id}`;
             const title = flattenRefTokens(task.content);
-            return `→tarea[${taskStateLabel(task)}] "${title}"${tagHint(task)}${noteHint(task)} id:${id}`;
+            return `→tarea[${taskStateLabel(task)}] "${title}"${tagHint(task)}${noteHint(task)}${refSpaceHint(task)} id:${id}`;
         }
         if (!resolution.checkedLists.has(id))
             return `→proyecto/área[sin resolver] id:${id}`;
@@ -236,7 +244,7 @@ export function renderRefs(text, resolution) {
         const listTags = resolution.listTags.get(id);
         const tags = formatTags(listTags?.own, listTags?.effective);
         const tagSuffix = tags.length > 0 ? ` ${tags.join(',')}` : '';
-        return `→proyecto/área "${flattenRefTokens(name)}"${tagSuffix} id:${id}`;
+        return `→proyecto/área "${flattenRefTokens(name)}"${tagSuffix}${refSpaceHint(resolution.listStores?.get(id))} id:${id}`;
     });
 }
 /** Ver `RefCounts`. Pura; cuenta ids DISTINTOS, no ocurrencias (una misma

@@ -38,14 +38,21 @@ export async function requireTaskExists(ctx, taskId, opts = {}) {
     const cached = ctx.taskCache.get(taskId);
     if (cached !== undefined) {
         assertTaskUsable(cached, taskId, opts);
-        return;
+        return cached;
     }
     // `notes=none`: la existencia no lee la nota (R2 del audit de rendimiento).
-    // Lo que entra en `taskCache` solo lo lee `assertTaskUsable` (`parentId`).
+    // Retiene parentId y procedencia mínima; el destino de adjuntos no acredita acceso.
     const task = await findTaskById(ctx.config, taskId, { notesQuery: 'none' });
     if (task)
         ctx.taskCache.set(task);
     assertTaskUsable(task, taskId, opts);
+    return {
+        id: task.id,
+        parentId: task.parentId,
+        archivedAt: task.archivedAt,
+        ...(task.storeId !== undefined ? { storeId: task.storeId } : {}),
+        ...(task.spaceId !== undefined ? { spaceId: task.spaceId } : {})
+    };
 }
 // `mutateTaskInvalidating` (wrapper de `mutateTask` que invalidaba
 // `taskCache` tras encolar) se retiró el 2026-09-19 con las nueve tools

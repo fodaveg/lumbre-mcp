@@ -28,9 +28,11 @@ dónde están las reglas de uso, la guía de instalación y el manual de la app
 ## Espacios compartidos (C5-g)
 
 Las lecturas conservan su formato personal cuando el servidor no manda campos de
-espacios. Cuando los trae, enseñan `storeId`, `spaceId` y el nombre del espacio de
-cada tarea/lista compartida, su asignado y las marcas `assignedToMe`, `inViewerToday` y
-`crossStoreDuplicate`. El catálogo `GET /api/tasks?includeLists=1` añade `spaces[]`
+espacios, y también cuando los manda a `null` (cuenta sin espacios o `LUMBRE_SPACES`
+apagado): el texto de cada herramienta es el mismo que antes de C5. Cuando los trae,
+enseñan `storeId`, `spaceId` y el nombre del espacio de cada tarea/lista compartida y
+las marcas `inViewerToday` y `crossStoreDuplicate`; el asignado y `assignedToMe` solo
+si el servidor los manda. El catálogo `GET /api/tasks?includeLists=1` añade `spaces[]`
 con miembros `{accountId, name}` y metadata opcional (`storeId`, `role`, `agentAccess`).
 `list_lists` los muestra incluso sin listas; `get_list` muestra los de su espacio.
 `list_tasks` y `get_task` consultan ese mismo catálogo solo si hay tareas compartidas.
@@ -45,6 +47,9 @@ y coincide con dos o más listas de espacios compartidos, el MCP lanza un error 
 lo declara ambiguo y enumera cada candidata con su `listId` y su espacio; hay que
 repetir con `listId`. Una personal con ese nombre gana y no es ambigua.
 Una sola coincidencia con lista vacía sigue devolviendo vacío.
+Un `listId` que el servidor no deja ver (inexistente, borrado o de un espacio sin
+acceso para agentes) responde 404 «Lista no encontrada» y el MCP lo da como «no
+existe», nunca como el listado general.
 Para la vista «asignadas a mí», combina `scope: "all"` con `assignee: "me"`;
 `scope: "today"` restringe a Hoy. Ambos filtros los evalúa el servidor. Los nombres iguales favorecen
 la lista personal; si solo hay compartidas empatadas, resuelve con `listId`. No hay
@@ -55,9 +60,12 @@ lista compartida lo ven TODOS los miembros del espacio.
 `assigneeId` es un `accountId` de `spaces[].members`: 64 hex en minúsculas o `""`
 para desasignar; nunca UUID, email, mayúsculas ni `null`. Se admite también sobre
 subtareas, con asignado propio (la madre no hereda ni agrega). Las altas de
-`add_task` (suelta o batch) aceptan ese campo: el servidor solo lo aplica con
-`listId` compartida y miembro activo; en otro caso lo ignora con aviso. El MCP
-conserva esos avisos y el éxito parcial por op.
+`add_task` (suelta o batch) aceptan ese campo: el servidor solo lo admite con
+`listId` compartida y miembro activo; en otro caso rechaza el alta sin crearla (400
+en `add_task`, op fallida en el lote, «assigneeId no válido: tiene que ser un miembro
+activo del espacio de la lista»). Un `set_assignee` no admitido (no miembro, store
+personal) falla como `not_found`, igual que una tarea que no existe. El MCP conserva
+el éxito parcial por op.
 
 La puerta del servidor aplica `agentAccess` a OAuth MCP y al token personal de
 compatibilidad; el conector no duplica autorización ni cambia a credenciales de
@@ -67,8 +75,16 @@ Las subidas y permisos de adjuntos mandan `?store=` para tareas compartidas
 resueltas. BRL, hábitos y `refresh_sync` siguen siendo personales. La deduplicación
 entre stores la decide el servidor; el MCP muestra `crossStoreDuplicate` cuando llega.
 
-Estos campos dependen de las rutas C5 de Lumbre; las pruebas de este repo fijan el
-contrato con fixtures y no acreditan su despliegue ni una integración real.
+Estos campos dependen de las rutas C5 de Lumbre. Las pruebas de este repo fijan el
+contrato con respuestas grabadas de la forma exacta del servidor
+(`src/test-support/c5-server-shapes.ts`, leído de `release/fase3-cand3` en
+`6dc35f62c`); no acreditan su despliegue ni una integración real.
+
+**Lo que ese servidor todavía no da (30 oct 2026):** `assigneeId` y `assignedToMe` por
+tarea, y el filtro `?assignee=me`, que ignora. Mientras sea así, `list_tasks` con
+`assignee: "me"` responde error con cualquier resultado no vacío (no presenta el listado
+general como filtrado) y las lecturas no enseñan el asignado. `set_assignee` y el
+`assigneeId` de las altas sí funcionan.
 
 ## Qué hace (Fase 1 — crear/leer)
 

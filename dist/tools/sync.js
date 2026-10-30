@@ -53,7 +53,7 @@ export function registerSyncTools(server, ctx) {
      */
     const refreshSyncTool = server.registerTool('refresh_sync', {
         annotations: { destructiveHint: false, idempotentHint: true },
-        description: 'Fuerza el flush de sync de Lumbre. NO hace falta llamarla por una mutación hecha con ' +
+        description: 'Fuerza el flush del espacio personal de Lumbre; no refresca espacios compartidos. NO hace falta llamarla por una mutación hecha con ' +
             'ESTE MCP: cuando la tool de escritura responde, el servidor ya la ha aplicado y la ' +
             'siguiente lectura la ve (medido). SÍ hace falta cuando el cambio viene de FUERA de ' +
             'este MCP (la app o el móvil del usuario) y quieres que se vea ya, porque de esos ' +
@@ -64,7 +64,7 @@ export function registerSyncTools(server, ctx) {
     }, async () => {
         try {
             await refreshSync(ctx.config);
-            return textResult('Sync de Lumbre refrescado: el servidor ya tiene persistido todo lo que le había llegado.');
+            return textResult('Sync personal de Lumbre refrescado: el servidor ya tiene persistido lo que había llegado a ese store.');
         }
         catch (err) {
             return errorResult(err);

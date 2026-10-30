@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 /** Error con el status HTTP adjunto, para poder dar mensajes específicos (401, 429…). */
 export class LumbreApiError extends Error {
     status;
-    constructor(message, status) {
+    code;
+    constructor(message, status, code) {
         super(message);
         this.status = status;
+        this.code = code;
         this.name = 'LumbreApiError';
     }
 }
@@ -120,7 +122,7 @@ async function requestOnce(config, path, init, signal) {
             throw new LumbreApiError('Demasiadas peticiones a Lumbre; espera un momento y reintenta.', 429);
         }
         const detail = extractMessage(body) ?? (typeof body === 'string' ? body : JSON.stringify(body));
-        throw new LumbreApiError(`Lumbre respondió ${res.status}: ${detail}`, res.status);
+        throw new LumbreApiError(`Lumbre respondió ${res.status}: ${detail}`, res.status, body?.code === 'not_found' ? 'not_found' : undefined);
     }
     config.onAuthorized?.();
     return body;
@@ -156,12 +158,17 @@ export const LIST_TASKS_LIMIT = 500;
 /** `GET /api/tasks`: lee las tareas del usuario dueño del token. */
 export async function listTasks(config, input) {
     const params = new URLSearchParams();
-    if (input.scope)
-        params.set('scope', input.scope);
+    const scope = input.scope ?? (input.listId ? 'all' : undefined);
+    if (scope)
+        params.set('scope', scope);
     if (input.days !== undefined)
         params.set('days', String(input.days));
-    if (input.list)
+    if (input.list && !input.listId)
         params.set('list', input.list);
+    if (input.listId)
+        params.set('listId', input.listId);
+    if (input.assignee)
+        params.set('assignee', input.assignee);
     if (input.section)
         params.set('section', input.section);
     if (input.includeDone)
@@ -173,11 +180,70 @@ export async function listTasks(config, input) {
     if (input.notesQuery)
         params.set('notes', input.notesQuery);
     const qs = params.toString();
-    const body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
+    let body;
+    try {
+        body = await request(config, `/api/tasks${qs ? `?${qs}` : ''}`);
+    }
+    catch (err) {
+        // `?listId=` sin `includeLists` (servidor C5): una lista inexistente, borrada,
+        // mal formada o de un espacio que esta credencial no ve responde el MISMO 404
+        // «Lista no encontrada», nunca el listado general. Se traduce a «no existe»
+        // sin distinguir los casos; cualquier otro 404 (URL base equivocada) sigue
+        // siendo el error original.
+        if (input.listId && isListNotFound(err)) {
+            throw new LumbreApiError(`El listId ${input.listId} no está entre los proyectos/áreas que el servidor deja ver a esta ` +
+                'credencial: no existe, se borró o es de un espacio sin acceso para agentes. Resuélvelo de ' +
+                'nuevo con list_lists.', 404);
+        }
+        throw err;
+    }
     if (!Array.isArray(body)) {
         throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks.');
     }
-    return body;
+    const tasks = body;
+    // Un servidor anterior ignora parámetros desconocidos. No presentar un
+    // listado general como filtrado: tampoco se recorta aquí porque el límite
+    // podría haberse aplicado antes del filtro y ocultar tareas del destino.
+    if (input.listId && tasks.some((t) => t.spaceId === undefined || t.somedayListId !== input.listId)) {
+        throw new LumbreApiError('La API no confirmó el filtro listId: respuesta sin procedencia o con tareas de otro destino. Actualiza Lumbre o consulta por un filtro compatible.');
+    }
+    // El servidor C5 de `release/fase3-cand3` (6dc35f62c, 30 oct 2026) todavía no
+    // manda `assigneeId`/`assignedToMe` ni aplica `?assignee=me`: lo ignora y
+    // devuelve el listado del scope. Mientras sea así, este filtro da error con
+    // cualquier respuesta no vacía; nunca se presenta ese listado como filtrado.
+    if (input.assignee && tasks.some((t) => t.assignedToMe !== true)) {
+        throw new LumbreApiError('El servidor de Lumbre no confirmó el filtro assignee=me: sus tareas no traen assignedToMe ' +
+            '(versión que aún no aplica ese filtro) o llegaron tareas no asignadas a ti. No se presenta el ' +
+            'listado general como «asignadas a mí»; repite sin assignee.');
+    }
+    if (input.list && !input.listId && tasks.length === 0) {
+        // El servidor responde 200 con [] cuando el nombre empata entre dos o más
+        // stores compartidos; una coincidencia personal gana y no es ambigua.
+        // Solo entonces se consulta el catálogo. Es un diagnóstico auxiliar: si el
+        // catálogo falla, se devuelve el vacío como antes de C5 en vez de convertir
+        // una lectura correcta en un error.
+        const wanted = input.list.trim().toLowerCase();
+        let lists;
+        try {
+            ({ lists } = await getListCatalog(config, { notes: 'length' }));
+        }
+        catch {
+            return tasks;
+        }
+        const named = lists.filter((l) => l.name.trim().toLowerCase() === wanted);
+        const matches = named.filter((l) => l.spaceId);
+        const personal = named.length - matches.length;
+        if (personal === 0 && matches.length >= 2) {
+            const where = (l) => (l.space?.name ?? l.spaceName ?? '').trim() || '(sin nombre)';
+            const candidates = matches.map((l) => `"${l.name}" (listId: ${l.id}, espacio: ${where(l)})`).join('; ');
+            throw new LumbreApiError(`El nombre de lista "${input.list}" es ambiguo entre espacios: coincide con ${matches.length} listas. ` +
+                `Usa listId con una de ellas: ${candidates}.`);
+        }
+    }
+    if ((input.listId || input.assignee) && tasks.length === 0 && (await getListCatalog(config, { notes: 'length' })).spaces === undefined) {
+        throw new LumbreApiError('La API no confirmó soporte de espacios para el filtro pedido: respuesta vacía sin catálogo spaces. Actualiza Lumbre.');
+    }
+    return tasks;
 }
 /** UUID RFC 4122/9562 de una nota de Hebra (versiones 1 a 8, variante RFC),
  *  igual que `HEBRA_NOTE_ID_PATTERN` en `src/lib/links/hebra-note-id.ts` del
@@ -239,43 +305,59 @@ export function parseListNoteUrl(raw) {
     }
     return null;
 }
-/**
- * `GET /api/tasks?includeLists=1`: enumera TODOS los proyectos y áreas
- * vivos del usuario, INCLUIDOS los que no tienen ninguna tarea todavía. Sin
- * esto, un contenedor con 0 tareas es invisible para el MCP — `list_tasks` solo
- * puede "verlo" a través de las tareas que contiene, así que un proyecto
- * recién creado (por la app o por `create_list`) no aparece en ningún
- * sitio hasta que se le añade la primera tarea (bug real, b00303b5).
- */
-export async function listLists(config, opts = {}) {
+export async function getListCatalog(config, opts = {}) {
     const path = opts.notes === 'length' ? '/api/tasks?includeLists=1&notes=length' : '/api/tasks?includeLists=1';
     const body = await request(config, path);
     if (!body || typeof body !== 'object' || !Array.isArray(body.lists)) {
         throw new LumbreApiError(`Lumbre devolvió una respuesta inesperada para ${path}.`);
     }
-    const lists = body.lists;
-    if (opts.notes !== 'length')
-        return lists;
-    // Compatibilidad con una app anterior a R6: ignora `notes=length` y manda el
-    // texto. Se calcula `notesLength` en cliente y se descarta el texto, para que
-    // el resultado observable sea el mismo con app nueva y vieja.
-    return lists.map((l) => {
-        if ('notesLength' in l)
-            return l;
-        const { notes, ...rest } = l;
-        return {
-            ...rest,
-            notes: null,
-            ...(typeof notes === 'string' ? { notesLength: notes.trim().length } : {})
-        };
+    const catalog = body;
+    const spaces = catalog.spaces;
+    const lists = catalog.lists.map((l) => {
+        const space = spaces?.find((space) => space.spaceId === l.spaceId);
+        const withSpace = space ? { ...l, space } : l;
+        if (opts.notes !== 'length' || 'notesLength' in l)
+            return withSpace;
+        // App anterior a R6: calcula longitud sin mostrar el texto en el listado.
+        const { notes, ...rest } = withSpace;
+        return { ...rest, notes: null, ...(typeof notes === 'string' ? { notesLength: notes.trim().length } : {}) };
+    });
+    return { lists, spaces };
+}
+/** Mantiene el contrato de array usado por existencia y resolución de referencias. */
+export async function listLists(config, opts = {}) {
+    return (await getListCatalog(config, opts)).lists;
+}
+/** Añade nombres y miembros solo a tareas compartidas. Personal no añade peticiones.
+ * No recupera credenciales alternativas ni oculta un rechazo del catálogo. */
+export async function describeTaskSpaces(config, tasks) {
+    if (!tasks.some((t) => t.spaceId))
+        return tasks;
+    const { spaces } = await getListCatalog(config, { notes: 'length' });
+    return tasks.map((t) => {
+        const space = spaces?.find((space) => space.spaceId === t.spaceId);
+        return space ? { ...t, space } : t;
     });
 }
 /** Mensaje con que la app lanza el 404 de `?listId=` inexistente
  *  (`selectApiLists`, `src/routes/api/tasks/serialize.ts:77` de Lumbre). */
 const LIST_NOT_FOUND_MESSAGE = 'Lista no encontrada';
 /**
+ * `true` si `err` es el 404 con que `GET /api/tasks?listId=` dice «esa lista no
+ * existe para esta credencial» (con o sin `includeLists`). `request` conserva el
+ * cuerpo en `err.message` («Lumbre respondió 404: <cuerpo>»): JSON `{message}` si
+ * la petición negocia JSON, o la página de error HTML de SvelteKit con el mensaje
+ * dentro (`<title>` y `<h1>`). C5 añade el code uniforme `not_found`; un 404 HTML
+ * genérico (URL base equivocada, app sin la ruta) NO cuenta.
+ */
+function isListNotFound(err) {
+    return (err instanceof LumbreApiError &&
+        err.status === 404 &&
+        (err.message.includes(LIST_NOT_FOUND_MESSAGE) || err.code === 'not_found'));
+}
+/**
  * Un solo proyecto o área con su nota ÍNTEGRA (R6: `GET /api/tasks?includeLists=1&listId=`),
- * o `null` si no existe. App nueva: 404 con cuerpo «Lista no encontrada» → `null`;
+ * o `null` si no existe. App nueva: 404 «Lista no encontrada» o code `not_found` → `null`;
  * cualquier otro 404 (URL base equivocada, app sin la ruta) es un error. App
  * anterior a R6: ignora `listId` y manda todas las listas; se filtra por id en
  * cliente. En ambos casos el llamador ve lo mismo.
@@ -288,11 +370,8 @@ export async function getListById(config, listId) {
     }
     catch (err) {
         if (err instanceof LumbreApiError && err.status === 404) {
-            // `request` conserva el cuerpo en `err.message` («Lumbre respondió 404: <cuerpo>»):
-            // JSON `{message}` si la petición negocia JSON, o la página de error HTML de
-            // SvelteKit con el mensaje dentro (`<title>` y `<h1>`). Solo ese mensaje
-            // significa «la lista no existe»; cualquier otro 404 es otra cosa.
-            if (err.message.includes(LIST_NOT_FOUND_MESSAGE))
+            // Solo el 404 de «Lista no encontrada» significa «no existe» (`isListNotFound`).
+            if (isListNotFound(err))
                 return null;
             throw new LumbreApiError('La ruta /api/tasks respondió 404 sin el mensaje «Lista no encontrada»: ' +
                 'puede ser un LUMBRE_BASE_URL equivocado o una app sin esa ruta. ' +
@@ -304,7 +383,11 @@ export async function getListById(config, listId) {
         throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks?includeLists=1&listId=.');
     }
     const lists = body.lists;
-    return lists.find((l) => l.id === listId) ?? null;
+    const list = lists.find((l) => l.id === listId);
+    if (!list)
+        return null;
+    const space = body.spaces?.find((space) => space.spaceId === list.spaceId);
+    return space ? { ...list, space } : list;
 }
 /**
  * `GET /api/list-links?listId=`: lee los vínculos configurados para UN proyecto o área.
@@ -526,7 +609,7 @@ export function subtaskNotAllowedError(taskId, op) {
     return new Error(`El id ${taskId} es de una SUBTAREA y esta operación no aplica ahí: ${subtaskRejectionReason(op)} ` +
         'Sobre la SUBTAREA sí valen las ops update (texto, notas, tags, prioridad, hora, deadline, ' +
         'reminders y recurrence), reschedule (darle fecha o quitársela con date:null), ' +
-        'complete/complete_subtask, cancel, set_waiting, clear_waiting, unarchive y set_parent de ' +
+        'complete/complete_subtask, cancel, set_waiting, clear_waiting, unarchive, set_assignee y set_parent de ' +
         'mutate_tasks, delete de organize y la tool add_attachment. No valen move_to_list, ' +
         'set_section ni archive. No se ha encolado ninguna mutación.');
 }
@@ -801,6 +884,8 @@ export async function uploadAttachment(config, input) {
 }
 async function uploadAttachmentOnce(config, input, signal) {
     const params = new URLSearchParams({ taskId: input.taskId });
+    if (input.store)
+        params.set('store', input.store);
     const url = `${config.baseUrl.replace(/\/$/, '')}/api/attachments?${params.toString()}`;
     let res;
     try {
@@ -861,10 +946,10 @@ async function uploadAttachmentOnce(config, input, signal) {
  * aquí y NO se refleja el cuerpo del servidor en ningún error: la respuesta
  * 200 es la única que lleva el permiso, y ningún mensaje lo repite.
  */
-export async function requestUploadPermit(config, taskId) {
+export async function requestUploadPermit(config, taskId, store) {
     let body;
     try {
-        body = await request(config, '/api/attachments/upload-permits', {
+        body = await request(config, `/api/attachments/upload-permits${store ? `?store=${encodeURIComponent(store)}` : ''}`, {
             method: 'POST',
             body: JSON.stringify({ taskId })
         });
@@ -1103,7 +1188,8 @@ const TASK_TARGET_ALLOW_SUBTASK = {
     clear_waiting: true,
     archive: false,
     unarchive: true,
-    set_parent: true
+    set_parent: true,
+    set_assignee: true
 };
 /** `taskId`/`subtaskId` de una op que targetea una tarea, o `undefined` si es
  *  de lista/sección/creación (ver `TASK_TARGET_ALLOW_SUBTASK`). */
@@ -1212,6 +1298,8 @@ function translateOp(op) {
             // `POST /api/ingest`, aquí para la vía `POST /api/batch`.
             return { type: 'ingest', task: { ...task, literal: true } };
         }
+        case 'set_assignee':
+            return { type: 'mutate', taskId: op.taskId, kind: 'setAssignee', payload: { assigneeId: op.assigneeId } };
         case 'complete':
             return {
                 type: 'mutate',

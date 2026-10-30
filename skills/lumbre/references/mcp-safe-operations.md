@@ -116,7 +116,7 @@ Usa `listId` para destinos compartidos y comprueba el espacio: lo creado allí l
 TODOS sus miembros. `set_assignee` usa `assigneeId` como `accountId` de
 `spaces[].members` (64 hex minúsculas); `""` desasigna. Vale también sobre subtareas,
 con asignado propio. En un alta requiere `listId` compartida y miembro activo; si
-la app lo ignora, su aviso prevalece sobre la intención enviada. No envíes `null`.
+no, la app rechaza el alta y la tarea NO se crea: dilo así. No envíes `null`.
 La autorización y las ambigüedades de nombres se resuelven en el servidor, sin
 fall back a otra credencial ni filtros de membresía en cliente. Las operaciones de
 mover o anidar no trasladan entre stores. La subida de adjuntos y los permisos de

@@ -143,6 +143,7 @@ export function registerAttachmentTools(server, ctx) {
                         '(cualquier conector, ficheros pequeños).'));
             }
             let file;
+            let task;
             if (hasBase64) {
                 if (!input.filename?.trim()) {
                     return errorResult(new Error('filename es obligatorio con content_base64 (no hay ruta de la que sacarlo).'));
@@ -152,7 +153,7 @@ export function registerAttachmentTools(server, ctx) {
                 // llamada de existencia.
                 file = decodeBase64Attachment(input.content_base64, input.filename);
                 // Una subtarea vale (25 sep 2026, ver `SUBTASK_ATTACHMENTS`).
-                await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
+                task = await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
             }
             else if (!ctx.localFilesystem) {
                 // Ni requireTaskExists ni uploadAttachment: contra este disco NO
@@ -161,13 +162,14 @@ export function registerAttachmentTools(server, ctx) {
                 return errorResult(new Error(remoteFileAccessError()));
             }
             else {
-                await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
+                task = await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
                 file = await readLocalAttachment(input.file_path, input.filename);
             }
             const attachment = await uploadAttachment(ctx.config, {
                 taskId: input.taskId,
                 filename: file.filename,
                 mime: file.mime,
+                store: task.spaceId ? task.storeId ?? task.spaceId : undefined,
                 bytes: file.bytes
             });
             return textResult(`Adjunto subido a Lumbre: "${attachment.filename}" (${attachment.mime}, ${attachment.size} ` +
@@ -193,7 +195,8 @@ export function registerAttachmentTools(server, ctx) {
         }
     }, async (input) => {
         try {
-            const upload = await requestUploadPermit(ctx.config, input.taskId);
+            const task = await requireTaskExists(ctx, input.taskId, SUBTASK_ATTACHMENTS);
+            const upload = await requestUploadPermit(ctx.config, input.taskId, task.spaceId ? task.storeId ?? task.spaceId : undefined);
             const cmd = buildUploadCommand({
                 uploadUrl: upload.uploadUrl,
                 permit: upload.permit,
