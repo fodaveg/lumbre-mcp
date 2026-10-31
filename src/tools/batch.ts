@@ -428,16 +428,15 @@ export const mutateTasksOpSchema = z
 			.guid()
 			.optional()
 			.describe(
-				'skip_occurrence: id de la SEMILLA de la serie (no de una ocurrencia) — list_tasks/get_task la ' +
-					'muestran como "semilla" en su propia línea y como "serie:<id>" en cada ocurrencia'
+				'skip_occurrence: id de la SEMILLA de la serie (no de una ocurrencia); list_tasks/get_task la ' +
+					'muestran como "semilla" y como "serie:<id>" en cada ocurrencia'
 			),
 		occurrenceId: z
 			.string()
 			.guid()
 			.optional()
 			.describe(
-				'skip_occurrence: id de la fila de la ocurrencia en list_tasks. Pásalo si está materializada ' +
-					'(imprescindible si se movió de día); sin él solo salta bien una ocurrencia sin mover'
+				'skip_occurrence: id de la fila de la ocurrencia en list_tasks; imprescindible si se movió de día'
 			),
 		// `text`/`content`/`deadline`: sin describe propio — el nombre del campo
 		// ya lo dice todo (texto de la tarea nueva o su nuevo texto, fecha
@@ -458,8 +457,8 @@ export const mutateTasksOpSchema = z
 			.optional()
 			.describe(
 				'YYYY-MM-DD, o null para "Algún día"/Bandeja de entrada. En register_habit, el día a registrar ' +
-					'(opcional: sin servidor con el HOY local desplegado, omitirla falla). En skip_occurrence, ' +
-					'el día de la ocurrencia a saltar (obligatorio, junto con seriesId)'
+					'(opcional, pero omitirla falla si el servidor no tiene el HOY local). En skip_occurrence, ' +
+					'el día de la ocurrencia (obligatorio, con seriesId)'
 			),
 		deadline: z
 			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
@@ -774,9 +773,8 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 				`set_section, add_subtask, complete_subtask, restore (saca de la Papelera), set_waiting, ` +
 				`clear_waiting, register_habit, archive_habit, unarchive_habit (hábito, no tarea), archive, ` +
 				`unarchive (visibilidad, no ciclo de vida), skip_occurrence (salta una ocurrencia de una ` +
-				`serie) y set_parent. Vía ÚNICA para mutar una tarea ` +
-				`y preferente para varias de golpe: resuelve existencias y ejecuta en ` +
-				`UNA llamada. Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
+				`serie) y set_parent. Vía ÚNICA para mutar una tarea, ` +
+				`preferente para varias de golpe (UNA llamada). Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
 				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
 				`cada add_task creada. ${OUTCOME_NOTE}`,
 			inputSchema: {

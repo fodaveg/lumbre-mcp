@@ -53,13 +53,11 @@ export function registerSyncTools(server, ctx) {
      */
     const refreshSyncTool = server.registerTool('refresh_sync', {
         annotations: { destructiveHint: false, idempotentHint: true },
-        description: 'Fuerza el flush del espacio personal de Lumbre; no refresca espacios compartidos. NO hace falta llamarla por una mutación hecha con ' +
-            'ESTE MCP: cuando la tool de escritura responde, el servidor ya la ha aplicado y la ' +
-            'siguiente lectura la ve (medido). SÍ hace falta cuando el cambio viene de FUERA de ' +
-            'este MCP (la app o el móvil del usuario) y quieres que se vea ya, porque de esos ' +
-            'cambios este MCP no se entera solo. Solo garantiza lo que YA llegó al servidor por ' +
-            'WebSocket — si el dispositivo del usuario está offline, sus cambios sin enviar no se ' +
-            'pueden recuperar. Sin parámetros.',
+        description: 'Fuerza el flush del espacio personal de Lumbre; no refresca espacios compartidos. NO hace falta ' +
+            'tras una mutación hecha con ESTE MCP (el servidor ya la aplicó). SÍ cuando el cambio viene de ' +
+            'FUERA (app o móvil del usuario) y quieres verlo ya. Solo garantiza lo que YA llegó al ' +
+            'servidor por WebSocket: los cambios sin enviar de un dispositivo offline no se recuperan. ' +
+            'Sin parámetros.',
         inputSchema: {}
     }, async () => {
         try {

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CHAR_CEILING } from './tools-list-ceiling.js';
 import { mkdtemp, readdir } from 'node:fs/promises';
 import { connect, type AddressInfo } from 'node:net';
 import { request as httpRequest, type Server } from 'node:http';
@@ -165,7 +166,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		// 26.468 en `index.test.ts` + ~1%), el mismo que allí. Subido a 27.100 el
 		// 2026-10-14 con `index.test.ts` (expectedContent/expectedNotes: 26.863).
 		// C5-g: 28.390 caracteres en index.test.ts; techo 28.700 (~1%) con espacios/asignación.
-		expect(JSON.stringify(body.result.tools).length).toBeLessThan(28700);
+		expect(JSON.stringify(body.result.tools).length).toBeLessThanOrEqual(CHAR_CEILING);
 	});
 
 	it('el log solo identifica métodos MCP conocidos y nunca copia un method arbitrario del body', async () => {

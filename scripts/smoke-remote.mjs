@@ -64,7 +64,11 @@ const scope = 'lumbre:mcp';
 // 27.100, el mismo en `index.test.ts` y `http.test.ts`.
 // 2026-10-27 (`prepare_attachment_upload`, 90c358e): 18 tools, medido 27.520;
 // techo 27.800, el mismo en `index.test.ts` y `http.test.ts`.
-const CHAR_CEILING = 27800;
+// 2026-10-31: C5-g llegó a 28.685 y el smoke remoto falló en producción; se recortaron
+// descripciones hasta 26.950 y el techo vive ahora en un único módulo, que los
+// tests también importan (ya no hay tres números que sincronizar a mano).
+// Fuente única del techo: `src/tools-list-ceiling.ts` (compilado a dist/).
+import { CHAR_CEILING } from '../dist/tools-list-ceiling.js';
 const EXPECTED_TOOL_COUNT = 18;
 
 if (!url) {

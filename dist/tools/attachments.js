@@ -100,37 +100,30 @@ export function registerAttachmentTools(server, ctx) {
     });
     const addAttachmentTool = server.registerTool('add_attachment', {
         annotations: { destructiveHint: false },
-        description: 'Sube un fichero y lo deja adjunto a una tarea o subtarea (al responder ya está enlazado). Acepta EXACTAMENTE una de dos vías — ' +
-            '`file_path` (ruta LOCAL, absoluta o "~/…", tope 25 MB) SOLO funciona si este conector ' +
-            'corre en tu propia máquina (stdio local); contra el conector remoto de mcp.lumbre.pro ' +
-            'devuelve un error explicativo, nunca intenta leer tu disco. `content_base64` funciona ' +
-            'siempre, pero es SOLO para ficheros de unos KB (un .txt, un .log): el argumento lo emites ' +
-            'TÚ como modelo, y una imagen de unos cientos de KB son ~100-200k tokens en base64 — tope ' +
-            '1 MB decodificado. `filename` es obligatorio con `content_base64` (no hay ruta de la que ' +
-            'sacar un nombre). Para un fichero grande o local usa prepare_attachment_upload.',
+        description: 'Sube un fichero y lo deja adjunto a una tarea o subtarea. EXACTAMENTE una vía: ' +
+            '`file_path` (ruta LOCAL, tope 25 MB) SOLO si este conector corre en tu máquina (stdio); ' +
+            'contra mcp.lumbre.pro da error explicativo. `content_base64` siempre funciona, pero SOLO ' +
+            'para unos KB (lo emites tú como modelo: cientos de KB son ~100k+ tokens), tope 1 MB, y ' +
+            'exige `filename`. Para un fichero grande o local usa prepare_attachment_upload.',
         inputSchema: {
             taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks; de una subtarea, get_task de su madre)'),
             file_path: z
                 .string()
                 .min(1)
                 .optional()
-                .describe('Ruta LOCAL del fichero, absoluta o "~/…" (una relativa se rechaza). Exactamente uno ' +
-                'de file_path/content_base64. Solo funciona si ESTE conector corre en tu máquina ' +
-                '(stdio local) — contra el conector remoto da un error explicativo con la alternativa.'),
+                .describe('Ruta LOCAL absoluta o "~/…" (una relativa se rechaza). Solo con el conector local (stdio); ' +
+                'el remoto da error con la alternativa.'),
             content_base64: z
                 .string()
                 .min(1)
                 .optional()
-                .describe('Bytes del fichero en base64, para cuando no hay file_path posible (conector remoto) ' +
-                'o el fichero es pequeño. SOLO para unos KB (un .txt/.log corto) — tope 1 MB ' +
-                'decodificado; para algo más grande usa file_path con el conector local. Exactamente ' +
-                'uno de file_path/content_base64. Requiere `filename`.'),
+                .describe('Bytes en base64, para el conector remoto o ficheros pequeños (unos KB; tope 1 MB ' +
+                'decodificado). Requiere `filename`.'),
             filename: z
                 .string()
                 .min(1)
                 .optional()
-                .describe('Nombre con el que se guarda. Con file_path, opcional (por defecto su basename); con ' +
-                'content_base64, OBLIGATORIO (no hay ruta de la que sacarlo).')
+                .describe('Nombre con el que se guarda. Opcional con file_path (basename); obligatorio con content_base64.')
         }
     }, async (input) => {
         try {

@@ -73,8 +73,8 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 			description:
 				'Devuelve el detalle completo de UN proyecto o área por su listId: nombre, tipo (proyecto/área), ' +
 					'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas y la nota ' +
-					'ÍNTEGRA y verbatim — útil antes de reescribirla con organize({op:"set_list_notes"}), que la ' +
-					'reemplaza entera. Error si el listId no existe.',
+					'ÍNTEGRA — útil antes de reescribirla con organize({op:"set_list_notes"}), que la ' +
+					'reemplaza entera. Error si no existe.',
 			inputSchema: {
 				listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)')
 			}

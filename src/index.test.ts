@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { z } from 'zod';
 import type { NotesMode } from './notes.js';
+import { CHAR_CEILING } from './tools-list-ceiling.js';
 
 /**
  * Test de regresión de la superficie de tools del MCP (tarea "bajar el coste
@@ -382,9 +383,10 @@ describe('tools/list — superficie completa', () => {
 		// Techo = medido + ~1% (27.800).
 		// C5-g: 28.390 caracteres (+870): espacios/asignación y alcance personal de refresh.
 		// Techo = medido + ~1%; sigue sin herramientas nuevas.
-		const CHAR_CEILING = 28700;
+		// Recortado a 27.800 (fuente única) tras fallar el smoke remoto con 28.685.
+		// El techo vive en `tools-list-ceiling.ts` (lo comparte el smoke remoto).
 		const size = JSON.stringify(tools).length;
-		expect(size).toBeLessThan(CHAR_CEILING);
+		expect(size).toBeLessThanOrEqual(CHAR_CEILING);
 	});
 
 	// David, 9 ago 2026: apunta el BRL en una libreta de papel CON su hora y

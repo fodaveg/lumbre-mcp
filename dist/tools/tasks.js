@@ -54,9 +54,8 @@ export function registerTaskTools(server, ctx) {
     const addTaskTool = server.registerTool('add_task', {
         annotations: { destructiveHint: false },
         description: 'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
-            '"recuérdame", "añade a mi proyecto/área". La respuesta trae los avisos de la app (p. ej. si la ' +
-            'colocó en otro sitio) pero NO el id de la tarea: si lo necesitas, usa la op add_task de ' +
-            'mutate_tasks, que sí lo devuelve. ' +
+            '"recuérdame", "añade a mi proyecto/área". La respuesta trae los avisos de la app pero NO el id ' +
+            'de la tarea: si lo necesitas, usa la op add_task de mutate_tasks. ' +
             '`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
         inputSchema: {
             text: z
@@ -70,8 +69,8 @@ export function registerTaskTools(server, ctx) {
                 .max(200)
                 .optional()
                 .describe('Nombre del proyecto o área destino (se crea como proyecto si no existe). Sin ' +
-                '`list`/`listId` ni `date`: texto solo aterriza en "hoy"; con priority/deadline/' +
-                'subtasks/tags, en la Bandeja de entrada. `recurrence` sin `date` aterriza hoy.'),
+                '`list`/`listId` ni `date`: solo texto aterriza en "hoy"; con priority/deadline/' +
+                'subtasks/tags, en la Bandeja. `recurrence` sin `date`, hoy.'),
             listId: z
                 .string()
                 .guid()
@@ -149,9 +148,9 @@ export function registerTaskTools(server, ctx) {
                 .optional()
                 .describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
             listId: z.string().guid().optional().describe('Id exacto de lista personal o compartida, preferente sobre list'),
-            assignee: z.literal('me').optional().describe('Solo las asignadas a mí (asignado efectivo = quien consulta; cualquier scope, usa "all" para incluir futuras y sin fecha). ' +
-                'Una subtarea asignada va anidada en su madre si esta también sale; si no, suelta con su parentId. ' +
-                'Filtro del servidor: si no lo aplica (versión anterior), error, nunca el listado general'),
+            assignee: z.literal('me').optional().describe('Solo las asignadas a mí (cualquier scope; "all" incluye futuras y sin fecha). ' +
+                'Subtarea asignada: anidada en su madre si esta sale; si no, suelta con parentId. ' +
+                'Si el servidor no lo aplica, error, nunca el listado general'),
             section: z
                 .string()
                 .optional()
@@ -167,30 +166,24 @@ export function registerTaskTools(server, ctx) {
                 .enum(['auto', 'none', 'preview', 'full'])
                 .optional()
                 .describe('"auto" (default): íntegra si @done/#done, si cambió desde la última vez que este MCP ' +
-                'la mostró (huella local por `notesUpdatedAt`), o si se tocó dentro de ' +
-                '`notesRecentHours` (solo la 1ª vez que se ve esa tarea) — si no, un marcador ' +
-                '"✎N ↻fecha" con su tamaño y la fecha de la última edición — GARANTÍA: nunca un ' +
-                'recorte a medias. "none": sin notas. "preview": recorte legado a ~240 chars, ' +
-                'colapsado a una línea. "full": todas íntegras y verbatim para TODO el lote ' +
-                '— útil si vas a reeditar con la op update (que ' +
-                'REEMPLAZA la nota entera). Para una sola tarea concreta, mejor get_task. Se ignora ' +
-                'si mandas `notesSince`.'),
+                'la mostró, o si se tocó dentro de `notesRecentHours` (solo la 1ª vez que se ve); ' +
+                'si no, un marcador "✎N ↻fecha" — nunca un recorte a medias. "none": sin notas. ' +
+                '"preview": recorte a ~240 chars en una línea. "full": todas íntegras para TODO el ' +
+                'lote (reeditar con update REEMPLAZA la nota entera; para una sola, get_task). ' +
+                'Se ignora con `notesSince`.'),
             notesRecentHours: z
                 .number()
                 .positive()
                 .optional()
-                .describe(`Solo con "auto": ventana (horas, default ${DEFAULT_NOTES_RECENT_HOURS}) para dar por ` +
-                'íntegra la nota de una tarea que el MCP ve por 1ª vez (sin huella local aún) — ' +
-                'más ventana = más notas íntegras de golpe, más chars en la respuesta.'),
+                .describe(`Solo con "auto": ventana en horas (default ${DEFAULT_NOTES_RECENT_HOURS}) en la que una ` +
+                'tarea vista por 1ª vez da su nota íntegra.'),
             notesSince: z
                 .string()
                 .min(10)
                 .optional()
-                .describe('Consulta de precisión, SIN estado: "YYYY-MM-DD" o ISO completo — íntegra SOLO si la ' +
-                'nota se editó desde esa fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`, ' +
-                '@done/#done y la huella local por completo (mezclar criterios haría ' +
-                'la consulta impredecible): úsalo para "qué ha cambiado desde X", no para lectura ' +
-                'normal.')
+                .describe('Consulta sin estado: "YYYY-MM-DD" o ISO — nota íntegra SOLO si se editó desde esa ' +
+                'fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`, @done/#done y la ' +
+                'huella local: para "qué ha cambiado desde X".')
         }
     }, async (input) => {
         try {
