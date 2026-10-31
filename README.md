@@ -31,8 +31,10 @@ Las lecturas conservan su formato personal cuando el servidor no manda campos de
 espacios, y también cuando los manda a `null` (cuenta sin espacios o `LUMBRE_SPACES`
 apagado): el texto de cada herramienta es el mismo que antes de C5. Cuando los trae,
 enseñan `storeId`, `spaceId` y el nombre del espacio de cada tarea/lista compartida y
-las marcas `inViewerToday` y `crossStoreDuplicate`; el asignado y `assignedToMe` solo
-si el servidor los manda. El catálogo `GET /api/tasks?includeLists=1` añade `spaces[]`
+las marcas `inViewerToday` y `crossStoreDuplicate` y, en las de espacio, el asignado
+(`asignado: <nombre> (accountId)` o `sin asignar`) y `asignada a mí`. En lo personal el
+servidor manda `assigneeId: null` y `assignedToMe: false` y no se pinta nada: la salida
+es la misma que sin esos campos. El catálogo `GET /api/tasks?includeLists=1` añade `spaces[]`
 con miembros `{accountId, name}` y metadata opcional (`storeId`, `role`, `agentAccess`).
 `list_lists` los muestra incluso sin listas; `get_list` muestra los de su espacio.
 `list_tasks` y `get_task` consultan ese mismo catálogo solo si hay tareas compartidas.
@@ -50,8 +52,13 @@ Una sola coincidencia con lista vacía sigue devolviendo vacío.
 Un `listId` que el servidor no deja ver (inexistente, borrado o de un espacio sin
 acceso para agentes) responde 404 «Lista no encontrada» y el MCP lo da como «no
 existe», nunca como el listado general.
-Para la vista «asignadas a mí», combina `scope: "all"` con `assignee: "me"`;
-`scope: "today"` restringe a Hoy. Ambos filtros los evalúa el servidor. Los nombres iguales favorecen
+Para la vista «asignadas a mí», combina `scope: "all"` (con futuras y sin fecha) con
+`assignee: "me"`; `scope: "today"` restringe a Hoy. Ambos filtros los evalúa el servidor.
+`assignee` solo admite `"me"`: otro valor da 400 en el servidor y el MCP lo traduce a un
+mensaje claro. Con `assignee: "me"` el asignado efectivo es quien consulta; una subtarea
+asignada cuya madre también sale va anidada en la madre (no se repite) y, si la madre no
+sale, aparece suelta con `subtarea de <parentId>`. Una cuenta sin espacios recibe «Sin
+tareas»: lo personal no se asigna. Los nombres iguales favorecen
 la lista personal; si solo hay compartidas empatadas, resuelve con `listId`. No hay
 sintaxis `Espacio/Lista`. Sin destino, el alta sigue en el personal. Crear en una
 lista compartida lo ven TODOS los miembros del espacio.
@@ -77,14 +84,13 @@ entre stores la decide el servidor; el MCP muestra `crossStoreDuplicate` cuando 
 
 Estos campos dependen de las rutas C5 de Lumbre. Las pruebas de este repo fijan el
 contrato con respuestas grabadas de la forma exacta del servidor
-(`src/test-support/c5-server-shapes.ts`, leído de `release/fase3-cand3` en
-`6dc35f62c`); no acreditan su despliegue ni una integración real.
+(`src/test-support/c5-server-shapes.ts`, leído de `release/fase3-cand5` en
+`df6ab2983`); no acreditan su despliegue ni una integración real.
 
-**Lo que ese servidor todavía no da (30 oct 2026):** `assigneeId` y `assignedToMe` por
-tarea, y el filtro `?assignee=me`, que ignora. Mientras sea así, `list_tasks` con
-`assignee: "me"` responde error con cualquier resultado no vacío (no presenta el listado
-general como filtrado) y las lecturas no enseñan el asignado. `set_assignee` y el
-`assigneeId` de las altas sí funcionan.
+**Servidores anteriores (cand3, `6dc35f62c`):** no mandan `assigneeId`/`assignedToMe` y
+ignoran `?assignee=me`. Contra uno así, `list_tasks` con `assignee: "me"` responde error
+con cualquier resultado no vacío (no presenta el listado general como filtrado).
+`set_assignee` y el `assigneeId` de las altas funcionan en ambos.
 
 ## Qué hace (Fase 1 — crear/leer)
 

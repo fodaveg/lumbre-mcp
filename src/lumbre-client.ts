@@ -547,6 +547,15 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 		// «Lista no encontrada», nunca el listado general. Se traduce a «no existe»
 		// sin distinguir los casos; cualquier otro 404 (URL base equivocada) sigue
 		// siendo el error original.
+		// `?assignee=` solo admite `me`: cualquier otro valor es 400 del servidor
+		// («assignee inválido: "x" (usa: me)»). Se traduce a un mensaje claro.
+		if (input.assignee && err instanceof LumbreApiError && err.status === 400 && /assignee/i.test(err.message)) {
+			throw new LumbreApiError(
+				`El servidor de Lumbre rechazó el filtro assignee="${String(input.assignee)}": solo admite "me" ` +
+					'(las asignadas a quien consulta). Para otra persona no hay filtro: lista el espacio y mira asignado.',
+				400
+			);
+		}
 		if (input.listId && isListNotFound(err)) {
 			throw new LumbreApiError(
 				`El listId ${input.listId} no está entre los proyectos/áreas que el servidor deja ver a esta ` +
@@ -567,14 +576,15 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if (input.listId && tasks.some((t) => t.spaceId === undefined || t.somedayListId !== input.listId)) {
 		throw new LumbreApiError('La API no confirmó el filtro listId: respuesta sin procedencia o con tareas de otro destino. Actualiza Lumbre o consulta por un filtro compatible.');
 	}
-	// El servidor C5 de `release/fase3-cand3` (6dc35f62c, 30 oct 2026) todavía no
-	// manda `assigneeId`/`assignedToMe` ni aplica `?assignee=me`: lo ignora y
-	// devuelve el listado del scope. Mientras sea así, este filtro da error con
-	// cualquier respuesta no vacía; nunca se presenta ese listado como filtrado.
+	// Desde `release/fase3-cand5` el servidor aplica `?assignee=me` (asignado efectivo
+	// = quien lee, con cualquier scope) y manda `assignedToMe` en cada tarea. Un
+	// servidor anterior (cand3, `6dc35f62c`) lo ignora y devuelve el listado del
+	// scope: se detecta porque sus tareas no traen `assignedToMe: true`, y entonces
+	// da error; nunca se presenta ese listado como «asignadas a mí».
 	if (input.assignee && tasks.some((t) => t.assignedToMe !== true)) {
 		throw new LumbreApiError(
 			'El servidor de Lumbre no confirmó el filtro assignee=me: sus tareas no traen assignedToMe ' +
-				'(versión que aún no aplica ese filtro) o llegaron tareas no asignadas a ti. No se presenta el ' +
+				'(versión anterior a Lumbre fase 3 candidato 5, que no aplica ese filtro) o llegaron tareas no asignadas a ti. No se presenta el ' +
 				'listado general como «asignadas a mí»; repite sin assignee.'
 		);
 	}
@@ -607,7 +617,18 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if ((input.listId || input.assignee) && tasks.length === 0 && (await getListCatalog(config, { notes: 'length' })).spaces === undefined) {
 		throw new LumbreApiError('La API no confirmó soporte de espacios para el filtro pedido: respuesta vacía sin catálogo spaces. Actualiza Lumbre.');
 	}
-	return tasks;
+	return input.assignee ? withoutDuplicatedSubtasks(tasks) : tasks;
+}
+
+/**
+ * Con `?assignee=me` el servidor ya deja la subtarea asignada DENTRO de los
+ * `subtasks` de su madre cuando la madre también sale, y solo la manda suelta (con
+ * `parentId`) si la madre no está. Defensa por si otra versión mandara las dos: la
+ * suelta cuya madre ya la trae anidada no se repite.
+ */
+function withoutDuplicatedSubtasks(tasks: LumbreTask[]): LumbreTask[] {
+	const nested = new Set(tasks.flatMap((t) => (t.subtasks ?? []).map((s) => s.id)));
+	return tasks.filter((t) => !(t.parentId && nested.has(t.id)));
 }
 
 /** Cierre de un proyecto (hecho/cancelado, con su marca de tiempo epoch ms);

@@ -4,8 +4,11 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer, stripToolsListSchema } from './index.js';
 import { resetExistenceCacheRegistryForTests } from './existence-cache.js';
 import {
+	ASSIGNEE_INVALID_BODY,
 	ASSIGNEE_REJECTED_ERROR,
+	assignedToMe,
 	fakeLumbre,
+	MEMBER_ME,
 	MEMBER_OTHER,
 	PERSONAL_AREA,
 	PERSONAL_LIST,
@@ -25,16 +28,17 @@ import {
 
 /**
  * Contrato del conector con el servidor C5 REAL, no con el de la spec: las respuestas
- * de `./test-support/c5-server-shapes.ts` copian la forma de `release/fase3-cand3`
- * (`6dc35f62c`), leída campo a campo. Dos bloques:
+ * de `./test-support/c5-server-shapes.ts` copian la forma de `release/fase3-cand5`
+ * (`df6ab2983`), leída campo a campo. Dos bloques:
  *
- * 1. **Cuenta personal con `LUMBRE_SPACES` apagado** (producción el 30 oct 2026): el
+ * 1. **Cuenta personal con `LUMBRE_SPACES` apagado**: el
  *    texto de cada herramienta es el MISMO que con las respuestas anteriores a C5 y el
  *    mismo que daba `origin/main` `d13e8a7` (los literales de abajo se capturaron
  *    ejecutando ese `dist/` con estas mismas respuestas).
- * 2. **Espacio compartido**: lo que el servidor sí da (procedencia, catálogo con
- *    miembros, `?listId=`, `setAssignee`, `?store=` de adjuntos) y lo que todavía no
- *    (`assigneeId`/`assignedToMe` y `?assignee=me`, que ignora).
+ * 2. **Espacio compartido**: procedencia, catálogo con
+ *    miembros, `?listId=`, `assigneeId`/`assignedToMe`, `?assignee=me`, `setAssignee`
+ *    y `?store=` de adjuntos. Un servidor cand3 que ignora `?assignee=` se simula con
+ *    `assignee: 'ignored'`.
  */
 
 const CONFIG = { baseUrl: 'https://lumbre.test', token: 'c5-contract-token' };
@@ -148,7 +152,7 @@ const GOLDEN_ORIGIN_MAIN: [string, Record<string, unknown>, string][] = [
 	]
 ];
 
-describe('C5 contra 6dc35f62c — cuenta personal con LUMBRE_SPACES apagado', () => {
+describe('C5 contra df6ab2983 — cuenta personal con LUMBRE_SPACES apagado', () => {
 	it.each(GOLDEN_ORIGIN_MAIN)('%s %j: mismo texto que origin/main y que con un servidor anterior', async (name, args, golden) => {
 		const now = fakeLumbre(flagOff());
 		const before = fakeLumbre(preC5());
@@ -203,7 +207,7 @@ describe('C5 contra 6dc35f62c — cuenta personal con LUMBRE_SPACES apagado', ()
 	});
 });
 
-describe('C5 contra 6dc35f62c — espacio compartido con agentAccess', () => {
+describe('C5 contra df6ab2983 — espacio compartido con agentAccess', () => {
 	const SHARED = sharedTask(preC5Task('dddd1111-0000-4000-8000-000000000004', { list: 'Compras', somedayListId: SHARED_LIST, date: null }), {
 		inViewerToday: false
 	});
@@ -215,15 +219,17 @@ describe('C5 contra 6dc35f62c — espacio compartido con agentAccess', () => {
 			write
 		});
 
-	it('list_tasks enseña el espacio y sus miembros del catálogo, sin inventar asignado', async () => {
+	it('list_tasks enseña el espacio, sus miembros y el asignado que manda el servidor', async () => {
 		const fake = shared();
 		const { text, isError } = await call('list_tasks', { scope: 'all', notes: 'none' }, fake);
 		expect(isError).toBe(false);
 		for (const value of [`espacio: Socios (spaceId: ${SPACE_ID})`, 'en mi Hoy: no', 'miembro: Lucía', MEMBER_OTHER]) {
 			expect(text).toContain(value);
 		}
-		// El servidor no manda assigneeId ni assignedToMe: el conector no los deduce.
-		expect(text).not.toMatch(/asignad|sin asignar/);
+		// El servidor manda assigneeId null y assignedToMe false: la de espacio lo dice...
+		expect(text).toContain('sin asignar, asignada a mí: no');
+		// ...y las personales no ganan ninguna etiqueta de asignación.
+		expect(text.match(/sin asignar/g)).toHaveLength(1);
 		// La tarea personal no gana etiquetas de espacio ni de Hoy.
 		expect(text).toContain('- [ ] Tarea bbbb (2026-10-30)  · id: bbbb1111-0000-4000-8000-000000000002');
 		expect(requests(fake.calls)).toEqual([
@@ -261,14 +267,93 @@ describe('C5 contra 6dc35f62c — espacio compartido con agentAccess', () => {
 		expect(fake.calls).toHaveLength(1);
 	});
 
-	it('assignee=me: el servidor lo ignora y el conector da error en vez de presentar el listado', async () => {
-		const fake = shared();
-		const { text, isError } = await call('list_tasks', { scope: 'all', assignee: 'me', notes: 'none' }, fake);
-		expect(isError).toBe(true);
-		expect(text).toContain('no confirmó el filtro assignee=me');
-		expect(text).not.toContain('Tarea dddd');
-		expect(fake.calls[0]!.params.get('assignee')).toBe('me');
-		expect(fake.calls).toHaveLength(1);
+	describe('assignee=me', () => {
+		const MINE = sharedTask(preC5Task('dddd1111-0000-4000-8000-000000000004', { list: 'Compras', somedayListId: SHARED_LIST, date: null }), assignedToMe);
+		const OTHERS = sharedTask(preC5Task('eeee1111-0000-4000-8000-000000000005', { list: 'Compras', somedayListId: SHARED_LIST, date: null }), {
+			assigneeId: MEMBER_OTHER
+		});
+		const PARENT = sharedTask(preC5Task('ffff1111-0000-4000-8000-000000000006', { list: 'Compras', somedayListId: SHARED_LIST, date: null }), assignedToMe);
+		const CHILD = sharedTask(preC5Task('abab1111-0000-4000-8000-000000000007', { content: 'Subtarea mía', list: 'Compras', somedayListId: SHARED_LIST, date: null, parentId: PARENT.id }), assignedToMe);
+		const LOOSE_PARENT = sharedTask(preC5Task('cdcd1111-0000-4000-8000-000000000008', { content: 'Madre ajena', list: 'Compras', somedayListId: SHARED_LIST, date: null }), {
+			assigneeId: MEMBER_OTHER
+		});
+		const LOOSE = sharedTask(preC5Task('efef1111-0000-4000-8000-000000000009', { content: 'Subtarea suelta', list: 'Compras', somedayListId: SHARED_LIST, date: null, parentId: LOOSE_PARENT.id }), assignedToMe);
+		const world = (assignee?: 'ignored') =>
+			fakeLumbre({
+				tasks: [...flagOff().tasks, MINE, OTHERS, PARENT, CHILD, LOOSE_PARENT, LOOSE],
+				lists: [...flagOff().lists, SHARED_LIST_SUMMARY],
+				spaces: SPACES_CATALOG,
+				assignee
+			});
+
+		it('pasa ?assignee=me al servidor y solo lista lo asignado a quien lee, con su etiqueta', async () => {
+			const fake = world();
+			const { text, isError } = await call('list_tasks', { scope: 'all', assignee: 'me', notes: 'none' }, fake);
+			expect(isError).toBe(false);
+			expect(fake.calls[0]!.params.get('assignee')).toBe('me');
+			expect(text).toContain('Tarea dddd');
+			expect(text).toContain(`asignado: David (${MEMBER_ME})`);
+			expect(text).toContain('asignada a mí: sí');
+			expect(text).not.toContain('Tarea eeee');
+			expect(text).not.toContain('Tarea bbbb');
+		});
+
+		it('madre y subtarea asignadas: la subtarea no aparece dos veces (solo anidada en la madre)', async () => {
+			const fake = world();
+			const { text } = await call('list_tasks', { scope: 'all', assignee: 'me', notes: 'none' }, fake);
+			expect(text.match(/Subtarea mía/g) ?? []).toHaveLength(0);
+			expect(text.match(new RegExp(PARENT.id as string, 'g'))).toHaveLength(1);
+			expect(text).not.toContain(CHILD.id as string);
+		});
+
+		it('subtarea asignada con madre fuera del resultado: sale suelta una vez, con su parentId', async () => {
+			const fake = world();
+			const { text } = await call('list_tasks', { scope: 'all', assignee: 'me', notes: 'none' }, fake);
+			expect(text.match(/Subtarea suelta/g)).toHaveLength(1);
+			expect(text).toContain(`subtarea de ${LOOSE_PARENT.id}`);
+			expect(text).not.toContain('Madre ajena');
+		});
+
+		it('si un servidor mandara madre con subtasks Y la subtarea suelta, el conector no la repite', async () => {
+			const { listTasks } = await import('./lumbre-client.js');
+			const parent = { ...PARENT, subtasks: [{ id: CHILD.id, content: 'x', done: false, tags: [], effectiveTags: [] }] };
+			vi.stubGlobal('fetch', async () => new Response(JSON.stringify([parent, CHILD]), { status: 200, headers: { 'content-type': 'application/json' } }));
+			const tasks = await listTasks(CONFIG, { assignee: 'me' });
+			expect(tasks.map((t) => t.id)).toEqual([PARENT.id]);
+		});
+
+		it('un valor distinto de «me»: el 400 del servidor se convierte en un mensaje claro', async () => {
+			const { listTasks, LumbreApiError } = await import('./lumbre-client.js');
+			const fake = world();
+			vi.stubGlobal('fetch', fake.fetch);
+			const err = await listTasks(CONFIG, { assignee: 'otro' as 'me' }).catch((e) => e);
+			expect(err).toBeInstanceOf(LumbreApiError);
+			expect(err.status).toBe(400);
+			expect(err.message).toContain('solo admite "me"');
+			expect(fake.calls[0]!.params.get('assignee')).toBe('otro');
+			expect(ASSIGNEE_INVALID_BODY('otro').message).toContain('usa: me');
+		});
+
+		it('cuenta sin espacios: vacío legítimo («Sin tareas»), no error', async () => {
+			const fake = fakeLumbre(flagOff());
+			expect(await call('list_tasks', { scope: 'all', assignee: 'me', notes: 'none' }, fake)).toEqual({
+				text: 'Sin tareas (scope=all).',
+				isError: false
+			});
+		});
+
+		it('servidor cand3 que ignora ?assignee=: error en vez de presentar el listado general', async () => {
+			const old = fakeLumbre({
+				tasks: flagOff().tasks.map((t) => ({ ...t, assigneeId: undefined, assignedToMe: undefined })),
+				lists: flagOff().lists,
+				spaces: [],
+				assignee: 'ignored'
+			});
+			const { text, isError } = await call('list_tasks', { scope: 'all', assignee: 'me', notes: 'none' }, old);
+			expect(isError).toBe(true);
+			expect(text).toContain('no confirmó el filtro assignee=me');
+			expect(text).not.toContain('Tarea bbbb');
+		});
 	});
 
 	it('add_task con assigneeId no admitido: el 400 del servidor llega tal cual, sin alta', async () => {

@@ -287,6 +287,9 @@ function formatTask(t: LumbreTask, opts: FormatTaskOptions, isDuplicateTitle: bo
 	const space = spaceLabel(t);
 	if (space) metadata.push(space);
 	metadata.push(...assignmentLabels(t, t.space, t.spaceId === null));
+	// Subtarea asignada que el servidor manda suelta (su madre no está en el
+	// resultado): sin el id de la madre no se sabría que lo es. Solo en espacios.
+	if (t.parentId && t.spaceId) metadata.push(`subtarea de ${t.parentId}`);
 	if (t.cancelledAt) metadata.push('cancelada');
 	const prio = priorityLabel(t.priority);
 	if (prio) metadata.push(prio);

@@ -30,8 +30,9 @@ resumir un proyecto o área, o leer feedback.
 Los espacios y miembros disponibles llegan en el catálogo de `list_lists`/`get_list`.
 Respeta la procedencia mostrada de tareas y listas; no confundas listas homónimas.
 Para «asignadas a mí», usa `{scope: "all", assignee: "me"}`; si pide solo hoy,
-combina `scope: "today"`. Hoy y ese filtro los decide el servidor; si no lo confirma,
-`list_tasks` da error: dilo y no lo simules filtrando tú.
+combina `scope: "today"`. Hoy y ese filtro los decide el servidor; si es una versión
+que no lo aplica, `list_tasks` da error: dilo y no lo simules filtrando tú. Una subtarea
+asignada va dentro de su madre si esta también sale; si no, suelta con `subtarea de <id>`.
 `refresh_sync` fuerza solo el store personal; no promete refrescar los compartidos.
 BRL y hábitos son personales. Un espacio oculto se trata como inexistente, sin
 consultar `/api/spaces` ni probar otra credencial.

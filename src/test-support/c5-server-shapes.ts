@@ -1,7 +1,9 @@
 /**
  * Respuestas GRABADAS con la forma exacta del servidor de Lumbre que el conector
- * contrasta en C5-g: `release/fase3-cand3` en `6dc35f62c` (30 oct 2026), lo que va
- * a producción con `LUMBRE_SPACES` apagado. Leídas campo a campo de:
+ * contrasta en C5-g: `release/fase3-cand5` en `df6ab2983` (31 oct 2026), que ya manda
+ * `assigneeId`/`assignedToMe` y aplica `?assignee=me`. Las formas de `6dc35f62c`
+ * (cand3, producción del 30 oct con `LUMBRE_SPACES` apagado) se conservan con
+ * `assignee: 'ignored'` en `fakeLumbre`. Leídas campo a campo de:
  *
  * - `src/routes/api/tasks/serialize.ts` (`serializeTask`, `ApiSubtask`);
  * - `src/routes/api/tasks/store-fields.ts` (`taskStoreFields`: `storeId`, `spaceId`,
@@ -17,15 +19,14 @@
  * - `src/routes/api/batch/+server.ts` (resultado por op) y
  *   `src/lib/server/repos/mutations.ts` (`setAssignee` no admitido = `not_found`).
  *
- * Lo que ese servidor NO manda, y por eso falta aquí a propósito: `assigneeId` y
- * `assignedToMe` por tarea (el punto de extensión de `store-fields.ts` sigue sin
- * implementar), y `storeId`/`agentAccess` dentro de `spaces[]`.
+ * `store-fields.ts`: `assigneeId` (asignado efectivo o `null`; siempre `null` en el store
+ * personal) y `assignedToMe` por tarea.
  *
  * Sin imports: lo carga tal cual también un script de Node para comparar con el
  * `dist/` de una versión anterior.
  */
 
-export const SERVER_SHA = '6dc35f62c79af17a401617fa8bd0ef79d95e4c52';
+export const SERVER_SHA = 'df6ab2983461719d4629d9d86d20bf1fc8ee5568';
 
 export const PERSONAL_LIST = '22222222-2222-4222-8222-222222222222';
 export const PERSONAL_AREA = '66666666-6666-4666-8666-666666666666';
@@ -82,7 +83,9 @@ export function personalTask(
 		spaceId: null,
 		spaceName: null,
 		inViewerToday,
-		crossStoreDuplicate: false
+		crossStoreDuplicate: false,
+		assigneeId: null,
+		assignedToMe: false
 	};
 }
 
@@ -98,6 +101,8 @@ export function sharedTask(
 		spaceName: 'Socios',
 		inViewerToday: false,
 		crossStoreDuplicate: false,
+		assigneeId: null,
+		assignedToMe: false,
 		...over
 	};
 }
@@ -180,6 +185,12 @@ export const SHARED_LIST_SUMMARY = {
 	spaceName: 'Socios'
 };
 
+/** Una tarea de un espacio asignada a `MEMBER_ME`, que es quien lee. */
+export const assignedToMe = { assigneeId: MEMBER_ME, assignedToMe: true };
+
+/** Cuerpo del 400 de `?assignee=` con un valor que no es `me` (`+server.ts` de /api/tasks). */
+export const ASSIGNEE_INVALID_BODY = (value: string) => ({ message: `assignee inválido: "${value}" (usa: me)` });
+
 /** `ASSIGNEE_REJECTED_ERROR` de `resolve-target-store.ts`. */
 export const ASSIGNEE_REJECTED_ERROR =
 	'assigneeId no válido: tiene que ser un miembro activo del espacio de la lista';
@@ -201,14 +212,16 @@ export interface FakeCall {
 /**
  * Servidor falso de `GET /api/tasks` con la semántica de `6dc35f62c` sobre unos datos
  * fijos: `?notes=` (`none`/`length`/`full`), `?id=`/`?ids=`, `?list=` por nombre exacto,
- * `?listId=` exacto con 404, `?includeLists=1` (con `?listId=`) y `?assignee=`
- * IGNORADO. Las escrituras responden lo que diga `write`. Sirve igual para las formas
+ * `?listId=` exacto con 404, `?includeLists=1` (con `?listId=`) y `?assignee=` (por
+ * defecto como cand5: `me` filtra por `assignedToMe`, subtareas sueltas o anidadas, y
+ * otro valor da 400; con `assignee: 'ignored'`, como cand3, lo ignora). Las escrituras responden lo que diga `write`. Sirve igual para las formas
  * anteriores a C5 (sin `spaces`): basta con pasarle tareas y listas de antes.
  */
 export function fakeLumbre(data: {
 	tasks: Record<string, unknown>[];
 	lists: Record<string, unknown>[];
 	spaces?: unknown[];
+	assignee?: 'ignored';
 	write?: (call: FakeCall) => { status: number; body: unknown };
 }) {
 	const calls: FakeCall[] = [];
@@ -254,6 +267,20 @@ export function fakeLumbre(data: {
 			const match = data.lists.filter((l) => String(l.name).trim().toLowerCase() === wanted);
 			if (match.length !== 1) return reply([]);
 			rows = rows.filter((t) => t.somedayListId === match[0]!.id);
+		}
+		const assignee = p.get('assignee');
+		if (assignee !== null && data.assignee !== 'ignored') {
+			if (assignee !== 'me') return reply(ASSIGNEE_INVALID_BODY(assignee), 400);
+			const mine = rows.filter((t) => t.assignedToMe === true);
+			const mineIds = new Set(mine.map((t) => t.id));
+			rows = mine
+				.filter((t) => !t.parentId || !mineIds.has(t.parentId as string))
+				.map((t) => {
+					const subtasks = data.tasks
+						.filter((s) => s.parentId === t.id)
+						.map((s) => ({ id: s.id, content: s.content, done: s.done, tags: s.tags, effectiveTags: s.effectiveTags }));
+					return t.parentId ? t : { ...t, subtasks };
+				});
 		}
 		return reply(rows.map((t) => withNotes(t, notes)));
 	};

@@ -149,7 +149,9 @@ export function registerTaskTools(server, ctx) {
                 .optional()
                 .describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
             listId: z.string().guid().optional().describe('Id exacto de lista personal o compartida, preferente sobre list'),
-            assignee: z.literal('me').optional().describe('Solo las asignadas a mí; filtro del servidor: si no lo confirma, error, nunca el listado general'),
+            assignee: z.literal('me').optional().describe('Solo las asignadas a mí (asignado efectivo = quien consulta; cualquier scope, usa "all" para incluir futuras y sin fecha). ' +
+                'Una subtarea asignada va anidada en su madre si esta también sale; si no, suelta con su parentId. ' +
+                'Filtro del servidor: si no lo aplica (versión anterior), error, nunca el listado general'),
             section: z
                 .string()
                 .optional()
