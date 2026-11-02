@@ -78,6 +78,7 @@ export function registerTaskTools(server, ctx) {
                 .describe('Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
                 'de list_lists.'),
             assigneeId: assigneeIdSchema.optional(),
+            spaceId: z.string().guid().optional().describe('Espacio compartido destino (con list o listId); ausente = personal'),
             section: z
                 .string()
                 .max(200)

@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { getListById, getListLinks, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
+import { getListById, getListLinksResult, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, textResult, type ToolCtx } from './shared.js';
 
@@ -58,8 +58,8 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 		},
 		async (input) => {
 			try {
-				const links = await getListLinks(ctx.config, input.listId);
-				return textResult(formatListLinks(input.listId, links));
+				const { links, spaceId } = await getListLinksResult(ctx.config, input.listId);
+				return textResult(formatListLinks(input.listId, links, spaceId));
 			} catch (err) {
 				return errorResult(err);
 			}
@@ -114,7 +114,7 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 				const result = await linkListNote(ctx.config, input);
 				return textResult(
 					`Nota vinculada al proyecto o área ${result.listId}. deleted=${result.deleted}.\n` +
-					formatListLinks(result.listId, [result.link])
+					formatListLinks(result.listId, [result.link], result.spaceId)
 				);
 			} catch (err) {
 				return errorResult(err);
@@ -136,7 +136,8 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 				const result = await unlinkListNote(ctx.config, input);
 				return textResult(
 					`Vínculo de nota retirado del proyecto o área ${result.listId}. ` +
-					`removed=${result.removed}; deleted=${result.deleted}.`
+					`removed=${result.removed}; deleted=${result.deleted}.` +
+					(result.spaceId ? ` espacio: ${result.spaceId}.` : '')
 				);
 			} catch (err) {
 				return errorResult(err);

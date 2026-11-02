@@ -725,10 +725,11 @@ export function formatListDetail(l, parentName) {
  * fila conserva la metadata que identifica el vínculo y su URL literal,
  * incluidos `obsidian://` y el enlace universal de Hebra para notas.
  */
-export function formatListLinks(listId, links) {
+export function formatListLinks(listId, links, spaceId) {
+    const space = spaceId ? ` (espacio: ${spaceId})` : '';
     if (links.length === 0)
-        return `Sin vínculos para el proyecto o área ${listId}.`;
-    const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} del proyecto o área ${listId}:`;
+        return `Sin vínculos para el proyecto o área ${listId}${space}.`;
+    const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} del proyecto o área ${listId}${space}:`;
     const body = links.map((link) => `· ${link.label} — ${link.url}\n` +
         `  id: ${link.id} · listId: ${link.listId} · kind: ${link.kind} · targetKey: ${link.targetKey} · updatedAt: ${link.updatedAt}`);
     return [header, ...body].join('\n');

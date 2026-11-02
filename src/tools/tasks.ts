@@ -123,6 +123,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 							'de list_lists.'
 					),
 				assigneeId: assigneeIdSchema.optional(),
+				spaceId: z.string().guid().optional().describe('Espacio compartido destino (con list o listId); ausente = personal'),
 				section: z
 					.string()
 					.max(200)

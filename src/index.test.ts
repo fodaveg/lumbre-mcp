@@ -5472,3 +5472,113 @@ describe('prepare_attachment_upload — permiso de subida de un solo uso para qu
 		expect(add.description).toContain('prepare_attachment_upload');
 	});
 });
+
+describe('espacios compartidos — spaceId/parentId al crear y spaceId en altas y vínculos', () => {
+	const LIST_ID = 'a0b1c2d3-e4f5-4678-9abc-def012345678';
+	const PARENT_ID = 'b1c2d3e4-f5a6-4789-9abc-def012345678';
+	const SPACE_ID = 'c2d3e4f5-a6b7-4890-9abc-def012345678';
+
+	function jsonResponse(body: unknown): Response {
+		return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+	}
+
+	async function buildClient() {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG);
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'spaces-create-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		return client;
+	}
+
+	const textOf = (result: unknown) => (result as { content: { text: string }[] }).content[0].text;
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('organize create_list manda spaceId y parentId en el payload de createList', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: LIST_ID }] }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({
+			name: 'organize',
+			arguments: { ops: [{ op: 'create_list', name: 'Plan', listId: LIST_ID, spaceId: SPACE_ID, parentId: PARENT_ID }] }
+		});
+		expect(result.isError).not.toBe(true);
+		const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body)) as { ops: unknown[] };
+		expect(body.ops).toEqual([
+			{ type: 'mutate', taskId: LIST_ID, kind: 'createList', payload: { name: 'Plan', spaceId: SPACE_ID, parentId: PARENT_ID } }
+		]);
+	});
+
+	it('el rechazo del servidor llega íntegro por op y un spaceId que no es uuid no sale a la red', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: false, error: 'espacio no accesible' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const rejected = await client.callTool({
+			name: 'organize',
+			arguments: { ops: [{ op: 'create_list', name: 'Plan', spaceId: SPACE_ID }] }
+		});
+		expect(textOf(rejected)).toContain('espacio no accesible');
+
+		fetchSpy.mockClear();
+		const invalid = await client.callTool({
+			name: 'organize',
+			arguments: { ops: [{ op: 'create_list', name: 'Plan', spaceId: 'no-uuid' }] }
+		});
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(textOf(invalid)).toMatch(/spaceId|uuid|inv/i);
+	});
+
+	it('add_task suelta y op add_task mandan spaceId al ingest', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		await client.callTool({ name: 'add_task', arguments: { text: 'a', list: 'Plan', spaceId: SPACE_ID } });
+		expect(JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body))).toMatchObject({
+			text: 'a', list: 'Plan', spaceId: SPACE_ID, literal: true
+		});
+		fetchSpy.mockClear();
+		await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'add_task', text: 'b', listId: LIST_ID, spaceId: SPACE_ID }] }
+		});
+		const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body)) as { ops: { task: unknown }[] };
+		expect(body.ops[0].task).toMatchObject({ text: 'b', listId: LIST_ID, spaceId: SPACE_ID });
+	});
+
+	it('get_list_links, link y unlink muestran el espacio si viene y no lo inventan con un servidor viejo', async () => {
+		const link = {
+			id: '22222222-2222-4222-8222-222222222222',
+			listId: LIST_ID,
+			kind: 'hebra',
+			noteId: '44444444-4444-4444-8444-444444444444',
+			targetKey: '44444444-4444-4444-8444-444444444444',
+			url: 'hebra://note/44444444-4444-4444-8444-444444444444',
+			label: 'Nota',
+			updatedAt: '2026-11-02T09:00:00.000Z'
+		};
+		const fetchSpy = vi
+			.fn()
+			.mockResolvedValueOnce(jsonResponse({ spaceId: SPACE_ID, links: [link] }))
+			.mockResolvedValueOnce(jsonResponse({ links: [link] }))
+			.mockResolvedValueOnce(jsonResponse({ ok: true, type: 'link', listId: LIST_ID, spaceId: SPACE_ID, deleted: false, link }))
+			.mockResolvedValueOnce(jsonResponse({ ok: true, type: 'unlink', listId: LIST_ID, spaceId: SPACE_ID, deleted: false, removed: true }))
+			.mockResolvedValueOnce(jsonResponse({ ok: true, type: 'unlink', listId: LIST_ID, deleted: false, removed: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const args = { listId: LIST_ID, url: link.url, label: 'Nota' };
+		expect(textOf(await client.callTool({ name: 'get_list_links', arguments: { listId: LIST_ID } }))).toContain(`espacio: ${SPACE_ID}`);
+		expect(textOf(await client.callTool({ name: 'get_list_links', arguments: { listId: LIST_ID } }))).not.toContain('espacio:');
+		expect(textOf(await client.callTool({ name: 'link_list_note', arguments: args }))).toContain(`espacio: ${SPACE_ID}`);
+		expect(textOf(await client.callTool({ name: 'unlink_list_note', arguments: args }))).toContain(`espacio: ${SPACE_ID}`);
+		expect(textOf(await client.callTool({ name: 'unlink_list_note', arguments: args }))).not.toContain('espacio:');
+	});
+});

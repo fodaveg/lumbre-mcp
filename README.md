@@ -61,7 +61,11 @@ sale, aparece suelta con `subtarea de <parentId>`. Una cuenta sin espacios recib
 tareas»: lo personal no se asigna. Los nombres iguales favorecen
 la lista personal; si solo hay compartidas empatadas, resuelve con `listId`. No hay
 sintaxis `Espacio/Lista`. Sin destino, el alta sigue en el personal. Crear en una
-lista compartida lo ven TODOS los miembros del espacio.
+lista compartida lo ven TODOS los miembros del espacio. `add_task` (suelta y op de
+`mutate_tasks`) acepta `spaceId` (uuid): con `list` por nombre busca (y crea si no casa)
+solo en ese espacio, y exige `list` o `listId`. Las reglas y rechazos los pone el
+servidor (`espacio no accesible`, `listId no es una lista de ese espacio`…) y llegan
+íntegros por op, sin que el MCP los duplique.
 
 `mutate_tasks` añade `{op: "set_assignee", taskId, assigneeId}` → `setAssignee`.
 `assigneeId` es un `accountId` de `spaces[].members`: 64 hex en minúsculas o `""`
@@ -271,7 +275,9 @@ retención en «Qué guarda el relé»).
   `https://app.hebra.pro/note/<uuid>`; muestra `kind`, `targetKey` y la URL sin
   abrir ni leer su contenido. Si el destino no tiene vínculos, devuelve
   una respuesta vacía clara. Un error de autenticación o de la API se devuelve
-  como error, nunca como una lista vacía. Como el resto de tools, un 401
+  como error, nunca como una lista vacía. Si la respuesta trae `spaceId` no nulo (lista de un
+  espacio compartido; un servidor viejo no lo manda), se muestra como `espacio: <spaceId>`; lo mismo en
+  `link_list_note` y `unlink_list_note`. Como el resto de tools, un 401
   contra Lumbre viaja como error de autenticación — el texto depende del modo
   del conector (ver "Autenticación — OAuth 2.1 con consentimiento en Lumbre" y
   "Conector stdio local" más abajo): con `LUMBRE_TOKEN` (stdio, o Bearer
@@ -745,7 +751,12 @@ operación suelta. Mismo informe por op que el resto de Fase 2.
   ver la leyenda de proyectos y áreas al principio de `list_tasks`) es preferente sobre
   `list` (nombre, se crea como proyecto si no existe); `listId: null` desvincula la tarea
   de su proyecto o área actual. Conserva la fecha de la tarea y limpia su sección.
-- `create_list`: `name*` [`color`, `icon`, `listId`, `listKind`] — crea un proyecto nuevo;
+- `create_list`: `name*` [`color`, `icon`, `listId`, `listKind`, `spaceId`, `parentId`] — crea un proyecto nuevo;
+  `spaceId` (uuid) lo crea en ese espacio compartido (ausente = personal; nunca cae al
+  personal si el espacio no es accesible: el servidor rechaza); `parentId` lo anida al
+  crear y, sin `spaceId`, nace en el espacio de la madre. Las mutaciones posteriores del
+  mismo lote con su `listId` van a ese espacio, pero un `add_task` en esa lista va en un
+  lote POSTERIOR (el cliente ya parte la llamada);
   el resultado trae el `listId` generado (o el que tú le hayas dado,
   ver "Encadenar dentro del MISMO lote" más abajo). `color` acepta uno de
   `red|amber|green|blue|violet|pink` o un hex `#rrggbb`; sin color/icono por
@@ -894,7 +905,7 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
 # mutate_tasks
-add_task: text* [list|listId, assigneeId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
+add_task: text* [list|listId, spaceId, assigneeId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
 update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes]
@@ -917,7 +928,7 @@ set_parent: taskId*, parentId* (uuid de la madre, o null para sacarla; taskId pu
 # organize
 delete: taskId*
 remove_section: sectionId*
-create_list: name* [color, icon, listId, listKind]
+create_list: name* [color, icon, listId, listKind, spaceId, parentId]
 nest_list: listId*, parentId*
 rename_list: listId*, name*
 remove_list: listId*

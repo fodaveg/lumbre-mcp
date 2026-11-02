@@ -113,7 +113,8 @@ servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicad
 ## Espacios y asignación
 
 Usa `listId` para destinos compartidos y comprueba el espacio: lo creado allí lo ven
-TODOS sus miembros. `set_assignee` usa `assigneeId` como `accountId` de
+TODOS sus miembros. `create_list` y `add_task` aceptan `spaceId`; si el servidor lo
+rechaza (`espacio no accesible`), no reintentes en personal. `set_assignee` usa `assigneeId` como `accountId` de
 `spaces[].members` (64 hex minúsculas); `""` desasigna. Vale también sobre subtareas,
 con asignado propio. En un alta requiere `listId` compartida y miembro activo; si
 no, la app rechaza el alta y la tarea NO se crea: dilo así. No envíes `null`.

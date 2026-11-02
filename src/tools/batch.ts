@@ -134,7 +134,8 @@ export const mutateTasksStrictOpSchema = z.discriminatedUnion('op', [
 			time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
 			recurrence: recurrenceSchema.optional(),
 			subtasks: subtasksSchema.optional(),
-			notes: z.string().max(10000).optional()
+			notes: z.string().max(10000).optional(),
+			spaceId: z.string().guid().optional()
 		})
 		.strict(),
 	z
@@ -303,7 +304,9 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 			color: z.string().max(20).optional(),
 			icon: z.string().max(16).optional(),
 			listId: z.string().guid().optional(),
-			listKind: z.enum(['area', 'project']).optional()
+			listKind: z.enum(['area', 'project']).optional(),
+			spaceId: z.string().guid().optional(),
+			parentId: z.string().guid().nullable().optional()
 		})
 		.strict(),
 	z
@@ -418,6 +421,7 @@ export const mutateTasksOpSchema = z
 			.optional()
 			.describe('set_parent: madre, o null'),
 		listId: z.string().guid().optional().describe('Id del proyecto o área destino de un add_task'),
+		spaceId: z.string().guid().optional().describe('add_task: espacio compartido destino (con list o listId)'),
 		habitId: z
 			.string()
 			.guid()
@@ -518,6 +522,7 @@ export const organizeOpSchema = z
 		icon: z.string().max(16).optional(),
 		revive: z.boolean().optional().describe('true restaura una nota de proyecto o área borrada previamente'),
 		listKind: z.enum(['area', 'project']).optional().describe('create_list/set_list_kind: tipo visible del contenedor'),
+		spaceId: z.string().guid().optional().describe('create_list: espacio compartido donde nace (ausente = personal)'),
 		// `as`/`when`/`deadline` laxos a propósito: el formato lo valida el schema
 		// estricto, por-op, con un mensaje legible y sin tumbar el lote.
 		as: z.string().optional(),
@@ -785,7 +790,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, assigneeId, section, ' +
-							'priority, date, deadline, time, recurrence, subtasks, notes, tags] (text literal, sin ' +
+							'priority, date, deadline, time, recurrence, subtasks, notes, tags, spaceId] (text literal, sin ' +
 							'interpretar fechas ni #etiquetas) · complete: taskId* ' +
 							'[done] · cancel: taskId* [cancelled] · update: taskId*, ≥1 de [content, notes, tags, ' +
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
@@ -838,7 +843,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): delete: taskId* · remove_section: sectionId* · ' +
-							'create_list: name* [color, icon, listId, listKind] · nest_list: listId*, parentId* · ' +
+							'create_list: name* [color, icon, listId, listKind, spaceId, parentId] · nest_list: listId*, parentId* · ' +
 							'rename_list: listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* ' +
 							'[revive] · move_to_list: taskId*, uno de [listId, list] · ' +
 							'set_list_kind: listId*, listKind* ("area"|"project") · ' +

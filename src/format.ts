@@ -776,9 +776,10 @@ export function formatListDetail(l: LumbreListSummary, parentName?: string | nul
  * fila conserva la metadata que identifica el vínculo y su URL literal,
  * incluidos `obsidian://` y el enlace universal de Hebra para notas.
  */
-export function formatListLinks(listId: string, links: LumbreListLink[]): string {
-	if (links.length === 0) return `Sin vínculos para el proyecto o área ${listId}.`;
-	const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} del proyecto o área ${listId}:`;
+export function formatListLinks(listId: string, links: LumbreListLink[], spaceId?: string | null): string {
+	const space = spaceId ? ` (espacio: ${spaceId})` : '';
+	if (links.length === 0) return `Sin vínculos para el proyecto o área ${listId}${space}.`;
+	const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} del proyecto o área ${listId}${space}:`;
 	const body = links.map(
 		(link) =>
 			`· ${link.label} — ${link.url}\n` +

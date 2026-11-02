@@ -71,7 +71,9 @@ lee [references/destinations.md](references/destinations.md).
 
 ## Espacios compartidos
 Crear en una lista compartida lo ven TODOS sus miembros. Resuelve el espacio y usa
-`listId` de `list_lists`/`get_list`; sin destino, el alta sigue siendo personal.
+`listId` de `list_lists`/`get_list`; sin destino, el alta sigue siendo personal. Para crear un
+proyecto en un espacio: `organize` `create_list` con `spaceId` (y `parentId` para anidarlo); un
+`add_task` con `spaceId` exige `list` o `listId`.
 Para «asignadas a mí», `list_tasks({scope:"all",assignee:"me"})`. `set_assignee` usa el
 `accountId` de `spaces[].members` (64 hex minúsculas); `""` desasigna, nunca email,
 UUID ni `null`. También vale en subtareas, con asignado propio. El servidor aplica

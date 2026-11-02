@@ -412,12 +412,20 @@ export async function getListById(config, listId) {
  * del destino, incluidos `obsidian://` y los enlaces universales de Hebra.
  */
 export async function getListLinks(config, listId) {
+    return (await getListLinksResult(config, listId)).links;
+}
+/** Como `getListLinks`, con el `spaceId` del store de la lista (ausente o null = personal / servidor viejo). */
+export async function getListLinksResult(config, listId) {
     const params = new URLSearchParams({ listId });
     const body = await request(config, `/api/list-links?${params.toString()}`);
     if (!body || typeof body !== 'object' || !Array.isArray(body.links)) {
         throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/list-links?listId=.');
     }
-    return body.links;
+    const spaceId = body.spaceId;
+    return {
+        spaceId: typeof spaceId === 'string' ? spaceId : null,
+        links: body.links
+    };
 }
 function isListLink(value, listId, url, label, target) {
     if (!value || typeof value !== 'object')
@@ -1413,7 +1421,9 @@ function translateOp(op) {
                     name: op.name,
                     ...(op.color !== undefined ? { color: op.color } : {}),
                     ...(op.icon !== undefined ? { icon: op.icon } : {}),
-                    ...(op.listKind !== undefined ? { listKind: op.listKind } : {})
+                    ...(op.listKind !== undefined ? { listKind: op.listKind } : {}),
+                    ...(op.spaceId !== undefined ? { spaceId: op.spaceId } : {}),
+                    ...(op.parentId !== undefined ? { parentId: op.parentId } : {})
                 }
             };
         case 'nest_list':

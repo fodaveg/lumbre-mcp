@@ -130,6 +130,9 @@ export interface AddTaskInput {
 	 *  tiene ninguno. */
 	tags?: string[];
 	list?: string;
+	/** Espacio compartido destino (uuid); el servidor decide si es accesible y
+	 *  exige `list` o `listId`. Ausente = biblioteca personal. */
+	spaceId?: string;
 	/** Id ESTABLE de la lista de "Algún día" destino (lote 2 — identidad de
 	 *  listas), alternativa a `list` (por nombre) inmune a renames. Preferente
 	 *  sobre `list` si se indican ambos — ver `/api/ingest` en el repo principal. */
@@ -778,6 +781,8 @@ export interface LinkListNoteResult {
 	listId: string;
 	/** La lista estaba en la papelera, pero el vínculo se escribió igualmente. */
 	deleted: boolean;
+	/** Espacio del store de la lista; ausente en servidores viejos. */
+	spaceId?: string | null;
 	link: LumbreListLink;
 }
 
@@ -789,6 +794,8 @@ export interface UnlinkListNoteResult {
 	deleted: boolean;
 	/** `false` es éxito idempotente: el vínculo ya no estaba registrado. */
 	removed: boolean;
+	/** Espacio del store de la lista; ausente en servidores viejos. */
+	spaceId?: string | null;
 }
 
 /**
@@ -907,12 +914,24 @@ export async function getListById(config: LumbreConfig, listId: string): Promise
  * del destino, incluidos `obsidian://` y los enlaces universales de Hebra.
  */
 export async function getListLinks(config: LumbreConfig, listId: string): Promise<LumbreListLink[]> {
+	return (await getListLinksResult(config, listId)).links;
+}
+
+/** Como `getListLinks`, con el `spaceId` del store de la lista (ausente o null = personal / servidor viejo). */
+export async function getListLinksResult(
+	config: LumbreConfig,
+	listId: string
+): Promise<{ spaceId: string | null; links: LumbreListLink[] }> {
 	const params = new URLSearchParams({ listId });
 	const body = await request(config, `/api/list-links?${params.toString()}`);
 	if (!body || typeof body !== 'object' || !Array.isArray((body as { links?: unknown }).links)) {
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/list-links?listId=.');
 	}
-	return (body as { links: LumbreListLink[] }).links;
+	const spaceId = (body as { spaceId?: unknown }).spaceId;
+	return {
+		spaceId: typeof spaceId === 'string' ? spaceId : null,
+		links: (body as { links: LumbreListLink[] }).links
+	};
 }
 
 function isListLink(
@@ -2272,6 +2291,10 @@ export type MutateTasksOp =
 			/** Tipo visible del contenedor nuevo (MC6); ausente = default del
 			 *  servidor (`'project'`). */
 			listKind?: 'area' | 'project';
+			/** Espacio compartido donde nace (uuid); ausente = personal. */
+			spaceId?: string;
+			/** Madre; sin `spaceId` la lista nace en el espacio de la madre. */
+			parentId?: string | null;
 	  }
 	| { op: 'nest_list'; listId: string; parentId: string | null }
 	| { op: 'rename_list'; listId: string; name: string }
@@ -2664,7 +2687,9 @@ function translateOp(op: MutateTasksOp): BatchOp {
 					name: op.name,
 					...(op.color !== undefined ? { color: op.color } : {}),
 					...(op.icon !== undefined ? { icon: op.icon } : {}),
-					...(op.listKind !== undefined ? { listKind: op.listKind } : {})
+					...(op.listKind !== undefined ? { listKind: op.listKind } : {}),
+					...(op.spaceId !== undefined ? { spaceId: op.spaceId } : {}),
+					...(op.parentId !== undefined ? { parentId: op.parentId } : {})
 				}
 			};
 		case 'nest_list':
