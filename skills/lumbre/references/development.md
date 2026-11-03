@@ -50,14 +50,17 @@ mediante las superficies nativas.
 ## Lo que ve el usuario: el tablero
 
 La app tiene una vista opcional, el tablero de agentes, que agrupa las tareas por la
-marca de estado de su título: `@acked` en Aceptadas, `@wip` en En curso, `@done` en
-Hechas y `@not-done` en No hechas (rótulos actuales en castellano; pueden cambiar).
+marca de estado de su título, en este orden: `@not-done` en No hechas, `@acked` en
+Aceptadas, `@wip` en En curso y `@done` en Por revisar (rótulos desde la web 6275bb9,
+28 oct 2026, docs/19 enmienda 27; antes la columna de `@done` se llamaba Hechas).
 
 - Una tarea sin marca no aparece en el tablero.
 - El usuario ve cada cambio de marca cuando el agente lo escribe, y un `@wip` olvidado
   se le muestra como atascado pasado un tiempo. Por eso rige «Cierre: ninguna tarea se
   queda en `@wip`».
-- `@not-done` llega cuando el usuario devuelve una tarea hecha desde el tablero.
+- `@not-done` llega cuando el usuario devuelve una tarea `@done` desde el tablero
+  (menú, selección múltiple y detalle; docs/19 enmienda 26, web 6275bb9): la app
+  escribe la marca `@not-done` y la tarea pasa a la columna No hechas.
 
 El umbral y la interfaz están en el manual de usuario: <https://lumbre.pro/ayuda/>.
 
