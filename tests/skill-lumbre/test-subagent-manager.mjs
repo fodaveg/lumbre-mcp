@@ -130,6 +130,7 @@ const readerContract = definitions.contracts.agents.find((agent) => agent.name =
 assert.deepEqual(readerContract.allowedOperations, [
   "refresh_sync",
   "list_lists",
+  "list_organizations",
   "list_tasks",
   "get_task",
   "read_attachment",

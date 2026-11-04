@@ -27,6 +27,7 @@ export const ALLOWED_OPERATIONS = [
   "list_tasks_today",
   "get_task_full",
   "list_lists",
+  "list_organizations",
   "list_tasks",
   "read_snapshot",
   "refresh_sync",

@@ -57,6 +57,7 @@
       "allowedOperations": [
         "refresh_sync",
         "list_lists",
+        "list_organizations",
         "list_tasks",
         "get_task",
         "read_attachment",
@@ -65,7 +66,7 @@
         "list_brl_entries"
       ],
       "operationLimits": [
-        "Acota list_tasks por scope, list y section cuando sea posible; para un id, get_task.",
+        "Acota list_tasks por scope, list y section cuando sea posible; para un id, get_task. Sin spaceId, list_tasks y list_lists solo leen Personal; list_organizations (solo lectura) da los espacios y su granted.",
         "Usa get_task para ids explícitos y para recuperar notas o propiedades íntegras que cambien la respuesta.",
         "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio.",
         "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; list_brl_entries lee el registro (BRL) de un día, que no son tareas."

@@ -107,10 +107,8 @@ conserva intención, autorización y veredicto.
    [references/attachments-and-connection.md](references/attachments-and-connection.md).
 5. Confirma inmediatamente antes de borrar o de otra acción difícil de recuperar,
    salvo autorización inequívoca para ese objetivo concreto.
-6. Usa la autorización segura del cliente MCP. Nunca pongas tokens en URLs, tareas,
-   notas, logs ni documentación.
-7. Las reglas del repositorio y la petición mandan sobre perfiles locales. La skill
-   no amplía autoridad ni instala, retira o reemplaza otras skills al activarse.
+6. Usa la autorización segura del cliente MCP. Nunca pongas tokens en URLs, tareas, notas, logs ni documentación.
+7. Las reglas del repositorio y la petición mandan sobre perfiles locales. La skill no amplía autoridad ni instala, retira o reemplaza otras skills al activarse.
 
 Los límites personales de autonomía, herramientas privadas, superficies externas y
 papeleo específico pertenecen a perfiles opcionales. No los conviertas en requisitos
