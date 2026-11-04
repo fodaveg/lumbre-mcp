@@ -7,6 +7,7 @@ import { stripToolsListSchema } from './schema-strip.js';
 import { registerSyncTools } from './tools/sync.js';
 import { registerAttachmentTools } from './tools/attachments.js';
 import { registerListTools } from './tools/lists.js';
+import { registerOrganizationTools } from './tools/organizations.js';
 import { registerBrlTools } from './tools/brl.js';
 import { registerHabitTools } from './tools/habits.js';
 import { registerTaskTools } from './tools/tasks.js';
@@ -197,6 +198,9 @@ export function createServer(config, opts = {}) {
     // Familia «listas y proyectos» (`src/tools/lists.ts`, paridad UI↔MCP,
     // `docs/20-contrato-lista.md`).
     const { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool } = registerListTools(server, ctx);
+    // Familia «organizaciones» (`src/tools/organizations.ts`): `list_organizations`,
+    // directorio de solo lectura (`docs/81` §4.7).
+    const { listOrganizationsTool } = registerOrganizationTools(server, ctx);
     // Familia «adjuntos» (`src/tools/attachments.ts`): las tres tools que
     // quedan solas en `toolset: 'attachments'`, ver `CreateServerOptions`. Sus
     // tres handles no se usan aquí (no entran en el filtro de abajo — son las
@@ -227,6 +231,7 @@ export function createServer(config, opts = {}) {
             refreshSyncTool,
             listTasksTool,
             listListsTool,
+            listOrganizationsTool,
             getListLinksTool,
             getListTool,
             linkListNoteTool,

@@ -4886,8 +4886,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 18 tools de siempre', async () => {
-		expect(await toolNamesOf()).toHaveLength(18);
+	it('sin `toolset` (default): las 19 tools', async () => {
+		expect(await toolNamesOf()).toHaveLength(19);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -4898,8 +4898,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		]);
 	});
 
-	it('`toolset: "all"` (explícito): las 18, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(18);
+	it('`toolset: "all"` (explícito): las 19, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(19);
 	});
 });
 

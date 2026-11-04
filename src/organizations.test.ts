@@ -316,6 +316,26 @@ describe('list_organizations', () => {
 		]) expect(out).toContain(expected);
 	});
 
+	it('admite la forma real del servidor: name null en miembros y espacios, también en el primer nivel de un invitado', async () => {
+		stubFetch(() =>
+			json({
+				organizations: [
+					{
+						orgId: 'org-2',
+						name: 'Otra SL',
+						members: [{ accountId: OTHER, role: 'admin', name: null }],
+						spaces: [{ spaceId: SPACE_B, name: null, granted: false }]
+					}
+				],
+				spaces: [{ spaceId: SPACE_A, name: null, granted: true }]
+			})
+		);
+		const dir = await getOrganizationsDirectory(CONFIG);
+		expect(dir.organizations[0]!.members[0]!.name).toBeNull();
+		expect(dir.organizations[0]!.spaces[0]!.name).toBeNull();
+		expect(dir.spaces[0]).toEqual({ spaceId: SPACE_A, name: null, granted: true });
+	});
+
 	it('sin organizaciones ni espacios lo dice', async () => {
 		stubFetch(() => json({ organizations: [], spaces: [] }));
 		expect(text(await (await client()).callTool({ name: 'list_organizations', arguments: {} }))).toContain('Solo hay Personal');

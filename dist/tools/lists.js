@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { getListById, getListLinksResult, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
-import { errorResult, textResult } from './shared.js';
+import { errorResult, spaceIdSchema, textResult } from './shared.js';
 const listNoteTargetInputSchema = {
     listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)'),
     url: z
@@ -23,11 +23,16 @@ export function registerListTools(server, ctx) {
         annotations: { readOnlyHint: true },
         description: 'Enumera TODOS los proyectos y áreas con su recuento de tareas, incluidos los ' +
             'vacíos (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacío de ' +
-            'inexistente. Sin parámetros.',
-        inputSchema: {}
-    }, async () => {
+            'inexistente. Sin spaceId, Personal.',
+        inputSchema: {
+            spaceId: spaceIdSchema
+        }
+    }, async (input) => {
         try {
-            const { lists, spaces } = await getListCatalog(ctx.config, { notes: 'length' });
+            const { lists, spaces } = await getListCatalog(ctx.config, {
+                notes: 'length',
+                ...(input.spaceId ? { spaceId: input.spaceId } : {})
+            });
             return textResult(formatListSummaries(lists, spaces));
         }
         catch (err) {

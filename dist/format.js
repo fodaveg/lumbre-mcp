@@ -775,4 +775,33 @@ export function formatHabitList(habits, habitLog, includeArchived) {
     });
     return [`${visible.length} hábito(s)${omittedSuffix}:`, ...lines].join('\n');
 }
+/**
+ * `list_organizations`: organizaciones con miembros y espacios, y los espacios
+ * sueltos. `granted` dice si el agente puede leer el contenido del espacio con su
+ * `spaceId`; sin concesión solo se ve el nombre.
+ */
+export function formatOrganizationsDirectory(directory) {
+    const spaceLine = (s) => `  · ${s.name ?? '(sin nombre)'} (spaceId: ${s.spaceId}) — ` +
+        (s.granted ? 'contenido legible: pasa spaceId' : 'sin permiso para agentes: solo se ve el nombre');
+    if (directory.organizations.length === 0 && directory.spaces.length === 0) {
+        return 'Sin organizaciones ni espacios. Solo hay Personal.';
+    }
+    const lines = [];
+    for (const org of directory.organizations) {
+        lines.push(`Organización "${org.name}" (orgId: ${org.orgId})`);
+        lines.push(`  Miembros (${org.members.length}):`);
+        for (const m of org.members)
+            lines.push(`  - ${m.name ?? '(sin nombre)'} (${m.role}, accountId: ${m.accountId})`);
+        lines.push(org.spaces.length > 0 ? `  Espacios (${org.spaces.length}):` : '  Sin espacios.');
+        for (const s of org.spaces)
+            lines.push(spaceLine(s));
+    }
+    if (directory.spaces.length > 0) {
+        lines.push(`Espacios sin organización (${directory.spaces.length}):`);
+        for (const s of directory.spaces)
+            lines.push(spaceLine(s));
+    }
+    lines.push('Sin spaceId, list_tasks y list_lists solo leen Personal.');
+    return lines.join('\n');
+}
 //# sourceMappingURL=format.js.map
