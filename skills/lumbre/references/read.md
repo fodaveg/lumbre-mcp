@@ -36,3 +36,14 @@ asignada va dentro de su madre si esta también sale; si no, suelta con `subtare
 `refresh_sync` fuerza solo el store personal; no promete refrescar los compartidos.
 BRL y hábitos son personales. Un espacio oculto se trata como inexistente, sin
 consultar `/api/spaces` ni probar otra credencial.
+
+Leer por espacio. Sin `spaceId`, `list_tasks` y `list_lists` solo ven Personal: no hay
+espacio activo y cada llamada dice su destino. Para leer un espacio, pasa su `spaceId` en
+las dos herramientas; un nombre de lista o `assignee: "me"` se resuelven dentro de ese
+espacio, y las referencias a listas de otro espacio se muestran con el suyo. Si una tarea
+o lista devuelta no es de ese espacio, la herramienta da error en vez de mostrarla. Para
+saber qué espacios existen, usa `list_organizations`: solo lectura, con organizaciones,
+miembros y espacios, y `granted` indica si la persona encendió el permiso de agente de ese
+espacio. Sin `granted` solo se ve el nombre; no leas ni escribas su contenido. Si
+`list_organizations` da error de ruta no encontrada, las organizaciones están apagadas en
+ese servidor: trabaja con Personal y los espacios de `list_lists`.

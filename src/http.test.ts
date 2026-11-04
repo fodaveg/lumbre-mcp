@@ -145,7 +145,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		expect(body.result.instructions).toContain('https://lumbre.pro/ayuda/');
 	});
 
-	it('tools/list responde con las 18 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
+	it('tools/list responde con las 19 tools de producción, sin `$schema` y bajo el mismo techo de bytes que index.test.ts', async () => {
 		const res = await fetch(`${baseUrl}/mcp`, {
 			method: 'POST',
 			headers: { ...JSON_RPC_HEADERS, authorization: 'Bearer tok-válido' },
@@ -153,7 +153,7 @@ describe('POST /mcp — con token, contra el servidor real (createServer de inde
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: Array<{ name: string; inputSchema: unknown }> } };
-		expect(body.result.tools).toHaveLength(18);
+		expect(body.result.tools).toHaveLength(19);
 		expect(JSON.stringify(body.result.tools)).not.toMatch(/\$schema/);
 		// Mismo techo que `index.test.ts` (medido allí sobre transporte
 		// in-memory) — aquí se confirma que el mismo `stripToolsListSchema`
@@ -598,7 +598,7 @@ describe('POST /mcp/<token> — token en el path (app de Claude, sin cabeceras)'
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { result: { tools: unknown[] } };
-		expect(body.result.tools).toHaveLength(18);
+		expect(body.result.tools).toHaveLength(19);
 	});
 
 	it('si vienen las dos formas, gana la cabecera', async () => {

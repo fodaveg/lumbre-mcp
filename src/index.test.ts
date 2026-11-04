@@ -103,6 +103,7 @@ describe('tools/list — superficie completa', () => {
 		'refresh_sync',
 		'list_tasks',
 		'list_lists',
+		'list_organizations',
 		'get_list_links',
 		'get_list',
 		'link_list_note',
@@ -119,12 +120,12 @@ describe('tools/list — superficie completa', () => {
 		'list_habits'
 	];
 
-	it('sigue exponiendo las 18 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 19 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27; ' +
 		'añadida get_list el 2026-09-16, tarea 827a7878; retiradas las nueve sueltas de mutación ' +
 		'individual y partido el lote en mutate_tasks/organize el 2026-09-19, tarea 6f62c877; ' +
-		'añadida list_habits MC6 el 2026-09-24; añadida prepare_attachment_upload el 2026-10-27)', () => {
-		expect(tools).toHaveLength(18);
+		'añadida list_habits MC6 el 2026-09-24; añadida prepare_attachment_upload el 2026-10-27; añadida list_organizations el 2026-11-04)', () => {
+		expect(tools).toHaveLength(19);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -185,6 +186,7 @@ describe('tools/list — superficie completa', () => {
 			'list_brl_entries',
 			'list_habits',
 			'list_lists',
+			'list_organizations',
 			'list_tasks',
 			'read_attachment'
 		];
@@ -221,7 +223,7 @@ describe('tools/list — superficie completa', () => {
 		expect(schema.properties).not.toHaveProperty('fullNotes');
 	});
 
-	it('techo de bytes de las 18 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 19 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21

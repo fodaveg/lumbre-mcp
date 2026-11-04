@@ -27,6 +27,7 @@ import {
 } from '../notes.js';
 import {
 	assigneeIdSchema,
+	spaceIdSchema,
 	errorResult,
 	formatOutcomeReport,
 	recurrenceSchema,
@@ -209,9 +210,9 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.optional()
 					.describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
 				listId: z.string().guid().optional().describe('Id exacto de lista personal o compartida, preferente sobre list'),
+				spaceId: spaceIdSchema,
 				assignee: z.literal('me').optional().describe('Solo las asignadas a mí (cualquier scope; "all" incluye futuras y sin fecha). ' +
-					'Subtarea asignada: anidada en su madre si esta sale; si no, suelta con parentId. ' +
-					'Si el servidor no lo aplica, error, nunca el listado general'),
+					'Subtarea asignada: anidada en su madre si esta sale; si no, suelta con parentId'),
 				section: z
 					.string()
 					.optional()
@@ -273,7 +274,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					// editó desde `since`; el criterio sigue siendo SOLO la marca.
 					const { list: tasks, autoRender } = await listTasksNotesSinceTwoPhase(input, since);
 					const refs = await resolveRefs(ctx.config, refTexts(tasks, 'auto', autoRender), {
-						includeArchived: input.includeArchived
+						includeArchived: input.includeArchived,
+						spaceId: input.spaceId
 					});
 					return textResult(
 						formatTaskList(await describeTaskSpaces(ctx.config, tasks), effectiveScopeLabel(input), {
@@ -298,7 +300,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					});
 					ctx.taskCache.setAll(tasks);
 					const refs = await resolveRefs(ctx.config, refTexts(tasks, notesMode), {
-						includeArchived: input.includeArchived
+						includeArchived: input.includeArchived,
+						spaceId: input.spaceId
 					});
 					return textResult(formatTaskList(await describeTaskSpaces(ctx.config, tasks), effectiveScopeLabel(input), { notesMode, refs }));
 				}
@@ -306,7 +309,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 				if (notesMode === 'auto') {
 					const { list, autoRender } = await listTasksAutoTwoPhase(input);
 					const refs = await resolveRefs(ctx.config, refTexts(list, notesMode, autoRender), {
-						includeArchived: input.includeArchived
+						includeArchived: input.includeArchived,
+						spaceId: input.spaceId
 					});
 					return textResult(
 						formatTaskList(await describeTaskSpaces(ctx.config, list), effectiveScopeLabel(input), {
@@ -336,7 +340,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					);
 				}
 				const refs = await resolveRefs(ctx.config, refTexts(tasks, notesMode), {
-					includeArchived: input.includeArchived
+					includeArchived: input.includeArchived,
+					spaceId: input.spaceId
 				});
 				return textResult(formatTaskList(await describeTaskSpaces(ctx.config, tasks), effectiveScopeLabel(input), { notesMode, refs }));
 			} catch (err) {

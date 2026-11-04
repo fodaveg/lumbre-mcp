@@ -1,4 +1,4 @@
-import { findTasksByIds, listLists, type LumbreConfig, type LumbreTask, type StoreMetadata } from './lumbre-client.js';
+import { findTasksByIds, getListById, listLists, type LumbreConfig, type LumbreListSummary, type LumbreTask, type StoreMetadata } from './lumbre-client.js';
 import { formatNoteMarker } from './notes.js';
 import { formatTags } from './tag-format.js';
 
@@ -58,6 +58,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *  quedan SIN COMPROBAR y se pintan como tales, nunca como rotos (declararlos
  *  rotos sería mentir, y "roto" es justo la señal que tiene que ser fiable). */
 export const MAX_REF_IDS = 200;
+
+/** Tope de consultas por id para referencias a listas ausentes del catálogo del destino. */
+export const MAX_LIST_REF_LOOKUPS = 25;
 
 /** Ids referenciados en un lote de textos, deduplicados y separados por tipo. */
 export interface RefIds {
@@ -148,7 +151,7 @@ export function collectRefIds(texts: (string | null | undefined)[]): RefIds {
 export async function resolveRefs(
 	config: LumbreConfig,
 	texts: (string | null | undefined)[],
-	opts: { includeArchived?: boolean } = {}
+	opts: { includeArchived?: boolean; spaceId?: string } = {}
 ): Promise<RefResolution> {
 	const { taskIds, listIds } = collectRefIds(texts);
 	const resolution = emptyRefResolution();
@@ -176,19 +179,45 @@ export async function resolveRefs(
 			// Best-effort: sin comprobar → «sin resolver», nunca «rota».
 		}
 	};
+	const store = (l: LumbreListSummary): void => {
+		resolution.lists.set(l.id, l.name);
+		resolution.listStores!.set(l.id, l);
+		resolution.listTags.set(l.id, { own: l.tags, effective: l.effectiveTags });
+	};
 	const listBranch = async (): Promise<void> => {
 		if (listIds.length === 0) return;
 		try {
-			const lists = await listLists(config);
-			for (const l of lists) {
-				resolution.lists.set(l.id, l.name);
-				resolution.listStores!.set(l.id, l);
-				resolution.listTags.set(l.id, { own: l.tags, effective: l.effectiveTags });
+			// El catálogo es el del destino de la lectura (`spaceId`, o Personal): con
+			// organizaciones un catálogo sin destino ya no trae las listas de los espacios.
+			const lists = await listLists(config, opts.spaceId ? { spaceId: opts.spaceId } : {});
+			for (const l of lists) store(l);
+			// En una lectura de destino único el catálogo trae TODAS sus listas vivas:
+			// una referencia que no esté en él puede ser de OTRO espacio, así que no se
+			// declara rota sin preguntar por su id (que nombra su destino) en vez de
+			// confundirla con una lista del mismo nombre de este.
+			const missing = listIds.filter((id) => !resolution.lists.has(id));
+			const askable = missing.filter((id) => UUID_RE.test(id)).slice(0, MAX_LIST_REF_LOOKUPS);
+			const lookedUp = await Promise.all(
+				askable.map(async (id) => {
+					try {
+						return { id, list: await getListById(config, id), failed: false };
+					} catch {
+						return { id, list: null, failed: true };
+					}
+				})
+			);
+			const failed = new Set<string>();
+			for (const r of lookedUp) {
+				if (r.failed) failed.add(r.id);
+				else if (r.list) store(r.list);
 			}
-			// `listLists` trae TODAS las listas vivas, así que cualquier id de lista
-			// referenciado queda comprobado: si no está en el mapa, es que ya no
-			// existe (rota), no que no se haya mirado.
-			for (const id of listIds) resolution.checkedLists.add(id);
+			// Sin comprobar solo lo que cabía preguntar y no se preguntó (por el tope);
+			// un id que no es uuid no existe en ningún destino y queda roto como antes.
+			const notAsked = new Set(missing.filter((id) => UUID_RE.test(id) && !askable.includes(id)));
+			for (const id of listIds) {
+				if (failed.has(id) || notAsked.has(id)) continue;
+				resolution.checkedLists.add(id);
+			}
 		} catch {
 			// Best-effort — ver arriba.
 		}

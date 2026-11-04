@@ -180,8 +180,13 @@ export type TaskScope = 'today' | 'week' | 'upcoming' | 'inbox' | 'someday' | 'o
 export interface ListTasksInput {
 	/** Identidad exacta de la lista; preferente sobre el nombre. */
 	listId?: string;
-	/** Filtro evaluado por el servidor sobre los stores autorizados. */
+	/** Filtro evaluado por el servidor sobre los stores autorizados. Con `spaceId`
+	 *  se resuelve dentro de ESE espacio: el servidor usa el accountId de la persona
+	 *  en ese store, el cliente no supone uno global. */
 	assignee?: 'me';
+	/** Espacio (uuid) cuyo contenido se lee. Ausente = Personal (con organizaciones
+	 *  un agente sin destino solo ve Personal, `docs/81` §4.7). */
+	spaceId?: string;
 	scope?: TaskScope;
 	/** Nº de días de la ventana de `scope: 'upcoming'`, CONTANDO hoy (default 7
 	 *  server-side, tope 14). Con cualquier otro scope el servidor responde 400
@@ -534,6 +539,7 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 	if (input.days !== undefined) params.set('days', String(input.days));
 	if (input.list && !input.listId) params.set('list', input.list);
 	if (input.listId) params.set('listId', input.listId);
+	if (input.spaceId) params.set('spaceId', input.spaceId);
 	if (input.assignee) params.set('assignee', input.assignee);
 	if (input.section) params.set('section', input.section);
 	if (input.includeDone) params.set('includeDone', 'true');
@@ -559,6 +565,7 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 				400
 			);
 		}
+		if (input.spaceId && isSpaceNotAccessible(err)) throw spaceNotAccessibleError(input.spaceId, err);
 		if (input.listId && isListNotFound(err)) {
 			throw new LumbreApiError(
 				`El listId ${input.listId} no está entre los proyectos/áreas que el servidor deja ver a esta ` +
@@ -573,6 +580,10 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/tasks.');
 	}
 	const tasks = body as LumbreTask[];
+	// Falla cerrado con destino por espacio: una fila de otro destino (o sin
+	// procedencia, que es lo que manda un servidor que ignoró `spaceId`) nunca se
+	// presenta como de este espacio.
+	if (input.spaceId) assertRowsInSpace(tasks, input.spaceId, 'tareas');
 	// Un servidor anterior ignora parámetros desconocidos. No presentar un
 	// listado general como filtrado: tampoco se recorta aquí porque el límite
 	// podría haberse aplicado antes del filtro y ocultar tareas del destino.
@@ -591,7 +602,9 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 				'listado general como «asignadas a mí»; repite sin assignee.'
 		);
 	}
-	if (input.list && !input.listId && tasks.length === 0) {
+	if (input.list && !input.listId && !input.spaceId && tasks.length === 0) {
+		// Con `spaceId` el nombre se resuelve dentro de ese espacio y no puede empatar
+		// con el de otro: no hay ambigüedad que diagnosticar.
 		// El servidor responde 200 con [] cuando el nombre empata entre dos o más
 		// stores compartidos; una coincidencia personal gana y no es ambigua.
 		// Solo entonces se consulta el catálogo. Es un diagnóstico auxiliar: si el
@@ -617,8 +630,27 @@ export async function listTasks(config: LumbreConfig, input: ListTasksInput): Pr
 			);
 		}
 	}
-	if ((input.listId || input.assignee) && tasks.length === 0 && (await getListCatalog(config, { notes: 'length' })).spaces === undefined) {
+	if (input.spaceId && tasks.length === 0) {
+		// Vacío no distingue «espacio sin tareas» de «servidor que ignoró spaceId»:
+		// solo se acepta si el catálogo autorizado confirma ese espacio.
+		const { spaces } = await getListCatalog(config, { notes: 'length', spaceId: input.spaceId });
+		if (!spaces?.some((space) => space.spaceId === input.spaceId)) {
+			throw spaceNotConfirmedError(input.spaceId);
+		}
+	} else if ((input.listId || input.assignee) && tasks.length === 0 && (await getListCatalog(config, { notes: 'length' })).spaces === undefined) {
 		throw new LumbreApiError('La API no confirmó soporte de espacios para el filtro pedido: respuesta vacía sin catálogo spaces. Actualiza Lumbre.');
+	}
+	if (input.spaceId && input.assignee && tasks.length > 0) {
+		// `assignee=me` lo resuelve el servidor con el accountId de esta persona en ESTE
+		// store. Se contrasta con los miembros que el catálogo da para el espacio.
+		const { spaces } = await getListCatalog(config, { notes: 'length', spaceId: input.spaceId });
+		const members = spaces?.find((space) => space.spaceId === input.spaceId)?.members;
+		if (members && tasks.some((t) => !t.assigneeId || !members.some((m) => m.accountId === t.assigneeId))) {
+			throw new LumbreApiError(
+				`El servidor devolvió tareas asignadas a alguien que no es miembro del espacio ${input.spaceId}: ` +
+					'no se presentan como «asignadas a mí».'
+			);
+		}
 	}
 	return input.assignee ? withoutDuplicatedSubtasks(tasks) : tasks;
 }
@@ -814,15 +846,25 @@ export interface LumbreListCatalog {
 
 export async function getListCatalog(
 	config: LumbreConfig,
-	opts: { notes?: 'length' } = {}
+	opts: { notes?: 'length'; spaceId?: string } = {}
 ): Promise<LumbreListCatalog> {
-	const path = opts.notes === 'length' ? '/api/tasks?includeLists=1&notes=length' : '/api/tasks?includeLists=1';
-	const body = await request(config, path);
+	const params = new URLSearchParams({ includeLists: '1' });
+	if (opts.notes === 'length') params.set('notes', 'length');
+	if (opts.spaceId) params.set('spaceId', opts.spaceId);
+	const path = `/api/tasks?${params.toString()}`;
+	let body: unknown;
+	try {
+		body = await request(config, path);
+	} catch (err) {
+		if (opts.spaceId && isSpaceNotAccessible(err)) throw spaceNotAccessibleError(opts.spaceId, err);
+		throw err;
+	}
 	if (!body || typeof body !== 'object' || !Array.isArray((body as { lists?: unknown }).lists)) {
 		throw new LumbreApiError(`Lumbre devolvió una respuesta inesperada para ${path}.`);
 	}
 	const catalog = body as { lists: LumbreListSummary[]; spaces?: LumbreSpace[] };
 	const spaces = catalog.spaces;
+	if (opts.spaceId) assertRowsInSpace(catalog.lists, opts.spaceId, 'listas');
 	const lists = catalog.lists.map((l) => {
 		const space = spaces?.find((space) => space.spaceId === l.spaceId);
 		const withSpace = space ? { ...l, space } : l;
@@ -834,10 +876,43 @@ export async function getListCatalog(
 	return { lists, spaces };
 }
 
+/** Mensaje de la app para un `spaceId` que esta credencial no puede leer
+ *  (`SPACE_NOT_ACCESSIBLE_ERROR`): mal formado, inexistente, sin membresía o sin permiso de agente. */
+function isSpaceNotAccessible(err: unknown): boolean {
+	return err instanceof LumbreApiError && err.status === 404 && /espacio no accesible/i.test(err.message);
+}
+
+function spaceNotAccessibleError(spaceId: string, cause: unknown): LumbreApiError {
+	const detail = cause instanceof LumbreApiError ? ` (${cause.message})` : '';
+	return new LumbreApiError(
+		`El espacio ${spaceId} no es legible para esta credencial: no existe, no eres miembro o su permiso ` +
+			'para agentes está apagado (cada persona lo enciende espacio por espacio). Consulta los espacios ' +
+			`con list_organizations o list_lists.${detail}`,
+		404
+	);
+}
+
+function spaceNotConfirmedError(spaceId: string): LumbreApiError {
+	return new LumbreApiError(
+		`La API no confirmó el espacio ${spaceId}: respuesta vacía y el catálogo autorizado no lo incluye ` +
+			'(servidor anterior a las organizaciones, que ignora spaceId). No se presenta como un espacio vacío.'
+	);
+}
+
+/** Falla cerrado si alguna fila no trae el `spaceId` pedido (otro destino, Personal o sin procedencia). */
+function assertRowsInSpace(rows: { spaceId?: string | null }[], spaceId: string, what: string): void {
+	const bad = rows.filter((r) => r.spaceId?.toLowerCase() !== spaceId.toLowerCase());
+	if (bad.length === 0) return;
+	throw new LumbreApiError(
+		`La API devolvió ${bad.length} de ${rows.length} ${what} que no son del espacio ${spaceId} ` +
+			'(otro destino, o sin procedencia porque el servidor ignoró spaceId). No se muestran como de este espacio.'
+	);
+}
+
 /** Mantiene el contrato de array usado por existencia y resolución de referencias. */
 export async function listLists(
 	config: LumbreConfig,
-	opts: { notes?: 'length' } = {}
+	opts: { notes?: 'length'; spaceId?: string } = {}
 ): Promise<LumbreListSummary[]> {
 	return (await getListCatalog(config, opts)).lists;
 }
@@ -906,6 +981,99 @@ export async function getListById(config: LumbreConfig, listId: string): Promise
 	if (!list) return null;
 	const space = (body as { spaces?: LumbreSpace[] }).spaces?.find((space) => space.spaceId === list.spaceId);
 	return space ? { ...list, space } : list;
+}
+
+/** Espacio del directorio de organizaciones: `name` es `null` si no se publicó
+ *  (o si es de una persona invitada), y `granted` dice si ESTE agente puede leer
+ *  su contenido (la persona encendió el permiso para ese espacio). */
+export interface DirectorySpace {
+	spaceId: string;
+	name: string | null;
+	granted: boolean;
+}
+
+export interface DirectoryMember {
+	accountId: string;
+	role: string;
+	name: string | null;
+}
+
+export interface DirectoryOrganization {
+	orgId: string;
+	name: string;
+	members: DirectoryMember[];
+	spaces: DirectorySpace[];
+}
+
+/** Respuesta de `GET /api/organizations/directory`: solo lectura, sin contenido. */
+export interface OrganizationsDirectory {
+	organizations: DirectoryOrganization[];
+	/** Espacios sueltos o de los que la persona es invitada, sin organización. */
+	spaces: DirectorySpace[];
+}
+
+function parseDirectorySpaces(raw: unknown): DirectorySpace[] | null {
+	if (!Array.isArray(raw)) return null;
+	const out: DirectorySpace[] = [];
+	for (const s of raw) {
+		const o = s as { spaceId?: unknown; name?: unknown; granted?: unknown } | null;
+		if (!o || typeof o.spaceId !== 'string' || typeof o.granted !== 'boolean') return null;
+		if (o.name !== null && typeof o.name !== 'string') return null;
+		out.push({ spaceId: o.spaceId, name: o.name as string | null, granted: o.granted });
+	}
+	return out;
+}
+
+/**
+ * `GET /api/organizations/directory`: organizaciones, miembros y espacios que vería
+ * la persona dueña de la credencial, en solo lectura (`docs/81` §4.7). No da
+ * contenido: para leerlo hace falta `spaceId` en `list_tasks`/`list_lists` y que
+ * el espacio tenga `granted: true`. 404 = función apagada (o servidor anterior);
+ * 503 = el servicio de identidad no responde y no se conoce la pertenencia.
+ */
+export async function getOrganizationsDirectory(config: LumbreConfig): Promise<OrganizationsDirectory> {
+	let body: unknown;
+	try {
+		body = await request(config, '/api/organizations/directory');
+	} catch (err) {
+		if (err instanceof LumbreApiError && err.status === 404) {
+			throw new LumbreApiError(
+				'Este servidor de Lumbre no ofrece el directorio de organizaciones (/api/organizations/directory): ' +
+					'las organizaciones están apagadas o es una versión anterior. Sin ellas solo hay Personal y los ' +
+					'espacios de list_lists.',
+				404
+			);
+		}
+		if (err instanceof LumbreApiError && err.status === 503) {
+			throw new LumbreApiError(
+				'El directorio de organizaciones no está disponible ahora: Sumego no responde y no se conoce la ' +
+					'pertenencia. Reintenta en un minuto; no se usa ninguna copia local.',
+				503
+			);
+		}
+		throw err;
+	}
+	const unexpected = () => new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/organizations/directory.');
+	const raw = body as { organizations?: unknown; spaces?: unknown } | null;
+	if (!raw || typeof raw !== 'object' || !Array.isArray(raw.organizations)) throw unexpected();
+	const spaces = parseDirectorySpaces(raw.spaces);
+	if (!spaces) throw unexpected();
+	const organizations: DirectoryOrganization[] = [];
+	for (const o of raw.organizations) {
+		const org = o as { orgId?: unknown; name?: unknown; members?: unknown; spaces?: unknown } | null;
+		if (!org || typeof org.orgId !== 'string' || typeof org.name !== 'string' || !Array.isArray(org.members)) throw unexpected();
+		const orgSpaces = parseDirectorySpaces(org.spaces);
+		if (!orgSpaces) throw unexpected();
+		const members: DirectoryMember[] = [];
+		for (const m of org.members) {
+			const mem = m as { accountId?: unknown; role?: unknown; name?: unknown } | null;
+			if (!mem || typeof mem.accountId !== 'string' || typeof mem.role !== 'string') throw unexpected();
+			if (mem.name !== null && mem.name !== undefined && typeof mem.name !== 'string') throw unexpected();
+			members.push({ accountId: mem.accountId, role: mem.role, name: (mem.name as string | null | undefined) ?? null });
+		}
+		organizations.push({ orgId: org.orgId, name: org.name, members, spaces: orgSpaces });
+	}
+	return { organizations, spaces };
 }
 
 /**

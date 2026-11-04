@@ -372,3 +372,13 @@ export const MAX_SUBTASK_LEN = 500;
  *  array opcional, tope `MAX_SUBTASKS` elementos de hasta `MAX_SUBTASK_LEN`
  *  caracteres cada uno. */
 export const subtasksSchema = z.array(z.string().max(MAX_SUBTASK_LEN)).max(MAX_SUBTASKS);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** `spaceId` opcional de las lecturas: uuid sin `pattern` en el JSON Schema (el techo de
+ *  `tools/list` se paga por carácter). Sin él, el servidor lee solo Personal. */
+export const spaceIdSchema = z
+	.string()
+	.refine((value) => UUID_RE.test(value), 'spaceId debe ser un uuid')
+	.optional()
+	.describe('Espacio (ver list_organizations); sin él, Personal');

@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { getListById, getListLinksResult, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
-import { errorResult, textResult, type ToolCtx } from './shared.js';
+import { errorResult, spaceIdSchema, textResult, type ToolCtx } from './shared.js';
 
 const listNoteTargetInputSchema = {
 	listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)'),
@@ -31,13 +31,18 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 			description:
 				'Enumera TODOS los proyectos y áreas con su recuento de tareas, incluidos los ' +
 				'vacíos (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacío de ' +
-				'inexistente. Sin parámetros.',
+				'inexistente. Sin spaceId, Personal.',
 
-			inputSchema: {}
+			inputSchema: {
+				spaceId: spaceIdSchema
+			}
 		},
-		async () => {
+		async (input) => {
 			try {
-				const { lists, spaces } = await getListCatalog(ctx.config, { notes: 'length' });
+				const { lists, spaces } = await getListCatalog(ctx.config, {
+					notes: 'length',
+					...(input.spaceId ? { spaceId: input.spaceId } : {})
+				});
 				return textResult(formatListSummaries(lists, spaces));
 			} catch (err) {
 				return errorResult(err);

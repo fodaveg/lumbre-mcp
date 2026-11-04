@@ -204,11 +204,23 @@ describe('resolveRefs — coste en peticiones', () => {
 		expect(resolution.lists.get(LIST_ID)).toBe('Proyecto'); // la de listas sigue
 	});
 
-	it('solo referencias a listas: NO se pide `?ids=`', async () => {
-		const spy = mockFetchSequence([{ lists: [] }]);
-		await resolveRefs(config, [`[[list:${LIST_ID}|x]]`]);
-		expect(spy).toHaveBeenCalledTimes(1);
+	it('solo referencias a listas: NO se pide `?ids=`; la ausente se pregunta por su id y, si no existe, es ROTA', async () => {
+		const spy = vi.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ lists: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+			)
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ message: 'Lista no encontrada' }), {
+					status: 404,
+					headers: { 'content-type': 'application/json' }
+				})
+			);
+		vi.stubGlobal('fetch', spy);
+		const resolution = await resolveRefs(config, [`[[list:${LIST_ID}|x]]`]);
+		expect(spy).toHaveBeenCalledTimes(2);
 		expect(spy.mock.calls[0][0]).toBe('https://lumbre.test/api/tasks?includeLists=1');
+		expect(spy.mock.calls[1][0]).toBe(`https://lumbre.test/api/tasks?includeLists=1&listId=${LIST_ID}`);
+		expect(renderRefs(`[[list:${LIST_ID}|x]]`, resolution)).toBe(`→proyecto/área[ROTO] id:${LIST_ID}`);
 	});
 
 	it('TOPE de ids: pide como mucho MAX_REF_IDS y los que sobran quedan SIN RESOLVER (nunca "rotos")', async () => {

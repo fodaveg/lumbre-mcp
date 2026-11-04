@@ -43,6 +43,37 @@ No se consulta `/api/spaces`. Los nombres de miembro llegan del servidor, sin em
 Si una API anterior ignora un filtro nuevo o no acredita su soporte, el MCP da
 un error explícito; no presenta un listado general como filtrado.
 
+### Organizaciones y lectura por espacio (4 nov 2026)
+
+Con `SUMEGO_ORGS=1` en Lumbre, un agente sin destino lee solo Personal: los MCP no
+tienen contexto activo y cada llamada dice el suyo. Por eso `list_tasks` y `list_lists`
+aceptan `spaceId` (uuid, opcional) y lo mandan tal cual al servidor. Sin él, Personal.
+Con él:
+
+- `list` por nombre, `listId`, `section` y `assignee: "me"` se resuelven dentro de ese
+  espacio, así que un nombre repetido en dos espacios no se confunde. El `me` lo
+  resuelve el servidor con el accountId de la persona en ese store; el MCP no supone
+  uno global y comprueba que cada tarea devuelta esté asignada a un miembro de ese
+  espacio según `spaces[]`.
+- Cada fila devuelta (tarea o lista) debe traer ese `spaceId`. Si alguna es de otro
+  destino, o no trae procedencia porque el servidor ignoró el parámetro, el MCP da
+  error y no muestra nada. Un resultado vacío solo se acepta si el catálogo autorizado
+  confirma el espacio.
+- Un 404 `espacio no accesible` (mal formado, inexistente, sin membresía o con el
+  permiso de agente apagado) se traduce a un mensaje con el siguiente paso.
+- Las referencias `[[list:…]]` se resuelven con el catálogo del destino de la lectura y,
+  si una id no está ahí, por su propia id (hasta 25 por respuesta), así que una
+  referencia a una lista de otro espacio sale con su espacio y no como rota.
+
+`list_organizations()` (sin parámetros, solo lectura) llama a
+`GET /api/organizations/directory` y devuelve organizaciones con sus miembros
+(`accountId`, `role`, `name`) y espacios (`spaceId`, `name`, `granted`), más los
+espacios sin organización. `granted` indica si la persona encendió el permiso de
+agente de ese espacio: sin él solo se ve el nombre. Un 404 significa que las
+organizaciones están apagadas (o un servidor anterior) y un 503 que Sumego no
+responde; los dos dan un mensaje claro. Con el servidor anterior, sin `SUMEGO_ORGS`,
+todo lo demás sigue funcionando igual.
+
 `list_tasks` acepta `listId` (exacto, preferente sobre `list`) y `assignee: "me"`.
 Si `list` por nombre devuelve vacío, no hay ninguna lista personal con ese nombre
 y coincide con dos o más listas de espacios compartidos, el MCP lanza un error que
