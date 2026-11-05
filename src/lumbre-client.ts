@@ -1277,6 +1277,336 @@ export async function unlinkListNote(
 	return body as UnlinkListNoteResult;
 }
 
+/** Vínculo de una TAREA con una nota (`GET/POST /api/task-links`). `title` solo
+ *  llega en la lectura por nota (`?kind=hebra&targetKey=`): es el de la tarea. */
+export interface LumbreTaskLink {
+	id: string;
+	taskId: string;
+	kind: string;
+	/** UUID de Hebra; null para Obsidian. */
+	noteId?: string | null;
+	targetKey: string;
+	url: string;
+	label: string;
+	updatedAt: string;
+	title?: string;
+}
+
+/** Entrada de `link_task_note`/`unlink_task_note`. */
+export interface TaskNoteLinkInput {
+	taskId: string;
+	url: string;
+	label: string;
+}
+
+/** Tope de `targetKey` de Hebra en el servidor (`isValidHebraNoteTargetKey`). */
+const MAX_TASK_TARGET_KEY_LENGTH = 300;
+
+/** Mismo patrón (sin anclas) que `HEBRA_LIST_NOTE_URL` del servidor: la URL universal exacta. */
+const HEBRA_TASK_NOTE_HTTPS =
+	/^https:\/\/app\.hebra\.pro\/note\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+
+/** `target=` de `hebra://`: `note:<uuid>` con ancla opcional `:heading:…`/`:block:…`,
+ *  igual que `HEBRA_NOTE_TARGET` del servidor (a diferencia de `parseListNoteUrl`,
+ *  que acepta cualquier sufijo, porque allí el ancla se descarta). */
+const HEBRA_TASK_TARGET =
+	/^note:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?::(?:heading|block):.+)?$/i;
+
+/**
+ * Destino de un vínculo de TAREA a partir de la URL de la nota. Reutiliza la
+ * validación de `parseListNoteUrl`, pero NO su `targetKey`: `/api/list-links`
+ * identifica la nota por su uuid y `/api/task-links` por `note:<uuid>` (o por el
+ * valor de `?target=` CON su ancla, porque una tarea puede enlazar a un punto
+ * concreto de la nota). Contrato del servidor (repo `lumbre`, `be213282b`,
+ * `routes/api/task-links/+server.ts` + `hebraListNoteId` + `isValidHebraNoteTargetKey`):
+ *
+ *  · `https://app.hebra.pro/note/<uuid>` EXACTA (sin query ni fragmento) →
+ *    `targetKey = note:<uuid>`.
+ *  · `hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]]` → `targetKey`
+ *    = el `target` (o `note:<uuid>`), con el prefijo `note:<uuid>` en minúsculas,
+ *    como lo canoniza el servidor; el ancla se conserva tal cual.
+ *  · `obsidian://…` → `targetKey` = la URL, sin `noteId`.
+ *
+ * Se envían SIEMPRE `noteId` y `targetKey` en Hebra: con la credencial de token
+ * personal (la de este proceso stdio) el servidor los exige y no los deriva; con la
+ * concesión OAuth los deriva de `url` y comprueba que cuadren. Estas formas valen
+ * para las dos. Formas que SOLO valdrían con el token personal (una URL https con
+ * `?target=`, o `hebra://` con otros parámetros) se rechazan aquí también, para que
+ * el comportamiento no dependa de la credencial.
+ */
+export function parseTaskNoteTarget(raw: string):
+	| { kind: 'obsidian'; targetKey: string }
+	| { kind: 'hebra'; noteId: string; targetKey: string }
+	| null {
+	const base = parseListNoteUrl(raw);
+	if (!base || raw.includes('\u0000')) return null;
+	if (base.kind === 'obsidian') return { kind: 'obsidian', targetKey: raw };
+	const noteId = base.noteId;
+	const https = HEBRA_TASK_NOTE_HTTPS.exec(raw);
+	if (https) return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
+	const url = new URL(raw);
+	if (url.protocol !== 'hebra:') return null;
+	const target = url.searchParams.get('target');
+	if (target === null) return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
+	if (!HEBRA_TASK_TARGET.test(target) || target.length > MAX_TASK_TARGET_KEY_LENGTH) return null;
+	return { kind: 'hebra', noteId, targetKey: target.replace(/^note:[^:]+/i, (prefix) => prefix.toLowerCase()) };
+}
+
+/** ¿Es un uuid de nota de Hebra (versión 1 a 8, variante RFC)? */
+export function isHebraNoteId(raw: string): boolean {
+	return HEBRA_NOTE_UUID.test(raw);
+}
+
+export interface LinkTaskNoteResult {
+	ok: true;
+	type: 'link';
+	taskId: string;
+	/** La tarea está archivada o cancelada; el vínculo se guardó igualmente. */
+	archived: boolean;
+	link: LumbreTaskLink;
+}
+
+export interface UnlinkTaskNoteResult {
+	ok: true;
+	type: 'unlink';
+	taskId: string;
+	archived: boolean;
+	/** `false` es éxito idempotente: el vínculo ya no estaba registrado. */
+	removed: boolean;
+}
+
+function taskNoteBody(type: 'link' | 'unlink', input: TaskNoteLinkInput, url: string, label: string) {
+	const target = parseTaskNoteTarget(url);
+	if (!target) {
+		throw new LumbreApiError(
+			'URL de nota inválida para una tarea: usa obsidian://…, https://app.hebra.pro/note/<uuid> exacta ' +
+				'(sin query ni fragmento) o hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]].'
+		);
+	}
+	return {
+		target,
+		body: JSON.stringify({
+			type,
+			taskId: input.taskId,
+			target:
+				target.kind === 'hebra'
+					? { kind: 'hebra', noteId: target.noteId, targetKey: target.targetKey, url, label }
+					: { kind: 'obsidian', targetKey: target.targetKey, url, label }
+		})
+	};
+}
+
+function isTaskLink(
+	value: unknown,
+	taskId: string,
+	url: string,
+	label: string,
+	target: NonNullable<ReturnType<typeof parseTaskNoteTarget>>
+): value is LumbreTaskLink {
+	if (!value || typeof value !== 'object') return false;
+	const link = value as Partial<LumbreTaskLink>;
+	return (
+		typeof link.id === 'string' &&
+		link.taskId === taskId &&
+		link.kind === target.kind &&
+		link.targetKey === target.targetKey &&
+		(target.kind === 'obsidian' ||
+			(typeof link.noteId === 'string' && link.noteId.toLowerCase() === target.noteId)) &&
+		link.url === url &&
+		link.label === label &&
+		typeof link.updatedAt === 'string'
+	);
+}
+
+/** Vínculo síncrono e idempotente de una tarea (propia o de un espacio con acceso de agente) con una nota. */
+export async function linkTaskNote(config: LumbreConfig, input: TaskNoteLinkInput): Promise<LinkTaskNoteResult> {
+	const url = input.url.trim();
+	const label = input.label.trim();
+	const { target, body: payload } = taskNoteBody('link', input, url, label);
+	const body = await request(config, '/api/task-links', { method: 'POST', body: payload });
+	const o = body as { ok?: unknown; type?: unknown; taskId?: unknown; archived?: unknown; link?: unknown } | null;
+	if (
+		!o ||
+		typeof o !== 'object' ||
+		o.ok !== true ||
+		o.type !== 'link' ||
+		o.taskId !== input.taskId ||
+		typeof o.archived !== 'boolean' ||
+		!isTaskLink(o.link, input.taskId, url, label, target)
+	) {
+		throw new LumbreApiError('Lumbre no confirmó el vínculo de tarea (respuesta inesperada).');
+	}
+	return o as unknown as LinkTaskNoteResult;
+}
+
+/** Retirada síncrona e idempotente de un vínculo de tarea; `removed:false` es un 200. */
+export async function unlinkTaskNote(config: LumbreConfig, input: TaskNoteLinkInput): Promise<UnlinkTaskNoteResult> {
+	const url = input.url.trim();
+	const label = input.label.trim();
+	const { body: payload } = taskNoteBody('unlink', input, url, label);
+	const body = await request(config, '/api/task-links', { method: 'POST', body: payload });
+	const o = body as { ok?: unknown; type?: unknown; taskId?: unknown; archived?: unknown; removed?: unknown } | null;
+	if (
+		!o ||
+		typeof o !== 'object' ||
+		o.ok !== true ||
+		o.type !== 'unlink' ||
+		o.taskId !== input.taskId ||
+		typeof o.archived !== 'boolean' ||
+		typeof o.removed !== 'boolean'
+	) {
+		throw new LumbreApiError('Lumbre no confirmó la retirada del vínculo de tarea (respuesta inesperada).');
+	}
+	return o as unknown as UnlinkTaskNoteResult;
+}
+
+async function readTaskLinks(config: LumbreConfig, params: URLSearchParams): Promise<LumbreTaskLink[]> {
+	const body = await request(config, `/api/task-links?${params.toString()}`);
+	const links = (body as { links?: unknown } | null)?.links;
+	if (!body || typeof body !== 'object' || !Array.isArray(links)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/task-links.');
+	}
+	return links as LumbreTaskLink[];
+}
+
+/** `GET /api/task-links?taskId=`: 404 (el mismo texto siempre) si la tarea no es propia ni de un espacio con acceso de agente. */
+export async function getTaskLinks(config: LumbreConfig, taskId: string): Promise<LumbreTaskLink[]> {
+	return readTaskLinks(config, new URLSearchParams({ taskId }));
+}
+
+/**
+ * `GET /api/task-links?kind=hebra&targetKey=<uuid>`: las tareas del llamante vinculadas a una nota
+ * de Hebra. Una nota sin vínculos y un espacio sin permiso dan lo mismo (`[]`). `taskId` no puede
+ * ir junto a estos dos (400 del servidor); este cliente tampoco los combina.
+ */
+export async function getTaskLinksOfNote(config: LumbreConfig, noteId: string): Promise<LumbreTaskLink[]> {
+	return readTaskLinks(config, new URLSearchParams({ kind: 'hebra', targetKey: noteId.toLowerCase() }));
+}
+
+/** Evento de un calendario ICS suscrito (`events[]` de `/api/upcoming`). Título de TERCEROS. */
+export interface UpcomingEvent {
+	id: string;
+	title: string;
+	date: string;
+	/** `HH:MM`, o `null` si es de día completo (o el trozo viene del día anterior). */
+	time: string | null;
+	allDay: boolean;
+	continuedFromPrevDay?: boolean;
+	continuesNextDay?: boolean;
+	/** Solo con `continuedFromPrevDay`: hora de fin del evento original. */
+	endTime?: string | null;
+	color?: string | null;
+}
+
+/** Fila de tarea de `/api/upcoming` (`UpcomingTask` del servidor); `spaceId`/`spaceName` solo con varios stores. */
+export interface UpcomingTask {
+	id: string;
+	content: string;
+	time: string | null;
+	done: boolean;
+	cancelled?: boolean;
+	isHabit?: boolean;
+	habitEmoji?: string | null;
+	parentId?: string | null;
+	parentContent?: string | null;
+	spaceId?: string | null;
+	spaceName?: string | null;
+}
+
+export interface UpcomingDay {
+	date: string;
+	tasks: UpcomingTask[];
+	events: UpcomingEvent[];
+}
+
+/** Hábito de `?week=1` (`UpcomingHabit` del servidor): solo los campos que usa el formateador. */
+export interface UpcomingHabit {
+	id: string;
+	name: string;
+	done: number;
+	planned: number;
+	emoji?: string;
+	kind?: 'registro' | 'cadencia' | 'contador';
+	consistency?: { done: number; total: number };
+	todayCount?: number;
+	dailyGoal?: number;
+	daysSince?: number | null;
+	periodTotal?: number;
+}
+
+export interface UpcomingResponse {
+	/** Hoy en la zona de la cuenta (`?days=`) o primer día de la semana (`?week=1`). */
+	from: string;
+	to?: string;
+	week?: number;
+	year?: number;
+	days: UpcomingDay[];
+	habits?: UpcomingHabit[];
+	habitsSummary?: { total: number; doneToday: number };
+}
+
+/**
+ * `GET /api/upcoming?days=N` (1..14) o `?week=1`. NO acepta `spaceId`, `from`, `to`,
+ * `scope`, `date`, `week_of` ni `until` (400): la ventana empieza siempre en hoy.
+ */
+export async function getUpcoming(
+	config: LumbreConfig,
+	window: { days: number } | { week: true }
+): Promise<UpcomingResponse> {
+	const params = 'week' in window ? new URLSearchParams({ week: '1' }) : new URLSearchParams({ days: String(window.days) });
+	const body = await request(config, `/api/upcoming?${params.toString()}`);
+	const o = body as { from?: unknown; days?: unknown } | null;
+	if (!o || typeof o !== 'object' || typeof o.from !== 'string' || !Array.isArray(o.days)) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/upcoming.');
+	}
+	for (const day of o.days) {
+		if (!day || typeof day !== 'object' || typeof (day as { date?: unknown }).date !== 'string') {
+			throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/upcoming.');
+		}
+	}
+	return body as UpcomingResponse;
+}
+
+/** Bloque de Horario de hoy (`blocks[]` de `/api/today?blocks=1`). */
+export interface AgendaBlock {
+	taskId: string;
+	title: string;
+	icon?: string | null;
+	color?: string | null;
+	startMs: number;
+	endMs: number;
+	/** Solo con varios stores. */
+	spaceName?: string | null;
+}
+
+export interface BlockAgenda {
+	/** `false` con el módulo Horario apagado. */
+	enabled: boolean;
+	/** Zona de la cuenta, IANA. */
+	timezone: string;
+	generatedAtMs: number;
+	blocks: AgendaBlock[];
+}
+
+/** `GET /api/today?blocks=1`: los bloques de HOY que aún no han terminado (agenda «Ahora»). */
+export async function getBlockAgenda(config: LumbreConfig): Promise<BlockAgenda> {
+	const body = await request(config, '/api/today?blocks=1');
+	const o = body as Partial<BlockAgenda> | null;
+	if (
+		!o ||
+		typeof o !== 'object' ||
+		typeof o.enabled !== 'boolean' ||
+		typeof o.timezone !== 'string' ||
+		!Array.isArray(o.blocks) ||
+		o.blocks.some(
+			(b) => !b || typeof b !== 'object' || typeof b.startMs !== 'number' || typeof b.endMs !== 'number'
+		)
+	) {
+		throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/today?blocks=1.');
+	}
+	return body as BlockAgenda;
+}
+
 /**
  * Busca UNA tarea por `id` vía `GET /api/tasks?id=` (lookup directo, no
  * listado — ver ese endpoint en el repo principal) y la devuelve, o
