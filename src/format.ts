@@ -746,7 +746,7 @@ export function formatListSummaries(allLists: LumbreListSummary[], spaces: Lumbr
 export function formatListDetail(
 	l: LumbreListSummary,
 	parentName?: string | null,
-	sections?: LumbreListSection[] | null
+	sections?: LumbreListSection[] | string
 ): string {
 	const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}${isSharedInbox(l) ? ` ${SHARED_INBOX_MARK}` : ''}`,
 		...(spaceLabel(l) ? [`- ${spaceLabel(l)}`] : []),
@@ -785,18 +785,15 @@ export function formatListDetail(
 
 	lines.push(`- tareas: ${l.taskCount}`);
 
-	// Secciones: `undefined` = no se pidieron (no se pinta nada); `null` = la
-	// segunda petición falló o el servidor no las da, y se dice sin ocultarlo.
-	if (sections === null) {
-		lines.push('- secciones: no disponibles (no se pudieron leer ahora)');
-	} else if (sections !== undefined) {
-		if (sections.length === 0) {
-			lines.push('- secciones: (ninguna)');
-		} else {
-			lines.push(`- secciones (${sections.length}):`);
-			for (const s of sections) {
-				lines.push(`  · ${s.name} — ${s.taskCount} tarea${s.taskCount === 1 ? '' : 's'} (sectionId: ${s.id})`);
-			}
+	// Secciones: `undefined` = no se pidieron; un string = la segunda petición
+	// falló (es la causa breve); `[]` no pinta nada (una lista sin secciones se
+	// ve igual que antes de esta función, contrato de cuentas sin espacios).
+	if (typeof sections === 'string') {
+		lines.push(`- secciones: no disponibles (${sections})`);
+	} else if (sections !== undefined && sections.length > 0) {
+		lines.push(`- secciones (${sections.length}):`);
+		for (const s of sections) {
+			lines.push(`  · ${s.name} — ${s.taskCount} tarea${s.taskCount === 1 ? '' : 's'} (sectionId: ${s.id})`);
 		}
 	}
 

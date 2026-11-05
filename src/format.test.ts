@@ -456,12 +456,14 @@ describe('formatListDetail — secciones', () => {
 		expect(out).toContain('· Una — 1 tarea (sectionId: s3)');
 	});
 
-	it('lista sin secciones: lo dice', () => {
-		expect(formatListDetail(list, null, [])).toContain('- secciones: (ninguna)');
+	it('lista con 0 secciones: el texto es idéntico al de antes (contrato de cuentas sin espacios)', () => {
+		expect(formatListDetail(list, null, [])).toBe(formatListDetail(list, null));
 	});
 
-	it('null = no se pudieron leer: una línea que lo dice', () => {
-		expect(formatListDetail(list, null, null)).toContain('- secciones: no disponibles');
+	it('un string = no se pudieron leer: una línea con la causa', () => {
+		expect(formatListDetail(list, null, 'Lumbre respondió 500')).toContain(
+			'- secciones: no disponibles (Lumbre respondió 500)'
+		);
 	});
 });
 

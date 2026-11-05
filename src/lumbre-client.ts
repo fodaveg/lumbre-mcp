@@ -2648,9 +2648,10 @@ export type MutateTasksOp =
 	/** Deshace `register_habit` (mismo criterio de existencia: el objetivo es
 	 *  un hábito). `date` obligatoria; `eventId` solo para un hábito contador. */
 	| { op: 'unregister_habit'; habitId: string; date: string; eventId?: string }
-	/** Crea una sección `name` en la lista `listId` (op de `organize`). El id de
-	 *  la sección lo genera `translateOp`. */
-	| { op: 'create_section'; listId: string; name: string }
+	/** Crea una sección `name` en la lista `listId` (op de `organize`). `sectionId`
+	 *  opcional (como `create_list.listId`): el id de la sección nueva; con él,
+	 *  repetir la op no duplica. Sin él lo genera `translateOp`. */
+	| { op: 'create_section'; listId: string; name: string; sectionId?: string }
 	/** Archiva/desarchiva una TAREA (MC7, tarea 8eee8c72): visibilidad, no
 	 *  ciclo de vida — cruza con todos los estados (`done`/`cancelledAt` no se
 	 *  tocan). Acepta el id de una SUBTAREA (`archivedAt` no es un campo
@@ -3092,11 +3093,13 @@ function translateOp(op: MutateTasksOp): BatchOp {
 				payload: { date: op.date, ...(op.eventId !== undefined ? { eventId: op.eventId } : {}) }
 			};
 		case 'create_section':
-			// `taskId` = id de la sección nueva (la materialización ignora una
-			// sección que ya exista con ese id: reintentar es idempotente).
+			// `taskId` = id de la sección nueva. Con `sectionId` del llamante, repetir
+			// la op es idempotente (el servidor da `noop` si ya hay una fila con ese
+			// id, `inbound-materialize.ts`); sin él se genera uno NUEVO en cada
+			// traducción y repetir la op DUPLICA la sección.
 			return {
 				type: 'mutate',
-				taskId: randomUUID(),
+				taskId: op.sectionId ?? randomUUID(),
 				kind: 'createSection',
 				payload: { listId: op.listId, name: op.name }
 			};

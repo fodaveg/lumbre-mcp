@@ -4,6 +4,7 @@ import {
 	getListById,
 	getListLinksResult,
 	getListSections,
+	LumbreApiError,
 	linkListNote,
 	getListCatalog,
 	listNotFoundError,
@@ -110,11 +111,15 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 				}
 				// Secciones con su recuento: otra petición aparte (`includeSections=1`).
 				// Si falla, la tool responde igual y lo dice en una línea.
-				let sections: LumbreListSection[] | null;
+				// Un 401 se relanza como cualquier error de autenticación; el resto da la
+				// línea «no disponibles» con la causa breve.
+				let sections: LumbreListSection[] | string;
 				try {
 					sections = await getListSections(ctx.config, list.id, list.spaceId);
-				} catch {
-					sections = null;
+				} catch (err) {
+					if (err instanceof LumbreApiError && err.status === 401) throw err;
+					const reason = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+					sections = reason.length > 100 ? `${reason.slice(0, 97)}...` : reason || 'error desconocido';
 				}
 				return textResult(formatListDetail(list, parentName, sections));
 			} catch (err) {

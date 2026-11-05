@@ -1251,7 +1251,21 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 			);
 			expect(text).toContain('- nombre: Proyecto');
 			expect(text).toContain('mi nota');
-			expect(text).toContain('- secciones: no disponibles');
+			expect(text).toContain('- secciones: no disponibles (');
+			expect(text).toMatch(/no disponibles \(.*500/);
+		});
+
+		it('un 401 en la petición de secciones NO se traga: get_list falla como el resto de errores de autenticación', async () => {
+			const fetchSpy = vi.fn().mockImplementation(async (url: string) =>
+				url.includes('includeSections=1')
+					? new Response('no', { status: 401 })
+					: jsonResponse({ lists: [{ id: LIST_ID, name: 'Proyecto', taskCount: 1, kind: 'project' }] })
+			);
+			vi.stubGlobal('fetch', fetchSpy);
+			const client = await buildClient();
+			const result = await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } });
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toMatch(/Token inválido|autorización/i);
 		});
 
 		it('servidor sin includeSections (responde sin `sections`): también "no disponibles"', async () => {
@@ -1793,7 +1807,7 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				op: 'create_section',
 				listId: '11111111-1111-1111-1111-111111111111',
 				name: 'Fase 1',
-				sectionId: '22222222-2222-2222-2222-222222222222'
+				taskId: '22222222-2222-2222-2222-222222222222'
 			}
 		},
 		{
@@ -3700,6 +3714,25 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		const body = bodyOf(fetchSpy, '/api/batch') as { ops: { taskId: string; kind: string; payload: unknown }[] };
 		expect(body.ops[0]).toMatchObject({ kind: 'createSection', payload: { listId: LIST, name: 'Fase 1' } });
 		expect(body.ops[0].taskId).toMatch(/^[0-9a-f-]{36}$/);
+	});
+
+	it('organize op create_section con sectionId: ese id viaja como taskId y el informe lo devuelve en "ids asignados"', async () => {
+		const LIST = '33333333-3333-4333-8333-333333333333';
+		const SECTION = '44444444-4444-4444-8444-444444444444';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: SECTION }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'organize',
+				arguments: { ops: [{ op: 'create_section', listId: LIST, name: 'Fase 1', sectionId: SECTION }] }
+			})
+		);
+		const body = bodyOf(fetchSpy, '/api/batch') as { ops: { taskId: string }[] };
+		expect(body.ops[0].taskId).toBe(SECTION);
+		expect(text).toContain(`[0] create_section: id ${SECTION}`);
 	});
 
 	it('create_section no existe en mutate_tasks: el puntero dice que está en organize', async () => {

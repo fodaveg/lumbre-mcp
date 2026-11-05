@@ -314,7 +314,8 @@ export const organizeStrictOpSchema = z.discriminatedUnion('op', [
 		.object({
 			op: z.literal('create_section'),
 			listId: z.string().guid(),
-			name: z.string().min(1).max(200)
+			name: z.string().min(1).max(200),
+			sectionId: z.string().guid().optional()
 		})
 		.strict(),
 	z
@@ -863,7 +864,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.describe(
 						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): delete: taskId* · remove_section: sectionId* · ' +
-							'create_section: listId*, name* · ' +
+							'create_section: listId*, name* [sectionId] · ' +
 							'create_list: name* [color, icon, listId, listKind, spaceId, parentId] · nest_list: listId*, parentId* · ' +
 							'rename_list: listId*, name* · remove_list: listId* · set_list_notes: listId*, notes* ' +
 							'[revive] · move_to_list: taskId*, uno de [listId, list] · ' +

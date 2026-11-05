@@ -221,6 +221,8 @@ export function fakeLumbre(data: {
 	tasks: Record<string, unknown>[];
 	lists: Record<string, unknown>[];
 	spaces?: unknown[];
+	/** Secciones por `listId` para `?includeSections=1` (por defecto, `[]`). */
+	sections?: Record<string, unknown[]>;
 	assignee?: 'ignored';
 	write?: (call: FakeCall) => { status: number; body: unknown };
 }) {
@@ -253,6 +255,11 @@ export function fakeLumbre(data: {
 				lists: lists.map((l) => withNotes(l, notes)),
 				...(data.spaces ? { spaces: data.spaces } : {})
 			});
+		}
+		// `?listId=…&includeSections=1` → `{ sections }` (forma de `+server.ts`).
+		if (p.get('includeSections') === '1' && listId) {
+			if (!data.lists.some((l) => l.id === listId)) return reply(LIST_NOT_FOUND_BODY, 404);
+			return reply({ sections: data.sections?.[listId] ?? [] });
 		}
 		const id = p.get('id');
 		const ids = p.get('ids')?.split(',');

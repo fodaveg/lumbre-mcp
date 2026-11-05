@@ -309,8 +309,11 @@ retención en «Qué guarda el relé»).
   `GET /api/tasks?listId=<id>&includeSections=1`, por `listId` y no por
   nombre para que dos listas homónimas de espacios distintos no se confundan,
   con el `spaceId` de la lista si es de un espacio; las tareas sin sección no
-  cuentan, las secciones vacías salen con 0; si esa petición falla, `get_list`
-  responde igual con la línea «secciones: no disponibles»), seguidos de su nota ÍNTEGRA y
+  cuentan, las secciones vacías salen con 0; una lista SIN secciones no añade
+  ninguna línea, así que su texto es el de siempre; si esa petición falla,
+  `get_list` responde igual con «secciones: no disponibles (<motivo breve>)»,
+  salvo un 401, que se relanza como cualquier error de autenticación),
+  seguidos de su nota ÍNTEGRA y
   verbatim (2026-09-16, tarea 827a7878) — útil para leerla ANTES de
   reescribirla con `organize({ op: "set_list_notes" })`, que la reemplaza
   entera. `pinned`, `icon` y `color` viajan en la respuesta de la app pero son
@@ -802,12 +805,17 @@ operaciones a la vez» más abajo):
   MISMA residencia). Resuelve el `sectionId` con `get_list` (lista las
   secciones de la lista, también las vacías) o desde el campo `sectionId` de
   una tarea que ya viva ahí (`list_tasks`/`get_task`).
-- `{ op: "create_section", listId, name }` (**`organize`**, 5 nov 2026) — crea
-  una sección en un proyecto o área, `kind` `createSection`. Ambos campos
-  obligatorios; el servidor recorta `name` a 200 caracteres. El id de la
-  sección lo genera el conector y no vuelve en el informe: léelo con
-  `get_list`. Si `listId` no existe, el servidor responde `noop`.
-  Las tareas se colocan en ella con `set_section` (por nombre).
+- `{ op: "create_section", listId, name, sectionId? }` (**`organize`**, 5 nov
+  2026) — crea una sección en un proyecto o área, `kind` `createSection`.
+  `listId` y `name` obligatorios; el servidor recorta `name` a 200 caracteres,
+  y un nombre que solo sea un `#tag` queda vacío y da `noop`. `sectionId`
+  (uuid v4) es opcional, como `listId` en `create_list`: es el id de la
+  sección nueva. Con él, repetir la op NO duplica (el servidor da `noop` si ya
+  existe una fila con ese id); SIN él el conector genera un id nuevo en cada
+  llamada y repetir la op DUPLICA la sección. El informe devuelve el id en
+  «ids asignados» (lo propio o el generado). Si `listId` no existe, el
+  servidor responde `noop`. Las tareas se colocan en ella con `set_section`
+  (por nombre).
 - `{ op: "delete_habit", habitId }` (**`organize`**, MC7) — borra (tombstone)
   un HÁBITO. **Acción delicada**: sin deshacer (a diferencia de una tarea, no
   hay `restore` para un hábito borrado); confírmalo con el usuario antes de
@@ -1012,7 +1020,7 @@ set_assignee: taskId*, assigneeId* (accountId de miembro o ""; también en subta
 set_parent: taskId*, parentId* (uuid de la madre, o null para sacarla; taskId puede ser subtarea; el resto de reglas, en la app)
 
 # organize
-create_section: listId*, name*
+create_section: listId*, name* [sectionId] (con sectionId repetir no duplica)
 delete: taskId*
 remove_section: sectionId*
 create_list: name* [color, icon, listId, listKind, spaceId, parentId]

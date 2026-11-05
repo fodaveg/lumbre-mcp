@@ -165,6 +165,26 @@ describe('C5 contra df6ab2983 — cuenta personal con LUMBRE_SPACES apagado', ()
 		expect(now.calls.some((c) => c.path.startsWith('/api/spaces'))).toBe(false);
 	});
 
+	it('get_list: UNA petición de más, la de secciones, y con 0 secciones el texto no cambia', async () => {
+		const fake = fakeLumbre(flagOff());
+		await call('get_list', { listId: PERSONAL_AREA }, fake);
+		expect(requests(fake.calls)).toEqual([
+			`GET /api/tasks?includeLists=1&listId=${PERSONAL_AREA}`,
+			`GET /api/tasks?includeLists=1&listId=${PERSONAL_LIST}`,
+			// Deliberada (lote 1, 5 nov 2026): secciones de la lista, por listId.
+			`GET /api/tasks?listId=${PERSONAL_AREA}&includeSections=1`
+		]);
+	});
+
+	it('get_list con secciones: las enseña tras el recuento de tareas', async () => {
+		const fake = fakeLumbre({
+			...flagOff(),
+			sections: { [PERSONAL_AREA]: [{ id: 's1', name: 'Fase 1', tags: [], effectiveTags: [], taskCount: 2 }] }
+		});
+		const out = await call('get_list', { listId: PERSONAL_AREA }, fake);
+		expect(out.text).toContain('- tareas: 0\n- secciones (1):\n  · Fase 1 — 2 tareas (sectionId: s1)\n- notas:');
+	});
+
 	it.each([
 		['list_tasks', { notes: 'none' }],
 		['list_tasks', { scope: 'all', notes: 'full' }],
