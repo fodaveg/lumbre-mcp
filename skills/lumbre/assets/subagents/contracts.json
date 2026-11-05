@@ -63,13 +63,15 @@
         "read_attachment",
         "get_list",
         "get_list_links",
+        "get_task_links",
+        "get_agenda",
         "list_brl_entries"
       ],
       "operationLimits": [
         "Acota list_tasks por scope, list y section cuando sea posible; para un id, get_task. Sin spaceId, list_tasks y list_lists solo leen Personal; list_organizations (solo lectura) da los espacios y su granted.",
         "Usa get_task para ids explícitos y para recuperar notas o propiedades íntegras que cambien la respuesta.",
         "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio.",
-        "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; list_brl_entries lee el registro (BRL) de un día, que no son tareas."
+        "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; get_task_links lee los de una tarea (taskId) o las tareas de una nota de Hebra (noteId), exactamente uno; get_agenda da eventos, tareas y bloques de Horario de hoy (1 a 14 días, o la semana con hábitos); list_brl_entries lee el registro (BRL) de un día, que no son tareas."
       ],
       "forbiddenCapabilities": [
         "Invocar cualquier tool u operación que cree, edite, complete, cancele, mueva, reorganice o borre datos.",

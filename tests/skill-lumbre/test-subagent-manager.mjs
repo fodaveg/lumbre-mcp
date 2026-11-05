@@ -136,6 +136,8 @@ assert.deepEqual(readerContract.allowedOperations, [
   "read_attachment",
   "get_list",
   "get_list_links",
+  "get_task_links",
+  "get_agenda",
   "list_brl_entries",
 ]);
 assert.match(renderInstructions(definitions.contracts, readerContract), /estrictamente read-only/i);

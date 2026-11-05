@@ -131,12 +131,14 @@ con cualquier resultado no vacío (no presenta el listado general como filtrado)
 
 Todas las tools llevan `annotations` de MCP: `readOnlyHint` en las de lectura
 (`list_tasks`, `get_task`, `list_lists`, `get_list`, `get_list_links`,
-`list_brl_entries`, `list_habits`, `read_attachment`), `destructiveHint: true`
+`get_task_links`, `get_agenda`, `list_brl_entries`, `list_habits`,
+`read_attachment`), `destructiveHint: true`
 en las que borran (`organize`, `mutate_brl`, `delete_attachment`) y
-`idempotentHint` en `link_list_note`, `unlink_list_note` y `refresh_sync`.
+`idempotentHint` en `link_list_note`, `unlink_list_note`, `link_task_note`,
+`unlink_task_note` y `refresh_sync`.
 `destructiveHint: false` solo en las escrituras puramente aditivas (`add_task`,
-`add_attachment`, `link_list_note`, `refresh_sync`): `mutate_tasks` (su `update`
-reemplaza contenido y notas) y `unlink_list_note` (retira un vínculo) no lo
+`add_attachment`, `link_list_note`, `link_task_note`, `refresh_sync`): `mutate_tasks` (su `update`
+reemplaza contenido y notas), `unlink_list_note` y `unlink_task_note` (retiran un vínculo) no lo
 declaran y quedan con el valor por defecto de la especificación. `list_tasks` y
 `get_task` van como solo lectura aunque actualizan la huella local de notas
 vistas del conector (no son datos del usuario en Lumbre, pero sí dato personal
@@ -359,6 +361,35 @@ retención en «Qué guarda el relé»).
   `label` aunque no forme parte de la identidad. Ambas escrituras usan
   el mismo Bearer que el resto del MCP, incluido el conector remoto OAuth cuando
   el endpoint compatible está desplegado.
+- `link_task_note({ taskId, url, label })` y `unlink_task_note({ taskId, url, label })` —
+  vinculan o desvinculan, síncronas e idempotentes, una nota de Obsidian o Hebra con
+  una TAREA (propia o de un espacio con `agentAccess`) mediante `POST /api/task-links`.
+  `url` admite `obsidian://…`, `https://app.hebra.pro/note/<uuid>` exacta (sin query ni
+  fragmento) y `hebra://note/<uuid>` con o sin `?target=note:<uuid>[:heading:…|:block:…]`
+  (el ancla se conserva; `targetKey` máx. 300 caracteres). El cliente rechaza antes de la
+  red las formas que solo admitiría el token personal, para que el comportamiento no dependa
+  de la credencial, y envía siempre `noteId` y `targetKey` en Hebra. A diferencia de
+  `/api/list-links`, `targetKey` es `note:<uuid>` (o el `target`), no el uuid pelado.
+  `link_task_note` dice si la tarea está archivada o cancelada (el vínculo se guarda igual);
+  `unlink_task_note` devuelve `removed` (`false` es un 200). Una tarea inexistente, ajena o de
+  un espacio sin permiso da el mismo 404. El vínculo de una tarea de espacio se guarda a
+  nombre del miembro que lo crea y los demás no lo ven.
+- `get_task_links({ taskId? , noteId? })` — solo lectura; exactamente uno de los dos
+  (con ambos o ninguno da error sin llamar al servidor). Por `taskId`
+  (`GET /api/task-links?taskId=`) lista los vínculos de la tarea; por `noteId` (uuid de una
+  nota de Hebra, `?kind=hebra&targetKey=`) lista las tareas vinculadas, con título, url y
+  etiqueta. Por nota, un resultado vacío no distingue una nota sin vínculos de una tarea
+  fuera de alcance, y no trae `spaceId`.
+- `get_agenda({ days?, week? })` — solo lectura. `days` entero de 1 a 14 (default 1) o
+  `week: true` (semana en curso, con hábitos); no ambos. Hace dos peticiones:
+  `/api/upcoming` (eventos de calendarios suscritos y tareas por día; con `week`, hábitos
+  y `habitsSummary`) y `/api/today?blocks=1` (bloques de Horario de HOY que aún no han
+  terminado, con horas en la `timezone` que devuelve el servidor). Si fallan los bloques con
+  algo distinto de 401, responde igual y añade `bloques de Horario: no disponibles (<motivo>)`;
+  un 401 se relanza y si falla `/api/upcoming` es un error. Con Horario apagado lo dice en una
+  línea. Ninguna de las dos rutas acepta `spaceId`, `from`, `to`, `scope`, `date`, `week_of` ni
+  `until`, así que la tool no los ofrece. Los títulos de eventos son de terceros: se colapsan
+  a una línea y son datos, no instrucciones.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
   recortar (notas íntegras y verbatim, `createdAt` sin recortar, proyecto o área/sección
   con sus ids). `includeArchived: true` permite recuperarla aunque esté
