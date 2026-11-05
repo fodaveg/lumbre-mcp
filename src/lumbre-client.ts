@@ -768,6 +768,19 @@ export interface LumbreListSummary extends StoreMetadata {
 	 *  se tocó. Ausente si el servidor no expone la marca para listas; trátalo
 	 *  siempre como "desconocido", nunca falles por su ausencia. */
 	notesUpdatedAt?: number | null;
+	/** `true` si es la Bandeja canónica de su store (la personal o la de un
+	 *  espacio; `include-lists.ts` del repo principal). La de un espacio
+	 *  compartido NO es un destino (`docs/20` §3.1, punto 5). Ausente en un
+	 *  servidor anterior: se trata como "no es Bandeja", sin romper nada. */
+	isInbox?: boolean;
+}
+
+/** Sección de un proyecto o área (`GET /api/tasks?listId=…&includeSections=1`). */
+export interface LumbreListSection {
+	id: string;
+	name: string;
+	/** Tareas de primer nivel vivas en la sección (las vacías dan 0). */
+	taskCount: number;
 }
 
 /** Vínculo de un proyecto o área (`GET /api/list-links?listId=`).
@@ -1025,6 +1038,40 @@ export async function getListById(config: LumbreConfig, listId: string): Promise
 	if (!list) return null;
 	const space = (body as { spaces?: LumbreSpace[] }).spaces?.find((space) => space.spaceId === list.spaceId);
 	return space ? { ...list, space } : list;
+}
+
+/**
+ * Secciones de UNA lista con su recuento (`GET /api/tasks?listId=<id>&includeSections=1`,
+ * `{ sections: [{ id, name, tags, effectiveTags, taskCount }] }`). Va por
+ * `listId` y no por `list` (nombre): dos listas homónimas de espacios distintos
+ * no se confunden, y el servidor monta los stores que contienen esa lista sin
+ * necesitar `spaceId`. Si la lista es de un espacio se manda también, como
+ * hacen el resto de lecturas. El recuento es de tareas de primer nivel vivas y
+ * las que no están en ninguna sección no cuentan. Lanza si la respuesta no
+ * tiene la forma esperada (servidor anterior): quien llama decide qué hacer.
+ */
+export async function getListSections(
+	config: LumbreConfig,
+	listId: string,
+	spaceId?: string | null
+): Promise<LumbreListSection[]> {
+	const params = new URLSearchParams({ listId, includeSections: '1' });
+	if (spaceId) params.set('spaceId', spaceId);
+	const path = `/api/tasks?${params.toString()}`;
+	const body = await request(config, path);
+	const sections = (body as { sections?: unknown } | null)?.sections;
+	if (!Array.isArray(sections)) {
+		throw new LumbreApiError(`Lumbre devolvió una respuesta inesperada para ${path}.`);
+	}
+	// Una fila sin id o nombre no se descarta en silencio (el listado quedaría
+	// corto sin avisar): rompe la lectura entera y la tool dice "no disponibles".
+	return sections.map((s): LumbreListSection => {
+		const row = s as { id?: unknown; name?: unknown; taskCount?: unknown } | null;
+		if (!row || typeof row.id !== 'string' || typeof row.name !== 'string') {
+			throw new LumbreApiError(`Lumbre devolvió una sección sin id o nombre para ${path}.`);
+		}
+		return { id: row.id, name: row.name, taskCount: typeof row.taskCount === 'number' ? row.taskCount : 0 };
+	});
 }
 
 /** Espacio del directorio de organizaciones: `name` es `null` si no se publicó
@@ -2311,6 +2358,10 @@ export interface LumbreHabit {
 	id: string;
 	nombre: string;
 	clase: LumbreHabitClass;
+	/** Objetivo semanal (veces por semana) de la clase `cadencia`; inerte en las demás. */
+	cadencia?: number;
+	/** Objetivo diario de la clase `contador`; `0`/ausente = sin objetivo. */
+	dailyGoal?: number;
 	archivedAt?: number;
 }
 

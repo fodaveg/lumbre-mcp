@@ -1,6 +1,16 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { getListById, getListLinksResult, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
+import {
+	getListById,
+	getListLinksResult,
+	getListSections,
+	linkListNote,
+	getListCatalog,
+	listNotFoundError,
+	parseListNoteUrl,
+	unlinkListNote,
+	type LumbreListSection
+} from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, spaceIdSchema, textResult, type ToolCtx } from './shared.js';
 
@@ -98,7 +108,15 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 						parentName = null;
 					}
 				}
-				return textResult(formatListDetail(list, parentName));
+				// Secciones con su recuento: otra petición aparte (`includeSections=1`).
+				// Si falla, la tool responde igual y lo dice en una línea.
+				let sections: LumbreListSection[] | null;
+				try {
+					sections = await getListSections(ctx.config, list.id, list.spaceId);
+				} catch {
+					sections = null;
+				}
+				return textResult(formatListDetail(list, parentName, sections));
 			} catch (err) {
 				return errorResult(err);
 			}
