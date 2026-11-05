@@ -1588,26 +1588,56 @@ export interface SubtaskDecision {
 	op?: string;
 }
 
-/** Tope de bytes crudos de una imagen que `read_attachment` devuelve como
- *  imagen (3,5 MiB): un base64 mayor no cabe como imagen en el contexto del
- *  modelo. Por encima no se devuelve la imagen, solo su metadata. */
-export const MAX_IMAGE_ATTACHMENT_BYTES = Math.floor(3.5 * 1024 * 1024);
+/** Tope de bytes crudos de un adjunto que `read_attachment` devuelve con su
+ *  contenido (imagen, texto o PDF; 3,5 MiB): un base64 mayor no cabe en el
+ *  contexto del modelo. Por encima NO hay recorte: solo metadata con el motivo. */
+export const MAX_READABLE_ATTACHMENT_BYTES = Math.floor(3.5 * 1024 * 1024);
+
+/** Tipo que `read_attachment` sabe devolver: imagen, texto (UTF-8) o PDF. */
+export type AttachmentKind = 'image' | 'text' | 'pdf';
+
+/** Clasifica un `Content-Type` (con o sin parámetros) o `null` si no se lee.
+ *  Texto: `text/*` (incluye csv y markdown), JSON, XML, YAML, TOML, NDJSON,
+ *  JavaScript y cualquier sufijo `+json`/`+xml`. */
+export function attachmentKindOf(contentType: string): AttachmentKind | null {
+	const type = contentType.split(';')[0]!.trim().toLowerCase();
+	if (type.startsWith('image/')) return 'image';
+	if (type === 'application/pdf') return 'pdf';
+	if (type.startsWith('text/')) return 'text';
+	if (
+		/\+(json|xml)$/.test(type) ||
+		[
+			'application/json',
+			'application/xml',
+			'application/yaml',
+			'application/x-yaml',
+			'application/toml',
+			'application/x-ndjson',
+			'application/javascript'
+		].includes(type)
+	) {
+		return 'text';
+	}
+	return null;
+}
 
 /**
- * Adjunto consultado: tipo MIME (de la respuesta) + tamaño + bytes SOLO si es
- * una imagen dentro de `MAX_IMAGE_ATTACHMENT_BYTES`.
+ * Adjunto consultado: tipo MIME (de la respuesta) + tamaño + `kind` si es
+ * legible + contenido SOLO si cabe en `MAX_READABLE_ATTACHMENT_BYTES`.
  *
- * - `bytes` presente: imagen dentro del tope; `size` = bytes leídos.
- * - `skipped: 'not-image'`: el cuerpo NO se ha leído (stream cancelado);
- *   `size` sale de `content-length` o es `null` si no vino.
- * - `skipped: 'image-too-large'`: imagen por encima del tope, cuerpo cancelado;
- *   `size` de `content-length` o `null` si no vino (solo se sabe que supera el tope).
+ * - `bytes` presente (imagen/PDF) o `text` (texto UTF-8 estricto): íntegro.
+ * - `skipped: 'unsupported'`: tipo que no se lee; cuerpo NO descargado.
+ * - `skipped: 'too-large'`: legible pero por encima del tope; cuerpo cancelado,
+ *   `size` de `content-length` o `null` si no vino.
+ * - `skipped: 'not-utf8'`: texto que no decodifica como UTF-8; `size` = bytes.
  */
 export interface DownloadedAttachment {
 	contentType: string;
 	size: number | null;
+	kind?: AttachmentKind;
 	bytes?: Buffer;
-	skipped?: 'not-image' | 'image-too-large';
+	text?: string;
+	skipped?: 'unsupported' | 'too-large' | 'not-utf8';
 }
 
 /**
@@ -1615,7 +1645,7 @@ export interface DownloadedAttachment {
  * resto (`Authorization: Bearer`); ese endpoint solo sirve el adjunto si
  * pertenece al dueño del token (anti-IDOR server-side, ver el endpoint en el
  * repo principal). No pasa por `request()` porque la respuesta no es JSON.
- * Solo se descarga el cuerpo si es una imagen dentro del tope (R7 del audit de
+ * Solo se descarga el cuerpo si es imagen, texto o PDF dentro del tope (R7 del audit de
  * rendimiento: antes se bajaban hasta 25 MiB para devolver tipo y tamaño).
  * Timeout de `ATTACHMENT_TIMEOUT_MS` sobre toda la operación.
  */
@@ -1656,18 +1686,28 @@ async function getAttachmentOnce(
 	const declaredNumber = lengthHeader === null ? Number.NaN : Number(lengthHeader);
 	const declared = Number.isFinite(declaredNumber) && declaredNumber >= 0 ? declaredNumber : null;
 
-	if (!contentType.toLowerCase().startsWith('image/')) {
+	const kind = attachmentKindOf(contentType);
+	if (kind === null) {
 		// No hay nada que mostrar: ni se lee el cuerpo.
 		await res.body?.cancel().catch(() => undefined);
-		return { contentType, size: declared, skipped: 'not-image' };
+		return { contentType, size: declared, skipped: 'unsupported' };
 	}
-	if (declared !== null && declared > MAX_IMAGE_ATTACHMENT_BYTES) {
+	if (declared !== null && declared > MAX_READABLE_ATTACHMENT_BYTES) {
 		await res.body?.cancel().catch(() => undefined);
-		return { contentType, size: declared, skipped: 'image-too-large' };
+		return { contentType, size: declared, kind, skipped: 'too-large' };
 	}
-	const bytes = await readBoundedBody(res, MAX_IMAGE_ATTACHMENT_BYTES);
-	if (bytes === undefined) return { contentType, size: declared, skipped: 'image-too-large' };
-	return { contentType, size: bytes.length, bytes };
+	const bytes = await readBoundedBody(res, MAX_READABLE_ATTACHMENT_BYTES);
+	if (bytes === undefined) return { contentType, size: declared, kind, skipped: 'too-large' };
+	if (kind === 'text') {
+		try {
+			// UTF-8 estricto: un byte inválido es "no decodifica", nunca U+FFFD.
+			const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+			return { contentType, size: bytes.length, kind, text };
+		} catch {
+			return { contentType, size: bytes.length, kind, skipped: 'not-utf8' };
+		}
+	}
+	return { contentType, size: bytes.length, kind, bytes };
 }
 
 /**
