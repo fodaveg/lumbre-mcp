@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { deleteAttachment, getAttachment, MAX_IMAGE_ATTACHMENT_BYTES, requestUploadPermit, uploadAttachment } from '../lumbre-client.js';
+import { deleteAttachment, getAttachment, MAX_READABLE_ATTACHMENT_BYTES, requestUploadPermit, uploadAttachment } from '../lumbre-client.js';
 import { buildUploadCommand, decodeBase64Attachment, LOCAL_PATH_PLACEHOLDER, readLocalAttachment } from '../attachments.js';
 import { requireTaskExists } from './task-existence.js';
 import { errorResult, textResult } from './shared.js';
@@ -65,9 +65,8 @@ const SUBTASK_ATTACHMENTS = { allowSubtask: true };
 export function registerAttachmentTools(server, ctx) {
     const readAttachmentTool = server.registerTool('read_attachment', {
         annotations: { readOnlyHint: true },
-        description: 'Descarga un adjunto de una tarea de Lumbre por su id (ver el campo `attachments` de ' +
-            'list_tasks). Si es una imagen, la devuelve para verla directamente; si no (PDF, etc.), ' +
-            'devuelve solo su metadata, sin descargarlo. Imágenes hasta 3,5 MiB.',
+        description: 'Lee un adjunto por su id (campo `attachments` de list_tasks): imagen, texto (UTF-8) o PDF, ' +
+            'íntegros y hasta 3,5 MiB; si no, solo metadata con el motivo.',
         inputSchema: {
             attachment_id: z
                 .string()
@@ -76,23 +75,52 @@ export function registerAttachmentTools(server, ctx) {
         }
     }, async (input) => {
         try {
-            const { contentType, size, bytes, skipped } = await getAttachment(ctx.config, input.attachment_id);
-            if (bytes !== undefined) {
+            const { contentType, size, kind, bytes, text, skipped } = await getAttachment(ctx.config, input.attachment_id);
+            const sizeLabel = size === null ? 'tamaño desconocido' : `${size} bytes`;
+            const head = `Adjunto ${input.attachment_id}: tipo "${contentType}", ${sizeLabel}.`;
+            if (kind === 'image' && bytes !== undefined) {
                 return {
                     content: [
                         { type: 'image', data: bytes.toString('base64'), mimeType: contentType }
                     ]
                 };
             }
-            const sizeLabel = size === null ? 'tamaño desconocido' : `${size} bytes`;
-            if (skipped === 'image-too-large') {
-                return textResult(`Adjunto ${input.attachment_id}: imagen "${contentType}", ${sizeLabel}. Supera el tope de ` +
-                    `${MAX_IMAGE_ATTACHMENT_BYTES / (1024 * 1024)} MiB para devolverla como imagen (un base64 ` +
-                    'mayor no cabe como imagen en el contexto del modelo), así que no se ha descargado.');
+            if (kind === 'pdf' && bytes !== undefined) {
+                // Mismo mecanismo que hebra-mcp: recurso embebido (blob base64) con una
+                // URI opaca, que no apunta a ningún sitio.
+                return {
+                    content: [
+                        { type: 'text', text: head },
+                        {
+                            type: 'resource',
+                            resource: {
+                                uri: `lumbre-attachment:${input.attachment_id}`,
+                                mimeType: 'application/pdf',
+                                blob: bytes.toString('base64')
+                            }
+                        }
+                    ]
+                };
             }
-            return textResult(`Adjunto ${input.attachment_id}: tipo "${contentType}", ${sizeLabel}. No es una ` +
-                'imagen, así que esta tool no puede mostrar su contenido (no se ha descargado: ' +
-                'no hay forma de mostrártelo a partir de aquí).');
+            if (kind === 'text' && text !== undefined) {
+                return {
+                    content: [
+                        { type: 'text', text: head },
+                        ...(text === '' ? [] : [{ type: 'text', text }])
+                    ]
+                };
+            }
+            if (skipped === 'too-large') {
+                return textResult(`${head} Supera el tope de ${MAX_READABLE_ATTACHMENT_BYTES / (1024 * 1024)} MiB para ` +
+                    'devolverlo (un base64 mayor no cabe en el contexto del modelo y no se devuelve a medias), ' +
+                    'así que no se ha descargado.');
+            }
+            if (skipped === 'not-utf8') {
+                return textResult(`${head} Es de tipo texto pero sus bytes no son UTF-8 válido, así que no se puede ` +
+                    'devolver como texto sin corromperlo.');
+            }
+            return textResult(`${head} No es una imagen, texto ni PDF, así que esta tool no puede mostrar su contenido ` +
+                '(no se ha descargado).');
         }
         catch (err) {
             return errorResult(err);

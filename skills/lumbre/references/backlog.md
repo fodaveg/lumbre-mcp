@@ -54,6 +54,10 @@ tareas, que [daily.md](daily.md) crea y anida en su principal por defecto. `orga
 contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno que no
 existe.
 
+Secciones: `get_list` las enseña con su recuento y `sectionId`; `organize` las crea con
+`create_section` (`listId`, `name`) y las borra con `remove_section`. La Bandeja de un
+espacio compartido sale marcada «no es destino»: no es un sitio donde colocar tareas.
+
 Ciclo de vida de un proyecto, con `organize`: `close_project` (`as`: `"done"` o
 `"cancelled"`), `reopen_project`, `set_project_when` (fecha, `"someday"` o `null`) y
 `set_project_deadline` (fecha o `null`). Cerrar arrastra todo el subárbol abierto: sus

@@ -86,8 +86,13 @@ Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus
   visibilidad (no su ciclo de vida).
 - `set_waiting` y `clear_waiting` ponen y quitan el estado «esperando» (con fecha
   futura); valen también en subtareas.
-- Hábitos: `register_habit`, `skip_occurrence`, `archive_habit` y `unarchive_habit`
-  actúan sobre `habitId` o `seriesId`, no sobre una tarea (para leerlos, `list_habits`).
+- Hábitos: `register_habit`, `unregister_habit` (su deshacer; exige `date`),
+  `skip_occurrence`, `archive_habit` y `unarchive_habit` actúan sobre `habitId` o
+  `seriesId`, no sobre una tarea (para leerlos, `list_habits`).
+- `add_task` con `someday: true` la deja en «Algún día» (sin fecha); no combina con `date`,
+  `time` ni `recurrence`. `reschedule` con `date: null` quita la fecha: la tarea sigue en su
+  lista (suelta, va a la Bandeja) y no pasa a «Algún día». `update` con `daypart: "later"`
+  la manda a «Más tarde»; `null` la quita.
   Borrar un hábito (`delete_habit`, en `organize`) exige confirmación como cualquier
   borrado.
 - El registro del día (BRL) se escribe con `mutate_brl`; `delete` es destructiva.

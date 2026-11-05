@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { getListById, getListLinksResult, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
+import { getListById, getListLinksResult, getListSections, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, spaceIdSchema, textResult } from './shared.js';
 const listNoteTargetInputSchema = {
@@ -58,7 +58,7 @@ export function registerListTools(server, ctx) {
     const getListTool = server.registerTool('get_list', {
         annotations: { readOnlyHint: true },
         description: 'Devuelve el detalle completo de UN proyecto o área por su listId: nombre, tipo (proyecto/área), ' +
-            'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas y la nota ' +
+            'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas, secciones y la nota ' +
             'ÍNTEGRA — útil antes de reescribirla con organize({op:"set_list_notes"}), que la ' +
             'reemplaza entera. Error si no existe.',
         inputSchema: {
@@ -80,7 +80,16 @@ export function registerListTools(server, ctx) {
                     parentName = null;
                 }
             }
-            return textResult(formatListDetail(list, parentName));
+            // Secciones con su recuento: otra petición aparte (`includeSections=1`).
+            // Si falla, la tool responde igual y lo dice en una línea.
+            let sections;
+            try {
+                sections = await getListSections(ctx.config, list.id, list.spaceId);
+            }
+            catch {
+                sections = null;
+            }
+            return textResult(formatListDetail(list, parentName, sections));
         }
         catch (err) {
             return errorResult(err);

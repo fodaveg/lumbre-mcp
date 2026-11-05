@@ -342,6 +342,12 @@ export function formatTaskFull(t, refs) {
         `- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
         `- creada: ${t.createdAt}`
     ];
+    // «Algún día» y «Más tarde» (5 nov 2026): solo se pintan cuando valen; la
+    // ausencia es "no" o "servidor que no lo manda" y no se afirma nada.
+    if (t.someday === true)
+        lines.push('- algún día: sí');
+    if (t.daypart === 'later')
+        lines.push('- franja: Más tarde (daypart)');
     // «Esperando» (MC6): `waitingUntil` ausente = servidor que aún no la manda
     // (2026-09-24) — no se pinta nada antes que afirmar «no está esperando».
     if (t.waitingUntil) {
@@ -597,7 +603,15 @@ function closureLabel(closure) {
 }
 /** Marca de la línea de `list_lists`: `[área]`, `[cerrado]` (cierre «hecho»),
  *  `[cancelado]`, o `''` (proyecto abierto, sin marca ni fecha). */
+/** Marca de la Bandeja de un espacio COMPARTIDO (`docs/20` §3.1, punto 5: no es
+ *  un destino). La personal no lleva marca: se pinta como siempre. */
+const SHARED_INBOX_MARK = '[bandeja, no es destino]';
+function isSharedInbox(l) {
+    return l.isInbox === true && typeof l.spaceId === 'string' && l.spaceId !== '';
+}
 function listKindMark(l) {
+    if (isSharedInbox(l))
+        return ` ${SHARED_INBOX_MARK}`;
     if (l.kind === 'area')
         return ' [área]';
     if (l.closure)
@@ -619,13 +633,15 @@ function listKindMark(l) {
  * formateador: tras recorrer desde las raíces, las listas aún sin pintar se
  * toman como raíces en su orden de llegada y `visited` corta el bucle.
  */
-export function formatListSummaries(lists, spaces = []) {
+export function formatListSummaries(allLists, spaces = []) {
+    // La Bandeja de un espacio compartido no es un destino: sin tareas no sale.
+    const lists = allLists.filter((l) => !(isSharedInbox(l) && l.taskCount === 0));
     if (lists.length === 0 && spaces.length > 0)
         return ['Sin proyectos ni áreas.', ...formatSpaces(spaces)].join('\n');
     if (lists.length === 0)
         return 'Sin proyectos ni áreas.';
     const header = `Proyectos y áreas (${lists.length}): la sangría indica el padre; ` +
-        'marcas [área], [cerrado] (hecho), [cancelado].';
+        `marcas [área], [cerrado] (hecho), [cancelado]${lists.some(isSharedInbox) ? `, ${SHARED_INBOX_MARK}` : ''}.`;
     const ids = new Set(lists.map((l) => l.id));
     const children = new Map();
     const roots = [];
@@ -678,8 +694,8 @@ export function formatListSummaries(lists, spaces = []) {
  * tareas) se pintan solo cuando existen. `pinned`, `icon` y `color` viajan en
  * la respuesta pero son de PRESENTACIÓN en la app: se omiten a propósito.
  */
-export function formatListDetail(l, parentName) {
-    const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}`,
+export function formatListDetail(l, parentName, sections) {
+    const lines = [`Proyecto o área ${l.id}`, `- nombre: ${l.name}${isSharedInbox(l) ? ` ${SHARED_INBOX_MARK}` : ''}`,
         ...(spaceLabel(l) ? [`- ${spaceLabel(l)}`] : []),
         ...(l.storeId && l.spaceId !== null ? [`- storeId: ${l.storeId}`] : []),
         ...formatSpaces(l.space ? [l.space] : [])];
@@ -712,6 +728,22 @@ export function formatListDetail(l, parentName) {
     if (tags.length > 0)
         lines.push(`- etiquetas: ${tags.join(', ')}`);
     lines.push(`- tareas: ${l.taskCount}`);
+    // Secciones: `undefined` = no se pidieron (no se pinta nada); `null` = la
+    // segunda petición falló o el servidor no las da, y se dice sin ocultarlo.
+    if (sections === null) {
+        lines.push('- secciones: no disponibles (no se pudieron leer ahora)');
+    }
+    else if (sections !== undefined) {
+        if (sections.length === 0) {
+            lines.push('- secciones: (ninguna)');
+        }
+        else {
+            lines.push(`- secciones (${sections.length}):`);
+            for (const s of sections) {
+                lines.push(`  · ${s.name} — ${s.taskCount} tarea${s.taskCount === 1 ? '' : 's'} (sectionId: ${s.id})`);
+            }
+        }
+    }
     if (l.notes && l.notes.trim() !== '') {
         lines.push(`- notas:\n${notesFull(l.notes)}`);
     }
@@ -764,7 +796,17 @@ export function formatHabitList(habits, habitLog, includeArchived) {
     }
     const lines = visible.map((h) => {
         const archived = h.archivedAt !== undefined ? ` [archivado ${new Date(h.archivedAt).toISOString().slice(0, 10)}]` : '';
-        let line = `- ${h.nombre} (${h.clase})${archived}  · id: ${h.id}`;
+        // Objetivos solo cuando existen: `cadencia` (veces por semana) únicamente
+        // cuenta en la clase `cadencia` (fuera de ella queda inerte en la app) y
+        // `dailyGoal` 0/ausente es "sin objetivo".
+        const goals = [];
+        if (h.clase === 'cadencia' && typeof h.cadencia === 'number' && h.cadencia > 0) {
+            goals.push(`objetivo: ${h.cadencia} por semana`);
+        }
+        if (typeof h.dailyGoal === 'number' && h.dailyGoal > 0)
+            goals.push(`objetivo diario: ${h.dailyGoal}`);
+        const goalText = goals.length > 0 ? ` · ${goals.join(' · ')}` : '';
+        let line = `- ${h.nombre} (${h.clase})${archived}${goalText}  · id: ${h.id}`;
         const recent = (logByHabit.get(h.id) ?? [])
             .slice()
             .sort((a, b) => b.date.localeCompare(a.date))

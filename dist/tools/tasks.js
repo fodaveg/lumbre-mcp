@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { addTask, describeTaskSpaces, findTaskById, findTasksByIds, LIST_TASKS_LIMIT, listTasks, reservedStatusTagsError, reservedStatusTagsIn, taskNotFoundError } from '../lumbre-client.js';
+import { addTask, describeTaskSpaces, findTaskById, findTasksByIds, LIST_TASKS_LIMIT, listTasks, reservedStatusTagsError, reservedStatusTagsIn, somedayConflictError, taskNotFoundError } from '../lumbre-client.js';
 import { formatTaskFull, formatTaskList } from '../format.js';
 import { resolveRefs } from '../refs.js';
 import { computeAutoNotesRender, computeNotesSinceRender, DEFAULT_NOTES_RECENT_HOURS, hasNotes, parseNotesSince, recordNotesSeen } from '../notes.js';
@@ -87,13 +87,13 @@ export function registerTaskTools(server, ctx) {
                 'no existe). Se ignora si no se indica `list`.'),
             priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
             date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),
+            someday: z.boolean().optional().describe('true = "Algún día" (sin fecha); no con date/time/recurrence'),
             deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
             time: z
                 .string()
                 .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
                 .optional()
-                .describe('Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy — esto pasa ANTES de decidir ' +
-                'lista/Bandeja (ver `list`), así que gana incluso con `list` o metadata estructurada'),
+                .describe('Hora "HH:MM" (24h); sin `date`, se agenda hoy, incluso con `list` o metadata estructurada'),
             recurrence: recurrenceSchema.optional(),
             subtasks: subtasksSchema
                 .optional()
@@ -110,6 +110,9 @@ export function registerTaskTools(server, ctx) {
             const reserved = reservedStatusTagsIn(input.tags);
             if (reserved.length > 0)
                 return errorResult(new Error(reservedStatusTagsError(reserved)));
+            const clash = somedayConflictError(input);
+            if (clash !== null)
+                return errorResult(new Error(clash));
             const { notices } = await addTask(ctx.config, input);
             // Los `notices` de `/api/ingest` cuentan los desvíos que aplicó la app
             // (MC1 del audit de paridad, 23 sep 2026: antes se tiraban y el modelo

@@ -9,6 +9,8 @@ conexión del MCP. Las reglas de escritura en general viven en
 - Una ruta local solo es legible por un conector que corra en la misma máquina.
 - Base64 aumenta el tamaño; resérvalo para artefactos pequeños.
 - Respeta límites y nombres exigidos. Descargar metadata no equivale a leer contenido.
+- `read_attachment` devuelve íntegros imágenes, texto UTF-8 y PDF de hasta 3,5 MiB; si
+  no cabe, no es UTF-8 o es de otro tipo, da solo metadata con el motivo, nunca un recorte.
 - `add_attachment` es síncrona: cuando responde, el adjunto ya está enlazado. Las demás
   escrituras se dan por hechas solo si el informe de cada op dice «aplicada» (ver
   «Consistencia» en mcp-safe-operations.md).

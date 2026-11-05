@@ -159,6 +159,15 @@ retención en «Qué guarda el relé»).
   metadata) aterriza en "hoy"; con alguna metadata estructurada (`priority`/
   `deadline`/`subtasks`/`tags`) y sin `date` ni `list`, en la Bandeja de
   entrada; con `list` (o `listId` vivo), en esa lista; con `date`, ese día.
+  `someday: true` (booleano opcional, también en la op `add_task` de
+  `mutate_tasks`; 5 nov 2026) la deja en "Algún día": sin fecha, en su lista si
+  se indica `list`/`listId`, y si no en la Bandeja. En el servidor una fecha,
+  hora o repetición prevalecen y apagan `someday`, así que el conector
+  RECHAZA `someday: true` junto con `date`, `time` o `recurrence`, antes de
+  mandar nada y con un mensaje claro, en vez de dejar que se pierda en
+  silencio. `someday: false` equivale a omitirlo (no se envía: en el servidor
+  `false` es "Anytime explícito" y cambiaría el destino del solo texto, que
+  aterriza hoy). `get_task` enseña `- algún día: sí` cuando es `true`.
   `time` sin `date` agenda hoy y gana a la Bandeja. `recurrence` sin `date`
   también aterriza HOY (la app le pone la fecha de hoy para que la regla
   tenga ancla, `inbound-materialize.ts` del repo principal), no en la
@@ -184,7 +193,8 @@ retención en «Qué guarda el relé»).
   avisar; si llegan exactamente 500, la cabecera añade «⚠ resultado cortado en
   500: acota con list, section o scope»). Acota
   por `scope`: `today` (default), `week`, `upcoming`, `inbox`/`someday` (sin
-  fecha), `overdue` o `all`; puede incluir completadas con `includeDone`.
+  fecha; `someday` es un ALIAS de `inbox` en el servidor, `scope.ts`: da lo
+  mismo, no "solo las aparcadas"), `overdue` o `all`; puede incluir completadas con `includeDone`.
   `includeArchived: true` amplía el mismo filtro a tareas archivadas — se
   combina con `includeDone` y el resto de parámetros, y cada archivada se
   identifica con su fecha de archivo. El servidor exige el literal booleano
@@ -273,6 +283,10 @@ retención en «Qué guarda el relé»).
   pinta en la raíz). Las áreas llevan `[área]`; un proyecto cerrado lleva
   `[cerrado]` (cierre «hecho») o `[cancelado]`, sin fecha y sin reagrupar al
   final; un proyecto abierto no lleva marca. La cabecera explica las marcas.
+  La Bandeja de un espacio COMPARTIDO no es un destino (`docs/20` §3.1,
+  punto 5; lee `isInbox` de `includeLists=1`): sin tareas no sale; con tareas
+  sale marcada `[bandeja, no es destino]`. La Bandeja personal se pinta como
+  siempre, y un servidor que no mande `isInbox` no cambia nada.
   `get_list` da la fecha del cierre. Si un proyecto o área tiene
   nota, su línea termina con el marcador `✎N` (2026-09-16, tarea
   827a7878) — el MISMO marcador que usa `list_tasks` para una nota sin leer,
@@ -289,7 +303,14 @@ retención en «Qué guarda el relé»).
   nombre, tipo (proyecto/área), padre (`nombre (uuid)`, con una segunda
   petición solo si hay padre; si falla, se pinta solo el id sin fallar), estado (cierre/aparcado/fecha, cuando
   el servidor los trae), `deadline` y etiquetas (propias y `heredados:`; solo
-  cuando existen) y recuento de tareas, seguidos de su nota ÍNTEGRA y
+  cuando existen) y recuento de tareas, la misma marca `[bandeja, no es
+  destino]` si es la Bandeja de un espacio compartido, y sus SECCIONES con su
+  recuento de tareas y `sectionId` (5 nov 2026; segunda petición
+  `GET /api/tasks?listId=<id>&includeSections=1`, por `listId` y no por
+  nombre para que dos listas homónimas de espacios distintos no se confundan,
+  con el `spaceId` de la lista si es de un espacio; las tareas sin sección no
+  cuentan, las secciones vacías salen con 0; si esa petición falla, `get_list`
+  responde igual con la línea «secciones: no disponibles»), seguidos de su nota ÍNTEGRA y
   verbatim (2026-09-16, tarea 827a7878) — útil para leerla ANTES de
   reescribirla con `organize({ op: "set_list_notes" })`, que la reemplaza
   entera. `pinned`, `icon` y `color` viajan en la respuesta de la app pero son
@@ -350,14 +371,21 @@ retención en «Qué guarda el relé»).
   su tarea madre (el `parentId` que ya devuelve `GET /api/tasks?id=`), que es
   lo que necesita la op `set_parent`. Da error si el `taskId`
   no existe entre las tareas visibles del usuario para ese alcance.
-- `read_attachment({ attachment_id })` — descarga los BYTES de un adjunto de
-  una tarea (vía `GET /api/attachments/:id`, sácalo del campo `attachments`
-  de `list_tasks`/`get_task`). Si es una imagen, se devuelve para verla
-  directamente (hasta 3,5 MiB; una imagen mayor devuelve texto con tipo,
-  tamaño y motivo, sin descargarla); para cualquier otro tipo (PDF, etc.) NO
-  se descarga: devuelve tipo y tamaño desde `content-length` (o «tamaño
-  desconocido») — no hay forma de leer su contenido con esta tool. El tope de
-  25 MiB es solo el de la SUBIDA.
+- `read_attachment({ attachment_id })` — lee un adjunto de una tarea (vía
+  `GET /api/attachments/:id`, sácalo del campo `attachments` de
+  `list_tasks`/`get_task`). Según el `Content-Type`: una IMAGEN se devuelve
+  para verla; un TEXTO (`text/*` —CSV y Markdown incluidos—, JSON, XML, YAML,
+  TOML, NDJSON, JavaScript y cualquier `+json`/`+xml`) como bloque de texto,
+  UTF-8 estricto, tras una línea de metadata; un PDF como recurso embebido
+  (`blob` en base64, URI opaca `lumbre-attachment:<id>`), el mismo mecanismo
+  que `hebra-mcp`, para que el cliente lo reciba como documento. Tope común de
+  3,5 MiB (`MAX_READABLE_ATTACHMENT_BYTES`): por encima, o si un texto no
+  decodifica como UTF-8, devuelve solo metadata con el motivo y NUNCA un
+  recorte a medias. Cualquier otro tipo no se descarga: tipo y tamaño desde
+  `content-length` (o «tamaño desconocido»). Funciona igual con
+  `LUMBRE_MCP_TOOLSET=attachments`. El tipo se decide por el `Content-Type`
+  que sirve la app, no por la extensión. El tope de 25 MiB es solo el de la
+  SUBIDA.
 - `add_attachment({ taskId, file_path?, content_base64?, filename? })` — sube
   un fichero y lo deja adjunto y **enlazado** a una tarea (vía
   `POST /api/attachments?taskId=`). `taskId` puede ser el de una
@@ -523,7 +551,9 @@ de lote, que ya las cubrían entero:
   de un proyecto o área existente) y, desde MC7, `delete_habit` (borra un
   hábito, sin `restore`). Desde el 2026-10-08: `close_project`,
   `reopen_project`, `set_project_when` y `set_project_deadline` (cierre,
-  reapertura y fechas de un proyecto).
+  reapertura y fechas de un proyecto). Desde el 2026-11-05: `create_section`
+  en `organize` y `unregister_habit` (el deshacer de `register_habit`) en
+  `mutate_tasks`.
 
 Por qué se partió así: baja el coste fijo de `tools/list` (de 26.756 a 21.346
 caracteres, -20%) y, sobre todo, deja la frontera de "puede borrar / no puede
@@ -606,9 +636,12 @@ operaciones a la vez» más abajo):
   decide la app. El informe dice «aplicada» si volvió, o «sin efecto» con el
   aviso de la app si ya no había nada que restaurar (la fila se purgó
   definitivamente).
-- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence?, deadline?, reminders?, expectedContent?, expectedNotes? }`
+- `{ op: "update", taskId, content?, notes?, tags?, priority?, time?, recurrence?, deadline?, reminders?, daypart?, expectedContent?, expectedNotes? }`
   (`mutate_tasks`) — edita texto, notas, tags propios, prioridad, hora, regla de
-  repetición, fecha límite o avisos; solo toca los campos que envíes. `tags: []` quita todos los tags
+  repetición, fecha límite, avisos o franja; solo toca los campos que envíes.
+  `daypart` (5 nov 2026) es `"later"` (la manda a «Más tarde» del Día) o `null`
+  (la quita); otro valor lo rechaza el esquema. `get_task` lo enseña si la
+  respuesta lo trae, cosa que `GET /api/tasks` no hace hoy (solo `/api/today`). `tags: []` quita todos los tags
   propios (un tag `acked`/`wip`/`done`/`not-done`, case-insensitive, se RECHAZA:
   ese estado va como marca `@estado` al final de `content`, nunca en `tags`
   — tarea 2db86c2d, 2026-09-24); omitirlo los conserva. `priority` es `'p1'..'p4'` (`p4` = quitar la
@@ -647,8 +680,10 @@ operaciones a la vez» más abajo):
   vacía es "sin nota" o "borrada"), así que el aviso viaja siempre que se
   escriben notas, sea o no el caso real; confírmalo con `get_task` si dudas.
 - `{ op: "reschedule", taskId, date }` (`mutate_tasks`) — mueve la tarea a
-  otro día (`YYYY-MM-DD`), o a "Algún día"/Bandeja de entrada con
-  `date: null`. **Acepta también el id de una SUBTAREA**, con fecha o con
+  otro día (`YYYY-MM-DD`), o lo deja SIN fecha con `date: null`: la tarea se
+  queda en su lista y, si está suelta, va a la Bandeja. `null` NO la deja en
+  "Algún día" (el servidor escribe `someday: false`, `unscheduleTask`): para
+  crearla en "Algún día" usa `someday: true` en `add_task`. **Acepta también el id de una SUBTAREA**, con fecha o con
   `date: null`: `date` es un accidental permitido en subtarea (§2.5). Ojo al
   efecto, que no es el mismo que en una tarea de primer nivel: una subtarea
   con `date: null` se queda SIN fecha en la checklist de su padre, no cae a la
@@ -683,6 +718,13 @@ operaciones a la vez» más abajo):
   HOY local del usuario cuando falte (pedido el 2026-09-24) — **hasta que lo
   despliegue, omitir `date` falla server-side**; mándala mientras tanto.
   Resuelve `habitId` con `list_habits`.
+- `{ op: "unregister_habit", habitId, date, eventId? }` (`mutate_tasks`, 5 nov
+  2026) — el deshacer de `register_habit`, `kind` `unregisterHabit`. `date`
+  (`YYYY-MM-DD`) es obligatoria (el validador del servidor la exige);
+  `eventId` (uuid de la mutación `registerHabit` que se deshace) es opcional y
+  solo sirve para retirar ese evento de un hábito contador: sin él se desmarca
+  el día de un hábito binario. Desmarcar un día sin marca es `noop`. Mismo
+  criterio de existencia que `register_habit`.
 - `{ op: "archive", taskId }` / `{ op: "unarchive", taskId }` (`mutate_tasks`,
   MC7, 2026-09-24) — archivan/desarchivan una tarea: es VISIBILIDAD, no ciclo
   de vida (no toca `done`/`cancelledAt`, cruza con todos los estados). Sobre
@@ -757,9 +799,15 @@ operaciones a la vez» más abajo):
 - `{ op: "remove_section", sectionId }` (**`organize`**) — borra (tombstone)
   una sección/heading dentro de un proyecto o área. Sus tareas NUNCA se
   borran: solo pierden la sección (quedan sueltas, "sin sección", dentro de la
-  MISMA residencia). Sin `list_sections` todavía: resuelve el `sectionId`
-  desde el campo `sectionId` de una tarea que ya viva ahí
-  (`list_tasks`/`get_task`).
+  MISMA residencia). Resuelve el `sectionId` con `get_list` (lista las
+  secciones de la lista, también las vacías) o desde el campo `sectionId` de
+  una tarea que ya viva ahí (`list_tasks`/`get_task`).
+- `{ op: "create_section", listId, name }` (**`organize`**, 5 nov 2026) — crea
+  una sección en un proyecto o área, `kind` `createSection`. Ambos campos
+  obligatorios; el servidor recorta `name` a 200 caracteres. El id de la
+  sección lo genera el conector y no vuelve en el informe: léelo con
+  `get_list`. Si `listId` no existe, el servidor responde `noop`.
+  Las tareas se colocan en ella con `set_section` (por nombre).
 - `{ op: "delete_habit", habitId }` (**`organize`**, MC7) — borra (tombstone)
   un HÁBITO. **Acción delicada**: sin deshacer (a diferencia de una tarea, no
   hay `restore` para un hábito borrado); confírmalo con el usuario antes de
@@ -893,7 +941,10 @@ más abajo. Lectura:
   `GET /api/export`: el volcado devolvería la cuenta entera, más de lo que
   declara la conexión.
   Por hábito: `id`, `nombre`, `clase` (`registro`|`cadencia`|`contador`) y si
-  está `archivedAt` (epoch ms). Por defecto solo los vivos; `includeArchived:
+  está `archivedAt` (epoch ms). Cuando existen, añade el objetivo: `cadencia`
+  (veces por semana, solo en la clase `cadencia`, donde cuenta) como
+  «objetivo: N por semana» y `dailyGoal` (clase `contador`; 0 o ausente =
+  sin objetivo) como «objetivo diario: N». Por defecto solo los vivos; `includeArchived:
   true` incluye los archivados, con su fecha. Añade además las **últimas 3
   ocurrencias** (fecha) de cada hábito, a coste CERO: `habitLog` viaja en la
   MISMA respuesta, así que enseñarlas no cuesta una petición
@@ -916,14 +967,17 @@ resultado detalla, por posición 0-indexada en `ops`, qué falló y por qué, y 
 de un `add_task`, su `taskId` nuevo).
 
 Cada elemento de `ops` es `{ op: "<nombre>", ...campos }`. El reparto de las
-33 ops entre las dos tools (MC7, 2026-09-24, añade `archive`…`unarchive_habit`
-en la primera fila y la última de la segunda; `set_parent` llega el
-2026-09-25):
+35 ops entre las dos tools, 20 en `mutate_tasks` y 15 en `organize` (MC7,
+2026-09-24, añade `archive`…`unarchive_habit` en la primera fila y la última de
+la segunda; `set_parent` llega el 2026-09-25; `unregister_habit` y
+`create_section` el 2026-11-05). Con ellas, los 36 `kind` de
+`POST /api/mutations` quedan cubiertos (`complete_subtask` y `complete`
+comparten `complete`):
 
 | tool | ops |
 | --- | --- |
-| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `set_parent`, `set_assignee` |
-| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit`, `close_project`, `reopen_project`, `set_project_when`, `set_project_deadline` |
+| `mutate_tasks` (una tarea, hábito, serie o «esperando») | `add_task`, `complete`, `cancel`, `update`, `reschedule`, `set_section`, `add_subtask`, `complete_subtask`, `restore`, `set_waiting`, `clear_waiting`, `register_habit`, `unregister_habit`, `archive`, `unarchive`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `set_parent`, `set_assignee` |
+| `organize` (borrar y reorganizar) | `delete`, `remove_section`, `create_section`, `create_list`, `nest_list`, `rename_list`, `remove_list`, `set_list_notes`, `move_to_list`, `set_list_kind`, `delete_habit`, `close_project`, `reopen_project`, `set_project_when`, `set_project_deadline` |
 
 `move_to_list` está en `organize`, y no con las ops de tarea, porque se
 encadena con `create_list` por el `listId` generado en el mismo lote (ver
@@ -936,11 +990,11 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
 # mutate_tasks
-add_task: text* [list|listId, spaceId, assigneeId, section, priority, date, deadline, time, recurrence, subtasks, notes, tags]
+add_task: text* [list|listId, spaceId, assigneeId, section, priority, date, someday (no con date/time/recurrence), deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
-update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders] [expectedContent, expectedNotes]
-reschedule: taskId*, date*
+update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders, daypart ("later"|null)] [expectedContent, expectedNotes]
+reschedule: taskId*, date* (null = sin fecha; sigue en su lista, y si está suelta va a la Bandeja)
 set_section: taskId*, section*
 set_waiting: taskId*, until* (estrictamente futura) [for]
 clear_waiting: taskId*
@@ -948,6 +1002,7 @@ add_subtask: taskId*, subtasks*
 complete_subtask: subtaskId* [done]
 restore: taskId* (tarea borrada; sin comprobación de existencia en el cliente)
 register_habit: habitId* [date] (habitId, NO taskId; sin comprobación de existencia de tarea)
+unregister_habit: habitId*, date* [eventId] (deshace register_habit)
 archive: taskId* (archiva; noop sin aviso si ya lo estaba; no en subtarea)
 unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
 skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
@@ -957,6 +1012,7 @@ set_assignee: taskId*, assigneeId* (accountId de miembro o ""; también en subta
 set_parent: taskId*, parentId* (uuid de la madre, o null para sacarla; taskId puede ser subtarea; el resto de reglas, en la app)
 
 # organize
+create_section: listId*, name*
 delete: taskId*
 remove_section: sectionId*
 create_list: name* [color, icon, listId, listKind, spaceId, parentId]
@@ -1039,7 +1095,7 @@ batch — salvo `restore` (su objetivo es una tarea BORRADA) y, desde MC7,
 `archive`, `unarchive` y `delete` sobre una archivada (y la madre archivada de
 un `set_parent`), que repiten esa comprobación con `includeArchived` en vez de
 saltársela. Las ops cuyo objetivo NO es una tarea (`register_habit`,
-`skip_occurrence`, `archive_habit`, `unarchive_habit`, `delete_habit`) no
+`unregister_habit`, `create_section`, `skip_occurrence`, `archive_habit`, `unarchive_habit`, `delete_habit`) no
 comprueban nada contra `GET /api/tasks`: decide el servidor. El encadenado
 dentro de `organize` es SIEMPRE por
 `listId` (el uuid que tú le diste al `create_list`), nunca por `list`
@@ -1250,7 +1306,7 @@ con su cuenta escrita en el código):
 | `/authorize` | 30/min por IP, 10/min por `client_id`, 60/min global (429) | Cada `/authorize` válido crea un registro real en `app.lumbre.pro`. El uso real son unas pocas autorizaciones a la hora |
 | Formulario de `/token` y `/revoke` | 16 KiB (413) | Un `grant_type=refresh_token` completo no llega a 1 KiB |
 | Back-channel logout de Sumego | 60/min por IP, 8 a la vez, 16 KiB (429, 413) | Lo llama solo el servidor de Sumego, uno por app y sesión; un `logout_token` mide unos cientos de bytes |
-| Descarga de un adjunto | 3,5 MiB (imagen) | `read_attachment` solo descarga imágenes y hasta ese tope (un base64 mayor no cabe en el contexto); el de 25 MiB es solo el de la SUBIDA |
+| Lectura de un adjunto | 3,5 MiB (imagen, texto o PDF) | `read_attachment` devuelve imágenes, texto UTF-8 y PDF íntegros hasta ese tope (un base64 mayor no cabe en el contexto); por encima, solo metadata, nunca un recorte; el de 25 MiB es solo el de la SUBIDA |
 
 Al pasarse del tope de cuerpo la conexión se corta, pero no de golpe: se deja
 de procesar y se drena unos segundos para que el 413 llegue entero (si se

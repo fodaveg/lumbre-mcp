@@ -173,6 +173,7 @@ export const TASK_OP_TOOL = {
     set_waiting: 'mutate_tasks',
     clear_waiting: 'mutate_tasks',
     register_habit: 'mutate_tasks',
+    unregister_habit: 'mutate_tasks',
     add_subtask: 'mutate_tasks',
     complete_subtask: 'mutate_tasks',
     // MC7 (2026-09-24, tarea 8eee8c72): visibilidad/serie/hábito, todas en
@@ -187,6 +188,7 @@ export const TASK_OP_TOOL = {
     set_assignee: 'mutate_tasks',
     delete: 'organize',
     remove_section: 'organize',
+    create_section: 'organize',
     create_list: 'organize',
     set_list_kind: 'organize',
     nest_list: 'organize',

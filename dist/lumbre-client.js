@@ -133,6 +133,30 @@ function readNotices(body) {
     const raw = body.notices;
     return Array.isArray(raw) ? raw.filter((n) => typeof n === 'string') : [];
 }
+/** Quita `someday: false` del alta: solo `true` viaja (ver `AddTaskInput.someday`). */
+function withoutFalseSomeday(input) {
+    if (input.someday !== false)
+        return input;
+    const { someday: _discard, ...rest } = input;
+    return rest;
+}
+/** `someday: true` junto con `date`, `time` o `recurrence`: en el servidor
+ *  prevalece la fecha/hora/regla (`ingest-enqueue.ts` fuerza `someday: false`
+ *  con fecha y `parseIngestBodyObject` igual) y el "Algún día" se perdería en
+ *  silencio. Se rechaza antes de mandar nada. `null` si no hay conflicto. */
+export function somedayConflictError(input) {
+    if (input.someday !== true)
+        return null;
+    const clash = [
+        input.date !== undefined ? 'date' : null,
+        input.time !== undefined ? 'time' : null,
+        input.recurrence !== undefined ? 'recurrence' : null
+    ].filter((f) => f !== null);
+    if (clash.length === 0)
+        return null;
+    return (`someday: true no admite ${clash.join(', ')}: una fecha, hora o repetición sacan la tarea de ` +
+        '"Algún día" y el servidor la ignoraría. Quita uno de los dos.');
+}
 /** `POST /api/ingest`: crea una tarea. La app la encola y la materializa en
  *  el servidor en la misma petición; los dispositivos la reciben al
  *  sincronizar. Devuelve los `notices` para que la tool se los cuente al
@@ -143,7 +167,7 @@ export async function addTask(config, input) {
     const body = await request(config, '/api/ingest', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...input, literal: true })
+        body: JSON.stringify({ ...withoutFalseSomeday(input), literal: true })
     });
     if (!body || typeof body !== 'object' || body.ok !== true) {
         throw new LumbreApiError('Lumbre no confirmó la ingesta (respuesta inesperada).');
@@ -472,6 +496,36 @@ export async function getListById(config, listId) {
         return null;
     const space = body.spaces?.find((space) => space.spaceId === list.spaceId);
     return space ? { ...list, space } : list;
+}
+/**
+ * Secciones de UNA lista con su recuento (`GET /api/tasks?listId=<id>&includeSections=1`,
+ * `{ sections: [{ id, name, tags, effectiveTags, taskCount }] }`). Va por
+ * `listId` y no por `list` (nombre): dos listas homónimas de espacios distintos
+ * no se confunden, y el servidor monta los stores que contienen esa lista sin
+ * necesitar `spaceId`. Si la lista es de un espacio se manda también, como
+ * hacen el resto de lecturas. El recuento es de tareas de primer nivel vivas y
+ * las que no están en ninguna sección no cuentan. Lanza si la respuesta no
+ * tiene la forma esperada (servidor anterior): quien llama decide qué hacer.
+ */
+export async function getListSections(config, listId, spaceId) {
+    const params = new URLSearchParams({ listId, includeSections: '1' });
+    if (spaceId)
+        params.set('spaceId', spaceId);
+    const path = `/api/tasks?${params.toString()}`;
+    const body = await request(config, path);
+    const sections = body?.sections;
+    if (!Array.isArray(sections)) {
+        throw new LumbreApiError(`Lumbre devolvió una respuesta inesperada para ${path}.`);
+    }
+    // Una fila sin id o nombre no se descarta en silencio (el listado quedaría
+    // corto sin avisar): rompe la lectura entera y la tool dice "no disponibles".
+    return sections.map((s) => {
+        const row = s;
+        if (!row || typeof row.id !== 'string' || typeof row.name !== 'string') {
+            throw new LumbreApiError(`Lumbre devolvió una sección sin id o nombre para ${path}.`);
+        }
+        return { id: row.id, name: row.name, taskCount: typeof row.taskCount === 'number' ? row.taskCount : 0 };
+    });
 }
 function parseDirectorySpaces(raw) {
     if (!Array.isArray(raw))
@@ -891,16 +945,41 @@ export function assertTaskUsable(task, taskId, opts = {}) {
     if (!opts.allowSubtask && task.parentId)
         throw subtaskNotAllowedError(taskId, opts.op);
 }
-/** Tope de bytes crudos de una imagen que `read_attachment` devuelve como
- *  imagen (3,5 MiB): un base64 mayor no cabe como imagen en el contexto del
- *  modelo. Por encima no se devuelve la imagen, solo su metadata. */
-export const MAX_IMAGE_ATTACHMENT_BYTES = Math.floor(3.5 * 1024 * 1024);
+/** Tope de bytes crudos de un adjunto que `read_attachment` devuelve con su
+ *  contenido (imagen, texto o PDF; 3,5 MiB): un base64 mayor no cabe en el
+ *  contexto del modelo. Por encima NO hay recorte: solo metadata con el motivo. */
+export const MAX_READABLE_ATTACHMENT_BYTES = Math.floor(3.5 * 1024 * 1024);
+/** Clasifica un `Content-Type` (con o sin parámetros) o `null` si no se lee.
+ *  Texto: `text/*` (incluye csv y markdown), JSON, XML, YAML, TOML, NDJSON,
+ *  JavaScript y cualquier sufijo `+json`/`+xml`. */
+export function attachmentKindOf(contentType) {
+    const type = contentType.split(';')[0].trim().toLowerCase();
+    if (type.startsWith('image/'))
+        return 'image';
+    if (type === 'application/pdf')
+        return 'pdf';
+    if (type.startsWith('text/'))
+        return 'text';
+    if (/\+(json|xml)$/.test(type) ||
+        [
+            'application/json',
+            'application/xml',
+            'application/yaml',
+            'application/x-yaml',
+            'application/toml',
+            'application/x-ndjson',
+            'application/javascript'
+        ].includes(type)) {
+        return 'text';
+    }
+    return null;
+}
 /**
  * `GET /api/attachments/:id`: consulta un adjunto propio. Mismo token que el
  * resto (`Authorization: Bearer`); ese endpoint solo sirve el adjunto si
  * pertenece al dueño del token (anti-IDOR server-side, ver el endpoint en el
  * repo principal). No pasa por `request()` porque la respuesta no es JSON.
- * Solo se descarga el cuerpo si es una imagen dentro del tope (R7 del audit de
+ * Solo se descarga el cuerpo si es imagen, texto o PDF dentro del tope (R7 del audit de
  * rendimiento: antes se bajaban hasta 25 MiB para devolver tipo y tamaño).
  * Timeout de `ATTACHMENT_TIMEOUT_MS` sobre toda la operación.
  */
@@ -934,19 +1013,30 @@ async function getAttachmentOnce(config, id, signal) {
     const lengthHeader = res.headers.get('content-length');
     const declaredNumber = lengthHeader === null ? Number.NaN : Number(lengthHeader);
     const declared = Number.isFinite(declaredNumber) && declaredNumber >= 0 ? declaredNumber : null;
-    if (!contentType.toLowerCase().startsWith('image/')) {
+    const kind = attachmentKindOf(contentType);
+    if (kind === null) {
         // No hay nada que mostrar: ni se lee el cuerpo.
         await res.body?.cancel().catch(() => undefined);
-        return { contentType, size: declared, skipped: 'not-image' };
+        return { contentType, size: declared, skipped: 'unsupported' };
     }
-    if (declared !== null && declared > MAX_IMAGE_ATTACHMENT_BYTES) {
+    if (declared !== null && declared > MAX_READABLE_ATTACHMENT_BYTES) {
         await res.body?.cancel().catch(() => undefined);
-        return { contentType, size: declared, skipped: 'image-too-large' };
+        return { contentType, size: declared, kind, skipped: 'too-large' };
     }
-    const bytes = await readBoundedBody(res, MAX_IMAGE_ATTACHMENT_BYTES);
+    const bytes = await readBoundedBody(res, MAX_READABLE_ATTACHMENT_BYTES);
     if (bytes === undefined)
-        return { contentType, size: declared, skipped: 'image-too-large' };
-    return { contentType, size: bytes.length, bytes };
+        return { contentType, size: declared, kind, skipped: 'too-large' };
+    if (kind === 'text') {
+        try {
+            // UTF-8 estricto: un byte inválido es "no decodifica", nunca U+FFFD.
+            const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+            return { contentType, size: bytes.length, kind, text };
+        }
+        catch {
+            return { contentType, size: bytes.length, kind, skipped: 'not-utf8' };
+        }
+    }
+    return { contentType, size: bytes.length, kind, bytes };
 }
 /**
  * Lee el cuerpo de una imagen con el tope `maxBytes`: la cuenta real mientras
@@ -1423,6 +1513,11 @@ function localValidationError(op) {
         if (reserved.length > 0)
             return `${op.op}: ${reservedStatusTagsError(reserved)}`;
     }
+    if (op.op === 'add_task') {
+        const clash = somedayConflictError(op);
+        if (clash !== null)
+            return `add_task: ${clash}`;
+    }
     if (op.op === 'update') {
         if (op.content === undefined &&
             op.notes === undefined &&
@@ -1431,9 +1526,10 @@ function localValidationError(op) {
             op.time === undefined &&
             op.recurrence === undefined &&
             op.deadline === undefined &&
-            op.reminders === undefined) {
+            op.reminders === undefined &&
+            op.daypart === undefined) {
             return ('update: indica al menos un campo a cambiar (content, notes, tags, priority, time, ' +
-                'recurrence, deadline o reminders).');
+                'recurrence, deadline, reminders o daypart).');
         }
     }
     if (op.op === 'move_to_list' && op.listId === undefined && op.list === undefined) {
@@ -1454,7 +1550,7 @@ function translateOp(op) {
             // `literal: true` SIEMPRE (tarea cd39f028, 2026-09-24, ver el JSDoc de
             // `AddTaskInput.literal`) — mismo forzado que `addTask` aplica a
             // `POST /api/ingest`, aquí para la vía `POST /api/batch`.
-            return { type: 'ingest', task: { ...task, literal: true } };
+            return { type: 'ingest', task: { ...withoutFalseSomeday(task), literal: true } };
         }
         case 'set_assignee':
             return { type: 'mutate', taskId: op.taskId, kind: 'setAssignee', payload: { assigneeId: op.assigneeId } };
@@ -1490,6 +1586,7 @@ function translateOp(op) {
                     ...(op.recurrence !== undefined ? { recurrence: op.recurrence } : {}),
                     ...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
                     ...(op.reminders !== undefined ? { reminders: op.reminders } : {}),
+                    ...(op.daypart !== undefined ? { daypart: op.daypart } : {}),
                     ...(op.expectedContent !== undefined ? { expectedContent: op.expectedContent } : {}),
                     ...(op.expectedNotes !== undefined ? { expectedNotes: op.expectedNotes } : {})
                 }
@@ -1612,6 +1709,22 @@ function translateOp(op) {
                 kind: 'registerHabit',
                 payload: op.date !== undefined ? { date: op.date } : {}
             };
+        case 'unregister_habit':
+            return {
+                type: 'mutate',
+                taskId: op.habitId,
+                kind: 'unregisterHabit',
+                payload: { date: op.date, ...(op.eventId !== undefined ? { eventId: op.eventId } : {}) }
+            };
+        case 'create_section':
+            // `taskId` = id de la sección nueva (la materialización ignora una
+            // sección que ya exista con ese id: reintentar es idempotente).
+            return {
+                type: 'mutate',
+                taskId: randomUUID(),
+                kind: 'createSection',
+                payload: { listId: op.listId, name: op.name }
+            };
         case 'archive':
             return { type: 'mutate', taskId: op.taskId, kind: 'archive', payload: {} };
         case 'unarchive':
@@ -1687,7 +1800,16 @@ export function mergeRecurrencePatch(patch, current) {
     return { rule };
 }
 /** Campos de `update` distintos de `recurrence` (ver CX7 en `buildBatchFromOps`). */
-const UPDATE_EXTRA_FIELDS = ['content', 'notes', 'tags', 'priority', 'time', 'deadline', 'reminders'];
+const UPDATE_EXTRA_FIELDS = [
+    'content',
+    'notes',
+    'tags',
+    'priority',
+    'time',
+    'deadline',
+    'reminders',
+    'daypart'
+];
 /** Id de la semilla si `task` es una OCURRENCIA de una serie (su `seriesId`
  *  apunta a otra fila); `null` si es la semilla o no es de ninguna serie.
  *  Mismo criterio que `isSeriesOccurrence` en el repo principal. */
