@@ -21,7 +21,10 @@ resumir un proyecto o área, o leer feedback.
   `get_task_links` por nota no distingue vacío de sin permiso; por `taskId`, con token
   personal (stdio) una tarea fuera de alcance también sale vacía (con OAuth da 404).
 - `get_agenda({days?, week?})` da eventos, tareas y bloques de Horario por día: ve 14
-  días como mucho y bloques solo de hoy que no han terminado. No acepta `spaceId`.
+  días como mucho y bloques solo de hoy que no han terminado. No acepta `spaceId`. De un
+  espacio solo trae las tareas asignadas a ti y en tu Hoy, siempre en la columna de hoy:
+  una con fecha futura no sale en su día y una cerrada desaparece. Los bloques son solo de
+  Personal. Para ver un espacio entero, `list_tasks` con `spaceId`.
 - `refresh_sync` solo fuerza el flush de cambios que ya llegaron al servidor: es una
   operación de lectura. Úsala antes de releer cuando importa la frescura y el cambio
   pudo hacerse fuera de este MCP, por ejemplo desde la app o el móvil. No hace falta

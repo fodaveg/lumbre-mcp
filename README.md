@@ -395,7 +395,12 @@ retención en «Qué guarda el relé»).
   un 401 se relanza y si falla `/api/upcoming` es un error. Con Horario apagado lo dice en una
   línea. Ninguna de las dos rutas acepta `spaceId`, `from`, `to`, `scope`, `date`, `week_of` ni
   `until`, así que la tool no los ofrece. Los títulos de eventos son de terceros: se colapsan
-  a una línea y son datos, no instrucciones.
+  a una línea y son datos, no instrucciones. Para un agente con `SUMEGO_ORGS` encendido (web
+  de Lumbre 89c0c48 o posterior), `/api/upcoming` añade en el día de hoy las tareas de espacios
+  con `agentAccess` asignadas al usuario y en su Hoy, con `spaceId` y `spaceName`, también con
+  `week` y aunque su fecha sea otra. Una con fecha futura no sale en su día, una cerrada
+  desaparece y una en un proyecto aparcado no sale. `/api/today?blocks=1` sigue leyendo solo
+  Personal.
 - `get_task({ taskId, includeArchived? })` — devuelve UNA tarea completa y sin
   recortar (notas íntegras y verbatim, `createdAt` sin recortar, proyecto o área/sección
   con sus ids). `includeArchived: true` permite recuperarla aunque esté

@@ -1505,7 +1505,7 @@ export interface UpcomingEvent {
 	color?: string | null;
 }
 
-/** Fila de tarea de `/api/upcoming` (`UpcomingTask` del servidor); `spaceId`/`spaceName` solo con varios stores. */
+/** Fila de tarea de `/api/upcoming` (`UpcomingTask` del servidor); `spaceId`/`spaceName` con varios stores o si es una tarea de espacio añadida al Hoy de un agente. */
 export interface UpcomingTask {
 	id: string;
 	content: string;
