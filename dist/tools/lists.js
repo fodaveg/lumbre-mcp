@@ -143,7 +143,7 @@ export function registerListTools(server, ctx) {
     const linkTaskNoteTool = server.registerTool('link_task_note', {
         annotations: { destructiveHint: false, idempotentHint: true },
         description: 'Vincula una nota de Obsidian o Hebra con una tarea, síncrono e idempotente. ' +
-            'En un espacio, el vínculo es tuyo: los demás miembros no lo ven.',
+            'Tareas de espacio solo con OAuth (con token personal, 404); el vínculo es tuyo, los demás no lo ven.',
         inputSchema: taskNoteTargetInputSchema
     }, async (input) => {
         try {
