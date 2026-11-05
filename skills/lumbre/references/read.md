@@ -18,7 +18,8 @@ resumir un proyecto o área, o leer feedback.
 - Otras lecturas: `list_habits` (hábitos), `get_list` (nota íntegra de un proyecto o
   área), `get_list_links` (sus vínculos, sin abrir el destino), `get_task_links`
   (`taskId` o `noteId`, uno solo) y `list_brl_entries` (registro del día; no son tareas).
-  `get_task_links` por nota no distingue vacío de sin permiso.
+  `get_task_links` por nota no distingue vacío de sin permiso; por `taskId`, con token
+  personal (stdio) una tarea fuera de alcance también sale vacía (con OAuth da 404).
 - `get_agenda({days?, week?})` da eventos, tareas y bloques de Horario por día: ve 14
   días como mucho y bloques solo de hoy que no han terminado. No acepta `spaceId`.
 - `refresh_sync` solo fuerza el flush de cambios que ya llegaron al servidor: es una

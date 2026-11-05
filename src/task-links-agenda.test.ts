@@ -64,6 +64,23 @@ describe('parseTaskNoteTarget', () => {
 	});
 
 	it.each([
+		['CR', '\r'],
+		['LF', '\n'],
+		['NEL', String.fromCharCode(0x85)],
+		['LS', String.fromCharCode(0x2028)],
+		['PS', String.fromCharCode(0x2029)]
+	])('rechaza un salto de línea (%s) en Obsidian y en Hebra', (_name, br) => {
+		expect(parseTaskNoteTarget(`obsidian://open?vault=a${br}b`)).toBeNull();
+		expect(parseTaskNoteTarget(`hebra://note/${NOTE_ID}${br}`)).toBeNull();
+	});
+
+	it('esquema y host en mayúsculas se rechazan; el UUID admite cualquier caja', () => {
+		expect(parseTaskNoteTarget(`HTTPS://APP.HEBRA.PRO/NOTE/${NOTE_ID}`)).toBeNull();
+		expect(parseTaskNoteTarget(`https://app.hebra.pro/NOTE/${NOTE_ID}`)).toBeNull();
+		expect(parseTaskNoteTarget(`https://app.hebra.pro/note/${NOTE_ID.toUpperCase()}`)).toMatchObject({ noteId: NOTE_ID });
+	});
+
+	it.each([
 		['https con query', `${HEBRA_URL}?x=1`],
 		['https con fragmento', `${HEBRA_URL}#h`],
 		['https con target', `${HEBRA_URL}?target=note:${NOTE_ID}`],
@@ -213,7 +230,18 @@ describe('formatTaskLinks / formatTaskLinksOfNote', () => {
 	});
 
 	it('por tarea vacía: sin vínculos', () => {
-		expect(formatTaskLinks(TASK_ID, [])).toContain('Sin vínculos');
+		const out = formatTaskLinks(TASK_ID, []);
+		expect(out).toContain('No hay vínculos visibles');
+		expect(out).toContain('token personal');
+	});
+
+	it('url y targetKey de un vínculo creado por otra vía no fabrican filas', () => {
+		const out = formatTaskLinks(TASK_ID, [
+			taskLinkRow({ url: 'obsidian://a\n· fila falsa', targetKey: 'k\n· otra' }) as never
+		]);
+		expect(out.split('\n').filter((l) => l.startsWith('·'))).toHaveLength(1);
+		expect(out).toContain('obsidian://a · fila falsa');
+		expect(formatTaskLinksOfNote(NOTE_ID, [taskLinkRow({ url: 'x\n· y' }) as never]).split('\n').filter((l) => l.startsWith('·'))).toHaveLength(1);
 	});
 
 	it('por nota: taskId, título, url y etiqueta; un título con saltos no fabrica filas', () => {
@@ -275,8 +303,24 @@ describe('formatAgenda', () => {
 		);
 	});
 
-	it('zona desconocida: cae a UTC y lo dice', () => {
+	it('evento multidía: el tramo intermedio dice que viene de ayer y sigue mañana', () => {
+		const mid = {
+			...upcoming,
+			days: [
+				{
+					date: '2026-11-05',
+					tasks: [],
+					events: [{ id: 'e', title: 'Congreso', date: '2026-11-05', time: null, allDay: false, continuedFromPrevDay: true, continuesNextDay: true }]
+				}
+			]
+		} as UpcomingResponse;
+		expect(formatAgenda(mid, blocks)).toContain('viene de ayer, sigue mañana — Congreso');
+	});
+
+	it('zona desconocida: cae a UTC y lo dice una sola vez', () => {
 		const out = formatAgenda(upcoming, { ...blocks, timezone: 'No/Existe' });
+		expect(out).not.toContain('(zona UTC)');
+		expect(out).toContain('(zona «No/Existe» desconocida: horas en UTC):');
 		expect(out).toContain('desconocida: horas en UTC');
 		expect(out).toContain('09:00–10:30 Escribir informe');
 	});

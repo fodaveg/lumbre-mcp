@@ -480,7 +480,7 @@ export const mutateTasksOpSchema = z
 			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
 			.optional()
 			.describe(
-				'YYYY-MM-DD. reschedule: null = sin fecha (suelta, va a la Bandeja)'
+				'YYYY-MM-DD. reschedule: null = sin fecha (sigue en su lista; suelta, va a la Bandeja)'
 			),
 		someday: z.boolean().optional().describe('add_task: true = Algún día; no con date/time/recurrence'),
 		daypart: z.union([z.literal('later'), z.null()]).optional().describe('update: "later" = Más tarde; null la quita'),

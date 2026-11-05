@@ -1304,7 +1304,11 @@ const MAX_TASK_TARGET_KEY_LENGTH = 300;
 
 /** Mismo patrón (sin anclas) que `HEBRA_LIST_NOTE_URL` del servidor: la URL universal exacta. */
 const HEBRA_TASK_NOTE_HTTPS =
-	/^https:\/\/app\.hebra\.pro\/note\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+	/^https:\/\/app\.hebra\.pro\/note\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/;
+
+/** CR, LF, NEL, LS y PS: `new URL` los descarta en silencio, así que una URL con uno pasaría la
+ *  validación y el servidor guardaría la cadena cruda. Armado con códigos: LS/PS literales rompen un regex. */
+const URL_LINE_BREAKS = new RegExp(`[\\r\\n${String.fromCharCode(0x85, 0x2028, 0x2029)}]`);
 
 /** `target=` de `hebra://`: `note:<uuid>` con ancla opcional `:heading:…`/`:block:…`,
  *  igual que `HEBRA_NOTE_TARGET` del servidor (a diferencia de `parseListNoteUrl`,
@@ -1338,6 +1342,7 @@ export function parseTaskNoteTarget(raw: string):
 	| { kind: 'obsidian'; targetKey: string }
 	| { kind: 'hebra'; noteId: string; targetKey: string }
 	| null {
+	if (URL_LINE_BREAKS.test(raw)) return null;
 	const base = parseListNoteUrl(raw);
 	if (!base || raw.includes('\u0000')) return null;
 	if (base.kind === 'obsidian') return { kind: 'obsidian', targetKey: raw };
@@ -1418,7 +1423,9 @@ function isTaskLink(
 	);
 }
 
-/** Vínculo síncrono e idempotente de una tarea (propia o de un espacio con acceso de agente) con una nota. */
+/** Vínculo síncrono e idempotente de una tarea con una nota. Con la concesión OAuth `mcp` vale también
+ *  una tarea de un espacio con `agentAccess`; con token personal (stdio) solo las del espacio personal
+ *  (`findLinkableTask`) y una de espacio da 404. */
 export async function linkTaskNote(config: LumbreConfig, input: TaskNoteLinkInput): Promise<LinkTaskNoteResult> {
 	const url = input.url.trim();
 	const label = input.label.trim();

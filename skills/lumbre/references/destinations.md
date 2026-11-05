@@ -47,8 +47,9 @@ la sección.
 - Comprueba el vínculo con `get_list_links`.
 - Una nota ligada a una sola tarea se vincula a esa tarea con `link_task_note` (mismas
   URL; `hebra://` admite ancla `?target=note:<uuid>:heading:…`) y se comprueba con
-  `get_task_links`. El vínculo de una tarea de espacio se guarda a nombre del miembro que
-  lo crea y los demás no lo ven.
+  `get_task_links`. Las tareas de espacio solo se vinculan con la conexión OAuth (con token
+  personal, stdio, dan 404); ese vínculo se guarda a nombre del miembro que lo crea y los
+  demás no lo ven.
 - Salvo ese vínculo de origen, vincular o desvincular notas solo se hace con petición
   expresa.
 - El vínculo lo hace el coordinador: los subagentes de la skill no tienen

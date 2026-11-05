@@ -921,14 +921,21 @@ function oneLine(text: string, max = 300): string {
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-/** Vínculos de UNA tarea (`get_task_links({taskId})`). Vacío = sin vínculos; la tarea inaccesible da 404, no `[]`. */
+/** Vínculos de UNA tarea (`get_task_links({taskId})`). Con la concesión OAuth una tarea fuera de alcance da
+ *  404; con token personal el servidor devuelve `links: []` también para ella. `url` y `targetKey` pasan por
+ *  `oneLine`: el vínculo pudo crearse por otra vía con saltos de línea. */
 export function formatTaskLinks(taskId: string, links: LumbreTaskLink[]): string {
-	if (links.length === 0) return `Sin vínculos para la tarea ${taskId}.`;
+	if (links.length === 0) {
+		return (
+			`No hay vínculos visibles para la tarea ${taskId}. Con token personal (stdio), una tarea fuera de ` +
+			'alcance (p. ej. de un espacio) también sale así.'
+		);
+	}
 	const header = `${links.length} vínculo${links.length === 1 ? '' : 's'} de la tarea ${taskId}:`;
 	const body = links.map(
 		(link) =>
-			`· ${oneLine(link.label)} — ${link.url}\n` +
-			`  id: ${link.id} · taskId: ${link.taskId} · kind: ${link.kind} · targetKey: ${link.targetKey} · updatedAt: ${link.updatedAt}`
+			`· ${oneLine(link.label)} — ${oneLine(link.url, 2100)}\n` +
+			`  id: ${link.id} · taskId: ${link.taskId} · kind: ${link.kind} · targetKey: ${oneLine(link.targetKey, 2100)} · updatedAt: ${link.updatedAt}`
 	);
 	return [header, ...body].join('\n');
 }
@@ -945,7 +952,7 @@ export function formatTaskLinksOfNote(noteId: string, links: LumbreTaskLink[]): 
 	const body = links.map(
 		(link) =>
 			`· ${oneLine(link.title ?? '(sin título)')} — taskId: ${link.taskId}\n` +
-			`  etiqueta: ${oneLine(link.label)} · url: ${link.url}`
+			`  etiqueta: ${oneLine(link.label)} · url: ${oneLine(link.url, 2100)}`
 	);
 	return [header, ...body].join('\n');
 }
@@ -979,7 +986,13 @@ function spaceSuffix(row: { spaceId?: string | null; spaceName?: string | null }
 
 function eventLine(e: UpcomingEvent): string {
 	let when = e.allDay ? 'todo el día' : (e.time ?? '');
-	if (!e.allDay && !e.time && e.continuedFromPrevDay) when = e.endTime ? `viene de ayer, hasta ${e.endTime}` : 'viene de ayer';
+	if (!e.allDay && !e.time && e.continuedFromPrevDay) {
+		when = e.continuesNextDay
+			? 'viene de ayer, sigue mañana'
+			: e.endTime
+				? `viene de ayer, hasta ${e.endTime}`
+				: 'viene de ayer';
+	}
 	if (!e.allDay && e.time && e.continuesNextDay) when = `${e.time} (sigue mañana)`;
 	return `  · ${when || 'sin hora'} — ${oneLine(e.title, 200)}`;
 }
@@ -1035,8 +1048,9 @@ export function formatAgenda(upcoming: UpcomingResponse, blocks: BlockAgenda | s
 		lines.push('Horario está apagado en esta cuenta: no hay bloques.');
 	} else {
 		const zone = zonedParts(0, blocks.timezone) ? blocks.timezone : 'UTC';
-		const note = zone === blocks.timezone ? '' : ` (zona «${oneLine(blocks.timezone, 60)}» desconocida: horas en UTC)`;
-		lines.push(`Bloques de Horario de hoy que aún no han terminado (zona ${zone})${note}:`);
+		const zoneText =
+			zone === blocks.timezone ? `zona ${zone}` : `zona «${oneLine(blocks.timezone, 60)}» desconocida: horas en UTC`;
+		lines.push(`Bloques de Horario de hoy que aún no han terminado (${zoneText}):`);
 		if (blocks.blocks.length === 0) lines.push('  (ninguno)');
 		for (const b of blocks.blocks) {
 			const start = zonedParts(b.startMs, zone);

@@ -363,7 +363,9 @@ retención en «Qué guarda el relé»).
   el endpoint compatible está desplegado.
 - `link_task_note({ taskId, url, label })` y `unlink_task_note({ taskId, url, label })` —
   vinculan o desvinculan, síncronas e idempotentes, una nota de Obsidian o Hebra con
-  una TAREA (propia o de un espacio con `agentAccess`) mediante `POST /api/task-links`.
+  una TAREA mediante `POST /api/task-links`. Las tareas de un espacio con `agentAccess` solo
+  llegan con la concesión OAuth `mcp`; con token personal (stdio) solo vale una tarea del
+  espacio personal y una de espacio da 404 (`findLinkableTask`).
   `url` admite `obsidian://…`, `https://app.hebra.pro/note/<uuid>` exacta (sin query ni
   fragmento) y `hebra://note/<uuid>` con o sin `?target=note:<uuid>[:heading:…|:block:…]`
   (el ancla se conserva; `targetKey` máx. 300 caracteres). El cliente rechaza antes de la
@@ -371,12 +373,16 @@ retención en «Qué guarda el relé»).
   de la credencial, y envía siempre `noteId` y `targetKey` en Hebra. A diferencia de
   `/api/list-links`, `targetKey` es `note:<uuid>` (o el `target`), no el uuid pelado.
   `link_task_note` dice si la tarea está archivada o cancelada (el vínculo se guarda igual);
-  `unlink_task_note` devuelve `removed` (`false` es un 200). Una tarea inexistente, ajena o de
-  un espacio sin permiso da el mismo 404. El vínculo de una tarea de espacio se guarda a
-  nombre del miembro que lo crea y los demás no lo ven.
+  `unlink_task_note` devuelve `removed` (`false` es un 200). Con OAuth, una tarea inexistente,
+  ajena o de un espacio sin permiso da el mismo 404. El vínculo de una tarea de espacio se
+  guarda a nombre del miembro que lo crea y los demás no lo ven. Las URL con CR, LF, NEL, LS o
+  PS se rechazan en cliente, y `HTTPS://APP.HEBRA.PRO/NOTE/…` también (solo el UUID admite
+  mayúsculas).
 - `get_task_links({ taskId? , noteId? })` — solo lectura; exactamente uno de los dos
   (con ambos o ninguno da error sin llamar al servidor). Por `taskId`
-  (`GET /api/task-links?taskId=`) lista los vínculos de la tarea; por `noteId` (uuid de una
+  (`GET /api/task-links?taskId=`) lista los vínculos de la tarea (con OAuth, una tarea fuera de alcance da 404; con token
+  personal el servidor devuelve `links: []`, así que un vacío no distingue sin vínculos de
+  fuera de alcance); por `noteId` (uuid de una
   nota de Hebra, `?kind=hebra&targetKey=`) lista las tareas vinculadas, con título, url y
   etiqueta. Por nota, un resultado vacío no distingue una nota sin vínculos de una tarea
   fuera de alcance, y no trae `spaceId`.
