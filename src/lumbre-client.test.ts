@@ -2376,10 +2376,10 @@ describe('getAttachment — tope de descarga', () => {
 		expect(served()).toBe(2);
 	});
 
-	it('un adjunto que NO es imagen no se lee: tamaño de content-length y stream cancelado', async () => {
-		const { served } = streamedResponse(26, true);
+	it('un adjunto de tipo no legible no se lee: tamaño de content-length y stream cancelado', async () => {
+		const { served } = streamedResponse(26, true, 'application/zip');
 		const downloaded = await getAttachment(config, ATTACHMENT_ID);
-		expect(downloaded.skipped).toBe('not-image');
+		expect(downloaded.skipped).toBe('unsupported');
 		expect(downloaded.bytes).toBeUndefined();
 		expect(downloaded.size).toBe(26 * 1024 * 1024);
 		// 1 y no 0: `ReadableStream` adelanta un `pull` al construir la
@@ -2387,28 +2387,73 @@ describe('getAttachment — tope de descarga', () => {
 		expect(served()).toBeLessThanOrEqual(1);
 	});
 
-	it('un adjunto que NO es imagen y sin content-length: tamaño desconocido (null), sin leer', async () => {
-		const { served } = streamedResponse(26, false);
+	it('tipo no legible y sin content-length: tamaño desconocido (null), sin leer', async () => {
+		const { served } = streamedResponse(26, false, 'application/zip');
 		const downloaded = await getAttachment(config, ATTACHMENT_ID);
-		expect(downloaded).toMatchObject({ skipped: 'not-image', size: null });
+		expect(downloaded).toMatchObject({ skipped: 'unsupported', size: null });
 		expect(served()).toBeLessThanOrEqual(1);
 	});
 
-	it('una imagen por encima de 3,5 MiB con content-length ni se lee el cuerpo', async () => {
-		const { served } = streamedResponse(4, true, 'image/jpeg');
+	it.each(['image/jpeg', 'application/pdf', 'text/plain'])(
+		'%s por encima de 3,5 MiB con content-length ni se lee el cuerpo',
+		async (mime) => {
+			const { served } = streamedResponse(4, true, mime);
+			const downloaded = await getAttachment(config, ATTACHMENT_ID);
+			expect(downloaded).toMatchObject({ skipped: 'too-large', size: 4 * 1024 * 1024 });
+			expect(downloaded.bytes).toBeUndefined();
+			expect(downloaded.text).toBeUndefined();
+			expect(served()).toBeLessThanOrEqual(1);
+		}
+	);
+
+	it.each(['image/jpeg', 'application/pdf', 'text/csv'])(
+		'%s por encima de 3,5 MiB sin content-length: el stream se corta al pasarse',
+		async (mime) => {
+			const { served } = streamedResponse(26, false, mime);
+			const downloaded = await getAttachment(config, ATTACHMENT_ID);
+			expect(downloaded).toMatchObject({ skipped: 'too-large', size: null });
+			expect(downloaded.text).toBeUndefined();
+			// 3 MiB enteros caben; el cuarto trozo dispara el corte y se cancela
+			// (el `pull` adelantado del stream puede pedir uno más): lejos de los 26.
+			expect(served()).toBeLessThanOrEqual(5);
+		}
+	);
+
+	it('un PDF dentro del tope se descarga entero como bytes', async () => {
+		streamedResponse(1, true, 'application/pdf');
 		const downloaded = await getAttachment(config, ATTACHMENT_ID);
-		expect(downloaded).toMatchObject({ skipped: 'image-too-large', size: 4 * 1024 * 1024 });
+		expect(downloaded).toMatchObject({ kind: 'pdf', size: 1024 * 1024 });
+		expect(downloaded.bytes).toHaveLength(1024 * 1024);
+		expect(downloaded.skipped).toBeUndefined();
+	});
+
+	function textResponse(body: Blob | string, contentType: string) {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(new Response(body, { status: 200, headers: { 'content-type': contentType } }))
+		);
+	}
+
+	it.each([
+		'text/plain; charset=utf-8',
+		'text/markdown',
+		'text/csv',
+		'application/json',
+		'application/xml',
+		'application/ld+json',
+		'application/atom+xml'
+	])('%s se devuelve como texto UTF-8', async (mime) => {
+		textResponse('canción, ñandú — ✓', mime);
+		const downloaded = await getAttachment(config, ATTACHMENT_ID);
+		expect(downloaded).toMatchObject({ kind: 'text', text: 'canción, ñandú — ✓' });
 		expect(downloaded.bytes).toBeUndefined();
-		expect(served()).toBeLessThanOrEqual(1);
 	});
 
-	it('una imagen por encima de 3,5 MiB sin content-length: el stream se corta al pasarse', async () => {
-		const { served } = streamedResponse(26, false, 'image/jpeg');
+	it('un texto que no decodifica como UTF-8 da skipped not-utf8 y no texto con U+FFFD', async () => {
+		textResponse(new Blob([new Uint8Array([0x68, 0xe9, 0x6c, 0x6c, 0x6f])]), 'text/plain'); // "héllo" en latin-1
 		const downloaded = await getAttachment(config, ATTACHMENT_ID);
-		expect(downloaded).toMatchObject({ skipped: 'image-too-large', size: null });
-		// 3 MiB enteros caben; el cuarto trozo dispara el corte y se cancela
-		// (el `pull` adelantado del stream puede pedir uno más): lejos de los 26.
-		expect(served()).toBeLessThanOrEqual(5);
+		expect(downloaded).toMatchObject({ kind: 'text', skipped: 'not-utf8', size: 5 });
+		expect(downloaded.text).toBeUndefined();
 	});
 });
 

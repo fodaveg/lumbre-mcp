@@ -143,8 +143,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 					.optional()
 					.describe(
-						'Hora "HH:MM" (24h); sin `date`, la tarea se agenda hoy — esto pasa ANTES de decidir ' +
-							'lista/Bandeja (ver `list`), así que gana incluso con `list` o metadata estructurada'
+						'Hora "HH:MM" (24h); sin `date`, se agenda hoy, incluso con `list` o metadata estructurada'
 					),
 				recurrence: recurrenceSchema.optional(),
 				subtasks: subtasksSchema

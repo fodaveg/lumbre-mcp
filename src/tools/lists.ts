@@ -87,7 +87,7 @@ export function registerListTools(server: McpServer, ctx: ToolCtx) {
 			annotations: { readOnlyHint: true },
 			description:
 				'Devuelve el detalle completo de UN proyecto o área por su listId: nombre, tipo (proyecto/área), ' +
-					'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas y la nota ' +
+					'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas, secciones y la nota ' +
 					'ÍNTEGRA — útil antes de reescribirla con organize({op:"set_list_notes"}), que la ' +
 					'reemplaza entera. Error si no existe.',
 			inputSchema: {

@@ -481,8 +481,7 @@ export const mutateTasksOpSchema = z
 			.optional()
 			.describe(
 				'YYYY-MM-DD. reschedule: null = sin fecha (sigue en su lista; suelta, va a la Bandeja). ' +
-					'register_habit: día a registrar (opcional; sin él falla si el servidor no tiene el HOY local). ' +
-					'unregister_habit: día a deshacer. skip_occurrence: día de la ocurrencia (con seriesId)'
+					'En las ops de hábito y serie, el día (ver `ops`)'
 			),
 		someday: z.boolean().optional().describe('add_task: true = Algún día; no con date/time/recurrence'),
 		daypart: z.union([z.literal('later'), z.null()]).optional().describe('update: "later" = Más tarde; null la quita'),
@@ -830,8 +829,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'una ocurrencia; noop con aviso si no lo es) · archive_habit: habitId* · ' +
 							'unarchive_habit: habitId* · ' +
 							'set_parent: taskId*, parentId* (la anida en parentId; null la saca a la lista de su ' +
-							'madre; si la madre no tiene proyecto ni área y ella tiene fecha, queda en su día sin ' +
-							'ellos. La app rechaza con subtareas, deadline, recordatorios, esperando o serie; ' +
+							'madre. La app rechaza con subtareas, deadline, recordatorios, esperando o serie; ' +
 							'update quita antes deadline y recordatorios y clear_waiting el esperando; la serie no: ' +
 							'recurrence null apaga la serie entera, solo si el usuario lo pide)'
 					)

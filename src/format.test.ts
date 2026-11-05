@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { LumbreHabit, LumbreHabitLogEntry, LumbreTask } from './lumbre-client.js';
-import { formatHabitList, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
+import type { LumbreHabit, LumbreHabitLogEntry, LumbreListSummary, LumbreTask } from './lumbre-client.js';
+import { formatHabitList, formatListDetail, formatListSummaries, formatTaskFull, formatTaskList } from './format.js';
 
 /**
  * `creada:<timestamp>` en `formatTask` (tarea de perf, 2026-08-25): antes iba
@@ -375,5 +375,113 @@ describe('formatHabitList (MC6, list_habits)', () => {
 		const output = formatHabitList([habit({ archivedAt: 0 })], [], false);
 		expect(output).toContain('0 hábitos (1 archivado omitido)');
 		expect(output).toContain('includeArchived:true');
+	});
+});
+
+// ── Lote 1 del audit de endpoints (5 nov 2026) ────────────────────────────
+
+describe('formatTaskFull — algún día y Más tarde', () => {
+	it('someday:true se enseña; false o ausente no pintan nada', () => {
+		expect(formatTaskFull(task({ someday: true }))).toContain('- algún día: sí');
+		expect(formatTaskFull(task({ someday: false }))).not.toContain('algún día');
+		expect(formatTaskFull(task())).not.toContain('algún día');
+	});
+
+	it('daypart "later" se enseña; null o ausente no', () => {
+		expect(formatTaskFull(task({ daypart: 'later' }))).toContain('Más tarde');
+		expect(formatTaskFull(task({ daypart: null }))).not.toContain('Más tarde');
+		expect(formatTaskFull(task())).not.toContain('Más tarde');
+	});
+});
+
+describe('formatListSummaries / formatListDetail — Bandeja de un espacio compartido', () => {
+	const SPACE = '99999999-9999-4999-8999-999999999999';
+	const inbox = (over: Partial<LumbreListSummary> = {}): LumbreListSummary => ({
+		id: 'inbox-1',
+		name: 'Bandeja',
+		taskCount: 0,
+		kind: 'project',
+		isInbox: true,
+		spaceId: SPACE,
+		...over
+	});
+
+	it('compartida con 0 tareas: no sale en list_lists', () => {
+		const out = formatListSummaries([inbox(), { id: 'p', name: 'Proyecto', taskCount: 2 }]);
+		expect(out).not.toContain('Bandeja');
+		expect(out).toContain('Proyecto');
+		expect(out).toContain('Proyectos y áreas (1)');
+	});
+
+	it('compartida con tareas: sale marcada [bandeja, no es destino]', () => {
+		const out = formatListSummaries([inbox({ taskCount: 3 })]);
+		expect(out).toContain('Bandeja [bandeja, no es destino] — 3 tareas');
+	});
+
+	it('personal (spaceId null o ausente): se pinta exactamente como antes, con 0 tareas incluida', () => {
+		for (const spaceId of [null, undefined]) {
+			const out = formatListSummaries([inbox({ spaceId })]);
+			expect(out).toContain('· Bandeja — 0 tareas (listId: inbox-1)');
+			expect(out).not.toContain('no es destino');
+		}
+	});
+
+	it('servidor sin isInbox: nada cambia', () => {
+		const { isInbox: _drop, ...legacy } = inbox();
+		expect(formatListSummaries([legacy])).toContain('· Bandeja — 0 tareas');
+	});
+
+	it('get_list lleva la misma marca en la compartida y ninguna en la personal', () => {
+		expect(formatListDetail(inbox())).toContain('- nombre: Bandeja [bandeja, no es destino]');
+		expect(formatListDetail(inbox({ spaceId: null }))).toContain('- nombre: Bandeja\n');
+	});
+});
+
+describe('formatListDetail — secciones', () => {
+	const list: LumbreListSummary = { id: 'l1', name: 'Proyecto', taskCount: 3, kind: 'project' };
+
+	it('sin pedirlas (undefined): no pinta nada', () => {
+		expect(formatListDetail(list)).not.toContain('secciones');
+	});
+
+	it('con secciones: nombre, recuento (incluido 0) y sectionId', () => {
+		const out = formatListDetail(list, null, [
+			{ id: 's1', name: 'Fase 1', taskCount: 2 },
+			{ id: 's2', name: 'Vacía', taskCount: 0 },
+			{ id: 's3', name: 'Una', taskCount: 1 }
+		]);
+		expect(out).toContain('- secciones (3):');
+		expect(out).toContain('· Fase 1 — 2 tareas (sectionId: s1)');
+		expect(out).toContain('· Vacía — 0 tareas (sectionId: s2)');
+		expect(out).toContain('· Una — 1 tarea (sectionId: s3)');
+	});
+
+	it('lista sin secciones: lo dice', () => {
+		expect(formatListDetail(list, null, [])).toContain('- secciones: (ninguna)');
+	});
+
+	it('null = no se pudieron leer: una línea que lo dice', () => {
+		expect(formatListDetail(list, null, null)).toContain('- secciones: no disponibles');
+	});
+});
+
+describe('formatHabitList — objetivos', () => {
+	const h = (over: Partial<LumbreHabit>): LumbreHabit => ({ id: 'h1', nombre: 'Correr', clase: 'cadencia', ...over });
+
+	it('cadencia en clase cadencia: objetivo por semana', () => {
+		expect(formatHabitList([h({ cadencia: 3 })], [], false)).toContain('(cadencia) · objetivo: 3 por semana  · id: h1');
+	});
+
+	it('dailyGoal en contador: objetivo diario', () => {
+		expect(formatHabitList([h({ clase: 'contador', dailyGoal: 8 })], [], false)).toContain('objetivo diario: 8');
+	});
+
+	it('dailyGoal 0, ausente, o cadencia huérfana en otra clase: nada', () => {
+		const out = formatHabitList(
+			[h({ clase: 'contador', dailyGoal: 0 }), h({ id: 'h2', clase: 'registro', cadencia: 4 })],
+			[],
+			false
+		);
+		expect(out).not.toContain('objetivo');
 	});
 });

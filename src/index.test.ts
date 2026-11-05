@@ -1140,7 +1140,7 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 			);
 			const text = await call(fetchSpy);
 			expect(text).toContain(`- padre: Madre (${PARENT_ID})`);
-			expect(fetchSpy).toHaveBeenCalledTimes(2);
+			expect(fetchSpy).toHaveBeenCalledTimes(3);
 			expect(fetchSpy.mock.calls[1][0]).toBe(`https://lumbre.test/api/tasks?includeLists=1&listId=${PARENT_ID}`);
 		});
 
@@ -1153,16 +1153,16 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 			const text = await call(fetchSpy);
 			expect(text).toContain(`- padre: ${PARENT_ID}\n`);
 			expect(text).not.toContain('(66666666');
-			expect(fetchSpy).toHaveBeenCalledTimes(2);
+			expect(fetchSpy).toHaveBeenCalledTimes(3);
 		});
 
-		it('sin padre no hay ninguna petición extra', async () => {
+		it('sin padre no hay petición del padre (solo la de secciones)', async () => {
 			const fetchSpy = vi
 				.fn()
 				.mockResolvedValue(jsonResponse({ lists: [{ ...child, parentListId: null }] }));
 			const text = await call(fetchSpy);
 			expect(text).toContain('- padre: (ninguno, de primer nivel)');
-			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
 		});
 	});
 
@@ -1202,6 +1202,65 @@ describe('list_lists / get_list — nota de proyecto/área (tarea 827a7878)', ()
 		expect(text).toContain('- nombre: Mía');
 		expect(text).toContain('la nota mía');
 		expect(text).not.toContain('no soy yo');
+	});
+
+	describe('get_list — secciones (includeSections=1 por listId)', () => {
+		const SPACE = '77777777-7777-4777-8777-777777777777';
+		const sectionsBody = {
+			sections: [
+				{ id: 's1', name: 'Fase 1', tags: [], effectiveTags: [], taskCount: 2 },
+				{ id: 's2', name: 'Vacía', tags: [], effectiveTags: [], taskCount: 0 }
+			]
+		};
+		const run = async (list: Record<string, unknown>, sections: () => Response) => {
+			const fetchSpy = vi.fn().mockImplementation(async (url: string) =>
+				url.includes('includeSections=1') ? sections() : jsonResponse({ lists: [list] })
+			);
+			vi.stubGlobal('fetch', fetchSpy);
+			const client = await buildClient();
+			const text = textOf(await client.callTool({ name: 'get_list', arguments: { listId: LIST_ID } }));
+			return { text, fetchSpy };
+		};
+
+		it('lista personal: pide por listId (no por nombre) y enseña nombre y recuento', async () => {
+			const { text, fetchSpy } = await run(
+				{ id: LIST_ID, name: 'Proyecto', taskCount: 2, kind: 'project', spaceId: null },
+				() => jsonResponse(sectionsBody)
+			);
+			expect(text).toContain('· Fase 1 — 2 tareas (sectionId: s1)');
+			expect(text).toContain('· Vacía — 0 tareas (sectionId: s2)');
+			const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
+			expect(urls).toContain(`https://lumbre.test/api/tasks?listId=${LIST_ID}&includeSections=1`);
+			expect(urls.some((u) => u.includes('list='))).toBe(false);
+		});
+
+		it('lista de un espacio: el spaceId de la lista viaja en la petición', async () => {
+			const { fetchSpy } = await run(
+				{ id: LIST_ID, name: 'Compartida', taskCount: 0, kind: 'project', spaceId: SPACE },
+				() => jsonResponse(sectionsBody)
+			);
+			expect(fetchSpy.mock.calls.map((c) => String(c[0]))).toContain(
+				`https://lumbre.test/api/tasks?listId=${LIST_ID}&includeSections=1&spaceId=${SPACE}`
+			);
+		});
+
+		it('si la petición de secciones falla, get_list responde igual y lo dice en una línea', async () => {
+			const { text } = await run(
+				{ id: LIST_ID, name: 'Proyecto', taskCount: 4, kind: 'project', notes: 'mi nota' },
+				() => new Response('boom', { status: 500, headers: { 'content-type': 'text/plain' } })
+			);
+			expect(text).toContain('- nombre: Proyecto');
+			expect(text).toContain('mi nota');
+			expect(text).toContain('- secciones: no disponibles');
+		});
+
+		it('servidor sin includeSections (responde sin `sections`): también "no disponibles"', async () => {
+			const { text } = await run(
+				{ id: LIST_ID, name: 'Proyecto', taskCount: 1, kind: 'project' },
+				() => jsonResponse([])
+			);
+			expect(text).toContain('- secciones: no disponibles');
+		});
 	});
 
 	it('get_list da error claro si el listId no existe', async () => {
@@ -1714,6 +1773,29 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				taskId: '22222222-2222-2222-2222-222222222222'
 			}
 		},
+		// 5 nov 2026: `unregister_habit` exige `date`; `eventId` es opcional.
+		{
+			op: 'unregister_habit',
+			valid: { op: 'unregister_habit', habitId: '11111111-1111-1111-1111-111111111111', date: '2026-11-05' },
+			missingField: 'date',
+			extraField: {
+				op: 'unregister_habit',
+				habitId: '11111111-1111-1111-1111-111111111111',
+				date: '2026-11-05',
+				taskId: '22222222-2222-2222-2222-222222222222'
+			}
+		},
+		{
+			op: 'create_section',
+			valid: { op: 'create_section', listId: '11111111-1111-1111-1111-111111111111', name: 'Fase 1' },
+			missingField: 'name',
+			extraField: {
+				op: 'create_section',
+				listId: '11111111-1111-1111-1111-111111111111',
+				name: 'Fase 1',
+				sectionId: '22222222-2222-2222-2222-222222222222'
+			}
+		},
 		{
 			op: 'set_list_kind',
 			valid: { op: 'set_list_kind', listId: '11111111-1111-1111-1111-111111111111', listKind: 'area' },
@@ -1809,6 +1891,7 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 	const ORGANIZE_OPS = new Set([
 		'delete',
 		'remove_section',
+		'create_section',
 		'create_list',
 		'nest_list',
 		'rename_list',
@@ -1825,7 +1908,7 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 	const strictSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeStrictOpSchema : mutateTasksStrictOpSchema);
 	const exposedSchemaFor = (op: string) => (ORGANIZE_OPS.has(op) ? organizeOpSchema : mutateTasksOpSchema);
 
-	it('cubre las 32 operaciones (guardarraíl del propio test; MC7 y set_parent desde el 2026-09-25)', () => {
+	it('cubre las 34 operaciones (guardarraíl del propio test; MC7 y set_parent desde el 2026-09-25)', () => {
 		expect(cases.map((c) => c.op).sort()).toEqual(
 			[
 				'add_task',
@@ -1848,6 +1931,8 @@ describe('mutate_tasks/organize — las 21 `op` siguen aceptándose (esquemas es
 				'set_waiting',
 				'clear_waiting',
 				'register_habit',
+				'unregister_habit',
+				'create_section',
 				'set_list_kind',
 				'archive',
 				'unarchive',
@@ -3514,6 +3599,152 @@ describe('resultado real por op (MC1) y recurrencia completa (MC3)', () => {
 		expect(body.ops[0].task).toMatchObject({ text: 'Comprar leche', literal: true });
 	});
 
+	// ── Lote 1 del audit de endpoints (5 nov 2026) ────────────────────────────
+
+	it('add_task (tool): someday:true llega a /api/ingest junto con literal:true', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'add_task', arguments: { text: 'Algún día', someday: true } });
+		expect(result.isError).not.toBe(true);
+		expect(bodyOf(fetchSpy, '/api/ingest')).toMatchObject({ someday: true, literal: true });
+	});
+
+	it('add_task (tool): someday:false equivale a omitirlo (no viaja: en el servidor false es "Anytime")', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		await client.callTool({ name: 'add_task', arguments: { text: 'x', someday: false } });
+		expect(bodyOf(fetchSpy, '/api/ingest')).not.toHaveProperty('someday');
+	});
+
+	it.each([
+		['date', { date: '2026-11-10' }],
+		['time', { time: '10:00' }],
+		['recurrence', { recurrence: { freq: 'daily' } }]
+	])('add_task (tool): someday:true con %s se rechaza SIN llamar a la red', async (field, extra) => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client.callTool({ name: 'add_task', arguments: { text: 'x', someday: true, ...extra } });
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain(field);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('mutate_tasks op add_task: someday:true viaja en la ingesta; con date se rechaza esa op sin red', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'ingest', ok: true, id: 't1' }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: {
+					ops: [
+						{ op: 'add_task', text: 'Algún día', someday: true },
+						{ op: 'add_task', text: 'Con fecha', someday: true, date: '2026-11-10' }
+					]
+				}
+			})
+		);
+		const body = bodyOf(fetchSpy, '/api/batch') as { ops: { task: Record<string, unknown> }[] };
+		expect(body.ops).toHaveLength(1);
+		expect(body.ops[0].task).toMatchObject({ text: 'Algún día', someday: true, literal: true });
+		expect(text).toMatch(/\[1\] add_task: add_task: someday: true no admite date/);
+	});
+
+	it('mutate_tasks op unregister_habit: kind unregisterHabit con el hábito como taskId y date/eventId en el payload', async () => {
+		const HABIT = '11111111-1111-4111-8111-111111111111';
+		const EVENT = '22222222-2222-4222-8222-222222222222';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: HABIT }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'unregister_habit', habitId: HABIT, date: '2026-11-05', eventId: EVENT }] }
+		});
+		const body = bodyOf(fetchSpy, '/api/batch') as { ops: Record<string, unknown>[] };
+		expect(body.ops).toEqual([
+			{ type: 'mutate', taskId: HABIT, kind: 'unregisterHabit', payload: { date: '2026-11-05', eventId: EVENT } }
+		]);
+	});
+
+	it('mutate_tasks op unregister_habit sin date: falla de forma, sin red', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true, results: [] }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'unregister_habit', habitId: '11111111-1111-4111-8111-111111111111' }] }
+			})
+		);
+		expect(text).toMatch(/unregister_habit: date/);
+	});
+
+	it('organize op create_section: kind createSection con id nuevo y listId/name en el payload', async () => {
+		const LIST = '33333333-3333-4333-8333-333333333333';
+		const fetchSpy = vi.fn().mockResolvedValue(
+			jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true }] })
+		);
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		await client.callTool({
+			name: 'organize',
+			arguments: { ops: [{ op: 'create_section', listId: LIST, name: 'Fase 1' }] }
+		});
+		const body = bodyOf(fetchSpy, '/api/batch') as { ops: { taskId: string; kind: string; payload: unknown }[] };
+		expect(body.ops[0]).toMatchObject({ kind: 'createSection', payload: { listId: LIST, name: 'Fase 1' } });
+		expect(body.ops[0].taskId).toMatch(/^[0-9a-f-]{36}$/);
+	});
+
+	it('create_section no existe en mutate_tasks: el puntero dice que está en organize', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: true, results: [] })));
+		const client = await buildClient();
+		const text = resultText(
+			await client.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'create_section', listId: '33333333-3333-4333-8333-333333333333', name: 'x' }] }
+			})
+		);
+		expect(text).toContain('está en organize');
+	});
+
+	it.each([['later'], [null]])('mutate_tasks op update: daypart %s viaja en el payload (y solo él ya es un cambio válido)', async (daypart) => {
+		const fetchSpy = vi.fn(async (url: string | URL) => {
+			if (String(url).includes('/api/tasks?')) return jsonResponse([{ id: TASK_ID, content: 'x', done: false }]);
+			return jsonResponse({ ok: true, results: [{ index: 0, type: 'mutate', ok: true, id: TASK_ID }] });
+		});
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		await client.callTool({
+			name: 'mutate_tasks',
+			arguments: { ops: [{ op: 'update', taskId: TASK_ID, daypart }] }
+		});
+		const body = bodyOf(fetchSpy as unknown as ReturnType<typeof vi.fn>, '/api/batch') as {
+			ops: { kind: string; payload: unknown }[];
+		};
+		expect(body.ops[0]).toMatchObject({ kind: 'update', payload: { daypart } });
+	});
+
+	it('mutate_tasks op update: daypart distinto de "later"/null lo rechaza el esquema, sin red', async () => {
+		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true, results: [] }));
+		vi.stubGlobal('fetch', fetchSpy);
+		const client = await buildClient();
+		const result = await client
+			.callTool({
+				name: 'mutate_tasks',
+				arguments: { ops: [{ op: 'update', taskId: TASK_ID, daypart: 'evening' }] }
+			})
+			.catch((err: Error) => ({ isError: true, content: [{ type: 'text', text: err.message }] }));
+		expect(result.isError).toBe(true);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it('add_task (tool): la regla completa llega entera a /api/ingest (antes Zod borraba byWeekday/streak…)', async () => {
 		const fetchSpy = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
 		vi.stubGlobal('fetch', fetchSpy);
@@ -4857,17 +5088,82 @@ describe('read_attachment — imagen, imagen demasiado grande y no imagen (R7)',
 		expect(content[0].text).toContain('3.5 MiB');
 	});
 
-	it('no imagen: solo tipo y tamaño (de content-length) sin descargar el cuerpo', async () => {
+	it('tipo no legible: solo tipo y tamaño (de content-length) sin descargar el cuerpo', async () => {
 		const content = await callRead(
 			new Response(Buffer.alloc(1000), {
 				status: 200,
-				headers: { 'content-type': 'application/pdf', 'content-length': '1000' }
+				headers: { 'content-type': 'application/zip', 'content-length': '1000' }
 			})
 		);
+		expect(content).toHaveLength(1);
 		expect(content[0].type).toBe('text');
-		expect(content[0].text).toContain('application/pdf');
+		expect(content[0].text).toContain('application/zip');
 		expect(content[0].text).toContain('1000 bytes');
 		expect(content[0].text).toContain('no se ha descargado');
+	});
+
+	it('texto: metadata y un bloque de texto con el contenido íntegro', async () => {
+		const content = await callRead(
+			new Response('línea 1\nlínea 2 ñ', { status: 200, headers: { 'content-type': 'text/markdown' } })
+		);
+		expect(content).toHaveLength(2);
+		expect(content[0].text).toContain('text/markdown');
+		expect(content[1]).toEqual({ type: 'text', text: 'línea 1\nlínea 2 ñ' });
+	});
+
+	it('texto vacío: solo la metadata, sin bloque de texto vacío', async () => {
+		const content = await callRead(new Response('', { status: 200, headers: { 'content-type': 'text/plain' } }));
+		expect(content).toHaveLength(1);
+		expect(content[0].text).toContain('0 bytes');
+	});
+
+	it('texto que no es UTF-8: metadata con el motivo, sin contenido', async () => {
+		const content = await callRead(
+			new Response(new Uint8Array([0x68, 0xe9, 0x6c]), { status: 200, headers: { 'content-type': 'text/plain' } })
+		);
+		expect(content).toHaveLength(1);
+		expect(content[0].text).toMatch(/no son UTF-8 válido/);
+	});
+
+	it('texto por encima de 3,5 MiB: metadata con el motivo, nada recortado', async () => {
+		const size = 4 * 1024 * 1024;
+		const content = await callRead(
+			new Response(Buffer.alloc(size, 0x61), {
+				status: 200,
+				headers: { 'content-type': 'application/json', 'content-length': String(size) }
+			})
+		);
+		expect(content).toHaveLength(1);
+		expect(content[0].text).toContain('3.5 MiB');
+		expect(content[0].text).toContain('no se devuelve a medias');
+	});
+
+	it('PDF: metadata y recurso embebido con el blob en base64', async () => {
+		const pdf = Buffer.from('%PDF-1.4 falso');
+		const content = (await callRead(
+			new Response(pdf, { status: 200, headers: { 'content-type': 'application/pdf' } })
+		)) as unknown as { type: string; text?: string; resource?: { uri: string; mimeType: string; blob: string } }[];
+		expect(content).toHaveLength(2);
+		expect(content[0].type).toBe('text');
+		expect(content[1].type).toBe('resource');
+		expect(content[1].resource).toEqual({
+			uri: `lumbre-attachment:${ATTACHMENT_ID}`,
+			mimeType: 'application/pdf',
+			blob: pdf.toString('base64')
+		});
+	});
+
+	it('PDF por encima de 3,5 MiB: metadata con el motivo, sin recurso', async () => {
+		const size = 4 * 1024 * 1024;
+		const content = await callRead(
+			new Response(Buffer.alloc(size), {
+				status: 200,
+				headers: { 'content-type': 'application/pdf', 'content-length': String(size) }
+			})
+		);
+		expect(content).toHaveLength(1);
+		expect(content[0].type).toBe('text');
+		expect(content[0].text).toContain('3.5 MiB');
 	});
 });
 
@@ -4896,6 +5192,32 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 			'delete_attachment',
 			'read_attachment'
 		]);
+	});
+
+	it('`toolset: "attachments"`: read_attachment también devuelve texto y PDF', async () => {
+		const indexModule = await import('./index.js');
+		const server = indexModule.createServer(TEST_CONFIG, { toolset: 'attachments' });
+		const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+		const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		indexModule.stripToolsListSchema(serverTransport);
+		await server.connect(serverTransport);
+		const client = new Client({ name: 'toolset-read-test-client', version: '0.0.0' });
+		await client.connect(clientTransport);
+		const id = '55555555-5555-4555-8555-555555555555';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockImplementation(async () => new Response('hola ñ', { status: 200, headers: { 'content-type': 'text/plain' } }))
+		);
+		const text = await client.callTool({ name: 'read_attachment', arguments: { attachment_id: id } });
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockImplementation(async () => new Response('%PDF', { status: 200, headers: { 'content-type': 'application/pdf' } }))
+		);
+		const pdf = await client.callTool({ name: 'read_attachment', arguments: { attachment_id: id } });
+		vi.unstubAllGlobals();
+		expect((text.content as { type: string; text?: string }[])[1]).toEqual({ type: 'text', text: 'hola ñ' });
+		expect((pdf.content as { type: string }[])[1].type).toBe('resource');
 	});
 
 	it('`toolset: "all"` (explícito): las 19, igual que el default', async () => {
