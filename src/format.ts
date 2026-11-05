@@ -380,6 +380,10 @@ export function formatTaskFull(t: LumbreTask, refs?: RefResolution): string {
 		`- sección: ${t.section ? `"${t.section}"${t.sectionId ? ` (sectionId: ${t.sectionId})` : ''}` : '(sin sección)'}`,
 		`- creada: ${t.createdAt}`
 	];
+	// «Algún día» y «Más tarde» (5 nov 2026): solo se pintan cuando valen; la
+	// ausencia es "no" o "servidor que no lo manda" y no se afirma nada.
+	if (t.someday === true) lines.push('- algún día: sí');
+	if (t.daypart === 'later') lines.push('- franja: Más tarde (daypart)');
 	// «Esperando» (MC6): `waitingUntil` ausente = servidor que aún no la manda
 	// (2026-09-24) — no se pinta nada antes que afirmar «no está esperando».
 	if (t.waitingUntil) {

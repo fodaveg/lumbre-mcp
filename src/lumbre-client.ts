@@ -143,6 +143,13 @@ export interface AddTaskInput {
 	notes?: string;
 	priority?: 'p1' | 'p2' | 'p3' | 'p4';
 	date?: string;
+	/** `true` = la deja en "Algún día" (sin fecha; en su lista si la hay, si no
+	 *  en la Bandeja). Una fecha, hora o regla prevalecen en el servidor
+	 *  (`ingest-enqueue.ts`), así que `somedayConflictError` rechaza la
+	 *  combinación. `false` equivale a omitirlo: no se manda (en el servidor
+	 *  `false` es "Anytime explícito" y cambiaría el destino del solo texto de
+	 *  "hoy" a la Bandeja). */
+	someday?: boolean;
 	deadline?: string;
 	/** Hora "HH:MM" (24h); sin `date`, el servidor agenda la tarea hoy. Mismo formato que el chip de hora
 	 *  de la app (ver `/api/ingest` en el repo principal). Sin sentido sin
@@ -305,6 +312,13 @@ export interface LumbreTask extends StoreMetadata, AssignmentMetadata {
 	seriesId?: string | null;
 	priority: 1 | 2 | 3 | null;
 	date: string | null;
+	/** `true` si la tarea está aparcada en "Algún día" (`StoreTask.someday`;
+	 *  `serializeTask` lo manda siempre). Opcional para tolerar un servidor
+	 *  anterior: ausente se trata como "desconocido", no como `false`. */
+	someday?: boolean;
+	/** Franja "Más tarde" del Día: `'later'` o `null`. `GET /api/tasks` NO la
+	 *  serializa hoy (solo `/api/today`); se lee por si algún servidor la manda. */
+	daypart?: 'later' | null;
 	/** Hora "HH:MM" (24h) de la tarea, o `null` si no tiene — `GET /api/tasks`
 	 *  la serializa como `time` (`src/routes/api/tasks/+server.ts`, junto a
 	 *  `deadline`). La API de hoy siempre incluye la clave; opcional para
@@ -500,6 +514,36 @@ function readNotices(body: unknown): string[] {
 	return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
 }
 
+/** Quita `someday: false` del alta: solo `true` viaja (ver `AddTaskInput.someday`). */
+function withoutFalseSomeday<T extends { someday?: boolean }>(input: T): T {
+	if (input.someday !== false) return input;
+	const { someday: _discard, ...rest } = input;
+	return rest as T;
+}
+
+/** `someday: true` junto con `date`, `time` o `recurrence`: en el servidor
+ *  prevalece la fecha/hora/regla (`ingest-enqueue.ts` fuerza `someday: false`
+ *  con fecha y `parseIngestBodyObject` igual) y el "Algún día" se perdería en
+ *  silencio. Se rechaza antes de mandar nada. `null` si no hay conflicto. */
+export function somedayConflictError(input: {
+	someday?: boolean;
+	date?: string;
+	time?: string;
+	recurrence?: unknown;
+}): string | null {
+	if (input.someday !== true) return null;
+	const clash = [
+		input.date !== undefined ? 'date' : null,
+		input.time !== undefined ? 'time' : null,
+		input.recurrence !== undefined ? 'recurrence' : null
+	].filter((f): f is string => f !== null);
+	if (clash.length === 0) return null;
+	return (
+		`someday: true no admite ${clash.join(', ')}: una fecha, hora o repetición sacan la tarea de ` +
+		'"Algún día" y el servidor la ignoraría. Quita uno de los dos.'
+	);
+}
+
 /** Lo que devuelve `addTask`: los avisos de la app sobre la tarea creada. */
 export interface AddTaskResult {
 	/** `notices` de `/api/ingest`: desvíos que la app aplicó al materializar
@@ -517,7 +561,7 @@ export async function addTask(config: LumbreConfig, input: AddTaskInput): Promis
 	const body = await request(config, '/api/ingest', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ ...input, literal: true })
+		body: JSON.stringify({ ...withoutFalseSomeday(input), literal: true })
 	});
 	if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) {
 		throw new LumbreApiError('Lumbre no confirmó la ingesta (respuesta inesperada).');
@@ -1845,6 +1889,7 @@ export type MutationKind =
 	| 'clearWaiting'
 	| 'addSubtask'
 	| 'removeSection'
+	| 'createSection'
 	| 'createList'
 	| 'setListKind'
 	| 'nestList'
@@ -1856,6 +1901,7 @@ export type MutationKind =
 	| 'setProjectWhen'
 	| 'setProjectDeadline'
 	| 'registerHabit'
+	| 'unregisterHabit'
 	| 'createBrlEntry'
 	| 'updateBrlEntry'
 	| 'removeBrlEntry'
@@ -1936,6 +1982,23 @@ export interface SetListKindMutationPayload {
  *  `validateMutationPayload` rechaza un `date` ausente/inválido). */
 export interface RegisterHabitMutationPayload {
 	date?: string;
+}
+/** Deshace `registerHabit` (`MutateTaskInput.taskId` = id del hábito):
+ *  `date` obligatoria; `eventId` (uuid de la mutación `registerHabit` que se
+ *  deshace) retira solo ese evento de un hábito contador, y sin él se
+ *  desmarca el día de un hábito binario (`validateLifecycleMutationPayload`,
+ *  `lifecycle-mutation-validation.ts` del repo principal). */
+export interface UnregisterHabitMutationPayload {
+	date: string;
+	eventId?: string;
+}
+/** Crea una sección en una lista (`MutateTaskInput.taskId` = id de la sección
+ *  NUEVA, lo genera el llamante como en `createList`). Espejo de
+ *  `validateMutationPayload` → `createSection` (`mutations.ts` del repo
+ *  principal): `name` se recorta a 200 caracteres y no puede quedar vacío. */
+export interface CreateSectionMutationPayload {
+	listId: string;
+	name: string;
 }
 export interface RescheduleMutationPayload {
 	/** `YYYY-MM-DD`, o `null` para mandar la tarea a "Algún día"/Bandeja. */
@@ -2134,6 +2197,8 @@ export interface MutateTaskInput {
 		| SetProjectWhenMutationPayload
 		| SetProjectDeadlineMutationPayload
 		| RegisterHabitMutationPayload
+		| UnregisterHabitMutationPayload
+		| CreateSectionMutationPayload
 		| CreateBrlEntryMutationPayload
 		| UpdateBrlEntryMutationPayload
 		| RemoveBrlEntryMutationPayload
@@ -2418,6 +2483,9 @@ export type MutateTasksOp =
 			deadline?: string | null;
 			/** `[]` los quita, ausente no los toca. Vale también en subtarea. */
 			reminders?: number[];
+			/** Franja "Más tarde" del Día: `'later'` la pone, `null` la quita
+			 *  (`update-mutation-validation.ts` del repo principal). */
+			daypart?: 'later' | null;
 			/** Precondición de texto: ver `UpdateMutationPayload.expectedContent`. */
 			expectedContent?: string;
 			expectedNotes?: string;
@@ -2486,6 +2554,12 @@ export type MutateTasksOp =
 	 *  `TASK_TARGET_ALLOW_SUBTASK`. `date` opcional: ver el JSDoc de
 	 *  `RegisterHabitMutationPayload`. */
 	| { op: 'register_habit'; habitId: string; date?: string }
+	/** Deshace `register_habit` (mismo criterio de existencia: el objetivo es
+	 *  un hábito). `date` obligatoria; `eventId` solo para un hábito contador. */
+	| { op: 'unregister_habit'; habitId: string; date: string; eventId?: string }
+	/** Crea una sección `name` en la lista `listId` (op de `organize`). El id de
+	 *  la sección lo genera `translateOp`. */
+	| { op: 'create_section'; listId: string; name: string }
 	/** Archiva/desarchiva una TAREA (MC7, tarea 8eee8c72): visibilidad, no
 	 *  ciclo de vida — cruza con todos los estados (`done`/`cancelledAt` no se
 	 *  tocan). Acepta el id de una SUBTAREA (`archivedAt` no es un campo
@@ -2719,6 +2793,10 @@ function localValidationError(op: MutateTasksOp): string | null {
 		const reserved = reservedStatusTagsIn(op.tags);
 		if (reserved.length > 0) return `${op.op}: ${reservedStatusTagsError(reserved)}`;
 	}
+	if (op.op === 'add_task') {
+		const clash = somedayConflictError(op);
+		if (clash !== null) return `add_task: ${clash}`;
+	}
 	if (op.op === 'update') {
 		if (
 			op.content === undefined &&
@@ -2728,11 +2806,12 @@ function localValidationError(op: MutateTasksOp): string | null {
 			op.time === undefined &&
 			op.recurrence === undefined &&
 			op.deadline === undefined &&
-			op.reminders === undefined
+			op.reminders === undefined &&
+			op.daypart === undefined
 		) {
 			return (
 				'update: indica al menos un campo a cambiar (content, notes, tags, priority, time, ' +
-				'recurrence, deadline o reminders).'
+				'recurrence, deadline, reminders o daypart).'
 			);
 		}
 	}
@@ -2755,7 +2834,7 @@ function translateOp(op: MutateTasksOp): BatchOp {
 			// `literal: true` SIEMPRE (tarea cd39f028, 2026-09-24, ver el JSDoc de
 			// `AddTaskInput.literal`) — mismo forzado que `addTask` aplica a
 			// `POST /api/ingest`, aquí para la vía `POST /api/batch`.
-			return { type: 'ingest', task: { ...task, literal: true } };
+			return { type: 'ingest', task: { ...withoutFalseSomeday(task), literal: true } };
 		}
 		case 'set_assignee':
 			return { type: 'mutate', taskId: op.taskId, kind: 'setAssignee', payload: { assigneeId: op.assigneeId } };
@@ -2791,6 +2870,7 @@ function translateOp(op: MutateTasksOp): BatchOp {
 					...(op.recurrence !== undefined ? { recurrence: op.recurrence as IngestRecurrence | null } : {}),
 					...(op.deadline !== undefined ? { deadline: op.deadline } : {}),
 					...(op.reminders !== undefined ? { reminders: op.reminders } : {}),
+					...(op.daypart !== undefined ? { daypart: op.daypart } : {}),
 					...(op.expectedContent !== undefined ? { expectedContent: op.expectedContent } : {}),
 					...(op.expectedNotes !== undefined ? { expectedNotes: op.expectedNotes } : {})
 				}
@@ -2913,6 +2993,22 @@ function translateOp(op: MutateTasksOp): BatchOp {
 				kind: 'registerHabit',
 				payload: op.date !== undefined ? { date: op.date } : {}
 			};
+		case 'unregister_habit':
+			return {
+				type: 'mutate',
+				taskId: op.habitId,
+				kind: 'unregisterHabit',
+				payload: { date: op.date, ...(op.eventId !== undefined ? { eventId: op.eventId } : {}) }
+			};
+		case 'create_section':
+			// `taskId` = id de la sección nueva (la materialización ignora una
+			// sección que ya exista con ese id: reintentar es idempotente).
+			return {
+				type: 'mutate',
+				taskId: randomUUID(),
+				kind: 'createSection',
+				payload: { listId: op.listId, name: op.name }
+			};
 		case 'archive':
 			return { type: 'mutate', taskId: op.taskId, kind: 'archive', payload: {} };
 		case 'unarchive':
@@ -3007,7 +3103,16 @@ export function mergeRecurrencePatch(
 }
 
 /** Campos de `update` distintos de `recurrence` (ver CX7 en `buildBatchFromOps`). */
-const UPDATE_EXTRA_FIELDS = ['content', 'notes', 'tags', 'priority', 'time', 'deadline', 'reminders'] as const;
+const UPDATE_EXTRA_FIELDS = [
+	'content',
+	'notes',
+	'tags',
+	'priority',
+	'time',
+	'deadline',
+	'reminders',
+	'daypart'
+] as const;
 
 /** Id de la semilla si `task` es una OCURRENCIA de una serie (su `seriesId`
  *  apunta a otra fila); `null` si es la semilla o no es de ninguna serie.

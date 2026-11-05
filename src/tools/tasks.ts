@@ -9,6 +9,7 @@ import {
 	listTasks,
 	reservedStatusTagsError,
 	reservedStatusTagsIn,
+	somedayConflictError,
 	taskNotFoundError,
 	type LumbreTask,
 	type TaskScope
@@ -135,6 +136,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					),
 				priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
 				date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),
+				someday: z.boolean().optional().describe('true = "Algún día" (sin fecha); no con date/time/recurrence'),
 				deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Fecha límite ⚑, YYYY-MM-DD'),
 				time: z
 					.string()
@@ -162,6 +164,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			try {
 				const reserved = reservedStatusTagsIn(input.tags);
 				if (reserved.length > 0) return errorResult(new Error(reservedStatusTagsError(reserved)));
+				const clash = somedayConflictError(input);
+				if (clash !== null) return errorResult(new Error(clash));
 				const { notices } = await addTask(ctx.config, input);
 				// Los `notices` de `/api/ingest` cuentan los desvíos que aplicó la app
 				// (MC1 del audit de paridad, 23 sep 2026: antes se tiraban y el modelo
