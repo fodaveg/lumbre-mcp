@@ -453,8 +453,7 @@ export const mutateTasksOpSchema = z
 			.guid()
 			.optional()
 			.describe(
-				'skip_occurrence: id de la SEMILLA de la serie (no de una ocurrencia); list_tasks/get_task la ' +
-					'muestran como "semilla" y como "serie:<id>" en cada ocurrencia'
+				'skip_occurrence: id de la SEMILLA (list_tasks/get_task la muestran como "semilla"; cada ocurrencia, "serie:<id>")'
 			),
 		occurrenceId: z
 			.string()
@@ -473,7 +472,7 @@ export const mutateTasksOpSchema = z
 			.array(tagSchema)
 			.optional()
 			.describe('add_task/update: acked/wip/done/not-done se rechazan (ese estado va como @marca en content)'),
-		list: z.string().max(200).optional().describe('Nombre del proyecto o área destino (se crea como proyecto si no existe)'),
+		list: z.string().max(200).optional().describe('Proyecto o área destino (se crea como proyecto si no existe)'),
 		section: z.string().max(200).nullable().optional().describe('Nombre de la sección, o null para quitarla'),
 		notes: z.string().max(10000).optional().describe('Notas (reemplazan las anteriores enteras)'),
 		priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente … p4 = ninguna'),
@@ -481,8 +480,7 @@ export const mutateTasksOpSchema = z
 			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
 			.optional()
 			.describe(
-				'YYYY-MM-DD. reschedule: null = sin fecha (sigue en su lista; suelta, va a la Bandeja). ' +
-					'En las ops de hábito y serie, el día (ver `ops`)'
+				'YYYY-MM-DD. reschedule: null = sin fecha (suelta, va a la Bandeja)'
 			),
 		someday: z.boolean().optional().describe('add_task: true = Algún día; no con date/time/recurrence'),
 		daypart: z.union([z.literal('later'), z.null()]).optional().describe('update: "later" = Más tarde; null la quita'),
@@ -502,10 +500,10 @@ export const mutateTasksOpSchema = z
 		reminders: z
 			.array(z.number().int().nonnegative())
 			.optional()
-			.describe('update: offsets en minutos-antes de time; [] los quita. PROHIBIDO sobre una subtarea'),
+			.describe('update: minutos antes de time; [] los quita. PROHIBIDO sobre una subtarea'),
 		expectedContent: z.string().optional().describe('update: content leído; si cambió, la op da conflict'),
 		expectedNotes: z.string().optional(),
-		subtasks: subtasksSchema.optional().describe('Textos de las subtareas, en orden (máx. 50, 500 caracteres cada una)'),
+		subtasks: subtasksSchema.optional().describe('Textos de las subtareas (máx. 50, 500 caracteres cada una)'),
 		done: z.boolean().optional().describe('true = completar (default); false = desmarcar'),
 		cancelled: z.boolean().optional().describe('true = cancelar (default); false = quitar la cancelación'),
 		until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('set_waiting: fecha de reconsulta, estrictamente futura'),
@@ -536,7 +534,7 @@ export const organizeOpSchema = z
 		// `name`/`icon`: sin describe propio — su semántica (nombre del proyecto
 		// o área, emoji del proyecto) ya la dice el nombre del campo.
 		name: z.string().min(1).max(200).optional(),
-		list: z.string().max(200).optional().describe('Nombre del proyecto o área destino (se crea como proyecto si no existe)'),
+		list: z.string().max(200).optional().describe('Proyecto o área destino (se crea como proyecto si no existe)'),
 		notes: z
 			.union([z.string().max(10000), z.null()])
 			.optional()
@@ -800,17 +798,16 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 			description:
 				`Opera sobre UNA TAREA, en lote (ops y contrato en \`ops\`; restore saca de la Papelera, ` +
 				`archive/unarchive es visibilidad, las *_habit operan sobre un hábito, no una tarea). ` +
-				`Vía ÚNICA para mutar una tarea, ` +
-				`preferente para varias de golpe (UNA llamada). Borrar y reorganizar NO están aquí, están en organize. Éxito PARCIAL: una op ` +
-				`inválida no bloquea las demás — el resultado detalla qué falló por posición y el taskId de ` +
-				`cada add_task creada. ${OUTCOME_NOTE}`,
+				`Vía ÚNICA para mutar una tarea, varias en UNA llamada. Borrar y reorganizar están en organize. ` +
+				`Éxito PARCIAL: una op inválida no bloquea las demás — el resultado detalla qué falló por posición ` +
+				`y el taskId de cada add_task creada. ${OUTCOME_NOTE}`,
 			inputSchema: {
 				ops: z
 					.array(mutateTasksOpSchema)
 					.min(1)
 					.max(200)
 					.describe(
-						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
+						'Ops en orden (máx. 200). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): add_task: text* [list|listId, assigneeId, section, ' +
 							'priority, date, someday, deadline, time, recurrence, subtasks, notes, tags, spaceId] (text literal, sin ' +
 							'interpretar fechas ni #etiquetas) · complete: taskId* ' +
@@ -818,7 +815,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 							'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
 							'en una semilla archivada), deadline, reminders, daypart] [expectedContent, expectedNotes] · ' +
 							'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
-							'set_assignee: taskId*, assigneeId* (accountId de miembro; \"\" desasigna; también subtareas) · ' +
+							'set_assignee: taskId*, assigneeId* (\"\" desasigna; también subtareas) · ' +
 							'set_waiting: taskId*, until* (estrictamente futura) [for] · clear_waiting: taskId* · ' +
 							'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
 							'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +
@@ -862,7 +859,7 @@ export function registerBatchTool(server: McpServer, ctx: ToolCtx) {
 					.min(1)
 					.max(200)
 					.describe(
-						'Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
+						'Ops en orden (máx. 200). Contrato por-op ' +
 							'(`*` = obligatorio, el resto opcional): delete: taskId* · remove_section: sectionId* · ' +
 							'create_section: listId*, name* [sectionId] · ' +
 							'create_list: name* [color, icon, listId, listKind, spaceId, parentId] · nest_list: listId*, parentId* · ' +

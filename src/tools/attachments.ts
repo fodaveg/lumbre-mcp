@@ -176,12 +176,12 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { destructiveHint: false },
 			description:
-				'Sube un fichero y lo deja adjunto a una tarea o subtarea. EXACTAMENTE una vía: ' +
-				'`file_path` (local, tope 25 MB; solo con el conector stdio, el remoto da error explicativo) o ' +
-				'`content_base64` (solo unos KB: lo emites tú como modelo; tope 1 MB; exige `filename`). ' +
+				'Sube un fichero y lo adjunta a una tarea o subtarea. EXACTAMENTE una vía: ' +
+				'`file_path` (local, tope 25 MB; solo con el conector stdio) o ' +
+				'`content_base64` (solo unos KB; tope 1 MB; exige `filename`). ' +
 				'Fichero grande o local: prepare_attachment_upload.',
 			inputSchema: {
-				taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks; de una subtarea, get_task de su madre)'),
+				taskId: z.string().guid().describe('Id de la tarea (ver list_tasks; de una subtarea, get_task de su madre)'),
 				file_path: z
 					.string()
 					.min(1)
@@ -265,9 +265,8 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { destructiveHint: false },
 			description:
-				'Para subir un fichero LOCAL o grande (hasta 25 MB) sin pasar sus bytes por el modelo: ' +
-				'devuelve un permiso de un solo uso (10 min) y un comando curl que ejecutas tú en tu ' +
-				'terminal. Luego comprueba con get_task.',
+				'Subir un fichero LOCAL o grande (hasta 25 MB) sin pasar sus bytes por el modelo: ' +
+				'devuelve un permiso de un solo uso (10 min) y un curl que ejecutas tú. Luego comprueba con get_task.',
 			inputSchema: {
 				taskId: z.string().guid().describe('Id de la tarea o subtarea destino'),
 				filename: z.string().min(1).describe('Nombre con el que se guardará (su extensión fija el mime)')

@@ -58,11 +58,9 @@ export function registerSyncTools(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { destructiveHint: false, idempotentHint: true },
 			description:
-				'Fuerza el flush del espacio personal de Lumbre; no refresca espacios compartidos. NO hace falta ' +
-				'tras una mutación hecha con ESTE MCP (el servidor ya la aplicó). SÍ cuando el cambio viene de ' +
-				'FUERA (app o móvil del usuario) y quieres verlo ya. Solo garantiza lo que YA llegó al ' +
-				'servidor por WebSocket: los cambios sin enviar de un dispositivo offline no se recuperan. ' +
-				'Sin parámetros.',
+				'Fuerza el flush del espacio personal; no refresca espacios compartidos. NO hace falta ' +
+				'tras una mutación de ESTE MCP. SÍ si el cambio viene de FUERA (app o móvil) y quieres ' +
+				'verlo ya. Solo garantiza lo que YA llegó al servidor; lo de un dispositivo offline no. Sin parámetros.',
 
 			inputSchema: {}
 		},

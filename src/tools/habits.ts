@@ -18,9 +18,8 @@ export function registerHabitTools(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { readOnlyHint: true },
 			description:
-				'Enumera tus hábitos (id, nombre, clase, archivado) con sus últimas ocurrencias. ' +
-				'Por defecto solo los vivos; `includeArchived` los incluye. Para registrar una ' +
-				'ocurrencia, usa mutate_tasks({op:"register_habit"}).',
+				'Enumera tus hábitos (id, nombre, clase, archivado) con sus últimas ocurrencias; ' +
+				'por defecto solo los vivos. Registrar una ocurrencia: mutate_tasks({op:"register_habit"}).',
 			inputSchema: {
 				includeArchived: z.boolean().optional().describe('Incluir hábitos archivados; default false')
 			}

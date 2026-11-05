@@ -94,10 +94,8 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { destructiveHint: false },
 			description:
-				'Añade una tarea nueva a Lumbre (planificador semanal). Dispara con "apúntame", ' +
-				'"recuérdame", "añade a mi proyecto/área". La respuesta trae los avisos de la app pero NO el id ' +
-				'de la tarea: si lo necesitas, usa la op add_task de mutate_tasks. ' +
-				'`section` coloca la tarea DENTRO de `list` (se crea si no existe); se ignora sin `list`.',
+				'Añade una tarea nueva a Lumbre. La respuesta trae los avisos de la app pero NO el id ' +
+				'de la tarea: si lo necesitas, usa la op add_task de mutate_tasks.',
 			inputSchema: {
 				text: z
 					.string()
@@ -112,7 +110,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.max(200)
 					.optional()
 					.describe(
-						'Nombre del proyecto o área destino (se crea como proyecto si no existe). Sin ' +
+						'Proyecto o área destino (se crea como proyecto si no existe). Sin ' +
 							'`list`/`listId` ni `date`: solo texto aterriza en "hoy"; con priority/deadline/' +
 							'subtasks/tags, en la Bandeja. `recurrence` sin `date`, hoy.'
 					),
@@ -121,8 +119,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.guid()
 					.optional()
 					.describe(
-						'Id ESTABLE del proyecto o área destino, PREFERENTE sobre `list` (inmune a renames); sácalo ' +
-							'de list_lists.'
+						'Id del proyecto o área destino, preferente sobre `list` (ver list_lists)'
 					),
 				assigneeId: assigneeIdSchema.optional(),
 				spaceId: z.string().guid().optional().describe('Espacio compartido destino (con list o listId); ausente = personal'),
@@ -131,8 +128,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.max(200)
 					.optional()
 					.describe(
-						'Nombre de la sección/heading dentro de `list` donde colocar la tarea (se crea si ' +
-							'no existe). Se ignora si no se indica `list`.'
+						'Sección dentro de `list` (se crea si no existe); se ignora sin `list`'
 					),
 				priority: z.enum(['p1', 'p2', 'p3', 'p4']).optional().describe('p1 = más urgente; p4 = ninguna'),
 				date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Día programado, YYYY-MM-DD'),
@@ -143,7 +139,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 					.optional()
 					.describe(
-						'Hora "HH:MM" (24h); sin `date`, se agenda hoy, incluso con `list` o metadata estructurada'
+						'Hora "HH:MM" (24h); sin `date`, se agenda hoy (también con `list`)'
 					),
 				recurrence: recurrenceSchema.optional(),
 				subtasks: subtasksSchema
@@ -154,8 +150,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.array(tagSchema)
 					.optional()
 					.describe(
-					'Tags propios; [] deja la tarea explícitamente sin tags. acked/wip/done/not-done ' +
-						'(case-insensitive) se rechazan: ese estado va como @marca en content, no aquí'
+					'Tags propios; [] = sin tags. acked/wip/done/not-done se rechazan: ese estado va como @marca en content'
 				)
 			}
 		},
@@ -185,12 +180,9 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			annotations: { readOnlyHint: true },
 			description:
 				'Lee tareas de Lumbre. `scope`: today (default), week, upcoming, inbox/someday, overdue, ' +
-				'all (auto "all" si usas `list`/`listId` sin `scope`). `list` filtra por nombre; si no existe da ' +
-				'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. `section` ' +
-				'agrupa por sección dentro de `list`; `includeArchived` permite consultar archivadas. ' +
-				'`notes` decide qué notas trae cada tarea (criterio completo en ese campo; ' +
-				'la cabecera avisa de las no leídas). ' +
-				'`notesSince` es una consulta de precisión aparte: solo lo tocado desde esa fecha. ' +
+				'all (auto "all" si usas `list`/`listId` sin `scope`). `list` inexistente da ' +
+				'vacío igual que un proyecto o área vacíos — usa list_lists para distinguir. ' +
+				'`notes` decide qué notas trae cada tarea; la cabecera avisa de las no leídas. ' +
 				'Máx. 500 tareas; la cabecera avisa del corte.',
 
 			inputSchema: {
@@ -198,8 +190,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.enum(['today', 'week', 'upcoming', 'inbox', 'someday', 'overdue', 'all'])
 					.optional()
 					.describe(
-						'Alcance temporal; default "today" ("all" si se usa `list`/`listId` sin `scope`). "week" es la ' +
-							'semana de CALENDARIO; "upcoming" es una ventana rodante que siempre empieza hoy'
+						'Default "today". "week" es la semana de CALENDARIO; "upcoming" es una ventana rodante desde hoy'
 					),
 				days: z
 					.number()
@@ -212,34 +203,31 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.string()
 					.optional()
 					.describe('Nombre (case-insensitive) de un proyecto o área a filtrar'),
-				listId: z.string().guid().optional().describe('Id exacto de lista personal o compartida, preferente sobre list'),
+				listId: z.string().guid().optional().describe('Id de lista personal o compartida, preferente sobre list'),
 				spaceId: spaceIdSchema,
-				assignee: z.literal('me').optional().describe('Solo las asignadas a mí (cualquier scope; "all" incluye futuras y sin fecha). ' +
-					'Subtarea asignada: anidada en su madre si esta sale; si no, suelta con parentId'),
+				assignee: z.literal('me').optional().describe('Solo las asignadas a mí ("all" incluye futuras y sin fecha). ' +
+					'Subtarea asignada: anidada en su madre, o suelta con parentId'),
 				section: z
 					.string()
 					.optional()
 					.describe(
-						'Nombre (case-insensitive) de una sección dentro de `list` a filtrar; ' +
-							'combinado con `list`, solo casa una sección de ESE destino'
+						'Sección (case-insensitive) de `list` a filtrar; solo casa una sección de ESE destino'
 					),
 				includeDone: z.boolean().optional().describe('Incluir tareas ya completadas; default false'),
 				includeArchived: z
 					.boolean()
 					.optional()
 					.describe(
-						'Incluir tareas archivadas; default false. En listados sigue combinándose con ' +
-							'includeDone y el resto de filtros'
+						'Incluir tareas archivadas; default false'
 					),
 				notes: z
 					.enum(['auto', 'none', 'preview', 'full'])
 					.optional()
 					.describe(
 						'"auto" (default): íntegra si @done/#done, si cambió desde la última vez que este MCP ' +
-							'la mostró, o si se tocó dentro de `notesRecentHours` (solo la 1ª vez que se ve); ' +
-							'si no, un marcador "✎N ↻fecha" — nunca un recorte a medias. "none": sin notas. ' +
-							'"preview": recorte a ~240 chars en una línea. "full": todas íntegras para TODO el ' +
-							'lote (reeditar con update REEMPLAZA la nota entera; para una sola, get_task). ' +
+							'la mostró, o si se tocó dentro de `notesRecentHours` (solo la 1ª vez); ' +
+							'si no, un marcador "✎N ↻fecha". "none": sin notas. "preview": ~240 chars. ' +
+							'"full": todas íntegras (reeditar con update REEMPLAZA la nota entera; para una sola, get_task). ' +
 							'Se ignora con `notesSince`.'
 					),
 				notesRecentHours: z
@@ -247,17 +235,15 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 					.positive()
 					.optional()
 					.describe(
-						`Solo con "auto": ventana en horas (default ${DEFAULT_NOTES_RECENT_HOURS}) en la que una ` +
-							'tarea vista por 1ª vez da su nota íntegra.'
+						`Solo con "auto": ventana en horas (default ${DEFAULT_NOTES_RECENT_HOURS}) de nota íntegra en la 1ª vista`
 					),
 				notesSince: z
 					.string()
 					.min(10)
 					.optional()
 					.describe(
-						'Consulta sin estado: "YYYY-MM-DD" o ISO — nota íntegra SOLO si se editó desde esa ' +
-							'fecha (`notesUpdatedAt`), marcador el resto. Ignora `notes`, @done/#done y la ' +
-							'huella local: para "qué ha cambiado desde X".'
+						'"YYYY-MM-DD" o ISO — nota íntegra SOLO si se editó desde esa fecha, marcador el resto. ' +
+							'Ignora `notes`, @done/#done y la huella local'
 					)
 			}
 		},
@@ -494,8 +480,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolCtx) {
 			description:
 				'Devuelve UNA tarea entera y sin recortar (notas íntegras, fecha de creación, ' +
 				'proyecto o área/sección). Si tiene subtareas, las incluye con su id y estado — única forma de ' +
-				'obtener el id de una subtarea. `includeArchived` permite recuperarla si está archivada. ' +
-				'Error si el taskId no existe.',
+				'obtener el id de una subtarea. Error si el taskId no existe.',
 
 			inputSchema: {
 				taskId: z.string().guid().describe('Id de la tarea (ver list_tasks)'),

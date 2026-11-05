@@ -51,7 +51,7 @@ export function errorResult(err: unknown) {
  * MC9 del audit de paridad. Versión CORTA a propósito: se paga en
  * `tools/list` tres veces.
  */
-export const OUTCOME_NOTE = 'El informe dice por op si la app la aplicó, no tuvo efecto o falló.';
+export const OUTCOME_NOTE = 'El informe dice por op si se aplicó, no tuvo efecto o falló.';
 
 /**
  * Estado de una op aceptada, tal como lo cuenta el informe al modelo: los
