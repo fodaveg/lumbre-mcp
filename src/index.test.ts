@@ -5158,8 +5158,8 @@ describe('read_attachment — imagen, imagen demasiado grande y no imagen (R7)',
 		expect(content[0].text).toMatch(/no son UTF-8 válido/);
 	});
 
-	it('texto por encima de 3,5 MiB: metadata con el motivo, nada recortado', async () => {
-		const size = 4 * 1024 * 1024;
+	it('texto por encima de 256 KiB: metadata con el motivo (sin base64), nada recortado', async () => {
+		const size = 300 * 1024;
 		const content = await callRead(
 			new Response(Buffer.alloc(size, 0x61), {
 				status: 200,
@@ -5167,8 +5167,18 @@ describe('read_attachment — imagen, imagen demasiado grande y no imagen (R7)',
 			})
 		);
 		expect(content).toHaveLength(1);
-		expect(content[0].text).toContain('3.5 MiB');
+		expect(content[0].text).toContain('256 KiB');
 		expect(content[0].text).toContain('no se devuelve a medias');
+		expect(content[0].text).not.toMatch(/base64|MiB/);
+	});
+
+	it('texto con charset no UTF-8: metadata con el motivo, sin contenido', async () => {
+		const content = await callRead(
+			new Response('caf\xe9', { status: 200, headers: { 'content-type': 'text/plain; charset=iso-8859-1' } })
+		);
+		expect(content).toHaveLength(1);
+		expect(content[0].text).toContain('charset=iso-8859-1');
+		expect(content[0].text).toContain('no se ha decodificado');
 	});
 
 	it('PDF: metadata y recurso embebido con el blob en base64', async () => {

@@ -4,6 +4,7 @@ import {
 	deleteAttachment,
 	getAttachment,
 	MAX_READABLE_ATTACHMENT_BYTES,
+	MAX_READABLE_TEXT_BYTES,
 	requestUploadPermit,
 	uploadAttachment,
 	type SubtaskDecision
@@ -89,8 +90,8 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		{
 			annotations: { readOnlyHint: true },
 			description:
-				'Lee un adjunto por su id (campo `attachments` de list_tasks): imagen, texto (UTF-8) o PDF, ' +
-				'íntegros y hasta 3,5 MiB; si no, solo metadata con el motivo.',
+				'Lee un adjunto por su id (campo `attachments` de list_tasks): imagen o PDF hasta 3,5 MiB, ' +
+				'texto UTF-8 hasta 256 KiB, íntegros; si no, solo metadata con el motivo.',
 			inputSchema: {
 				attachment_id: z
 					.string()
@@ -100,7 +101,7 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 		},
 		async (input) => {
 			try {
-				const { contentType, size, kind, bytes, text, skipped } = await getAttachment(
+				const { contentType, size, kind, charset, bytes, text, skipped } = await getAttachment(
 					ctx.config,
 					input.attachment_id
 				);
@@ -138,6 +139,12 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 						]
 					};
 				}
+				if (skipped === 'too-large' && kind === 'text') {
+					return textResult(
+						`${head} Supera el tope de ${MAX_READABLE_TEXT_BYTES / 1024} KiB para devolver un texto ` +
+							'(ocuparía demasiado contexto del modelo y no se devuelve a medias), así que no se ha descargado.'
+					);
+				}
 				if (skipped === 'too-large') {
 					return textResult(
 						`${head} Supera el tope de ${MAX_READABLE_ATTACHMENT_BYTES / (1024 * 1024)} MiB para ` +
@@ -147,8 +154,11 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 				}
 				if (skipped === 'not-utf8') {
 					return textResult(
-						`${head} Es de tipo texto pero sus bytes no son UTF-8 válido, así que no se puede ` +
-							'devolver como texto sin corromperlo.'
+						`${head} Es de tipo texto pero ` +
+							(charset !== undefined
+								? `declara charset=${charset}, no UTF-8, y no se ha decodificado`
+								: 'sus bytes no son UTF-8 válido') +
+							'; no se devuelve como texto para no corromperlo.'
 					);
 				}
 				return textResult(
@@ -167,35 +177,26 @@ export function registerAttachmentTools(server: McpServer, ctx: ToolCtx) {
 			annotations: { destructiveHint: false },
 			description:
 				'Sube un fichero y lo deja adjunto a una tarea o subtarea. EXACTAMENTE una vía: ' +
-				'`file_path` (ruta LOCAL, tope 25 MB) SOLO si este conector corre en tu máquina (stdio); ' +
-				'contra mcp.lumbre.pro da error explicativo. `content_base64` siempre funciona, pero SOLO ' +
-				'para unos KB (lo emites tú como modelo: cientos de KB son ~100k+ tokens), tope 1 MB, y ' +
-				'exige `filename`. Para un fichero grande o local usa prepare_attachment_upload.',
+				'`file_path` (local, tope 25 MB; solo con el conector stdio, el remoto da error explicativo) o ' +
+				'`content_base64` (solo unos KB: lo emites tú como modelo; tope 1 MB; exige `filename`). ' +
+				'Fichero grande o local: prepare_attachment_upload.',
 			inputSchema: {
 				taskId: z.string().guid().describe('Id de la tarea a la que adjuntar (ver list_tasks; de una subtarea, get_task de su madre)'),
 				file_path: z
 					.string()
 					.min(1)
 					.optional()
-					.describe(
-						'Ruta LOCAL absoluta o "~/…" (una relativa se rechaza). Solo con el conector local (stdio); ' +
-							'el remoto da error con la alternativa.'
-					),
+					.describe('Ruta LOCAL absoluta o "~/…" (una relativa se rechaza)'),
 				content_base64: z
 					.string()
 					.min(1)
 					.optional()
-					.describe(
-						'Bytes en base64, para el conector remoto o ficheros pequeños (unos KB; tope 1 MB ' +
-							'decodificado). Requiere `filename`.'
-					),
+					.describe('Bytes en base64 (tope 1 MB decodificado). Requiere `filename`'),
 				filename: z
 					.string()
 					.min(1)
 					.optional()
-					.describe(
-						'Nombre con el que se guarda. Opcional con file_path (basename); obligatorio con content_base64.'
-					)
+					.describe('Nombre con el que se guarda; opcional con file_path (basename)')
 			}
 		},
 		async (input) => {

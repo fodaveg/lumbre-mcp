@@ -381,10 +381,14 @@ retención en «Qué guarda el relé»).
   TOML, NDJSON, JavaScript y cualquier `+json`/`+xml`) como bloque de texto,
   UTF-8 estricto, tras una línea de metadata; un PDF como recurso embebido
   (`blob` en base64, URI opaca `lumbre-attachment:<id>`), el mismo mecanismo
-  que `hebra-mcp`, para que el cliente lo reciba como documento. Tope común de
-  3,5 MiB (`MAX_READABLE_ATTACHMENT_BYTES`): por encima, o si un texto no
-  decodifica como UTF-8, devuelve solo metadata con el motivo y NUNCA un
-  recorte a medias. Cualquier otro tipo no se descarga: tipo y tamaño desde
+  que `hebra-mcp`, para que el cliente lo reciba como documento. Topes:
+  imagen y PDF 3,5 MiB (`MAX_READABLE_ATTACHMENT_BYTES`, un base64 mayor no
+  cabe en el contexto) y TEXTO 256 KiB (`MAX_READABLE_TEXT_BYTES`: un `.json`
+  de 3,5 MiB son cerca de un millón de tokens). Por encima, devuelve solo
+  metadata con el motivo y NUNCA un recorte a medias. Un texto que declara un
+  `charset` distinto de UTF-8 (p. ej. `iso-8859-1`), o cuyos bytes no son UTF-8
+  válido, también da solo metadata (`not-utf8`), sin decodificarlo ni, en el
+  primer caso, descargarlo. Cualquier otro tipo no se descarga: tipo y tamaño desde
   `content-length` (o «tamaño desconocido»). Funciona igual con
   `LUMBRE_MCP_TOOLSET=attachments`. El tipo se decide por el `Content-Type`
   que sirve la app, no por la extensión. El tope de 25 MiB es solo el de la
@@ -1314,7 +1318,7 @@ con su cuenta escrita en el código):
 | `/authorize` | 30/min por IP, 10/min por `client_id`, 60/min global (429) | Cada `/authorize` válido crea un registro real en `app.lumbre.pro`. El uso real son unas pocas autorizaciones a la hora |
 | Formulario de `/token` y `/revoke` | 16 KiB (413) | Un `grant_type=refresh_token` completo no llega a 1 KiB |
 | Back-channel logout de Sumego | 60/min por IP, 8 a la vez, 16 KiB (429, 413) | Lo llama solo el servidor de Sumego, uno por app y sesión; un `logout_token` mide unos cientos de bytes |
-| Lectura de un adjunto | 3,5 MiB (imagen, texto o PDF) | `read_attachment` devuelve imágenes, texto UTF-8 y PDF íntegros hasta ese tope (un base64 mayor no cabe en el contexto); por encima, solo metadata, nunca un recorte; el de 25 MiB es solo el de la SUBIDA |
+| Lectura de un adjunto | 3,5 MiB (imagen, PDF); 256 KiB (texto) | `read_attachment` devuelve imágenes y PDF íntegros hasta 3,5 MiB (un base64 mayor no cabe en el contexto) y texto UTF-8 hasta 256 KiB (más ocuparía demasiado contexto); por encima, solo metadata, nunca un recorte; el de 25 MiB es solo el de la SUBIDA |
 
 Al pasarse del tope de cuerpo la conexión se corta, pero no de golpe: se deja
 de procesar y se drena unos segundos para que el 413 llegue entero (si se

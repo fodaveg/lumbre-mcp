@@ -2449,6 +2449,41 @@ describe('getAttachment — tope de descarga', () => {
 		expect(downloaded.bytes).toBeUndefined();
 	});
 
+	it('texto: tope propio de 256 KiB (exacto cabe; un byte más, too-large) mientras PDF e imagen siguen en 3,5 MiB', async () => {
+		textResponse('a'.repeat(256 * 1024), 'text/plain');
+		expect((await getAttachment(config, ATTACHMENT_ID)).text).toHaveLength(256 * 1024);
+		textResponse('a'.repeat(256 * 1024 + 1), 'application/json');
+		expect(await getAttachment(config, ATTACHMENT_ID)).toMatchObject({ kind: 'text', skipped: 'too-large' });
+		streamedResponse(1, true, 'application/pdf'); // 1 MiB > 256 KiB, pero PDF
+		expect((await getAttachment(config, ATTACHMENT_ID)).bytes).toHaveLength(1024 * 1024);
+	});
+
+	it('texto grande con content-length: ni se lee el cuerpo', async () => {
+		const { served } = streamedResponse(1, true, 'text/csv');
+		expect(await getAttachment(config, ATTACHMENT_ID)).toMatchObject({ skipped: 'too-large', size: 1024 * 1024 });
+		expect(served()).toBeLessThanOrEqual(1);
+	});
+
+	it.each(['text/plain; charset=iso-8859-1', 'text/csv;charset="windows-1252"', 'text/plain; charset=UTF-16'])(
+		'%s: charset no UTF-8, metadata not-utf8 sin decodificar ni descargar',
+		async (mime) => {
+			const { served } = streamedResponse(1, true, mime);
+			const downloaded = await getAttachment(config, ATTACHMENT_ID);
+			expect(downloaded).toMatchObject({ kind: 'text', skipped: 'not-utf8' });
+			expect(downloaded.charset).toMatch(/iso-8859-1|windows-1252|utf-16/);
+			expect(downloaded.text).toBeUndefined();
+			expect(served()).toBeLessThanOrEqual(1);
+		}
+	);
+
+	it.each(['text/plain; charset=utf-8', 'text/plain; charset=UTF-8', 'text/plain; charset="utf-8"'])(
+		'%s: charset UTF-8 se decodifica',
+		async (mime) => {
+			textResponse('ñ', mime);
+			expect((await getAttachment(config, ATTACHMENT_ID)).text).toBe('ñ');
+		}
+	);
+
 	it('un texto que no decodifica como UTF-8 da skipped not-utf8 y no texto con U+FFFD', async () => {
 		textResponse(new Blob([new Uint8Array([0x68, 0xe9, 0x6c, 0x6c, 0x6f])]), 'text/plain'); // "héllo" en latin-1
 		const downloaded = await getAttachment(config, ATTACHMENT_ID);
