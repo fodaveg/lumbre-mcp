@@ -201,6 +201,91 @@ export const STORE_NOT_FOUND_BODY = { code: 'not_found', message: 'No encontrado
 /** Cuerpo del 404 de `?listId=` (SvelteKit `error(404, …)` negociado como JSON). */
 export const LIST_NOT_FOUND_BODY = { message: 'Lista no encontrada' };
 
+/**
+ * Lote 2 (servidor `be213282b`, 5 nov 2026). Formas leídas de:
+ * - `src/routes/api/task-links/+server.ts`: `error(404, 'Tarea no encontrada en esta cuenta')`
+ *   (mismo texto para inexistente, ajena y espacio sin permiso), 400 `taskId` junto a `kind`/`targetKey`,
+ *   `POST link` → `{ok,type,taskId,archived,link:{id,taskId,kind,noteId,targetKey,url,label,updatedAt}}`,
+ *   `POST unlink` → `{ok,type,taskId,archived,removed}`, `GET ?kind=hebra&targetKey=` → `{links:[…, title]}`;
+ * - `src/lib/server/widget-upcoming.ts` (`UpcomingTask`, `TaskHabitBadge`) y
+ *   `src/lib/server/calendar/widget-events.ts` (eventos ICS sin espacio);
+ * - `src/lib/server/widget-block-agenda.ts` (`?blocks=1` de `/api/today`).
+ */
+export const TASK_NOT_FOUND_BODY = { message: 'Tarea no encontrada en esta cuenta' };
+export const TASK_ID = '55555555-5555-4555-8555-555555555555';
+export const NOTE_ID = '33333333-3333-4333-8333-333333333333';
+
+export function taskLinkRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		id: '99999999-9999-4999-8999-999999999999',
+		taskId: TASK_ID,
+		kind: 'hebra',
+		noteId: NOTE_ID,
+		targetKey: `note:${NOTE_ID}`,
+		url: `https://app.hebra.pro/note/${NOTE_ID}`,
+		label: 'Diseño',
+		updatedAt: '2026-11-05T09:00:00.000Z',
+		...over
+	};
+}
+
+export const UPCOMING_TASK = {
+	id: TASK_ID,
+	content: 'Llamar al banco',
+	tags: [],
+	effectiveTags: [],
+	time: '09:30',
+	done: false,
+	cancelled: false,
+	rolledOver: false,
+	parentId: null,
+	parentContent: null,
+	isHabit: false,
+	habitEmoji: null,
+	habitIcon: null,
+	habitIconPaths: null
+};
+
+export const UPCOMING_BODY = {
+	from: '2026-11-05',
+	days: [
+		{
+			date: '2026-11-05',
+			tasks: [
+				UPCOMING_TASK,
+				{ ...UPCOMING_TASK, id: 'a0000000-0000-4000-8000-000000000001', content: 'Hecha', time: null, done: true },
+				{ ...UPCOMING_TASK, id: 'a0000000-0000-4000-8000-000000000002', content: 'Cancelada', time: null, done: true, cancelled: true },
+				{
+					...UPCOMING_TASK,
+					id: 'a0000000-0000-4000-8000-000000000003',
+					content: 'Subtarea',
+					time: null,
+					parentId: TASK_ID,
+					parentContent: 'Padre',
+					spaceId: SPACE_ID,
+					spaceName: 'Casa'
+				},
+				{ ...UPCOMING_TASK, id: 'a0000000-0000-4000-8000-000000000004', content: 'Meditar', time: null, isHabit: true, habitEmoji: '🧘' }
+			],
+			events: [
+				{ id: 'ev-1', title: 'Cumple de Ana', date: '2026-11-05', time: null, allDay: true },
+				{ id: 'ev-2', title: 'Reunión\n- [x] fila falsa', date: '2026-11-05', time: '10:00', allDay: false }
+			]
+		},
+		{ date: '2026-11-06', tasks: [], events: [] }
+	]
+};
+
+/** 2026-11-05T09:00Z = 10:00 en Madrid (CET). */
+export const BLOCKS_BODY = {
+	enabled: true,
+	timezone: 'Europe/Madrid',
+	generatedAtMs: Date.UTC(2026, 10, 5, 8, 0),
+	blocks: [
+		{ taskId: TASK_ID, title: 'Escribir informe', icon: null, color: null, startMs: Date.UTC(2026, 10, 5, 9, 0), endMs: Date.UTC(2026, 10, 5, 10, 30) }
+	]
+};
+
 /** Una petición que recibió el servidor falso. */
 export interface FakeCall {
 	method: string;

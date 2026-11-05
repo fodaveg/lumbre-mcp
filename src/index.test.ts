@@ -117,15 +117,19 @@ describe('tools/list — superficie completa', () => {
 		'organize',
 		'list_brl_entries',
 		'mutate_brl',
-		'list_habits'
+		'list_habits',
+		'link_task_note',
+		'unlink_task_note',
+		'get_task_links',
+		'get_agenda'
 	];
 
-	it('sigue exponiendo las 19 tools, por nombre (podadas create_list/nest_list/rename_list/' +
+	it('sigue exponiendo las 23 tools, por nombre (podadas create_list/nest_list/rename_list/' +
 		'remove_list/move_to_list y add_brl_entry/update_brl_entry/delete_brl_entry el 2026-08-27; ' +
 		'añadida get_list el 2026-09-16, tarea 827a7878; retiradas las nueve sueltas de mutación ' +
 		'individual y partido el lote en mutate_tasks/organize el 2026-09-19, tarea 6f62c877; ' +
-		'añadida list_habits MC6 el 2026-09-24; añadida prepare_attachment_upload el 2026-10-27; añadida list_organizations el 2026-11-04)', () => {
-		expect(tools).toHaveLength(19);
+		'añadida list_habits MC6 el 2026-09-24; añadida prepare_attachment_upload el 2026-10-27; añadida list_organizations el 2026-11-04; añadidas link_task_note/unlink_task_note/get_task_links/get_agenda el 2026-11-05)', () => {
+		expect(tools).toHaveLength(23);
 		expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
 	});
 
@@ -180,9 +184,11 @@ describe('tools/list — superficie completa', () => {
 
 	it('`annotations`: fija qué tools son de solo lectura, cuáles destructivas y cuáles idempotentes', () => {
 		const READ_ONLY = [
+			'get_agenda',
 			'get_list',
 			'get_list_links',
 			'get_task',
+			'get_task_links',
 			'list_brl_entries',
 			'list_habits',
 			'list_lists',
@@ -191,7 +197,7 @@ describe('tools/list — superficie completa', () => {
 			'read_attachment'
 		];
 		const DESTRUCTIVE = ['delete_attachment', 'mutate_brl', 'organize'];
-		const IDEMPOTENT = ['link_list_note', 'refresh_sync', 'unlink_list_note'];
+		const IDEMPOTENT = ['link_list_note', 'link_task_note', 'refresh_sync', 'unlink_list_note', 'unlink_task_note'];
 		const ann = (t: (typeof tools)[number]) =>
 			(t.annotations ?? {}) as { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean };
 		expect(tools.filter((t) => ann(t).readOnlyHint === true).map((t) => t.name).sort()).toEqual(READ_ONLY);
@@ -223,7 +229,7 @@ describe('tools/list — superficie completa', () => {
 		expect(schema.properties).not.toHaveProperty('fullNotes');
 	});
 
-	it('techo de bytes de las 19 tools: no crece sin que alguien se entere', () => {
+	it('techo de bytes de las 23 tools: no crece sin que alguien se entere', () => {
 		// Medido 2026-07-25, tras (a)+(c)+(d)+(e) — (e) = comprimir las 21
 		// `description` (prosa/historia movida a JSDoc/README, ver la cabecera de
 		// este fichero y `ASYNC_NOTE` en index.ts): `JSON.stringify` de las 21
@@ -5225,8 +5231,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		return result.tools.map((t) => t.name).sort();
 	}
 
-	it('sin `toolset` (default): las 19 tools', async () => {
-		expect(await toolNamesOf()).toHaveLength(19);
+	it('sin `toolset` (default): las 23 tools', async () => {
+		expect(await toolNamesOf()).toHaveLength(23);
 	});
 
 	it('`toolset: "attachments"`: SOLO las tres tools de adjuntos', async () => {
@@ -5263,8 +5269,8 @@ describe('CreateServerOptions.toolset — modo acotado a adjuntos (LUMBRE_MCP_TO
 		expect((pdf.content as { type: string }[])[1].type).toBe('resource');
 	});
 
-	it('`toolset: "all"` (explícito): las 19, igual que el default', async () => {
-		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(19);
+	it('`toolset: "all"` (explícito): las 23, igual que el default', async () => {
+		expect(await toolNamesOf({ toolset: 'all' })).toHaveLength(23);
 	});
 });
 

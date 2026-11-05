@@ -1,4 +1,10 @@
 import type {
+	BlockAgenda,
+	LumbreTaskLink,
+	UpcomingEvent,
+	UpcomingHabit,
+	UpcomingResponse,
+	UpcomingTask,
 	DirectorySpace,
 	IngestRecurrence,
 	LumbreHabit,
@@ -905,10 +911,13 @@ export function formatOrganizationsDirectory(directory: OrganizationsDirectory):
 	return lines.join('\n');
 }
 
+const ONE_LINE_BREAKS = new RegExp(`[\\s${String.fromCharCode(0x85, 0x2028, 0x2029)}]+`, 'g');
+
 /** Una línea: texto de otro (evento de un calendario suscrito, tarea de un espacio) sin saltos de línea
  *  ni separadores Unicode, para que una fila no pueda fabricar otras. Mismo colapso que `notesPreview`. */
 function oneLine(text: string, max = 300): string {
-	const flat = text.replace(/[\s\u0085  ]+/g, ' ').trim();
+	// Se arma con códigos (NEL, LS, PS) porque LS y PS literales en un regex rompen el módulo.
+	const flat = text.replace(ONE_LINE_BREAKS, ' ').trim();
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 

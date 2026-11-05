@@ -69,7 +69,7 @@ const scope = 'lumbre:mcp';
 // tests también importan (ya no hay tres números que sincronizar a mano).
 // Fuente única del techo: `src/tools-list-ceiling.ts` (compilado a dist/).
 import { CHAR_CEILING } from '../dist/tools-list-ceiling.js';
-const EXPECTED_TOOL_COUNT = 19;
+const EXPECTED_TOOL_COUNT = 23;
 
 if (!url) {
 	console.error('smoke-remote: falta la URL. Uso: node scripts/smoke-remote.mjs <url> <token>');
