@@ -7,6 +7,7 @@ import { stripToolsListSchema } from './schema-strip.js';
 import { registerSyncTools } from './tools/sync.js';
 import { registerAttachmentTools } from './tools/attachments.js';
 import { registerListTools } from './tools/lists.js';
+import { registerAgendaTools } from './tools/agenda.js';
 import { registerOrganizationTools } from './tools/organizations.js';
 import { registerBrlTools } from './tools/brl.js';
 import { registerHabitTools } from './tools/habits.js';
@@ -197,7 +198,9 @@ export function createServer(config, opts = {}) {
     const { mutateTasksTool, organizeTool } = registerBatchTool(server, ctx);
     // Familia «listas y proyectos» (`src/tools/lists.ts`, paridad UI↔MCP,
     // `docs/20-contrato-lista.md`).
-    const { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool } = registerListTools(server, ctx);
+    const { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool, linkTaskNoteTool, unlinkTaskNoteTool, getTaskLinksTool } = registerListTools(server, ctx);
+    // Familia «agenda» (`src/tools/agenda.ts`): `get_agenda`, solo lectura.
+    const { getAgendaTool } = registerAgendaTools(server, ctx);
     // Familia «organizaciones» (`src/tools/organizations.ts`): `list_organizations`,
     // directorio de solo lectura (`docs/81` §4.7).
     const { listOrganizationsTool } = registerOrganizationTools(server, ctx);
@@ -236,6 +239,10 @@ export function createServer(config, opts = {}) {
             getListTool,
             linkListNoteTool,
             unlinkListNoteTool,
+            linkTaskNoteTool,
+            unlinkTaskNoteTool,
+            getTaskLinksTool,
+            getAgendaTool,
             getTaskTool,
             listBrlEntriesTool,
             mutateBrlTool,

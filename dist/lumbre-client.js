@@ -683,6 +683,179 @@ export async function unlinkListNote(config, input) {
     }
     return body;
 }
+/** Tope de `targetKey` de Hebra en el servidor (`isValidHebraNoteTargetKey`). */
+const MAX_TASK_TARGET_KEY_LENGTH = 300;
+/** Mismo patrón (sin anclas) que `HEBRA_LIST_NOTE_URL` del servidor: la URL universal exacta. */
+const HEBRA_TASK_NOTE_HTTPS = /^https:\/\/app\.hebra\.pro\/note\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+/** `target=` de `hebra://`: `note:<uuid>` con ancla opcional `:heading:…`/`:block:…`,
+ *  igual que `HEBRA_NOTE_TARGET` del servidor (a diferencia de `parseListNoteUrl`,
+ *  que acepta cualquier sufijo, porque allí el ancla se descarta). */
+const HEBRA_TASK_TARGET = /^note:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?::(?:heading|block):.+)?$/i;
+/**
+ * Destino de un vínculo de TAREA a partir de la URL de la nota. Reutiliza la
+ * validación de `parseListNoteUrl`, pero NO su `targetKey`: `/api/list-links`
+ * identifica la nota por su uuid y `/api/task-links` por `note:<uuid>` (o por el
+ * valor de `?target=` CON su ancla, porque una tarea puede enlazar a un punto
+ * concreto de la nota). Contrato del servidor (repo `lumbre`, `be213282b`,
+ * `routes/api/task-links/+server.ts` + `hebraListNoteId` + `isValidHebraNoteTargetKey`):
+ *
+ *  · `https://app.hebra.pro/note/<uuid>` EXACTA (sin query ni fragmento) →
+ *    `targetKey = note:<uuid>`.
+ *  · `hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]]` → `targetKey`
+ *    = el `target` (o `note:<uuid>`), con el prefijo `note:<uuid>` en minúsculas,
+ *    como lo canoniza el servidor; el ancla se conserva tal cual.
+ *  · `obsidian://…` → `targetKey` = la URL, sin `noteId`.
+ *
+ * Se envían SIEMPRE `noteId` y `targetKey` en Hebra: con la credencial de token
+ * personal (la de este proceso stdio) el servidor los exige y no los deriva; con la
+ * concesión OAuth los deriva de `url` y comprueba que cuadren. Estas formas valen
+ * para las dos. Formas que SOLO valdrían con el token personal (una URL https con
+ * `?target=`, o `hebra://` con otros parámetros) se rechazan aquí también, para que
+ * el comportamiento no dependa de la credencial.
+ */
+export function parseTaskNoteTarget(raw) {
+    const base = parseListNoteUrl(raw);
+    if (!base || raw.includes('\u0000'))
+        return null;
+    if (base.kind === 'obsidian')
+        return { kind: 'obsidian', targetKey: raw };
+    const noteId = base.noteId;
+    const https = HEBRA_TASK_NOTE_HTTPS.exec(raw);
+    if (https)
+        return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
+    const url = new URL(raw);
+    if (url.protocol !== 'hebra:')
+        return null;
+    const target = url.searchParams.get('target');
+    if (target === null)
+        return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
+    if (!HEBRA_TASK_TARGET.test(target) || target.length > MAX_TASK_TARGET_KEY_LENGTH)
+        return null;
+    return { kind: 'hebra', noteId, targetKey: target.replace(/^note:[^:]+/i, (prefix) => prefix.toLowerCase()) };
+}
+/** ¿Es un uuid de nota de Hebra (versión 1 a 8, variante RFC)? */
+export function isHebraNoteId(raw) {
+    return HEBRA_NOTE_UUID.test(raw);
+}
+function taskNoteBody(type, input, url, label) {
+    const target = parseTaskNoteTarget(url);
+    if (!target) {
+        throw new LumbreApiError('URL de nota inválida para una tarea: usa obsidian://…, https://app.hebra.pro/note/<uuid> exacta ' +
+            '(sin query ni fragmento) o hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]].');
+    }
+    return {
+        target,
+        body: JSON.stringify({
+            type,
+            taskId: input.taskId,
+            target: target.kind === 'hebra'
+                ? { kind: 'hebra', noteId: target.noteId, targetKey: target.targetKey, url, label }
+                : { kind: 'obsidian', targetKey: target.targetKey, url, label }
+        })
+    };
+}
+function isTaskLink(value, taskId, url, label, target) {
+    if (!value || typeof value !== 'object')
+        return false;
+    const link = value;
+    return (typeof link.id === 'string' &&
+        link.taskId === taskId &&
+        link.kind === target.kind &&
+        link.targetKey === target.targetKey &&
+        (target.kind === 'obsidian' ||
+            (typeof link.noteId === 'string' && link.noteId.toLowerCase() === target.noteId)) &&
+        link.url === url &&
+        link.label === label &&
+        typeof link.updatedAt === 'string');
+}
+/** Vínculo síncrono e idempotente de una tarea (propia o de un espacio con acceso de agente) con una nota. */
+export async function linkTaskNote(config, input) {
+    const url = input.url.trim();
+    const label = input.label.trim();
+    const { target, body: payload } = taskNoteBody('link', input, url, label);
+    const body = await request(config, '/api/task-links', { method: 'POST', body: payload });
+    const o = body;
+    if (!o ||
+        typeof o !== 'object' ||
+        o.ok !== true ||
+        o.type !== 'link' ||
+        o.taskId !== input.taskId ||
+        typeof o.archived !== 'boolean' ||
+        !isTaskLink(o.link, input.taskId, url, label, target)) {
+        throw new LumbreApiError('Lumbre no confirmó el vínculo de tarea (respuesta inesperada).');
+    }
+    return o;
+}
+/** Retirada síncrona e idempotente de un vínculo de tarea; `removed:false` es un 200. */
+export async function unlinkTaskNote(config, input) {
+    const url = input.url.trim();
+    const label = input.label.trim();
+    const { body: payload } = taskNoteBody('unlink', input, url, label);
+    const body = await request(config, '/api/task-links', { method: 'POST', body: payload });
+    const o = body;
+    if (!o ||
+        typeof o !== 'object' ||
+        o.ok !== true ||
+        o.type !== 'unlink' ||
+        o.taskId !== input.taskId ||
+        typeof o.archived !== 'boolean' ||
+        typeof o.removed !== 'boolean') {
+        throw new LumbreApiError('Lumbre no confirmó la retirada del vínculo de tarea (respuesta inesperada).');
+    }
+    return o;
+}
+async function readTaskLinks(config, params) {
+    const body = await request(config, `/api/task-links?${params.toString()}`);
+    const links = body?.links;
+    if (!body || typeof body !== 'object' || !Array.isArray(links)) {
+        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/task-links.');
+    }
+    return links;
+}
+/** `GET /api/task-links?taskId=`: 404 (el mismo texto siempre) si la tarea no es propia ni de un espacio con acceso de agente. */
+export async function getTaskLinks(config, taskId) {
+    return readTaskLinks(config, new URLSearchParams({ taskId }));
+}
+/**
+ * `GET /api/task-links?kind=hebra&targetKey=<uuid>`: las tareas del llamante vinculadas a una nota
+ * de Hebra. Una nota sin vínculos y un espacio sin permiso dan lo mismo (`[]`). `taskId` no puede
+ * ir junto a estos dos (400 del servidor); este cliente tampoco los combina.
+ */
+export async function getTaskLinksOfNote(config, noteId) {
+    return readTaskLinks(config, new URLSearchParams({ kind: 'hebra', targetKey: noteId.toLowerCase() }));
+}
+/**
+ * `GET /api/upcoming?days=N` (1..14) o `?week=1`. NO acepta `spaceId`, `from`, `to`,
+ * `scope`, `date`, `week_of` ni `until` (400): la ventana empieza siempre en hoy.
+ */
+export async function getUpcoming(config, window) {
+    const params = 'week' in window ? new URLSearchParams({ week: '1' }) : new URLSearchParams({ days: String(window.days) });
+    const body = await request(config, `/api/upcoming?${params.toString()}`);
+    const o = body;
+    if (!o || typeof o !== 'object' || typeof o.from !== 'string' || !Array.isArray(o.days)) {
+        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/upcoming.');
+    }
+    for (const day of o.days) {
+        if (!day || typeof day !== 'object' || typeof day.date !== 'string') {
+            throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/upcoming.');
+        }
+    }
+    return body;
+}
+/** `GET /api/today?blocks=1`: los bloques de HOY que aún no han terminado (agenda «Ahora»). */
+export async function getBlockAgenda(config) {
+    const body = await request(config, '/api/today?blocks=1');
+    const o = body;
+    if (!o ||
+        typeof o !== 'object' ||
+        typeof o.enabled !== 'boolean' ||
+        typeof o.timezone !== 'string' ||
+        !Array.isArray(o.blocks) ||
+        o.blocks.some((b) => !b || typeof b !== 'object' || typeof b.startMs !== 'number' || typeof b.endMs !== 'number')) {
+        throw new LumbreApiError('Lumbre devolvió una respuesta inesperada para /api/today?blocks=1.');
+    }
+    return body;
+}
 /**
  * Busca UNA tarea por `id` vía `GET /api/tasks?id=` (lookup directo, no
  * listado — ver ese endpoint en el repo principal) y la devuelve, o

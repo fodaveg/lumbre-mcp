@@ -158,16 +158,16 @@ export function registerBrlTools(server, ctx) {
      */
     const mutateBrlTool = server.registerTool('mutate_brl', {
         annotations: { destructiveHint: true },
-        description: `Añade, reescribe o borra entradas del registro (BRL), varias de golpe. Contrato ` +
-            `por-op en la description de \`ops\`. Éxito PARCIAL: una op inválida no bloquea las ` +
-            `demás — el resultado detalla qué falló por posición y el \`id\` de cada \`add\` creado. ` +
-            `La op \`delete\`: Sin deshacer: confirma con el usuario antes. ${OUTCOME_NOTE}`,
+        description: `Añade, reescribe o borra entradas del registro (BRL), varias de golpe (contrato en \`ops\`). ` +
+            `Éxito PARCIAL: una op inválida no bloquea las demás — el resultado detalla qué falló ` +
+            `por posición y el \`id\` de cada \`add\` creado. ` +
+            `\`delete\`: Sin deshacer: confirma con el usuario antes. ${OUTCOME_NOTE}`,
         inputSchema: {
             ops: z
                 .array(mutateBrlOpSchema)
                 .min(1)
                 .max(200)
-                .describe('Operaciones a ejecutar, en el orden indicado (máx. 200 por llamada). Contrato por-op ' +
+                .describe('Ops en orden (máx. 200). Contrato por-op ' +
                 '(`*` = obligatorio, el resto opcional): add: date*, text* [kind, time] · update: ' +
                 'date*, entryId*, text* [kind] · delete: date*, entryId*')
         }

@@ -13,9 +13,8 @@ import { errorResult, textResult } from './shared.js';
 export function registerHabitTools(server, ctx) {
     const listHabitsTool = server.registerTool('list_habits', {
         annotations: { readOnlyHint: true },
-        description: 'Enumera tus hábitos (id, nombre, clase, archivado) con sus últimas ocurrencias. ' +
-            'Por defecto solo los vivos; `includeArchived` los incluye. Para registrar una ' +
-            'ocurrencia, usa mutate_tasks({op:"register_habit"}).',
+        description: 'Enumera tus hábitos (id, nombre, clase, archivado) con sus últimas ocurrencias; ' +
+            'por defecto solo los vivos. Registrar una ocurrencia: mutate_tasks({op:"register_habit"}).',
         inputSchema: {
             includeArchived: z.boolean().optional().describe('Incluir hábitos archivados; default false')
         }

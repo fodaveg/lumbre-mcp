@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { getListById, getListLinksResult, getListSections, LumbreApiError, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
-import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
+import { getListById, getListLinksResult, getListSections, getTaskLinks, getTaskLinksOfNote, isHebraNoteId, LumbreApiError, linkListNote, linkTaskNote, getListCatalog, listNotFoundError, parseListNoteUrl, parseTaskNoteTarget, unlinkListNote, unlinkTaskNote } from '../lumbre-client.js';
+import { formatListDetail, formatListLinks, formatListSummaries, formatTaskLinks, formatTaskLinksOfNote } from '../format.js';
 import { errorResult, spaceIdSchema, textResult } from './shared.js';
 const listNoteTargetInputSchema = {
     listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)'),
@@ -10,6 +10,16 @@ const listNoteTargetInputSchema = {
         .refine((url) => parseListNoteUrl(url) !== null, 'URL de Obsidian o Hebra inválida')
         .describe('URL obsidian://, https://app.hebra.pro/note/<uuid> o hebra://note/<uuid> (máx. 2048 caracteres/bytes)'),
     label: z.string().trim().min(1).max(300).describe('Nombre visible de la nota (1..300 caracteres)')
+};
+const taskNoteTargetInputSchema = {
+    taskId: z.string().guid(),
+    url: z
+        .string()
+        .trim()
+        .refine((url) => parseTaskNoteTarget(url) !== null, 'URL de nota inválida para una tarea: usa obsidian://…, https://app.hebra.pro/note/<uuid> exacta ' +
+        '(sin query ni fragmento) o hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]]')
+        .describe('URL obsidian://, https://app.hebra.pro/note/<uuid> o hebra://note/<uuid>'),
+    label: z.string().trim().min(1).max(300).describe('Nombre visible (1..300)')
 };
 /**
  * Familia «listas y proyectos»: `list_lists`/`get_list_links`/`get_list`/
@@ -22,8 +32,8 @@ export function registerListTools(server, ctx) {
     const listListsTool = server.registerTool('list_lists', {
         annotations: { readOnlyHint: true },
         description: 'Enumera TODOS los proyectos y áreas con su recuento de tareas, incluidos los ' +
-            'vacíos (recuento 0) — a diferencia de list_tasks({list}), que no distingue vacío de ' +
-            'inexistente. Sin spaceId, Personal.',
+            'vacíos (list_tasks({list}) no distingue vacío de ' +
+            'inexistente). Sin spaceId, Personal.',
         inputSchema: {
             spaceId: spaceIdSchema
         }
@@ -41,7 +51,7 @@ export function registerListTools(server, ctx) {
     });
     const getListLinksTool = server.registerTool('get_list_links', {
         annotations: { readOnlyHint: true },
-        description: 'Lee los vínculos de un proyecto o área por listId (URL, kind y metadata). ' +
+        description: 'Vínculos de un proyecto o área por listId (URL, kind y metadata). ' +
             'No abre el destino. Vacío si no tiene vínculos.',
         inputSchema: {
             listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)')
@@ -57,10 +67,9 @@ export function registerListTools(server, ctx) {
     });
     const getListTool = server.registerTool('get_list', {
         annotations: { readOnlyHint: true },
-        description: 'Devuelve el detalle completo de UN proyecto o área por su listId: nombre, tipo (proyecto/área), ' +
-            'padre, estado (cierre/aparcado/fecha, si el servidor los trae), recuento de tareas, secciones y la nota ' +
-            'ÍNTEGRA — útil antes de reescribirla con organize({op:"set_list_notes"}), que la ' +
-            'reemplaza entera. Error si no existe.',
+        description: 'Detalle de UN proyecto o área por listId: nombre, tipo, padre, estado, recuento de tareas, ' +
+            'secciones y la nota ÍNTEGRA — léela antes de reescribirla con organize({op:"set_list_notes"}), ' +
+            'que la reemplaza entera. Error si no existe.',
         inputSchema: {
             listId: z.string().guid().describe('Id del proyecto o área (ver list_lists)')
         }
@@ -102,8 +111,8 @@ export function registerListTools(server, ctx) {
     });
     const linkListNoteTool = server.registerTool('link_list_note', {
         annotations: { destructiveHint: false, idempotentHint: true },
-        description: 'Vincula de forma síncrona e idempotente una nota de Obsidian o Hebra con un proyecto o área. ' +
-            'Guarda enlace e identidad de la nota; no lee ni copia su contenido.',
+        description: 'Vincula, síncrono e idempotente, una nota de Obsidian o Hebra con un proyecto o área. ' +
+            'No lee ni copia su contenido.',
         inputSchema: listNoteTargetInputSchema
     }, async (input) => {
         try {
@@ -117,8 +126,8 @@ export function registerListTools(server, ctx) {
     });
     const unlinkListNoteTool = server.registerTool('unlink_list_note', {
         annotations: { idempotentHint: true },
-        description: 'Desvincula de forma síncrona e idempotente una nota de Obsidian o Hebra de un proyecto o área. ' +
-            '`removed=false` confirma que el vínculo ya no estaba registrado.',
+        description: 'Desvincula, idempotente, una nota de un proyecto o área. ' +
+            '`removed=false`: ya no estaba.',
         inputSchema: listNoteTargetInputSchema
     }, async (input) => {
         try {
@@ -131,6 +140,72 @@ export function registerListTools(server, ctx) {
             return errorResult(err);
         }
     });
-    return { listListsTool, getListLinksTool, getListTool, linkListNoteTool, unlinkListNoteTool };
+    const linkTaskNoteTool = server.registerTool('link_task_note', {
+        annotations: { destructiveHint: false, idempotentHint: true },
+        description: 'Vincula una nota de Obsidian o Hebra con una tarea, síncrono e idempotente. ' +
+            'En un espacio, el vínculo es tuyo: los demás miembros no lo ven.',
+        inputSchema: taskNoteTargetInputSchema
+    }, async (input) => {
+        try {
+            const result = await linkTaskNote(ctx.config, input);
+            return textResult(`Nota vinculada a la tarea ${result.taskId}.${result.archived ? ' La tarea está archivada o cancelada; el vínculo se guardó igualmente.' : ''}\n` +
+                formatTaskLinks(result.taskId, [result.link]));
+        }
+        catch (err) {
+            return errorResult(err);
+        }
+    });
+    const unlinkTaskNoteTool = server.registerTool('unlink_task_note', {
+        annotations: { idempotentHint: true },
+        description: 'Desvincula una nota de una tarea, idempotente. `removed=false`: ya no estaba.',
+        inputSchema: taskNoteTargetInputSchema
+    }, async (input) => {
+        try {
+            const result = await unlinkTaskNote(ctx.config, input);
+            return textResult(`Vínculo de nota retirado de la tarea ${result.taskId}. removed=${result.removed}.` +
+                (result.archived ? ' La tarea está archivada o cancelada.' : ''));
+        }
+        catch (err) {
+            return errorResult(err);
+        }
+    });
+    const getTaskLinksTool = server.registerTool('get_task_links', {
+        annotations: { readOnlyHint: true },
+        description: 'Vínculos de nota de UNA tarea (taskId) o tareas vinculadas a UNA nota de Hebra (noteId). ' +
+            'Exactamente uno. Por nota, vacío no distingue sin vínculos de sin permiso.',
+        inputSchema: {
+            taskId: z.string().guid().optional(),
+            noteId: z.string().optional()
+        }
+    }, async (input) => {
+        try {
+            const hasTask = input.taskId !== undefined;
+            const hasNote = input.noteId !== undefined;
+            if (hasTask === hasNote) {
+                return errorResult(new Error('Pasa exactamente uno: taskId o noteId.'));
+            }
+            if (input.taskId !== undefined) {
+                return textResult(formatTaskLinks(input.taskId, await getTaskLinks(ctx.config, input.taskId)));
+            }
+            const noteId = input.noteId.trim();
+            if (!isHebraNoteId(noteId)) {
+                return errorResult(new Error('noteId no es un uuid de nota de Hebra.'));
+            }
+            return textResult(formatTaskLinksOfNote(noteId.toLowerCase(), await getTaskLinksOfNote(ctx.config, noteId)));
+        }
+        catch (err) {
+            return errorResult(err);
+        }
+    });
+    return {
+        listListsTool,
+        getListLinksTool,
+        getListTool,
+        linkListNoteTool,
+        unlinkListNoteTool,
+        linkTaskNoteTool,
+        unlinkTaskNoteTool,
+        getTaskLinksTool
+    };
 }
 //# sourceMappingURL=lists.js.map
