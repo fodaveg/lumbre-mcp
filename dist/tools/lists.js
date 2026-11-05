@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { getListById, getListLinksResult, getListSections, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
+import { getListById, getListLinksResult, getListSections, LumbreApiError, linkListNote, getListCatalog, listNotFoundError, parseListNoteUrl, unlinkListNote } from '../lumbre-client.js';
 import { formatListDetail, formatListLinks, formatListSummaries } from '../format.js';
 import { errorResult, spaceIdSchema, textResult } from './shared.js';
 const listNoteTargetInputSchema = {
@@ -82,12 +82,17 @@ export function registerListTools(server, ctx) {
             }
             // Secciones con su recuento: otra petición aparte (`includeSections=1`).
             // Si falla, la tool responde igual y lo dice en una línea.
+            // Un 401 se relanza como cualquier error de autenticación; el resto da la
+            // línea «no disponibles» con la causa breve.
             let sections;
             try {
                 sections = await getListSections(ctx.config, list.id, list.spaceId);
             }
-            catch {
-                sections = null;
+            catch (err) {
+                if (err instanceof LumbreApiError && err.status === 401)
+                    throw err;
+                const reason = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+                sections = reason.length > 100 ? `${reason.slice(0, 97)}...` : reason || 'error desconocido';
             }
             return textResult(formatListDetail(list, parentName, sections));
         }

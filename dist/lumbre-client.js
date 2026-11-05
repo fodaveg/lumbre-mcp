@@ -949,6 +949,15 @@ export function assertTaskUsable(task, taskId, opts = {}) {
  *  contenido (imagen, texto o PDF; 3,5 MiB): un base64 mayor no cabe en el
  *  contexto del modelo. Por encima NO hay recorte: solo metadata con el motivo. */
 export const MAX_READABLE_ATTACHMENT_BYTES = Math.floor(3.5 * 1024 * 1024);
+/** Tope de un adjunto de TEXTO (256 KiB), aparte del de imagen/PDF: un `.json`
+ *  de 3,5 MiB son cerca de un millón de tokens de contexto. Por encima, solo
+ *  metadata con el motivo, nunca un recorte. */
+export const MAX_READABLE_TEXT_BYTES = 256 * 1024;
+/** `charset` declarado en un `Content-Type` (minúsculas, sin comillas) o `null`. */
+function declaredCharset(contentType) {
+    const match = /;\s*charset\s*=\s*"?([^";\s]+)"?/i.exec(contentType);
+    return match ? match[1].toLowerCase() : null;
+}
 /** Clasifica un `Content-Type` (con o sin parámetros) o `null` si no se lee.
  *  Texto: `text/*` (incluye csv y markdown), JSON, XML, YAML, TOML, NDJSON,
  *  JavaScript y cualquier sufijo `+json`/`+xml`. */
@@ -1019,11 +1028,19 @@ async function getAttachmentOnce(config, id, signal) {
         await res.body?.cancel().catch(() => undefined);
         return { contentType, size: declared, skipped: 'unsupported' };
     }
-    if (declared !== null && declared > MAX_READABLE_ATTACHMENT_BYTES) {
+    // Un texto que declara otro `charset` no se decodifica ni se descarga: leerlo
+    // como UTF-8 lo corrompería (o, peor, lo daría por bueno si los bytes casan).
+    const charset = declaredCharset(contentType);
+    if (kind === 'text' && charset !== null && !['utf-8', 'utf8'].includes(charset)) {
+        await res.body?.cancel().catch(() => undefined);
+        return { contentType, size: declared, kind, charset, skipped: 'not-utf8' };
+    }
+    const maxBytes = kind === 'text' ? MAX_READABLE_TEXT_BYTES : MAX_READABLE_ATTACHMENT_BYTES;
+    if (declared !== null && declared > maxBytes) {
         await res.body?.cancel().catch(() => undefined);
         return { contentType, size: declared, kind, skipped: 'too-large' };
     }
-    const bytes = await readBoundedBody(res, MAX_READABLE_ATTACHMENT_BYTES);
+    const bytes = await readBoundedBody(res, maxBytes);
     if (bytes === undefined)
         return { contentType, size: declared, kind, skipped: 'too-large' };
     if (kind === 'text') {
@@ -1717,11 +1734,13 @@ function translateOp(op) {
                 payload: { date: op.date, ...(op.eventId !== undefined ? { eventId: op.eventId } : {}) }
             };
         case 'create_section':
-            // `taskId` = id de la sección nueva (la materialización ignora una
-            // sección que ya exista con ese id: reintentar es idempotente).
+            // `taskId` = id de la sección nueva. Con `sectionId` del llamante, repetir
+            // la op es idempotente (el servidor da `noop` si ya hay una fila con ese
+            // id, `inbound-materialize.ts`); sin él se genera uno NUEVO en cada
+            // traducción y repetir la op DUPLICA la sección.
             return {
                 type: 'mutate',
-                taskId: randomUUID(),
+                taskId: op.sectionId ?? randomUUID(),
                 kind: 'createSection',
                 payload: { listId: op.listId, name: op.name }
             };
