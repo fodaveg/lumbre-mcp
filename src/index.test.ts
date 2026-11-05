@@ -1555,6 +1555,13 @@ describe('link_list_note / unlink_list_note — registro, validación y contrato
 			{ listId: LIST_ID, url: `hebra://note/${NOTE_ID}?target=note:44444444-4444-4444-8444-444444444444`, label: 'Nota' }
 		],
 		['Hebra nativo UUID inválido', { listId: LIST_ID, url: 'hebra://note/no-uuid', label: 'Nota' }],
+		['Hebra https con query', { listId: LIST_ID, url: `${HEBRA_URL}?x=1`, label: 'Nota' }],
+		['Hebra https con fragmento', { listId: LIST_ID, url: `${HEBRA_URL}#frag`, label: 'Nota' }],
+		['Hebra https con esquema en mayúsculas', { listId: LIST_ID, url: `HTTPS://app.hebra.pro/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra https con host en mayúsculas', { listId: LIST_ID, url: `https://App.Hebra.pro/note/${NOTE_ID}`, label: 'Nota' }],
+		['Hebra nativo con target de sufijo inválido', { listId: LIST_ID, url: `hebra://note/${NOTE_ID}?target=note:${NOTE_ID}:otra-cosa`, label: 'Nota' }],
+		['Hebra nativo con salto de línea', { listId: LIST_ID, url: `hebra://note/${NOTE_ID}\n?target=note:${NOTE_ID}`, label: 'Nota' }],
+		['Obsidian con salto de línea', { listId: LIST_ID, url: 'obsidian://open?vault=a\nb&file=n.md', label: 'Nota' }],
 		['más de 2048 caracteres', { listId: LIST_ID, url: `obsidian://open?file=${'a'.repeat(2_048)}`, label: 'Nota' }],
 		['más de 2048 bytes UTF-8', { listId: LIST_ID, url: `obsidian://open?file=${'á'.repeat(1_020)}`, label: 'Nota' }],
 		['label vacío tras trim', { listId: LIST_ID, url: URL, label: '   ' }],

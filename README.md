@@ -344,9 +344,11 @@ retención en «Qué guarda el relé»).
 - `link_list_note({ listId, url, label })` — vincula de forma síncrona e
   idempotente una nota de Obsidian o Hebra con un proyecto o área mediante
   `POST /api/list-links`. `url` debe ser un deep link `obsidian://`, el enlace
-  universal `https://app.hebra.pro/note/<uuid>` o el esquema nativo
-  `hebra://note/<uuid>` (con o sin `?target=note:<uuid>[:…]`), sin credenciales
-  ni puerto (máx. 2.048 caracteres y bytes UTF-8). Las dos formas de Hebra de la
+  universal `https://app.hebra.pro/note/<uuid>` exacto (sin query ni fragmento, con
+  esquema, host y `/note/` en minúsculas) o el esquema nativo `hebra://note/<uuid>`
+  (con o sin `?target=note:<uuid>[:heading:…|:block:…]`), sin credenciales ni
+  puerto ni saltos de línea (máx. 2.048 caracteres y bytes UTF-8); lo que el servidor
+  rechazaría con 400 se rechaza antes de llamarle. Las dos formas de Hebra de la
   misma nota producen el mismo `noteId`/`targetKey` (UUID RFC de versión 1 a 8,
   variante `[89ab]`, en minúsculas; incluye las notas importadas con UUID v5), así
   que no crean vínculos duplicados. El MCP infiere `kind` y, para Hebra, el

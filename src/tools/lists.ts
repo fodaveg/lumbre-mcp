@@ -32,7 +32,11 @@ const listNoteTargetInputSchema = {
 	url: z
 		.string()
 		.trim()
-		.refine((url) => parseListNoteUrl(url) !== null, 'URL de Obsidian o Hebra inválida')
+		.refine(
+			(url) => parseListNoteUrl(url) !== null,
+			'URL inválida: usa obsidian://…, https://app.hebra.pro/note/<uuid> exacta (sin query ni fragmento) ' +
+				'o hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]], en una línea'
+		)
 		.describe(
 			'URL obsidian://, https://app.hebra.pro/note/<uuid> o hebra://note/<uuid> (máx. 2048 caracteres/bytes)'
 		),

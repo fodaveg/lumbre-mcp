@@ -546,7 +546,7 @@ describe('linkListNote / unlinkListNote', () => {
 	const LIST_ID = '11111111-1111-4111-8111-111111111111';
 	const URL = 'obsidian://open?vault=fodaveg&file=projects%2Flumbre.md';
 	const NOTE_ID = '33333333-3333-4333-8333-333333333333';
-	const HEBRA_URL = `https://app.hebra.pro/note/${NOTE_ID}?from=lumbre#detalle`;
+	const HEBRA_URL = `https://app.hebra.pro/note/${NOTE_ID}`;
 	const LINK = {
 		id: '22222222-2222-4222-8222-222222222222',
 		listId: LIST_ID,
@@ -806,6 +806,20 @@ describe('parseListNoteUrl', () => {
 		['hebra con target que no empieza por note:', `hebra://note/${UUID}?target=${UUID}`],
 		['hebra con target duplicado', `hebra://note/${UUID}?target=note:${UUID}&target=note:${UUID}`],
 		['https con host distinto', `https://app.hebra.pro.evil.test/note/${UUID}`],
+		['https con query', `https://app.hebra.pro/note/${UUID}?x=1`],
+		['https con fragmento', `https://app.hebra.pro/note/${UUID}#frag`],
+		['https con esquema en mayúsculas', `HTTPS://app.hebra.pro/note/${UUID}`],
+		['https con host en mayúsculas', `https://APP.hebra.pro/note/${UUID}`],
+		['https con /Note/ en mayúsculas', `https://app.hebra.pro/Note/${UUID}`],
+		['https con barra final', `https://app.hebra.pro/note/${UUID}/`],
+		['hebra con target de sufijo inválido', `hebra://note/${UUID}?target=note:${UUID}:cualquier-cosa`],
+		['hebra con ancla vacía', `hebra://note/${UUID}?target=note:${UUID}:heading:`],
+		['hebra con salto de línea', `hebra://note/${UUID.slice(0, 20)}\n${UUID.slice(20)}`],
+		['hebra con CR', `hebra://note/${UUID}\r?target=note:${UUID}`],
+		['https con salto de línea', `https://app.hebra.pro/note/${UUID}\n`],
+		['obsidian con salto de línea', 'obsidian://open?vault=a\nb&file=n.md'],
+		['obsidian con U+2028', 'obsidian://open?vault=a b&file=n.md'],
+		['hebra con NUL', `hebra://note/${UUID}?target=note:${UUID}:heading:a\u0000`],
 		['https con variante uuid inválida', 'https://app.hebra.pro/note/ea4cc2ed-ebc8-1863-1569-ded9c1bbdcca'],
 		['más de 2048 caracteres', `obsidian://open?file=${'a'.repeat(2_049)}`],
 		['más de 2048 bytes UTF-8', `obsidian://open?file=${'á'.repeat(1_025)}`],

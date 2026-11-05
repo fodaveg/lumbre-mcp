@@ -813,23 +813,54 @@ export interface ListNoteLinkInput {
 const HEBRA_NOTE_UUID =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/** Fuente del UUID de una nota de Hebra (sin anclas ni grupos), igual que `HEBRA_NOTE_ID_PATTERN`. */
+const HEBRA_NOTE_ID_SOURCE =
+	'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
+
+/** La URL universal EXACTA, como `HEBRA_LIST_NOTE_URL` del servidor: esquema, host y `/note/`
+ *  en minúsculas, sin query ni fragmento. Se aplica a la cadena cruda, no a `new URL`, que los normaliza. */
+const HEBRA_LIST_NOTE_URL = new RegExp(`^https://app\\.hebra\\.pro/note/(${HEBRA_NOTE_ID_SOURCE})$`);
+
+/** El `pathname` de `hebra://note/<uuid>`, como `HEBRA_LIST_NOTE_PATH` del servidor. */
+const HEBRA_LIST_NOTE_PATH = new RegExp(`^/(${HEBRA_NOTE_ID_SOURCE})$`);
+
+/** `target=` de `hebra://`: `note:<uuid>` con ancla opcional `:heading:…`/`:block:…` (nada más),
+ *  como `HEBRA_LIST_NOTE_TARGET` del servidor. */
+const HEBRA_NOTE_TARGET = new RegExp(`^note:(${HEBRA_NOTE_ID_SOURCE})(?::(?:heading|block):.+)?$`, 'i');
+
+/** CR, LF, NEL, LS y PS: `new URL` los descarta en silencio, así que una URL con uno pasaría la
+ *  validación y el servidor guardaría la cadena cruda (solo hace `trim`). Armado con códigos: LS/PS literales rompen un regex. */
+const URL_LINE_BREAKS = new RegExp(`[\\r\\n${String.fromCharCode(0x85, 0x2028, 0x2029)}]`);
+
 /**
  * Identifica la nota sin alterar la URL que se guardará y mostrará. Acepta
- * `obsidian://`, el enlace universal `https://app.hebra.pro/note/<uuid>` y el
- * esquema nativo de la app `hebra://note/<uuid>[?target=note:<uuid>[:…]]` —
- * alineado con `hebraListNoteId` del servidor (repo `lumbre`,
+ * `obsidian://`, el enlace universal EXACTO `https://app.hebra.pro/note/<uuid>` y el
+ * esquema nativo de la app `hebra://note/<uuid>[?target=note:<uuid>[:heading:…|:block:…]]` —
+ * campo a campo como `hebraListNoteId` del servidor (repo `lumbre`,
  * `src/lib/links/list-links.ts`, que acepta versiones 1 a 8 y devuelve el uuid en minúsculas):
- * ambas formas de Hebra de la MISMA nota devuelven el mismo `noteId`/
+ * lo que el servidor rechaza con 400 (query o fragmento en la https, mayúsculas en esquema,
+ * host o `/note/`, un `target` con sufijo distinto de `:heading:`/`:block:`) se rechaza aquí
+ * sin llamarle. Ambas formas de Hebra de la MISMA nota devuelven el mismo `noteId`/
  * `targetKey` (uuid en minúsculas), para que no acaben creando dos vínculos.
- * Un `target` con ancla (`:heading:…`/`:block:…`) se acepta pero se colapsa al
- * `targetKey` de la nota entera: este vínculo es de LISTA, no de un punto
- * concreto de la nota.
+ * Un `target` con ancla se acepta pero se colapsa al `targetKey` de la nota entera:
+ * este vínculo es de LISTA, no de un punto concreto de la nota.
+ *
+ * Un salto de línea en cualquier parte se rechaza (también en Obsidian): `new URL` lo
+ * descarta y el servidor, que solo hace `trim`, guardaría la cadena cruda.
  */
 export function parseListNoteUrl(raw: string):
 	| { kind: 'obsidian'; targetKey: string }
 	| { kind: 'hebra'; noteId: string; targetKey: string }
 	| null {
 	if (raw.length > 2_048 || new TextEncoder().encode(raw).length > 2_048) return null;
+	if (URL_LINE_BREAKS.test(raw)) return null;
+	// Postgres no admite un NUL en un `text`: el servidor lo rechaza en Hebra.
+	if (raw.includes('\u0000')) return null;
+	const https = HEBRA_LIST_NOTE_URL.exec(raw);
+	if (https) {
+		const noteId = https[1].toLowerCase();
+		return { kind: 'hebra', noteId, targetKey: noteId };
+	}
 	let url: URL;
 	try {
 		url = new URL(raw);
@@ -840,23 +871,16 @@ export function parseListNoteUrl(raw: string):
 	if (url.protocol === 'obsidian:' && raw.length > 'obsidian://'.length) {
 		return { kind: 'obsidian', targetKey: raw };
 	}
-	if (url.protocol === 'https:' && url.origin === 'https://app.hebra.pro') {
-		const match = /^\/note\/([0-9a-f-]+)$/i.exec(url.pathname);
-		if (!match || !HEBRA_NOTE_UUID.test(match[1])) return null;
-		const noteId = match[1].toLowerCase();
-		return { kind: 'hebra', noteId, targetKey: noteId };
-	}
 	if (url.protocol === 'hebra:') {
-		if (url.port !== '' || url.hostname !== 'note' || url.hash !== '') return null;
-		const match = /^\/([0-9a-f-]+)$/i.exec(url.pathname);
-		if (!match || !HEBRA_NOTE_UUID.test(match[1])) return null;
+		// Host de esquema no especial: `URL` conserva la caja; el servidor compara sin ella.
+		if (url.hostname.toLowerCase() !== 'note' || url.port !== '' || url.hash !== '') return null;
+		const match = HEBRA_LIST_NOTE_PATH.exec(url.pathname);
+		if (!match) return null;
 		const noteId = match[1].toLowerCase();
-		const queryKeys = [...url.searchParams.keys()];
-		if (queryKeys.length > 1 || (queryKeys.length === 1 && queryKeys[0] !== 'target')) return null;
-		const targetValues = url.searchParams.getAll('target');
-		if (targetValues.length > 1) return null;
-		if (targetValues.length === 1) {
-			const targetMatch = /^note:([0-9a-f-]+)(?::.*)?$/i.exec(targetValues[0]);
+		const params = [...url.searchParams.entries()];
+		if (params.length > 1 || (params.length === 1 && params[0][0] !== 'target')) return null;
+		if (params.length === 1) {
+			const targetMatch = HEBRA_NOTE_TARGET.exec(params[0][1]);
 			if (!targetMatch || targetMatch[1].toLowerCase() !== noteId) return null;
 		}
 		return { kind: 'hebra', noteId, targetKey: noteId };
@@ -1302,20 +1326,6 @@ export interface TaskNoteLinkInput {
 /** Tope de `targetKey` de Hebra en el servidor (`isValidHebraNoteTargetKey`). */
 const MAX_TASK_TARGET_KEY_LENGTH = 300;
 
-/** Mismo patrón (sin anclas) que `HEBRA_LIST_NOTE_URL` del servidor: la URL universal exacta. */
-const HEBRA_TASK_NOTE_HTTPS =
-	/^https:\/\/app\.hebra\.pro\/note\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/;
-
-/** CR, LF, NEL, LS y PS: `new URL` los descarta en silencio, así que una URL con uno pasaría la
- *  validación y el servidor guardaría la cadena cruda. Armado con códigos: LS/PS literales rompen un regex. */
-const URL_LINE_BREAKS = new RegExp(`[\\r\\n${String.fromCharCode(0x85, 0x2028, 0x2029)}]`);
-
-/** `target=` de `hebra://`: `note:<uuid>` con ancla opcional `:heading:…`/`:block:…`,
- *  igual que `HEBRA_NOTE_TARGET` del servidor (a diferencia de `parseListNoteUrl`,
- *  que acepta cualquier sufijo, porque allí el ancla se descarta). */
-const HEBRA_TASK_TARGET =
-	/^note:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?::(?:heading|block):.+)?$/i;
-
 /**
  * Destino de un vínculo de TAREA a partir de la URL de la nota. Reutiliza la
  * validación de `parseListNoteUrl`, pero NO su `targetKey`: `/api/list-links`
@@ -1342,18 +1352,17 @@ export function parseTaskNoteTarget(raw: string):
 	| { kind: 'obsidian'; targetKey: string }
 	| { kind: 'hebra'; noteId: string; targetKey: string }
 	| null {
-	if (URL_LINE_BREAKS.test(raw)) return null;
+	// `parseListNoteUrl` ya rechaza saltos de línea, NUL y las formas https/hebra que el servidor no admite.
 	const base = parseListNoteUrl(raw);
-	if (!base || raw.includes('\u0000')) return null;
+	if (!base) return null;
 	if (base.kind === 'obsidian') return { kind: 'obsidian', targetKey: raw };
 	const noteId = base.noteId;
-	const https = HEBRA_TASK_NOTE_HTTPS.exec(raw);
-	if (https) return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
+	if (HEBRA_LIST_NOTE_URL.test(raw)) return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
 	const url = new URL(raw);
 	if (url.protocol !== 'hebra:') return null;
 	const target = url.searchParams.get('target');
 	if (target === null) return { kind: 'hebra', noteId, targetKey: `note:${noteId}` };
-	if (!HEBRA_TASK_TARGET.test(target) || target.length > MAX_TASK_TARGET_KEY_LENGTH) return null;
+	if (!HEBRA_NOTE_TARGET.test(target) || target.length > MAX_TASK_TARGET_KEY_LENGTH) return null;
 	return { kind: 'hebra', noteId, targetKey: target.replace(/^note:[^:]+/i, (prefix) => prefix.toLowerCase()) };
 }
 
