@@ -68,10 +68,12 @@ la conversación aunque no diga «crea la tarea» («¿y si quitamos los segundo
 proyecto del trabajo según la sección anterior. Si nacen por iniciativa del agente
 mientras trabaja (al hacer X descubre que la sincronización falla por Y) o de la petición
 de otra sesión u otro agente, van sin preguntar al proyecto que el
-usuario dedica al trabajo de los agentes (por ejemplo, «Agentes Lumbre»), en su propia
-sección por tema, para no mezclarlas con las del usuario. Usa la sección de ese tema si
-ya existe. Si el usuario no tiene ese proyecto, van al proyecto del trabajo en una
-sección propia de hallazgos del agente, y dilo. Al terminar, nombra cada tarea creada
+usuario dedica al trabajo de los agentes, para no mezclarlas con las del usuario. Ese
+proyecto es común a todos sus productos: dentro, cada tarea va a la sección con el
+nombre del producto o repositorio del que sale el hallazgo, no a una sección por tema.
+Si esa sección no existe, créala con `organize` antes de añadir la tarea. Si el usuario
+no tiene ese proyecto, van al proyecto del trabajo en una sección propia de hallazgos
+del agente, y dilo. Al terminar, nombra cada tarea creada
 así y dónde quedó.
 
 ## Otras operaciones de tarea

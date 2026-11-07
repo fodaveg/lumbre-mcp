@@ -196,7 +196,7 @@ agente lo rellena preguntando al usuario y no lo escribe en un repo sin que se l
 ```markdown
 Este repositorio usa el flujo de desarrollo de Lumbre (skill `lumbre`).
 - Trabajo: proyecto de Lumbre `<proyecto>`.
-- Tareas que el agente crea por su cuenta: proyecto `<proyecto de agentes>`.
+- Tareas que el agente crea por su cuenta: proyecto `<proyecto de agentes>`, sección `<nombre de este producto>`.
 - Audits, specs y planes: `<ruta o carpeta de notas>`.
 - Decisiones: `<fichero o nota donde se registran>`.
 ```
