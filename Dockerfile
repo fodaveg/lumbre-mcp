@@ -9,7 +9,10 @@
 # 22.23.3, leído con `docker buildx imagetools inspect node:22-alpine` el 11
 # oct 2026): un rebuild sin caché ya no cambia de Node sin avisar. Para
 # subirla, repetir ese comando y cambiar el digest en un commit propio.
-FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+# Registro de las imágenes base: Docker Hub por defecto; el deploy propio pasa
+# --build-arg BASE_REGISTRY=git.dualhand.com/fodaveg/espejo (copia con la misma huella).
+ARG BASE_REGISTRY=docker.io/library
+FROM ${BASE_REGISTRY}/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 
 WORKDIR /app
 
