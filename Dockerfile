@@ -26,7 +26,7 @@ COPY dist/ ./dist/
 ENV PORT=8787
 EXPOSE 8787
 
-# Commit del que sale la imagen (lo pasa `deploy/publicar.sh` vía compose).
+# Commit del que sale la imagen (lo pasa `deploy/publicar.sh` con `--label` en el buildx).
 # Al final a propósito: cambia en cada deploy y no debe invalidar la capa de
 # `npm ci`. Se lee con
 # `docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' lumbre-mcp`.

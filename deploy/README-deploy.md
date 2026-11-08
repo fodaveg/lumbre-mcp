@@ -7,7 +7,7 @@ no es un plan: es cómo se opera.
 
 | Pieza | Dónde | Qué |
 |---|---|---|
-| Servicio | `/srv/lumbre-mcp` del VPS | Copia de este repo + `deploy/compose.yml` |
+| Servicio | `/srv/lumbre-mcp` del VPS | `compose.yml` (el de `deploy/compose.yml`), `.env` con la imagen por huella y `despliegues.log`; la imagen sale del registro `git.dualhand.com/fodaveg/lumbre-mcp` |
 | Contenedor | `lumbre-mcp` | `node dist/http.js`, escucha en 8787 |
 | Borde | `/srv/edge/conf.d/mcp-lumbre-pro.caddy` | Caddy termina TLS y hace proxy |
 | Estado | volumen `lumbre-mcp_state` | huella de notas + grants OAuth cifrados y clave estable |
@@ -65,7 +65,7 @@ segundos, y Caddy la bloquea: solo la consume el healthcheck interno por
 El relé corre como **un único proceso** y tiene que seguir así: nada de
 `docker compose up --scale`, de un segundo contenedor sobre el mismo volumen ni
 de despliegues azul/verde que dejen dos vivos a la vez. `container_name` fijo ya
-impide `--scale`, y `publicar.sh` recrea el contenedor (para el viejo y luego
+impide `--scale`, y el deploy recrea el contenedor (para el viejo y luego
 arranca el nuevo), así que nunca hay dos. Lo que se rompería con dos:
 
 - **Se pierden escrituras del store OAuth.** Cada proceso reescribe el fichero
@@ -212,26 +212,26 @@ Límites que se quedan:
 ### Un `.env` local nunca acaba en git, en la imagen ni en el servidor
 
 El repo es público y `.env.example` invita a crear un `.env` local con una
-clave de configuración. Tres capas lo mantienen fuera:
+clave de configuración. Estas capas lo mantienen fuera:
 
 - `.gitignore` y `.dockerignore` ignoran `.env` y `.env.*`, con la excepción
   `!.env.example` para que la plantilla siga versionada (compruébalo con
   `git check-ignore -v .env .env.local .env.example`: solo los dos primeros
   deben salir en la lista).
-- `deploy/publicar.sh` excluye `.env*` del `rsync` que copia el árbol al
-  servidor, con `--include '.env.example'` antes del `--exclude` (rsync evalúa
-  los filtros en orden). Excluir no borra lo que ya estuviera copiado de antes
-  por error; hay que retirarlo a mano en el servidor.
-- `LUMBRE_MCP_HOST` pasa por la misma validación de formato que `DEST` y
-  `ENV_FILE`: alias de `~/.ssh/config` o `usuario@host`, solo letras, dígitos,
-  punto, guion, guion bajo y arroba, primer carácter alfanumérico. Un valor
-  inválido aborta antes de tocar `ssh` o `rsync`.
+- El `.dockerignore` deja fuera `.env*` (salvo `.env.example`) del contexto del
+  build, así que ninguno llega a la imagen. Ya no hay `rsync` del árbol al
+  servidor: el server solo baja la imagen y tiene su `compose.yml` y su `.env`
+  (con la huella de la imagen, sin secretos).
+- `SSH_HOST`, `REMOTE_DIR`, `LUMBRE_MCP_ENV_FILE` y `LUMBRE_MCP_LOG_DIR` pasan
+  por una validación de formato (alias de `~/.ssh/config` o `usuario@host`;
+  rutas absolutas canónicas, sin `.`/`..` ni dobles barras). Un valor inválido
+  aborta antes de tocar `docker` o `ssh`.
 
 ### Secreto del backchannel
 
 El secreto vive en `/srv/lumbre-mcp.env`, fuera de `/srv/lumbre-mcp`: el script
-de publicación sincroniza ese árbol con `rsync --delete` y borraría un `.env`
-guardado dentro. Crear el fichero una sola vez con permisos restrictivos:
+de publicación solo deja ahí el compose, el `.env` de la imagen y el historial, y
+el secreto no debe mezclarse con ellos. Crear el fichero una sola vez con permisos restrictivos:
 
 ```bash
 sudo install -m 0600 -o "$USER" /dev/null /srv/lumbre-mcp.env
@@ -246,10 +246,10 @@ LUMBRE_MCP_BACKCHANNEL_SECRET=<secreto-aleatorio>
 ```
 
 `deploy/publicar.sh` comprueba que el fichero existe, es legible y tiene modo
-exacto `0600` antes del `rsync`, y pasa explícitamente
+exacto `0600` antes de tocar nada en el server, y pasa explícitamente
 `--env-file /srv/lumbre-mcp.env` a Compose. `LUMBRE_MCP_ENV_FILE` permite otra
 ruta absoluta canónica si el operador la necesita, siempre fuera de
-`LUMBRE_MCP_DEST`; el script rechaza rutas equivalentes con `.`/`..` o dobles
+`REMOTE_DIR`; el script rechaza rutas equivalentes con `.`/`..` o dobles
 barras. Para rotar, preparar el mismo valor
 nuevo en ambos servicios y reiniciarlos en una ventana coordinada; mientras no
 coincidan, `/requests` falla cerrado y no se emiten grants locales.
@@ -313,75 +313,113 @@ conexiones nuevas; `/mcp`, `/token` y `/revoke` no le preguntan nada.
 
 ## Publicar una versión nueva
 
+Desde el 8 nov 2026 la imagen se despliega **por el registro de imágenes del
+Forgejo propio** (`git.dualhand.com/fodaveg/lumbre-mcp`), con despliegue por
+huella (`@sha256:…`) y vuelta atrás, como Senda. El server ya no tiene clon de
+este repo ni construye nada: baja la imagen.
+
 ```bash
-./deploy/publicar.sh
+./deploy/publicar.sh                  # despliega el HEAD
+./deploy/publicar.sh --anterior       # vuelve a la imagen anterior (sin gate ni build)
+./deploy/publicar.sh --version <sha>  # despliega la imagen de ese commit (ya en el registro)
+./deploy/publicar.sh --historial      # historial de despliegues del server
+./deploy/publicar.sh --dry-run        # ensayo en seco: dice qué haría
 ```
 
-Publica **HEAD**, no el árbol de trabajo:
+Sirve igual desde el Mac que desde Fedora. Requisitos:
 
-1. Aborta si `git status --porcelain` no está vacío (cambios sin commitear o
-   ficheros sin seguimiento): lo que llega al servidor tiene que poder
-   reconstruirse desde un commit.
-2. Recompila `dist/` y aborta si lo recompilado no coincide con lo commiteado,
-   incluidos ficheros nuevos (es `dist/` lo que viaja, no `src/`: publicar sin
-   recompilar dejaría la versión vieja corriendo sin ningún síntoma).
-3. Exporta HEAD con `git archive` y lo copia con `rsync -rlptz --delete`,
-   excluyendo `.DS_Store`; después `chown -R 0:0` del destino y borra los
-   `.DS_Store` que quedaran de copias anteriores. No usa `--chown=root:root`
-   porque el `rsync` de macOS (openrsync) no lo admite; sin `-o`/`-g`, los
-   ficheros nuevos ya nacen del usuario remoto.
-4. En el servidor: etiqueta la imagen en marcha como `lumbre-mcp:anterior`,
-   construye `lumbre-mcp:<sha>` (con `LABEL org.opencontainers.image.revision`
-   = el SHA), para el contenedor saliente (`docker stop -t 15`, apagado
-   ordenado) y guarda su log ya con las líneas del apagado, levanta la nueva y
-   espera a `healthy` (tope `LUMBRE_MCP_HEALTH_TIMEOUT` en segundos reales, 90
-   por defecto; el healthcheck comprueba cada 2 s mientras arranca). Si llega,
-   la etiqueta también como `latest` y borra las etiquetas por SHA que no sean
-   la nueva ni la anterior. Si el `up` falla o no llega a healthy, para la
-   fallida, guarda su log, vuelve a `anterior` y sale con 1; `latest` no se
-   mueve.
+- `docker login git.dualhand.com` en la máquina que publica, con un token de
+  **escritura** (Mac y Fedora). En el server, `docker login` de **solo
+  lectura** (para el `docker pull`). El script no crea ni pide credenciales.
+- Fedora no necesita Node si la imagen del commit ya está en el registro.
+  Construirla (primer deploy de un commit) exige Node y `node_modules` (`npm ci`).
 
-   Esta parte se sube a `/var/log/lumbre-mcp/.deploy-<fecha>-<sha12>/` y se
-   lanza con `setsid nohup`, desacoplada del ssh, con su salida en
-   `/var/log/lumbre-mcp/deploy-<fecha>-<sha>.log` (los 30 más recientes). Si el
-   canal se cae a mitad, el deploy y la vuelta atrás siguen en el servidor;
-   desde el Mac solo se sigue ese log (`tail --pid`, reenganchándose si el ssh
-   se corta) y se devuelve el código de salida que el script remoto deja al
-   terminar.
-5. Si hay `LUMBRE_TOKEN` en el entorno, corre `scripts/smoke-remote.mjs`
-   (el token va por el entorno, no por la línea de órdenes). Si falla, sale con
-   1 e imprime el comando para volver a la anterior. Sin token, lo deja
-   indicado como paso manual.
+### Deploy normal del HEAD
+
+1. Exige árbol limpio (`git status --porcelain` vacío) y el HEAD contenido en
+   `origin/main` tras un `git fetch`: producción solo sale de `main`.
+2. Pregunta al registro (`docker buildx imagetools inspect`) por
+   `git.dualhand.com/fodaveg/lumbre-mcp:<sha completo>` para la arquitectura
+   del server (`linux/arm64`, por `ssh lumbre-arm uname -m`):
+   - **Ya está** → se reutiliza SIN gate ni build.
+   - **No está** → recompila `dist/` y aborta si no coincide con lo commiteado
+     (la imagen copia `dist/` tal cual, sin compilar), pasa el gate del repo
+     (`npm test`: typecheck + vitest), `docker buildx build --platform
+     linux/arm64 --push` y lee la huella de `--metadata-file`, que comprueba
+     contra el registro.
+   - **Registro caído o sin credenciales** → para ANTES del gate; no hay vía
+     alternativa.
+3. En el server (`/srv/lumbre-mcp`), con un candado `flock` (un deploy a la
+   vez): comprueba que `/srv/lumbre-mcp.env` es legible y `0600`; instala el
+   `deploy/compose.yml` del commit como `compose.yml` solo si lee
+   `LUMBRE_MCP_IMAGE`; baja la imagen por huella ANTES de tocar nada; escribe
+   `LUMBRE_MCP_IMAGE=<repo>@sha256:…` en el `.env`; para el contenedor saliente
+   y guarda su log (ver abajo); `docker compose up -d --wait` y comprueba que
+   se queda en marcha. Si no arranca, restaura la imagen anterior, la levanta y
+   sale con error. Apunta una línea en `despliegues.log`.
+4. Con `LUMBRE_TOKEN` en el entorno (y Node), corre `scripts/smoke-remote.mjs`
+   (el token va por el entorno). Si falla, sale con 1 y dice cómo volver. Sin
+   token o sin Node el deploy sale bien pero avisa de que NO está verificado.
+
+Compose recibe los secretos con `--env-file /srv/lumbre-mcp.env` y la imagen por
+huella como variable de **entorno** (`LUMBRE_MCP_IMAGE`, leída del `.env` del
+directorio): un `--env-file` explícito sustituye al `.env` del directorio, y el
+entorno gana sobre cualquier fichero. Para un `docker compose` a mano en el
+server:
+
+```bash
+ssh lumbre-arm 'cd /srv/lumbre-mcp && set -a && . ./.env && set +a && \
+  docker compose --env-file /srv/lumbre-mcp.env ps'
+```
+
+### Vuelta atrás
+
+```bash
+./deploy/publicar.sh --anterior          # la imagen que corría antes de la actual
+./deploy/publicar.sh --version <sha>     # la de un commit concreto (en el registro)
+```
+
+Sin gate ni build, con el mismo candado, `up --wait` y línea de historial.
+`--anterior` busca en `despliegues.log` la línea cuya imagen nueva es la del
+`.env` y vuelve a su anterior; dos seguidas alternan entre las dos últimas. El
+`compose.yml` que se instala sale de `origin/main` tras `git fetch` (no del
+HEAD ni del árbol de trabajo), así que no exige árbol limpio ni estar en `main`.
+Si la imagen anterior aún está en el server no hace falta registro.
+
+**Primer despliegue por registro.** La imagen que corría antes (construida en el
+server, `lumbre-mcp:latest`) se etiqueta `lumbre-mcp:previo-registro` y queda
+como destino de la primera vuelta atrás; después se retira la etiqueta
+`lumbre-mcp:latest`. El volumen `lumbre-mcp_state` y el nombre del contenedor no
+cambian (el proyecto de compose sigue siendo `lumbre-mcp`). Las etiquetas viejas
+`lumbre-mcp:<sha>` y `anterior` quedan hasta que se borren a mano
+(`docker image rm`); el directorio `/srv/lumbre-mcp/deploy/` de la copia
+antigua también es inofensivo y se puede retirar.
 
 Qué commit corre en el servidor:
 
 ```bash
 ssh lumbre-arm "docker inspect -f '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' lumbre-mcp"
+./deploy/publicar.sh --historial
 ```
-
-Volver a la versión anterior a mano (la imagen sigue en el servidor, sin
-recompilar ni red):
-
-```bash
-ssh lumbre-arm 'cd /srv/lumbre-mcp && docker tag lumbre-mcp:anterior lumbre-mcp:latest && \
-  LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file /srv/lumbre-mcp.env -f deploy/compose.yml up -d --no-build'
-```
-
-El `docker tag` va primero para que `latest` deje de apuntar a la rota: si no,
-un `docker compose up -d` a mano la resucitaría.
 
 **Logs de contenedores anteriores.** Compose recrea el contenedor en cada
-deploy y Docker borra su log con él, así que `publicar.sh` lo para y lo guarda
-antes en `/var/log/lumbre-mcp/<fecha UTC>-saliente-<sha12>.log.gz` (y
-`…-fallido.log.gz` si la nueva no llega a healthy), `0600`, conservando los 30
-más recientes. `LUMBRE_MCP_LOG_DIR` cambia el directorio; tiene que quedar
-fuera de `/srv/lumbre-mcp`, que `rsync --delete` vacía. Se leen con
-`zcat <fichero> | tail`.
+deploy y Docker borra su log con él, así que el deploy lo para (apagado ordenado,
+`docker stop -t 15`) y lo guarda antes en
+`/var/log/lumbre-mcp/<fecha UTC>-saliente-<sha12>.log.gz` (y `…-fallido.log.gz`
+si la nueva no llega a arrancar), `0600`, conservando los 30 más recientes.
+`LUMBRE_MCP_LOG_DIR` cambia el directorio. Se leen con `zcat <fichero> | tail`.
 
-**No usa `git pull` en el servidor** porque la clave de despliegue que hay allí
-solo da acceso a `fodaveg/lumbre`, no a este repo. Si algún día se le añade una
-clave de despliegue propia a `fodaveg/lumbre-mcp`, el script se cambia por un
-`git -C /srv/lumbre-mcp pull` y lo demás sigue igual.
+Variables de `publicar.sh`: `SSH_HOST` (`lumbre-arm`), `REMOTE_DIR`
+(`/srv/lumbre-mcp`), `LUMBRE_MCP_ENV_FILE` (`/srv/lumbre-mcp.env`),
+`LUMBRE_MCP_LOG_DIR`, `DEPLOY_REGISTRY` (`git.dualhand.com/fodaveg`),
+`DOCKER_PLATFORM`, `LUMBRE_MCP_SMOKE_URL`, `LUMBRE_TOKEN`. Las rutas del server y
+el host se validan antes de tocar nada (ruta absoluta canónica; alias o
+`usuario@host`).
+
+La mecánica común vive en `deploy/lib/deploy-registro.sh` (lado local) y
+`deploy/lib/remote-release.sh` (lado server, que viaja entero por `ssh bash -s`);
+`src/deploy-registro.test.ts` los prueba con `docker`, `ssh`, `npm` y `node`
+falsos.
 
 ## Cambiar el fragmento de Caddy
 
@@ -557,7 +595,7 @@ Claude descubre OAuth 2.1 y el callback exacto es
 solo por compatibilidad; las configuraciones nuevas deben usar OAuth.
 
 La compatibilidad con `/mcp/<token>` sigue tocando las DOS piezas del deploy:
-además de `./deploy/publicar.sh` (recompila y sube `dist/`), hay que volver a
+además de `./deploy/publicar.sh` (publica la imagen con `dist/`), hay que volver a
 subir `deploy/mcp-lumbre-pro.caddy` con los pasos de "Cambiar el fragmento de
 Caddy" de arriba — trae el bloque `log` que apaga el registro del borde para
 este host (necesario porque Caddy vuelca la URI completa en sus entradas de

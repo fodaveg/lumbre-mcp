@@ -1,10 +1,11 @@
 # Servicio del transporte HTTP remoto (`mcp.lumbre.pro`, tarea M2).
 #
-# Se despliega en `/srv/lumbre-mcp` del VPS (clon de este repo) y se une a la
-# red Docker externa `edge`, que es de donde cuelga el Caddy que termina TLS
-# (vive en `/srv/edge`; ver `deploy/README-deploy.md`).
+# Se despliega en `/srv/lumbre-mcp` del VPS: allí `deploy/publicar.sh` instala
+# este fichero como `compose.yml` (no hay clon del repo ni build en el server)
+# y se une a la red Docker externa `edge`, de donde cuelga el Caddy que termina
+# TLS (vive en `/srv/edge`; ver `deploy/README-deploy.md`).
 #
-#   docker compose -f deploy/compose.yml up -d --build
+#   ./deploy/publicar.sh        (desde el Mac o Fedora; ver «Publicar»)
 #
 # NO publica puertos al host A PROPÓSITO: Caddy lo alcanza por el DNS de la
 # red `edge` con el nombre del contenedor (`lumbre-mcp:8787`), igual que hace
@@ -15,18 +16,15 @@ name: lumbre-mcp
 
 services:
   mcp:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      args:
-        # SHA del commit desplegado; `deploy/publicar.sh` lo pasa y acaba en
-        # la etiqueta `org.opencontainers.image.revision` de la imagen.
-        REVISION: '${LUMBRE_MCP_REVISION:-desconocida}'
-    # `publicar.sh` construye `lumbre-mcp:<sha>`, levanta esa y solo cuando
-    # está healthy la etiqueta además como `latest`; la anterior queda como
-    # `lumbre-mcp:anterior` para volver atrás. Sin la variable (un `up -d` a
-    # mano) se usa `latest`, que es la última que llegó a estar healthy.
-    image: 'lumbre-mcp:${LUMBRE_MCP_IMAGE_TAG:-latest}'
+    # La imagen NO se construye en el server: `deploy/publicar.sh` la construye
+    # en el Mac (o la reutiliza del registro) y el server la baja por HUELLA
+    # (`git.dualhand.com/fodaveg/lumbre-mcp@sha256:…`), que escribe en el `.env`
+    # del directorio del servicio y que `deploy/lib/remote-release.sh` inyecta
+    # como LUMBRE_MCP_IMAGE al llamar a compose. Sin la variable cae a la
+    # etiqueta local de antes del registro (`lumbre-mcp:latest`), así que subir
+    # este fichero no cambia lo que corre. El SHA del commit viaja en la
+    # etiqueta `org.opencontainers.image.revision` de la imagen.
+    image: '${LUMBRE_MCP_IMAGE:-lumbre-mcp:latest}'
     container_name: lumbre-mcp
     restart: unless-stopped
     # `init`: un init mínimo (tini) es el PID 1 y reenvía SIGTERM a Node, que

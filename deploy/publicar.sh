@@ -1,360 +1,147 @@
 #!/usr/bin/env bash
-# Publica el transporte HTTP remoto (mcp.lumbre.pro) en el VPS.
+# Publica el transporte HTTP remoto (mcp.lumbre.pro) en el server de productos
+# POR EL REGISTRO de imágenes del Forgejo propio, con despliegue por huella y
+# vuelta atrás. `./deploy/publicar.sh --help` para las opciones.
 #
-#   ./deploy/publicar.sh
+#   ./deploy/publicar.sh                 despliega el HEAD
+#   ./deploy/publicar.sh --anterior      vuelve a la imagen anterior
+#   ./deploy/publicar.sh --version <sha> despliega la imagen de ese commit
+#   ./deploy/publicar.sh --historial     historial de despliegues del server
 #
-# Publica un COMMIT, no el árbol de trabajo: aborta si hay cambios sin
-# commitear o ficheros sin seguimiento, exporta HEAD con `git archive` y copia
-# ese export a /srv/lumbre-mcp por rsync. NO usa `git pull` en el servidor
-# porque la clave de despliegue que hay allí solo da acceso a `fodaveg/lumbre`,
-# no a este repo. Si algún día se le añade una clave de despliegue propia a
-# `fodaveg/lumbre-mcp`, la copia se cambia por un `git -C /srv/lumbre-mcp pull`
-# y el resto sigue igual.
+# Deploy normal del HEAD (árbol limpio y HEAD dentro de origin/main):
+#   - si `git.dualhand.com/fodaveg/lumbre-mcp:<sha completo>` ya está en el
+#     registro para la arquitectura del server, se despliega esa imagen tal cual
+#     (sin gate ni build; vale desde Fedora, sin Node);
+#   - si no: `dist/` recompilado tiene que coincidir con lo commiteado, gate
+#     (`npm test`: typecheck + vitest), `docker buildx build --push` para la
+#     arquitectura del server y huella del registro. Registro caído o sin
+#     credenciales: para ANTES del gate.
+#   - En el server: candado, compose.yml del commit (solo si lee
+#     LUMBRE_MCP_IMAGE), `.env` con la imagen por huella, `docker compose pull`
+#     de esa huella, `up -d --wait`, y una línea en el historial. El log del
+#     contenedor saliente se vuelca a $LUMBRE_MCP_LOG_DIR antes de recrearlo
+#     (Docker lo borra con el contenedor).
+#   - Después, con LUMBRE_TOKEN en el entorno, corre el smoke remoto.
 #
-# Lo que va al servidor es `dist/` YA COMPILADO (viene versionado en el repo,
-# ver la sección "Actualizar sin toolchain" del README): si has tocado `src/`
-# y no has recompilado, publicarías la versión vieja sin ningún síntoma. Por
-# eso el script recompila y ABORTA si eso deja `dist/` distinto de lo
-# commiteado.
+# La mecánica común vive en deploy/lib/deploy-registro.sh (lado local) y
+# deploy/lib/remote-release.sh (lado server). Credenciales: `docker login
+# git.dualhand.com` con escritura en el Mac o en Fedora; el server, de solo
+# lectura (este script no las crea ni las pide).
 #
-# En el servidor (H4 y H5 de docs/audit-recuperacion-despliegue-20261010.md):
-#   1. etiqueta la imagen que corre como `lumbre-mcp:anterior`;
-#   2. construye `lumbre-mcp:<sha>` con la etiqueta OCI de la revisión;
-#   3. para el contenedor saliente (apagado ordenado) y vuelca su log a
-#      $LUMBRE_MCP_LOG_DIR, con las líneas del apagado (Compose lo borra al
-#      recrearlo);
-#   4. levanta `<sha>` y espera a `healthy` con tope en segundos;
-#   5. si llega, la etiqueta también como `latest`; si el `up` falla o no
-#      llega, vuelca su log y vuelve a `anterior`, y sale con 1.
-# Esa parte corre DESACOPLADA del ssh (`setsid nohup`, con su salida en
-# $LUMBRE_MCP_LOG_DIR/deploy-<fecha>-<sha>.log): si el canal se cae a mitad,
-# el deploy sigue en el servidor y la vuelta atrás también. Desde aquí solo se
-# sigue ese log y se recoge el código de salida que deja.
-# Después, si hay `LUMBRE_TOKEN` en el entorno, corre el smoke remoto.
-#
-# Variables: LUMBRE_MCP_HOST (alias ssh, default `lumbre-arm`), LUMBRE_MCP_DEST
-# (default /srv/lumbre-mcp), LUMBRE_MCP_ENV_FILE (default /srv/lumbre-mcp.env),
-# LUMBRE_MCP_LOG_DIR (default /var/log/lumbre-mcp), LUMBRE_MCP_HEALTH_TIMEOUT
-# (segundos, default 90), LUMBRE_MCP_SMOKE_URL (default
-# https://mcp.lumbre.pro/mcp) y LUMBRE_TOKEN (opcional, para el smoke).
+# Variables: SSH_HOST (alias, default `lumbre-arm`), REMOTE_DIR (default
+# /srv/lumbre-mcp), LUMBRE_MCP_ENV_FILE (secretos, default /srv/lumbre-mcp.env),
+# LUMBRE_MCP_LOG_DIR (default /var/log/lumbre-mcp), DEPLOY_REGISTRY, DOCKER_PLATFORM,
+# LUMBRE_MCP_SMOKE_URL (default https://mcp.lumbre.pro/mcp) y LUMBRE_TOKEN.
 set -euo pipefail
-
-HOST="${LUMBRE_MCP_HOST:-lumbre-arm}"
-DEST="${LUMBRE_MCP_DEST:-/srv/lumbre-mcp}"
-ENV_FILE="${LUMBRE_MCP_ENV_FILE:-/srv/lumbre-mcp.env}"
-LOG_DIR="${LUMBRE_MCP_LOG_DIR:-/var/log/lumbre-mcp}"
-HEALTH_TIMEOUT="${LUMBRE_MCP_HEALTH_TIMEOUT:-90}"
-SMOKE_URL="${LUMBRE_MCP_SMOKE_URL:-https://mcp.lumbre.pro/mcp}"
-
-is_canonical_remote_path() {
-	local path="$1"
-	[[ "$path" =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] &&
-		[[ "$path" != *"/./"* && "$path" != */. && "$path" != *"/../"* && "$path" != */.. ]]
-}
-
-# Alias de `~/.ssh/config` o `usuario@host`: solo letras, dígitos, punto,
-# guion, guion bajo y arroba, y el primer carácter alfanumérico (para que no
-# empiece por un carácter que `ssh`/`rsync` pudieran interpretar como opción).
-is_valid_host() {
-	local host="$1"
-	[[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]
-}
-
-if ! is_valid_host "$HOST"; then
-	echo "ERROR: LUMBRE_MCP_HOST debe ser un alias o usuario@host válido." >&2
-	exit 1
-fi
-if ! is_canonical_remote_path "$DEST"; then
-	echo "ERROR: LUMBRE_MCP_DEST debe ser una ruta absoluta canónica simple." >&2
-	exit 1
-fi
-if ! is_canonical_remote_path "$ENV_FILE"; then
-	echo "ERROR: LUMBRE_MCP_ENV_FILE debe ser una ruta absoluta canónica simple." >&2
-	exit 1
-fi
-if ! is_canonical_remote_path "$LOG_DIR"; then
-	echo "ERROR: LUMBRE_MCP_LOG_DIR debe ser una ruta absoluta canónica simple." >&2
-	exit 1
-fi
-case "$ENV_FILE" in
-"$DEST" | "$DEST"/*)
-	echo "ERROR: LUMBRE_MCP_ENV_FILE debe quedar fuera de LUMBRE_MCP_DEST." >&2
-	exit 1
-	;;
-esac
-case "$LOG_DIR" in
-"$DEST" | "$DEST"/*)
-	# `rsync --delete` lo vaciaría en el siguiente deploy.
-	echo "ERROR: LUMBRE_MCP_LOG_DIR debe quedar fuera de LUMBRE_MCP_DEST." >&2
-	exit 1
-	;;
-esac
-if ! [[ "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
-	echo "ERROR: LUMBRE_MCP_HEALTH_TIMEOUT debe ser un número de segundos entre 1 y 9999." >&2
-	exit 1
-fi
-if ! [[ "$SMOKE_URL" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9/._-]*$ ]]; then
-	echo "ERROR: LUMBRE_MCP_SMOKE_URL debe ser una URL http(s) simple." >&2
-	exit 1
-fi
-
 cd "$(dirname "$0")/.."
 
-# Se publica un commit: si el árbol tiene algo que no está en HEAD, lo que
-# acabara en el servidor no se podría reconstruir desde git (H12).
-if [[ -n "$(git status --porcelain)" ]]; then
-	echo "ERROR: el árbol tiene cambios sin commitear o ficheros sin seguimiento." >&2
-	echo "       Se publica HEAD tal cual: commitea, aparta o borra esto antes:" >&2
-	git status --short >&2
-	exit 1
-fi
+DEPLOY_SERVICE="mcp"             # servicio de deploy/compose.yml
+DEPLOY_CONTAINER="lumbre-mcp"    # container_name del compose
+DEPLOY_ENV_VAR="LUMBRE_MCP_IMAGE" # DEBE coincidir con image: de deploy/compose.yml
+DEPLOY_IMAGE="lumbre-mcp"
+DEPLOY_CONTEXT="."
+REMOTE_DIR="${REMOTE_DIR:-/srv/lumbre-mcp}"
+# Secretos del server: fuera de REMOTE_DIR, 0600. Compose los lee con --env-file.
+DEPLOY_SECRETS_ENV="${LUMBRE_MCP_ENV_FILE:-/srv/lumbre-mcp.env}"
+DEPLOY_LOG_DIR="${LUMBRE_MCP_LOG_DIR:-/var/log/lumbre-mcp}"
+SMOKE_URL="${LUMBRE_MCP_SMOKE_URL:-https://mcp.lumbre.pro/mcp}"
 
-echo "==> Recompilando dist/ para comprobar que lo commiteado está al día"
-npm run build >/dev/null
-# `--porcelain` y no `git diff --quiet`: también ve un fichero NUEVO en dist/
-# que el commit no trae.
-if [[ -n "$(git status --porcelain -- dist)" ]]; then
-	echo "ERROR: dist/ recompilado NO coincide con lo commiteado." >&2
-	echo "       Commitea el dist/ regenerado antes de publicar:" >&2
-	git status --short -- dist >&2
-	exit 1
-fi
-
-SHA="$(git rev-parse HEAD)"
-if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-	echo "ERROR: no se pudo leer el SHA de HEAD." >&2
-	exit 1
-fi
-
-STAGE="$(mktemp -d "${TMPDIR:-/tmp}/lumbre-mcp-publicar.XXXXXX")"
-trap 'rm -rf "$STAGE"' EXIT
-git archive --format=tar HEAD | tar -x -C "$STAGE"
-
-echo "==> Copiando $SHA a $HOST:$DEST"
-echo "==> Validando secreto remoto fuera del árbol sincronizado: $ENV_FILE"
-ssh "$HOST" "test -r $ENV_FILE && test \$(stat -c %a $ENV_FILE) = 600" || {
-	echo "ERROR: falta $ENV_FILE legible y con permisos 0600 en $HOST." >&2
-	exit 1
-}
-ssh "$HOST" "mkdir -p $DEST"
-# Un `.env` local nunca debe viajar al servidor (el repo es público y
-# `.env.example` invita a crear uno con una clave de configuración). El
-# `--include` va ANTES que el `--exclude` porque rsync evalúa los filtros en
-# el orden dado: si `.env*` llegara primero, `.env.example` también caería.
-# Ojo: excluir un fichero no lo borra en destino si ya está ahí de una copia
-# anterior; hay que retirarlo a mano si alguna vez se copió por error.
-#
-# `-rlptz` y no `-a`: sin `-o`/`-g`, los ficheros nuevos quedan del usuario
-# remoto (root) y no del uid del Mac (`501:staff`, H12). `--chown=root:root`
-# haría lo mismo, pero el rsync de macOS (openrsync) no lo admite; el `chown`
-# de después cubre los ficheros que ya estaban.
-rsync -rlptz --delete \
-	--exclude '.DS_Store' \
-	--exclude '.git' \
-	--exclude 'node_modules' \
-	--exclude '.claude' \
-	--include '.env.example' \
-	--exclude '.env*' \
-	"$STAGE/" "$HOST:$DEST/"
-# El `.DS_Store` que dejaron copias anteriores no lo borra `--delete` (está
-# excluido), así que se retira aquí.
-ssh "$HOST" "chown -R 0:0 $DEST && find $DEST -name .DS_Store -type f -delete"
-
-# La parte del servidor se sube a un directorio de trabajo bajo LOG_DIR y se
-# lanza desacoplada del ssh: si el canal se cae a mitad, ni un SIGHUP ni un
-# EPIPE al escribir la matan, y la vuelta atrás sigue pudiendo ocurrir.
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-WORK="$LOG_DIR/.deploy-$STAMP-${SHA:0:12}"
-DEPLOY_LOG="$LOG_DIR/deploy-$STAMP-$SHA.log"
-echo "==> Subiendo la parte del servidor a $HOST:$WORK"
-ssh "$HOST" "install -d -m 0700 $LOG_DIR $WORK && cat >$WORK/desplegar.sh" <<'REMOTO'
-set -euo pipefail
-DEST="$1"
-ENV_FILE="$2"
-SHA="$3"
-HEALTH_TIMEOUT="$4"
-LOG_DIR="$5"
-WORK="$6"
-NAME=lumbre-mcp
-# El PID para que `publicar.sh` lo siga con `tail --pid`, y el código de
-# salida, escrito de forma atómica, para que lo recoja al terminar.
-echo "$$" >"$WORK/pid"
-# shellcheck disable=SC2329 # la invoca el `trap … EXIT` de abajo
-write_code() {
-	local code=$?
-	echo "$code" >"$WORK/codigo.tmp" && mv "$WORK/codigo.tmp" "$WORK/codigo"
-}
-trap write_code EXIT
-cd "$DEST"
-# Los logs de deploy: los 30 más recientes (el de este, el más nuevo, queda).
-{ ls -1t "$LOG_DIR"/deploy-*.log 2>/dev/null || true; } | tail -n +31 | while read -r old; do rm -f -- "$old"; done
-
-compose() { docker compose --env-file "$ENV_FILE" -f deploy/compose.yml "$@"; }
-
-revision_of_running() {
-	local rev
-	rev="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$NAME" 2>/dev/null || true)"
-	if [[ "$rev" =~ ^[0-9a-f]{40}$ ]]; then echo "$rev"; fi
+# Rutas del server que viajan por SSH: absolutas y sin caracteres raros.
+is_canonical_remote_path() {
+  local path="$1"
+  [[ "$path" =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] &&
+    [[ "$path" != *"/./"* && "$path" != */. && "$path" != *"/../"* && "$path" != */.. ]]
 }
 
-# Docker borra el log json-file al recrear el contenedor: se guarda antes,
-# comprimido, con los 30 más recientes (H5).
-dump_logs() {
-	local label="$1" rev file
-	docker inspect "$NAME" >/dev/null 2>&1 || return 0
-	rev="$(revision_of_running)"
-	install -d -m 0700 "$LOG_DIR"
-	file="$LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$label${rev:+-${rev:0:12}}.log.gz"
-	if docker logs --timestamps "$NAME" 2>&1 | gzip >"$file"; then
-		chmod 0600 "$file"
-		echo "    log del contenedor $label: $file"
-	else
-		echo "AVISO: no se pudo volcar el log del contenedor $label." >&2
-	fi
-	{ ls -1t "$LOG_DIR"/*.log.gz 2>/dev/null || true; } | tail -n +31 | while read -r old; do rm -f -- "$old"; done
+# Alias de `~/.ssh/config` o `usuario@host`; el primer carácter alfanumérico para
+# que ssh no lo lea como opción.
+is_valid_host() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]
 }
 
-# El tope es en SEGUNDOS reales (`SECONDS`), no en vueltas: cada vuelta hace
-# dos `docker inspect`, que en un host cargado no tardan cero.
-wait_healthy() {
-	local status=desconocido restarts=0 deadline=$((SECONDS + HEALTH_TIMEOUT)) started=$SECONDS
-	while ((SECONDS < deadline)); do
-		status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sin-healthcheck{{end}}' "$NAME" 2>/dev/null || echo ausente)"
-		restarts="$(docker inspect -f '{{.RestartCount}}' "$NAME" 2>/dev/null || echo 0)"
-		[[ "$status" == healthy ]] && return 0
-		# Un `unhealthy` o un reinicio no se arreglan esperando más.
-		if [[ "$status" == unhealthy || "$restarts" != 0 ]]; then break; fi
-		sleep 1
-	done
-	echo "    estado: $status, reinicios: $restarts, tras $((SECONDS - started)) s" >&2
-	return 1
+is_valid_smoke_url() {
+  [[ "$1" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9/._-]*$ ]]
 }
 
-# Para el contenedor (apagado ordenado, ver `src/http-lifecycle.ts`) ANTES de
-# volcar su log: así el volcado lleva también las líneas del apagado.
-stop_and_dump() {
-	local label="$1"
-	docker inspect "$NAME" >/dev/null 2>&1 || return 0
-	docker stop -t 15 "$NAME" >/dev/null || echo "AVISO: docker stop del contenedor $label falló." >&2
-	dump_logs "$label"
+# shellcheck source=deploy/lib/deploy-registro.sh
+source "$(dirname "$0")/lib/deploy-registro.sh"
+
+is_valid_host "$SSH_HOST" || {
+  echo "ERROR: SSH_HOST debe ser un alias o usuario@host válido." >&2
+  exit 1
 }
-
-docker_ps() {
-	docker ps -a --filter "name=$NAME" --format '{{.Names}}\t{{.Status}}\t{{.Image}}' || true
-}
-
-PREV_IMAGE="$(docker inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
-PREV_REV="$(revision_of_running)"
-if [[ -n "$PREV_IMAGE" ]]; then
-	docker tag "$PREV_IMAGE" lumbre-mcp:anterior
-	echo "==> [servidor] imagen en marcha guardada como lumbre-mcp:anterior (${PREV_REV:-sin revisión})"
-fi
-
-echo "==> [servidor] construyendo lumbre-mcp:$SHA"
-LUMBRE_MCP_IMAGE_TAG="$SHA" LUMBRE_MCP_REVISION="$SHA" compose build
-
-stop_and_dump saliente
-
-echo "==> [servidor] levantando lumbre-mcp:$SHA"
-# `up` y la espera en la misma condición: con `set -e`, un `up` que fallara
-# fuera de un `if` mataría el script antes de la vuelta atrás.
-if LUMBRE_MCP_IMAGE_TAG="$SHA" compose up -d --no-build && wait_healthy; then
-	docker tag "lumbre-mcp:$SHA" lumbre-mcp:latest
-	# Solo se conservan la versión nueva, la anterior y las etiquetas fijas:
-	# el disco del VPS va justo (H7).
-	for tag in $(docker image ls lumbre-mcp --format '{{.Tag}}'); do
-		[[ "$tag" =~ ^[0-9a-f]{40}$ ]] || continue
-		[[ "$tag" == "$SHA" || "$tag" == "$PREV_REV" ]] && continue
-		docker image rm "lumbre-mcp:$tag" >/dev/null || true
-	done
-	echo "==> [servidor] healthy: lumbre-mcp:$SHA es ahora latest"
-	docker_ps
-	exit 0
-fi
-
-echo "ERROR: lumbre-mcp:$SHA no arrancó o no llegó a healthy en $HEALTH_TIMEOUT s." >&2
-# Si el `up` falló a medias puede no haber contenedor; `stop_and_dump` lo
-# tolera. El saliente ya está parado y sigue disponible como imagen
-# `anterior`.
-stop_and_dump fallido
-if [[ -n "$PREV_IMAGE" ]]; then
-	echo "==> [servidor] volviendo a lumbre-mcp:anterior (${PREV_REV:-sin revisión})" >&2
-	if LUMBRE_MCP_IMAGE_TAG=anterior compose up -d --no-build && wait_healthy; then
-		echo "    la anterior vuelve a estar healthy; latest no se ha movido" >&2
-	else
-		echo "    ¡la anterior TAMPOCO llega a healthy! Revisa el log." >&2
-	fi
-else
-	echo "    no había imagen anterior a la que volver" >&2
-fi
-docker_ps >&2
-exit 1
-REMOTO
-
-echo "==> Construyendo, levantando y esperando a healthy (tope ${HEALTH_TIMEOUT} s); log en $HOST:$DEPLOY_LOG"
-ssh "$HOST" "setsid nohup bash $WORK/desplegar.sh $DEST $ENV_FILE $SHA $HEALTH_TIMEOUT $LOG_DIR $WORK >$DEPLOY_LOG 2>&1 </dev/null &"
-
-# Seguir el log hasta que el proceso remoto termine. Si el ssh se cae, se
-# vuelve a enganchar (sin repetir lo ya visto); el deploy no depende de esto.
-follow() {
-	local from="$1"
-	ssh "$HOST" "for i in \$(seq 1 60); do [ -s $WORK/pid ] && break; sleep 1; done; [ -s $WORK/pid ] || exit 3; tail -n $from -F --pid=\$(cat $WORK/pid) $DEPLOY_LOG 2>/dev/null"
-}
-attempts=0
-from='+1'
-until follow "$from"; do
-	attempts=$((attempts + 1))
-	if ((attempts >= 30)); then
-		echo "ERROR: no consigo seguir el deploy remoto. Sigue en el servidor; su log: $HOST:$DEPLOY_LOG" >&2
-		exit 1
-	fi
-	from='0'
-	sleep 2
+for p in "$REMOTE_DIR" "$DEPLOY_SECRETS_ENV" "$DEPLOY_LOG_DIR"; do
+  is_canonical_remote_path "$p" || {
+    echo "ERROR: '$p' debe ser una ruta absoluta canónica simple." >&2
+    exit 1
+  }
 done
-CODE="$(ssh "$HOST" "cat $WORK/codigo 2>/dev/null" || true)"
-if ! [[ "$CODE" =~ ^[0-9]+$ ]]; then
-	echo "ERROR: el deploy remoto terminó sin dejar código de salida; mira $HOST:$DEPLOY_LOG" >&2
-	exit 1
-fi
-ssh "$HOST" "rm -rf $WORK" || true
-if ((CODE != 0)); then
-	echo "ERROR: el deploy remoto salió con $CODE; log completo en $HOST:$DEPLOY_LOG" >&2
-	exit "$CODE"
-fi
+is_valid_smoke_url "$SMOKE_URL" || {
+  echo "ERROR: LUMBRE_MCP_SMOKE_URL debe ser una URL http(s) simple." >&2
+  exit 1
+}
 
-# `latest` también vuelve atrás: si no, un `up -d` a mano resucitaría la rota.
-ROLLBACK="ssh $HOST 'cd $DEST && docker tag lumbre-mcp:anterior lumbre-mcp:latest && LUMBRE_MCP_IMAGE_TAG=anterior docker compose --env-file $ENV_FILE -f deploy/compose.yml up -d --no-build'"
+# La etiqueta es el sha COMPLETO del commit.
+deploy_tag_for_commit() {
+  echo "$1"
+}
 
-echo
-if [[ -n "${LUMBRE_TOKEN:-}" ]]; then
-	# El token se lee del entorno (`smoke-remote.mjs` lo coge de
-	# `LUMBRE_TOKEN`): en la línea de órdenes lo vería cualquiera con `ps`.
-	echo "==> Smoke contra $SMOKE_URL"
-	if ! node scripts/smoke-remote.mjs "$SMOKE_URL"; then
-		echo "ERROR: el smoke ha fallado con $SHA desplegado. Para volver a la anterior:" >&2
-		echo "  $ROLLBACK" >&2
-		exit 1
-	fi
-elif [[ "${LUMBRE_MCP_SKIP_SMOKE:-}" == "1" ]]; then
-	# Única salida sin smoke: válvula explícita, con motivo, y con constancia en la salida
-	# y en el log del deploy del servidor.
-	if [[ -z "${LUMBRE_MCP_SKIP_SMOKE_MOTIVO:-}" ]]; then
-		echo "ERROR: LUMBRE_MCP_SKIP_SMOKE=1 exige LUMBRE_MCP_SKIP_SMOKE_MOTIVO=\"...\" (por qué se salta el smoke)." >&2
-		echo "El deploy YA está desplegado; sin smoke no está verificado. Rollback:" >&2
-		echo "  $ROLLBACK" >&2
-		exit 1
-	fi
-	SIN_SMOKE="SIN SMOKE: ${LUMBRE_MCP_SKIP_SMOKE_MOTIVO//[$'\r\n']/ }"
-	echo "$SIN_SMOKE"
-	printf '%s\n' "$SIN_SMOKE" | ssh "$HOST" "cat >>$DEPLOY_LOG" ||
-		echo "AVISO: no pude anotar «SIN SMOKE» en $HOST:$DEPLOY_LOG" >&2
-else
-	echo "ERROR: falta LUMBRE_TOKEN en el entorno: sin él no hay smoke y el deploy NO está verificado." >&2
-	echo "Ejecútalo con LUMBRE_TOKEN, o a mano: node scripts/smoke-remote.mjs $SMOKE_URL" >&2
-	echo "Única salida: LUMBRE_MCP_SKIP_SMOKE=1 LUMBRE_MCP_SKIP_SMOKE_MOTIVO=\"<motivo>\"." >&2
-	echo "Para volver a la versión anterior:" >&2
-	echo "  $ROLLBACK" >&2
-	exit 1
+deploy_build_steps() {
+  echo "    1/3 npm run build y comprobar que dist/ coincide con lo commiteado"
+  echo "    2/3 npm test (typecheck + vitest)"
+  echo "    3/3 (el build de la imagen copia dist/ tal cual)"
+}
+
+# Solo corre si hay que construir la imagen (no está en el registro). Se llama
+# como `deploy_prepare_build || return 1`, y ahí bash NO aplica `set -e`: cada
+# paso lleva su `|| return 1`.
+deploy_prepare_build() {
+  deploy_require_node || return 1
+  [ -d node_modules ] || {
+    echo "ERROR: falta node_modules (npm ci) para compilar y pasar el gate." >&2
+    return 1
+  }
+
+  # `dist/` viene versionado y la imagen lo copia SIN compilar: si se tocó src/
+  # sin recompilar, se publicaría la versión vieja sin ningún síntoma.
+  echo "==> 1/2 Recompilando dist/ para comprobar que lo commiteado está al día…"
+  npm run build >/dev/null || return 1
+  # `--porcelain` y no `git diff --quiet`: también ve un fichero NUEVO en dist/.
+  if [ -n "$(git status --porcelain -- dist)" ]; then
+    echo "ERROR: dist/ recompilado NO coincide con lo commiteado. Commitea el dist/ regenerado:" >&2
+    git status --short -- dist >&2
+    return 1
+  fi
+
+  echo "==> 2/2 Gate (npm test: typecheck + vitest)…"
+  npm test || {
+    echo "ERROR: gate en rojo: no se construye ni se despliega." >&2
+    return 1
+  }
+}
+
+# smoke_after_deploy: con LUMBRE_TOKEN corre el smoke remoto. Sin él, o sin Node
+# (Fedora), el deploy queda SIN VERIFICAR y lo dice; no es un fallo del deploy.
+smoke_after_deploy() {
+  local rollback="./deploy/publicar.sh --anterior"
+  if [ -z "${LUMBRE_TOKEN:-}" ] || ! command -v node >/dev/null 2>&1; then
+    echo "AVISO: sin LUMBRE_TOKEN o sin Node no hay smoke: el deploy NO está verificado."
+    echo "       Verifícalo con: LUMBRE_TOKEN=… node scripts/smoke-remote.mjs $SMOKE_URL"
+    return 0
+  fi
+  # El token se lee del entorno: en la línea de órdenes lo vería cualquiera con `ps`.
+  echo "==> Smoke contra $SMOKE_URL"
+  node scripts/smoke-remote.mjs "$SMOKE_URL" || {
+    echo "ERROR: el smoke ha fallado con la imagen desplegada. Para volver a la anterior:" >&2
+    echo "  $rollback" >&2
+    return 1
+  }
+}
+
+deploy_main "./deploy/publicar.sh" "$@" || exit $?
+
+if [ "$DEPLOY_DRY_RUN" = 0 ] && [ "$DEPLOY_MODE" != ayuda ] && [ "$DEPLOY_MODE" != historial ]; then
+  smoke_after_deploy || exit 1
+  echo
+  echo "Para volver a la versión anterior:  ./deploy/publicar.sh --anterior"
 fi
-echo "Para volver a la versión anterior:"
-echo "  $ROLLBACK"
