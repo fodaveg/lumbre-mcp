@@ -488,7 +488,7 @@ export const mutateTasksOpSchema = z
 		deadline: z
 			.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.null()])
 			.optional()
-			.describe('update: null la quita. PROHIBIDO sobre una subtarea'),
+			.describe('update: null la quita'),
 		time: z
 			.union([z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), z.null()])
 			.optional()
@@ -500,7 +500,7 @@ export const mutateTasksOpSchema = z
 		reminders: z
 			.array(z.number().int().nonnegative())
 			.optional()
-			.describe('update: minutos antes de time; [] los quita. PROHIBIDO sobre una subtarea'),
+			.describe('update: minutos antes de time; [] los quita'),
 		expectedContent: z.string().optional().describe('update: content leído; si cambió, la op da conflict'),
 		expectedNotes: z.string().optional(),
 		subtasks: subtasksSchema.optional().describe('Textos de las subtareas (máx. 50, 500 caracteres cada una)'),
