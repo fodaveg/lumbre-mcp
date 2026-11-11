@@ -1,7 +1,7 @@
 # Adjuntos y conexión
 
-Lee esta referencia solo si vas a subir, leer o borrar un adjunto, o a configurar la
-conexión del MCP. Las reglas de escritura en general viven en
+Lee esta referencia solo si vas a subir, leer o borrar un adjunto, o a configurar o
+diagnosticar la conexión del MCP. Las reglas de escritura en general viven en
 [mcp-safe-operations.md](mcp-safe-operations.md).
 
 ## Adjuntos y topología
@@ -18,7 +18,8 @@ conexión del MCP. Las reglas de escritura en general viven en
   en vez de `add_attachment` con base64. Devuelve un permiso de un solo uso (10 min) y un `curl`
   que ejecutas tú en la terminal sustituyendo `<ruta local>`; los bytes no pasan por el modelo.
   Flujo: prepare, curl y `get_task` para comprobar el adjunto. 401/413/404 de la subida: pide otro
-  permiso; 429: reintenta con el mismo. El permiso es un secreto: no lo copies a tareas ni notas.
+  permiso; 403: el `taskId` no es el del permiso; 429: reintenta con el mismo. El permiso es
+  un secreto: no lo copies a tareas ni notas.
 - `delete_attachment` es destructiva y no ofrece deshacer desde el MCP. Resuelve el id
   desde la tarea íntegra, confirma con el usuario el adjunto exacto antes de llamarla y,
   tras el éxito, relee la tarea para comprobar que ese id ya no aparece. Un 404 no

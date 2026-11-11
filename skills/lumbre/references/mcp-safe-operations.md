@@ -34,9 +34,12 @@ independiente. Para adjuntos o para configurar la conexión, lee además
 - **Subtareas** (definición única). Un solo nivel: viven dentro de su principal, sin
   lista ni sección propias, y su archivado lo hereda. Son tareas completas (id, notas,
   adjuntos, tags, prioridad, fecha, deadline, recordatorios, repetición y «esperando»);
-  solo les falta lista, sección y subtareas propias. `set_parent` anida o saca una tarea
-  existente, y la app lo rechaza si es parte de una serie repetida (una serie no pasa de
-  tarea a subtarea ni al revés) o si tiene subtareas propias.
+  solo les falta lista, sección y subtareas propias. Una subtarea nace solo con texto; el
+  resto se pone después (`update`, `reschedule`, `set_waiting`, `add_attachment`).
+  `set_parent` anida o saca una tarea existente, y la app lo rechaza si la tarea tiene
+  subtareas, deadline, recordatorios, "esperando" o es de una serie. Para anidarla, quita
+  antes deadline y recordatorios con `update` y el "esperando" con `clear_waiting`; la
+  repetición no se quita para anidar (apagar la serie solo si el usuario lo pide).
 - Leerlas: `list_tasks` no las lista, ni siquiera con fecha. `get_task` de la principal
   trae de cada una su id, su `content`, si está hecha y sus tags (basta para conocer y
   cambiar el `content` de todas), pero no su fecha, prioridad, notas ni adjuntos. Abre
@@ -54,10 +57,9 @@ independiente. Para adjuntos o para configurar la conexión, lee además
   `serie:<id de la semilla>`).
 - Antes de borrar, conoce los efectos y confirma el objetivo. Si se elimina una
   sección, verifica que sus tareas se conserven cuando ese sea el contrato.
-- `close_project` (en `organize`) cierra también los subproyectos y las tareas abiertas del
-  proyecto, y `reopen_project` solo reabre el proyecto nombrado. Confirma con el usuario
-  inmediatamente antes de cerrar, como con un borrado, salvo autorización inequívoca para
-  ese proyecto concreto.
+- `close_project` (en `organize`) arrastra todo el subárbol abierto. Antes de cerrar un
+  proyecto, lee "Ciclo de vida" en [backlog.md](backlog.md): qué cierra, qué no reabre
+  `reopen_project` y cómo confirmarlo.
 
 ## Consistencia
 
@@ -114,10 +116,15 @@ servidor. Declara esa limitación en vez de afirmar que el estado quedó aplicad
 
 Usa `listId` para destinos compartidos y comprueba el espacio: lo creado allí lo ven
 TODOS sus miembros. `create_list` y `add_task` aceptan `spaceId`; si el servidor lo
-rechaza (`espacio no accesible`), no reintentes en personal. `set_assignee` usa `assigneeId` como `accountId` de
-`spaces[].members` (64 hex minúsculas); `""` desasigna. Vale también sobre subtareas,
-con asignado propio. En un alta requiere `listId` compartida y miembro activo; si
-no, la app rechaza el alta y la tarea NO se crea: dilo así. No envíes `null`.
+rechaza (`espacio no accesible`), no reintentes en personal. Un proyecto se crea en un
+espacio con `organize` `create_list` y `spaceId` (y `parentId` para anidarlo); un
+`add_task` con `spaceId` exige `list` o `listId`. BRL y hábitos son personales.
+
+`set_assignee` usa `assigneeId` como `accountId` de `spaces[].members` (64 hex
+minúsculas, de `list_lists`/`get_list`); `""` desasigna. No envíes `null`, email ni UUID.
+Vale también sobre subtareas, con asignado propio: no uses el de su principal como
+sustituto. En un alta, `assigneeId` va con `listId` compartida y miembro activo; si
+no, la app rechaza el alta y la tarea NO se crea: dilo así.
 La autorización y las ambigüedades de nombres se resuelven en el servidor, sin
 fall back a otra credencial ni filtros de membresía en cliente. Las operaciones de
 mover o anidar no trasladan entre stores. La subida de adjuntos y los permisos de

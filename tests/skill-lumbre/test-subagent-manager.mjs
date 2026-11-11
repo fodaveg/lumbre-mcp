@@ -125,6 +125,9 @@ assert.match(taggerPrompt, /limita mutate_tasks a operaciones update con taskId 
 assert.ok(!taggerContract.allowedOperations.includes("organize"));
 assert.ok(!taggerContract.allowedOperations.includes("update_task"));
 assert.match(taggerPrompt, /@not-done es una señal humana/i);
+// Cierre sin @wip, con la única excepción del agente despachado que sigue trabajando.
+assert.match(taggerPrompt, /si el encargo cierra el lote o el turno, escribe @acked/i);
+assert.match(taggerPrompt, /agente despachado sigue trabajando en la tarea, no escribas @acked/i);
 
 const readerContract = definitions.contracts.agents.find((agent) => agent.name === "lumbre-reader");
 assert.deepEqual(readerContract.allowedOperations, [
@@ -139,6 +142,7 @@ assert.deepEqual(readerContract.allowedOperations, [
   "get_task_links",
   "get_agenda",
   "list_brl_entries",
+  "list_habits",
 ]);
 assert.match(renderInstructions(definitions.contracts, readerContract), /estrictamente read-only/i);
 

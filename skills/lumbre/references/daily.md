@@ -14,8 +14,8 @@ Usa las propiedades nativas de Lumbre para tareas personales u operativas:
 
 Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto es este:
 
-1. **Proyecto principal.** Enumera proyectos y áreas (`list_lists`) y elige el que
-   mejor encaje por nombre y contenido: es la lista principal del trabajo. Si ninguno
+1. **Proyecto del trabajo.** Enumera proyectos y áreas (`list_lists`) y elige el que
+   mejor encaje por nombre y contenido: es el proyecto del trabajo. Si ninguno
    encaja con claridad, crea las tareas sin destino (la app las coloca) y dilo. Manda
    cada destino por `listId` (el de `list_lists` o el que generaste), no por `list`:
    un nombre mal escrito crea un proyecto nuevo. Un proyecto marcado `[cerrado]` o
@@ -25,12 +25,12 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    trata como un proyecto propio (lo llama proyecto o trae su propia nota o spec). Lo
    demás no es gordo. Ante la duda, trátalo como no gordo: una sección se promueve
    después a proyecto sin perder nada.
-   - **Gordo → proyecto nuevo** dentro del principal. Antes, comprueba en `list_lists`
-     que no exista ya uno del mismo encargo; si existe, úsalo. Nómbralo
-     `<proyecto principal> · <resultado>` y créalo con `organize`: `create_list`
+   - **Gordo → proyecto nuevo** dentro del proyecto del trabajo. Antes, comprueba en
+     `list_lists` que no exista ya uno del mismo encargo; si existe, úsalo. Nómbralo
+     `<proyecto del trabajo> · <resultado>` y créalo con `organize`: `create_list`
      (`listKind: "project"`) con un `listId` que generes tú y, en la misma llamada,
-     `nest_list` hacia el principal.
-   - **No gordo → sección nueva** dentro del principal, que nombra el encargo o la
+     `nest_list` hacia el proyecto del trabajo.
+   - **No gordo → sección nueva** dentro del proyecto del trabajo, que nombra el encargo o la
      iniciativa. Si ya existe una sección de ese mismo encargo, úsala. La sección se
      crea al pasar `section` en el alta de la primera principal.
 3. **Siempre en lotes.** Cada tarea principal es un lote: una unidad que una persona o
@@ -42,7 +42,8 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    principal, porque las subtareas no la tienen. Antes de crear otra principal, busca en ese destino una principal abierta
    del mismo lote: si existe, añade las piezas nuevas como subtareas suyas
    (`add_subtask`). Una tarea sin piezas ni relación con nada queda como principal
-   sin subtareas, y puede ser la principal de un lote futuro.
+   sin subtareas, y puede ser la principal de un lote futuro. Un lote que cruza
+   proyectos se marca con un `#tag` libre, nunca con una sección propia.
 4. **Vincular la nota de origen.** Si se crea un proyecto o se añaden tareas que salen
    de un audit, la nota del audit, la spec o el plan se guarda y se vincula al destino
    de las tareas según [destinations.md](destinations.md), que fija la mecánica.
@@ -50,7 +51,8 @@ Si la petición no dice dónde ni cómo agrupar, el comportamiento por defecto e
    su estado), crea con la op `add_task` de `mutate_tasks`, que lo devuelve; la tool
    `add_task` suelta no.
 6. **Subtareas.** Una subtarea nace solo con texto, y los `#tags` escritos en ese texto
-   se capturan como tags. Después se edita como una tarea completa: fecha con
+   se capturan como tags y desaparecen del texto: no escribas `#` en el texto de una
+   subtarea salvo que quieras ese tag. Después se edita como una tarea completa: fecha con
    `reschedule`; hora, prioridad, notas y tags con `update`; adjuntos con
    `add_attachment`. Sus límites, y cómo leerlas y completarlas, están en «Preservación
    y orden» de [mcp-safe-operations.md](mcp-safe-operations.md).
@@ -70,20 +72,19 @@ mientras trabaja (al hacer X descubre que la sincronización falla por Y) o de l
 de otra sesión u otro agente, van sin preguntar al proyecto que el
 usuario dedica al trabajo de los agentes, para no mezclarlas con las del usuario. Ese
 proyecto es común a todos sus productos: dentro, cada tarea va a la sección con el
-nombre del producto o repositorio del que sale el hallazgo, no a una sección por tema.
-Si esa sección no existe, créala con `organize` antes de añadir la tarea. Si el usuario
+nombre del producto o repositorio del que sale el hallazgo, no a una sección por tema
+(si no existe, se crea al pasar `section` en el alta). Si el usuario
 no tiene ese proyecto, van al proyecto del trabajo en una sección propia de hallazgos
-del agente, y dilo. Al terminar, nombra cada tarea creada
+del agente, y dilo. Como toda tarea de trabajo de agente, nacen en `@acked` según
+[development.md](development.md). Al terminar, nombra cada tarea creada
 así y dónde quedó.
 
 ## Otras operaciones de tarea
 
 Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus campos.
 
-- `set_assignee` asigna una tarea o subtarea compartida al `accountId` de un miembro
-  de su espacio (consulta `list_lists`/`get_list`); `""` desasigna y `null` es inválido.
-  No uses email, UUID ni el asignado de la madre como sustituto. En altas,
-  `assigneeId` se envía junto a `listId` compartida; si el servidor la rechaza, no se creó.
+- `set_assignee` asigna una tarea o subtarea compartida a un miembro de su espacio: sus
+  reglas, en "Espacios y asignación" de [mcp-safe-operations.md](mcp-safe-operations.md).
 - `restore` saca de la Papelera una tarea borrada; `archive` y `unarchive` cambian su
   visibilidad (no su ciclo de vida).
 - `set_waiting` y `clear_waiting` ponen y quitan el estado «esperando» (con fecha

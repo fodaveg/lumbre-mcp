@@ -1,6 +1,6 @@
 # Proyecto y release
 
-Este modo enlaza Lumbre con un repositorio. Descubre y lee por completo `AGENTS.md`,
+Esta extensión enlaza Lumbre con un repositorio. Descubre y lee por completo `AGENTS.md`,
 `CONTRIBUTING`, la documentación de workflow/release y los gates disponibles. Esas
 fuentes vivas mandan; no copies una receta histórica sobre ellas.
 

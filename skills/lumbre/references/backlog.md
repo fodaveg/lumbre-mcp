@@ -43,19 +43,31 @@ ni reestructures un contenedor configurado sin autorización.
    escritura. Si enumera movimientos exactos, aplícalos directamente. Conserva ids,
    contenido y propiedades.
 4. Ordena las operaciones: cambiar de proyecto o área antes de reasignar sección si el movimiento
-   limpia esa relación.
+   limpia esa relación. Una tarea cambia de proyecto o área con `move_to_list` (`organize`),
+   por `listId`: con `list`, un nombre que no existe crea un proyecto nuevo, y `listId: null`
+   la deja sin proyecto ni área. Conserva la fecha y limpia la sección.
 5. Verifica el lote completo y los elementos que debían quedar intactos.
 
 Crear un proyecto o un área, convertir uno en otro, borrar un proyecto o área existente, o
 anidar un proyecto de forma que cambie la navegación requiere que la petición autorice
 esa transformación. La excepción es el proyecto nuevo de un encargo gordo al crear sus
-tareas, que [daily.md](daily.md) crea y anida en su principal por defecto. `organize` crea con `create_list` (`listKind`: `"area"` o
+tareas, que [daily.md](daily.md) crea y anida en el proyecto del trabajo por defecto. `organize` crea con `create_list` (`listKind`: `"area"` o
 `"project"`) y convierte un contenedor existente con `set_list_kind`. No busques un
 contenedor «parecido» ni lo crees por inferencia cuando el usuario nombró uno que no
 existe.
 
-Secciones: `get_list` las enseña con su recuento y `sectionId`; `organize` las crea con
-`create_section` (`listId`, `name`) y las borra con `remove_section`. La Bandeja de un
+Otras ops de `organize` sobre proyectos y áreas:
+
+- `rename_list` cambia el nombre; su identidad y sus tareas no cambian.
+- `remove_list` borra el proyecto o área: confírmalo como cualquier borrado. Sus tareas no se
+  pierden (las que no tienen fecha pasan a otra residencia viva y las que la tienen quedan
+  como tarea de su día) y sus proyectos hijos pasan a primer nivel.
+- `set_list_notes` reemplaza la nota entera: léela antes con `get_list` y envía el texto
+  final completo; `notes: null` o `""` la borra.
+
+Secciones: `get_list` las enseña con su recuento y `sectionId`. Al dar de alta una tarea, la
+sección se crea al pasar `section`; `organize` `create_section` (`listId`, `name`) crea una
+sin dar de alta ninguna tarea, y `remove_section` la borra. La Bandeja de un
 espacio compartido sale marcada «no es destino»: no es un sitio donde colocar tareas.
 
 Ciclo de vida de un proyecto, con `organize`: `close_project` (`as`: `"done"` o

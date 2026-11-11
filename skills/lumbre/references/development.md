@@ -20,7 +20,9 @@ La máquina de estados pública es:
   motivo escrito, según «Cierre: ninguna tarea se queda en `@wip`».
 
 `@wip` es un estado de tránsito, no de reposo: solo vale mientras el trabajo está
-realmente en curso. Ninguna tarea termina un lote, una entrega o un turno en `@wip`.
+realmente en curso. Ninguna tarea termina un lote, una entrega o un turno en `@wip`, salvo
+la que un agente despachado sigue trabajando cuando acaba el turno: sigue en `@wip` hasta
+que ese agente entrega, falla o se para.
 
 **Dónde se escribe el estado:** como marca `@estado` al final del `content` de la
 tarea (`… texto de la tarea @wip`), con una op `update` que lleve solo `taskId` y
@@ -51,16 +53,15 @@ mediante las superficies nativas.
 
 La app tiene una vista opcional, el tablero de agentes, que agrupa las tareas por la
 marca de estado de su título, en este orden: `@not-done` en No hechas, `@acked` en
-Aceptadas, `@wip` en En curso y `@done` en Por revisar (rótulos desde la web 6275bb9,
-28 oct 2026, docs/19 enmienda 27; antes la columna de `@done` se llamaba Hechas).
+Aceptadas, `@wip` en En curso y `@done` en Por revisar.
 
 - Una tarea sin marca no aparece en el tablero.
 - El usuario ve cada cambio de marca cuando el agente lo escribe, y un `@wip` olvidado
   se le muestra como atascado pasado un tiempo. Por eso rige «Cierre: ninguna tarea se
   queda en `@wip`».
 - `@not-done` llega cuando el usuario devuelve una tarea `@done` desde el tablero
-  (menú, selección múltiple y detalle; docs/19 enmienda 26, web 6275bb9): la app
-  escribe la marca `@not-done` y la tarea pasa a la columna No hechas.
+  (menú, selección múltiple y detalle): la app escribe la marca `@not-done` y la tarea
+  pasa a la columna No hechas.
 
 El umbral y la interfaz están en el manual de usuario: <https://lumbre.pro/ayuda/>.
 
@@ -92,16 +93,16 @@ mecánico no las descubre por sí solo.
 
 ## Lotes y checkpoints
 
-- Agrupa por causa y superficie compartida. El lote por defecto es una tarea principal
-  con sus subtareas; añade un `#tag` libre solo cuando cruza secciones, proyectos o
-  áreas. No lo conviertas en sección por ser un lote de ejecución.
+- Agrupa por causa y superficie compartida. Qué es un lote y por qué no se convierte en
+  sección: "Siempre en lotes" de [daily.md](daily.md) o, en triaje, "Taxonomía
+  conservada" de [backlog.md](backlog.md), según el modo base cargado.
 - Si las tareas de un lote ya existen sueltas, al despacharlo se le da estructura en la
   misma pasada que las marca `@wip`: crea su principal con la op `add_task` de
   `mutate_tasks` (devuelve el id) y, en la llamada siguiente, anídalas con `set_parent`
   y marca `@wip` subtareas y principal. Marcar `@wip` sin anidar deja el lote sin
-  principal. `set_parent` rechaza las que tienen deadline, recordatorios, «esperando»,
-  repetición o subtareas propias: esas siguen en primer nivel y la nota de la principal
-  las nombra.
+  principal. Las que `set_parent` rechaza (ver "Subtareas" en
+  [mcp-safe-operations.md](mcp-safe-operations.md)) siguen en primer nivel y la nota de
+  la principal las nombra.
 - Antes de delegar, registra ids, alcance, ownership y superficies compartidas cuando
   el riesgo o la concurrencia lo justifique.
 - Una sola tarea no se presenta como lote salvo delimitación explícita.
@@ -119,7 +120,8 @@ mecánico no las descubre por sí solo.
 ## Cierre: ninguna tarea se queda en `@wip`
 
 Al cerrar un lote, al entregar y al terminar el turno, toda tarea en `@wip` sale de
-`@wip` por una de estas dos vías, y no hay una tercera:
+`@wip` por una de estas dos vías, y no hay una tercera, salvo la tarea que un agente
+despachado sigue trabajando cuando acaba el turno, que sigue en `@wip` (ver "Matices"):
 
 - **`@done`**: el trabajo del agente está terminado y verificado según el criterio
   vigente.

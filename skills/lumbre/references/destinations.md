@@ -18,7 +18,7 @@ dilo y sigue por la columna «Sin Hebra»; no bloquees el encargo.
 | Tareas | Lumbre | Lumbre |
 | Audit, spec, plan | Nota de Hebra; vínculo al proyecto o área de destino con `link_list_note` y `hebra://note/<uuid>`, comprobado con `get_list_links` | Si hay disco y repositorio: fichero donde el repo guarde esos documentos, y en la nota de la tarea principal del lote la ruta y el commit. Si no hay disco: adjunto `.md` a la principal (`add_attachment`). La entrega dice que no hay nota vinculada |
 | Decisiones | La nota de decisiones que el usuario o el repo designen, en Hebra | El mecanismo persistente que el repo o el runtime declaren (fichero de instrucciones o de decisiones del repo, memoria del agente). Sin almacenamiento escribible: en la respuesta y en la nota de la tarea afectada. Nunca como tarea nueva |
-| Relevos, changelogs y documentos efímeros (partes de estado, notas de trabajo de un lote, borradores que se van a tirar) | La carpeta que el usuario o el repo designen para notas efímeras de agentes. Si la biblioteca usa Johnny.Decimal: nota directamente en la carpeta `.05` de la categoría del proyecto (por ejemplo `21.05 memoria de agentes para productos de software/`), sin subcarpetas y nunca en la carpeta del ID del proyecto, con las reglas de su nota léeme si la hay; si la categoría no tiene `.05`, no la crees: avisa al usuario. Sin destino designado ni Johnny.Decimal: pregunta al usuario dónde, sin crear tú una carpeta. La marca "Ocultar del listado general" y el resto, en el apartado "Relevos, changelogs y documentos efímeros" de la skill `hebra`. Lo que dura no va ahí: decisiones a su nota, audits a su destino de esta tabla | El sitio donde el repo o el runtime guarden relevos (fichero de relevo del repo, memoria del agente). Sin almacenamiento escribible: en la nota de la tarea principal del lote. Nunca en la carpeta de audits ni como tarea nueva |
+| Relevos, changelogs y documentos efímeros (partes de estado, notas de trabajo de un lote, borradores que se van a tirar) | La carpeta que el usuario o el repo designen para notas efímeras de agentes. Si la biblioteca usa Johnny.Decimal: nota directamente en la carpeta `.05` de la categoría del proyecto (por ejemplo `12.05 notas de agentes/`), sin subcarpetas y nunca en la carpeta del ID del proyecto, con las reglas de su nota léeme si la hay; si la categoría no tiene `.05`, no la crees: avisa al usuario. Sin destino designado ni Johnny.Decimal: pregunta al usuario dónde, sin crear tú una carpeta. La marca "Ocultar del listado general" y el resto, en el apartado "Relevos, changelogs y documentos efímeros" de la skill `hebra`. Lo que dura no va ahí: decisiones a su nota, audits a su destino de esta tabla | El sitio donde el repo o el runtime guarden relevos (fichero de relevo del repo, memoria del agente). Sin almacenamiento escribible: en la nota de la tarea principal del lote. Nunca en la carpeta de audits ni como tarea nueva |
 
 ## Tareas que salen de un audit
 
@@ -26,8 +26,8 @@ Las tareas de un audit, una spec o un plan nacen ya como lotes, con la regla «S
 lotes» de [daily.md](daily.md): una tarea principal por área o apartado del documento,
 que nombra el resultado, y los hallazgos de ese apartado como sus subtareas (`add_task`
 con `subtasks`, o `add_subtask` sobre la principal abierta del mismo lote). No se crean
-sueltas por sección. Un hallazgo que necesite deadline, recordatorios o repetición queda
-como principal propia, porque las subtareas no los admiten.
+sueltas por sección. Un hallazgo que necesite deadline, recordatorios o repetición también
+va como subtarea: nace solo con texto y esos campos se ponen después con `update`.
 
 Si el alta se reparte en varias llamadas por tamaño, el tamaño de cada tanda no define el
 lote: las subtareas de una principal pueden llegar en llamadas distintas (`add_subtask`
@@ -37,8 +37,8 @@ con su id), y una tanda no se convierte en principal ni en sección.
 
 Si se crea un proyecto o se añaden tareas que salen de un audit, la nota de Hebra de ese
 encargo (el audit, la spec o el plan) se vincula con `link_list_note` al proyecto o área
-donde caen las tareas: el proyecto nuevo del encargo gordo, o el principal que contiene
-la sección.
+donde caen las tareas: el proyecto nuevo del encargo gordo, o el proyecto del trabajo que
+contiene la sección.
 
 - La `url` es el deep link `hebra://note/<uuid>`, con el id que da Hebra al buscar o
   crear la nota; el `label` es el título de la nota.
@@ -51,6 +51,7 @@ la sección.
   personal, stdio, dan 404); ese vínculo se guarda a nombre del miembro que lo crea y los
   demás no lo ven.
 - Salvo ese vínculo de origen, vincular o desvincular notas solo se hace con petición
-  expresa.
+  expresa. Se desvincula con `unlink_list_note` o `unlink_task_note` (misma `url` y
+  `label` que el vínculo); `unlink_task_note` dice si quitó algo (`removed`).
 - El vínculo lo hace el coordinador: los subagentes de la skill no tienen
   `link_list_note`.

@@ -3,7 +3,7 @@ name: lumbre
 description: >-
   Consulta y gestiona tareas, proyectos, áreas y backlog en Lumbre mediante su MCP, incluido
   un flujo opcional para desarrollo y release. Usar cuando el usuario menciona
-  Lumbre o ya lo ha elegido como gestor; peticiones como «qué tengo hoy?»,
+  Lumbre o ya lo ha elegido como gestor; peticiones como «¿qué tengo hoy?»,
   «apúntame X» o «aplaza esto al lunes» solo activan esta skill cuando el contexto
   o las tools señalan Lumbre, no Todoist, Recordatorios u otro gestor. Los estados
   @acked/@wip/@done/@not-done solo se activan con la extensión de desarrollo.
@@ -58,28 +58,22 @@ Ejemplos rápidos:
 | Selección | Puede mutar |
 |---|---|
 | Lectura | Nada. |
-| Gestión cotidiana | Solo los campos de las tareas solicitadas y, al crearlas, el proyecto o la sección de destino que fija `daily.md`. |
+| Gestión cotidiana | Solo los campos de las tareas solicitadas y, al crearlas, el proyecto o la sección de destino que fija `daily.md` y el vínculo de la nota de origen (`link_list_note` o `link_task_note`) que fija `destinations.md`. |
 | Triaje/backlog | Solo el conjunto y la estructura expresamente indicados. |
-| + Desarrollo | Solo estados y checkpoints del flujo cuando esté activada. |
+| + Desarrollo | Cuando esté activada: estados y checkpoints del flujo; al despachar un lote, crear su principal y anidar sus tareas con `set_parent`; al devolver a `@acked`, el motivo en la nota. |
 | + Proyecto/release | No concede por sí misma mutaciones adicionales en Lumbre. |
 
 Si la petición enumera cambios exactos, aplícalos sin ceremonia adicional. Si exige
 inferir alcance o taxonomía, muestra primero una propuesta breve.
 
-Si el encargo produce un documento (audit, spec, plan) o una decisión que hay que guardar,
-lee [references/destinations.md](references/destinations.md).
+Si el encargo produce un documento (audit, spec, plan), un relevo o changelog, o una
+decisión que hay que guardar, lee [references/destinations.md](references/destinations.md).
 
 ## Espacios compartidos
-Crear en una lista compartida lo ven TODOS sus miembros. Resuelve el espacio y usa
-`listId` de `list_lists`/`get_list`; sin destino, el alta sigue siendo personal. Para crear un
-proyecto en un espacio: `organize` `create_list` con `spaceId` (y `parentId` para anidarlo); un
-`add_task` con `spaceId` exige `list` o `listId`.
-Para «asignadas a mí», `list_tasks({scope:"all",assignee:"me"})`. `set_assignee` usa el
-`accountId` de `spaces[].members` (64 hex minúsculas); `""` desasigna, nunca email,
-UUID ni `null`. También vale en subtareas, con asignado propio. El servidor aplica
-`agentAccess`: no cambies credenciales ni consultes `/api/spaces` para eludirlo.
-BRL y hábitos son personales. Detalles de altas, ambigüedad, avisos y límites en
-la referencia del modo elegido y, al escribir, `mcp-safe-operations.md`.
+Lo que se crea en una lista compartida lo ven TODOS sus miembros; sin destino, el alta es
+personal. El servidor aplica `agentAccess`: no cambies credenciales ni consultes
+`/api/spaces` para eludirlo. Leer un espacio y "asignadas a mí": `read.md`; crear en un
+espacio y `set_assignee`: "Espacios y asignación" de `mcp-safe-operations.md`.
 
 ## Subagentes opcionales
 
@@ -92,27 +86,28 @@ conserva intención, autorización y veredicto.
 
 1. Antes de mutar, identifica por id la entidad exacta. Si un proyecto o área vacío
    puede confundirse con uno inexistente, enumera proyectos y áreas antes de concluir.
-2. Para reeditar contenido o notas (se reemplazan enteros), antes de delegar trabajo
-   sobre una tarea o cuando la decisión dependa de un campo que no has leído, obtén
-   primero la versión íntegra. Con el id ya resuelto, `reschedule`, `complete`,
-   `cancel`, prioridad o sección no la necesitan. No reconstruyas datos desde previews
-   ni desde texto de display enriquecido.
+2. Antes de reeditar contenido o notas (se reemplazan enteros), obtén su versión íntegra
+   y no la reconstruyas desde previews ni display enriquecido; cuándo más hace falta, en
+   "Identidad y lectura íntegra" de `mcp-safe-operations.md`.
 3. Conserva los campos no solicitados. Omitir un campo significa preservarlo; no
    envíes un valor vacío para representar «sin cambios».
 4. Solo cuando vayas a escribir, lee
    [references/mcp-safe-operations.md](references/mcp-safe-operations.md). Agrupa
    operaciones compatibles y verifica el resultado sin atribuir a una respuesta
-   aceptada una consistencia que el servidor no garantice. Para adjuntos o para
-   configurar la conexión, lee además
-   [references/attachments-and-connection.md](references/attachments-and-connection.md).
+   aceptada una consistencia que el servidor no garantice. Para subir o borrar adjuntos,
+   y en cualquier modo para configurar o diagnosticar la conexión, lee
+   [references/attachments-and-connection.md](references/attachments-and-connection.md);
+   leer un adjunto solo necesita `read.md`.
 5. Confirma inmediatamente antes de borrar o de otra acción difícil de recuperar,
    salvo autorización inequívoca para ese objetivo concreto.
 6. Usa la autorización segura del cliente MCP. Nunca pongas tokens en URLs, tareas, notas, logs ni documentación.
-7. Las reglas del repositorio y la petición mandan sobre perfiles locales. La skill no amplía autoridad ni instala, retira o reemplaza otras skills al activarse.
+7. La skill no amplía autoridad ni instala, retira o reemplaza otras skills al activarse.
 
-Los límites personales de autonomía, herramientas privadas, superficies externas y
-papeleo específico pertenecen a perfiles opcionales. No los conviertas en requisitos
-universales.
+**Perfiles opcionales**: reglas personales del usuario o de su runtime (memoria del agente,
+fichero de instrucciones) que añaden límites o costumbres: autonomía, herramientas privadas,
+superficies externas o papeleo propio. La skill no los trae ni los exige;
+un perfil puede restringir más, nunca ampliar lo que la skill permite, y la petición y las
+reglas del repositorio mandan sobre él. No los conviertas en requisitos universales.
 
 Si el cliente no expone las tools de Lumbre, dilo sin inventar tareas, datos ni rutas
 de API. Indica que conecte el MCP mediante el flujo de autorización de su cliente y

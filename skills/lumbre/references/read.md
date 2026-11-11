@@ -7,8 +7,8 @@ resumir un proyecto o área, o leer feedback.
   leerlos.
 - No cargues `development.md` solo porque la tarea leída ya tenga `@acked`, `@wip` o
   `@done`; resumir o inspeccionar sigue siendo lectura pura.
-- No cargues `mcp-safe-operations.md` para una lectura ordinaria sin escritura,
-  configuración ni diagnóstico de conexión.
+- No cargues `mcp-safe-operations.md` para una lectura ordinaria sin escritura. Para
+  configurar o diagnosticar la conexión, la referencia es `attachments-and-connection.md`.
 - Preguntar si un proyecto o área existe, incluso vacío, sigue siendo lectura: no cargues
   `backlog.md` salvo que haya que clasificar o reorganizar.
 - Acota `list_tasks` por `scope`, `listId` (preferente), `list` y `section`; por id se lee con `get_task`. Para un
@@ -20,8 +20,11 @@ resumir un proyecto o área, o leer feedback.
   (`taskId` o `noteId`, uno solo) y `list_brl_entries` (registro del día; no son tareas).
   `get_task_links` por nota no distingue vacío de sin permiso; por `taskId`, con token
   personal (stdio) una tarea fuera de alcance también sale vacía (con OAuth da 404).
-- `get_agenda({days?, week?})` da eventos, tareas y bloques de Horario por día: ve 14
-  días como mucho y bloques solo de hoy que no han terminado. No acepta `spaceId`. De un
+- `read_attachment` devuelve íntegros imágenes y PDF de hasta 3,5 MiB y texto UTF-8 de
+  hasta 256 KiB; si no cabe, no es UTF-8 o es de otro tipo, da solo metadata con el motivo.
+- `get_agenda({days?, week?})` da eventos, tareas y bloques de Horario por día: con `days`
+  ve 14 días como mucho y con `week: true` la semana en curso, con hábitos (no los dos a la
+  vez); bloques solo de hoy que no han terminado. No acepta `spaceId`. De un
   espacio solo trae las tareas asignadas a ti y en tu Hoy, siempre en la columna de hoy:
   una con fecha futura no sale en su día y una cerrada desaparece. Los bloques son solo de
   Personal. Para ver un espacio entero, `list_tasks` con `spaceId`.
@@ -39,7 +42,7 @@ Respeta la procedencia mostrada de tareas y listas; no confundas listas homónim
 Para «asignadas a mí», usa `{scope: "all", assignee: "me"}`; si pide solo hoy,
 combina `scope: "today"`. Hoy y ese filtro los decide el servidor; si es una versión
 que no lo aplica, `list_tasks` da error: dilo y no lo simules filtrando tú. Una subtarea
-asignada va dentro de su madre si esta también sale; si no, suelta con `subtarea de <id>`.
+asignada va dentro de su principal si esta también sale; si no, suelta con `subtarea de <id>`.
 `refresh_sync` fuerza solo el store personal; no promete refrescar los compartidos.
 BRL y hábitos son personales. Un espacio oculto se trata como inexistente, sin
 consultar `/api/spaces` ni probar otra credencial.

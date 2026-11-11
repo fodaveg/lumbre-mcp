@@ -238,9 +238,10 @@ invariant(
   "WIP_IS_A_TRANSIT_STATE",
   hasAll(section(development, "Estado de agente").replace(/\s+/g, " "), [
     /`@wip` es un estado de tr[aá]nsito/i,
-    /Ninguna tarea termina un lote, una entrega o un turno en `@wip`/i,
+    /Ninguna tarea termina un lote, una entrega o un turno en `@wip`, salvo la que un agente despachado sigue trabajando/i,
+    /hasta que ese agente entrega, falla o se para/i,
   ]),
-  "@wip must stay a transit state that no batch, handoff or turn can end on",
+  "@wip must stay a transit state that no batch, handoff or turn can end on, except while a dispatched agent keeps working",
 );
 const developmentClose = section(development, "Cierre: ninguna tarea se queda en `@wip`")
   .replace(/\s+/g, " ");
@@ -249,7 +250,7 @@ invariant(
   developmentClose !== "" &&
     hasAll(developmentClose, [
       /toda tarea en `@wip` sale de `@wip`/i,
-      /no hay una tercera/i,
+      /no hay una tercera, salvo la tarea que un agente despachado sigue trabajando/i,
       /`@done`/,
       /`@acked`/,
       /escribe el motivo/i,

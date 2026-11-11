@@ -46,7 +46,7 @@
         "Retira @acked, @wip, @done y, solo al reabrir feedback humano, @not-done; añade al final un único tag objetivo en minúsculas. Conserva byte a byte el resto del contenido y los tags ortogonales.",
         "Escribe siempre con mutate_tasks, una o varias tareas: operaciones update que solo contengan taskId, content y expectedContent (el content leído en get_task), agrupadas en una única llamada. Si una op sale «en conflicto», no se aplicó: no reescribas e informa el content actual que trae, que es de otro escritor.",
         "Inspecciona cada resultado del lote. «Aplicada» no acredita la marca. Tras el lote, get_task de cada principal (o de la tarea si es de primer nivel; trae el content de cada subtarea) y compara el content de cada tarea escrita con el enviado; si queda antiguo, un refresh_sync compartido y una última relectura. Informa por tarea la marca leída en esa relectura: un informe sin ella no vale. Si el content leído difiere del enviado (marca ausente o texto cambiado), hay otro escritor: para, no reescribas ni en bucle e informa el content literal encontrado.",
-        "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; explica el motivo. Conserva @wip solo mientras el trabajo siga en curso: si el encargo cierra el lote o el turno, escribe @acked y devuelve el motivo, porque ninguna tarea puede quedarse en @wip al cerrar."
+        "Rechaza @done cuando el criterio vigente exija verificación real y el encargo no aporte esa evidencia; explica el motivo. Conserva @wip solo mientras el trabajo siga en curso: si el encargo cierra el lote o el turno, escribe @acked y devuelve el motivo, porque ninguna tarea puede quedarse en @wip al cerrar. Excepción: si el encargo dice que un agente despachado sigue trabajando en la tarea, no escribas @acked; sigue en @wip hasta que ese agente entregue, falle o se pare."
       ]
     },
     {
@@ -65,13 +65,14 @@
         "get_list_links",
         "get_task_links",
         "get_agenda",
-        "list_brl_entries"
+        "list_brl_entries",
+        "list_habits"
       ],
       "operationLimits": [
         "Acota list_tasks por scope, list y section cuando sea posible; para un id, get_task. Sin spaceId, list_tasks y list_lists solo leen Personal; list_organizations (solo lectura) da los espacios y su granted.",
         "Usa get_task para ids explícitos y para recuperar notas o propiedades íntegras que cambien la respuesta.",
         "refresh_sync solo mejora la frescura de cambios que ya alcanzaron el servidor; no es una escritura de negocio.",
-        "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; get_task_links lee los de una tarea (taskId) o las tareas de una nota de Hebra (noteId), exactamente uno; get_agenda da eventos, tareas y bloques de Horario de hoy (1 a 14 días, o la semana con hábitos); list_brl_entries lee el registro (BRL) de un día, que no son tareas."
+        "get_list devuelve la nota íntegra de un proyecto o área; get_list_links solo sus vínculos, sin abrir los destinos; get_task_links lee los de una tarea (taskId) o las tareas de una nota de Hebra (noteId), exactamente uno; get_agenda da eventos, tareas y bloques de Horario de hoy (1 a 14 días, o la semana con hábitos); list_brl_entries lee el registro (BRL) de un día, que no son tareas; list_habits enumera los hábitos con sus últimas ocurrencias (solo los vivos salvo includeArchived)."
       ],
       "forbiddenCapabilities": [
         "Invocar cualquier tool u operación que cree, edite, complete, cancele, mueva, reorganice o borre datos.",
