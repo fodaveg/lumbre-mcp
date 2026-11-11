@@ -58,7 +58,8 @@ describe('publicar.sh: constantes que tienen que casar con compose.yml y el regi
 		for (const text of [publish, lib, remote]) {
 			expect(text).not.toMatch(/\brsync\b.*(--delete|-rlptz)/);
 			expect(text).not.toContain('compose build');
-			expect(text).not.toContain('--build');
+			// `--build` solo como opción suelta (`compose up --build`); `--build-arg` del buildx es legítimo.
+			expect(text).not.toMatch(/--build(?![-\w])/);
 		}
 		const compose = await readFile('deploy/compose.yml', 'utf8');
 		expect(compose).not.toMatch(/^ {4}build:/m);
@@ -121,8 +122,10 @@ describe('contenedor: memoria, señales e imagen reproducible', () => {
 
 	it('Dockerfile: base fijada por digest y etiqueta OCI de la revisión al final', async () => {
 		const dockerfile = await readFile('Dockerfile', 'utf8');
-		expect(dockerfile).toMatch(/^FROM node:22-alpine@sha256:[0-9a-f]{64}$/m);
-		expect(dockerfile).not.toMatch(/^FROM node:22-alpine$/m);
+		// El registro de la base es un ARG con Docker Hub por defecto; la huella sigue fijada.
+		expect(dockerfile).toMatch(/^ARG BASE_REGISTRY=docker\.io\/library$/m);
+		expect(dockerfile).toMatch(/^FROM \$\{BASE_REGISTRY\}\/node:22-alpine@sha256:[0-9a-f]{64}$/m);
+		expect(dockerfile).not.toMatch(/^FROM \S*node:22-alpine$/m);
 		expect(dockerfile).toContain('ARG REVISION=desconocida');
 		expect(dockerfile).toContain('LABEL org.opencontainers.image.revision=$REVISION');
 		// Después de `npm ci`: si fuera antes, cada deploy invalidaría esa capa.
