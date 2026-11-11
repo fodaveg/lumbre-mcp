@@ -32,8 +32,9 @@ encargo (`get_task` de la tarea o, para una subtarea, la línea de `get_task` de
 principal), no del texto de `list_tasks`. El `update` envía el `content` final entero con `expectedContent` (el `content` leído; si sale `en conflicto`, no
 reescribas) y no toca `tags`. Un resultado `aplicada` no acredita la marca: solo la acredita la
 relectura con `get_task` (ver «Consistencia» en
-[mcp-safe-operations.md](mcp-safe-operations.md)). El mecánico de esto es
-`lumbre-tagger`, cuyo informe lista por tarea la marca leída en esa relectura; sin ella
+[mcp-safe-operations.md](mcp-safe-operations.md)). Hasta 4 tareas, el
+coordinador cambia la marca con `mutate_tasks` y la relee con `get_task`; desde 5, el
+mecánico es `lumbre-tagger`, cuyo informe lista por tarea la marca leída en esa relectura; sin ella
 no vale y el coordinador relee antes de decirle al usuario que la marca está puesta.
 
 Mantén un solo estado de esa familia al transicionar y conserva tags ortogonales de
@@ -88,7 +89,7 @@ La principal refleja a sus subtareas, no las decide por su cuenta:
 
 `get_task` de la principal basta para conocer y cambiar el estado de todas sus subtareas:
 no hace falta un `get_task` por subtarea para tocar su marca. Si delegas el cambio en
-`lumbre-tagger`, pásale el id de la principal y los de las subtareas explícitamente; el
+`lumbre-tagger` (desde 5 tareas), pásale el id de la principal y los de las subtareas explícitamente; el
 mecánico no las descubre por sí solo.
 
 ## Lotes y checkpoints

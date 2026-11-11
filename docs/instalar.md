@@ -69,7 +69,8 @@ npx --yes skills add fodaveg/lumbre-mcp -g -y \
 
 La skill no depende de subagentes, pero puede generar tres roles opcionales
 (`lumbre-tagger`, `lumbre-reader` y `lumbre-daily-operator`) desde un único
-contrato portable. En una instalación nueva, revisa primero el plan y después
+contrato portable (`lumbre-tagger` solo para lotes de 5 o más tareas; hasta 4, la
+marca la cambia la sesión principal con `mutate_tasks`). En una instalación nueva, revisa primero el plan y después
 instálalos para Codex y Claude Code:
 
 ```bash

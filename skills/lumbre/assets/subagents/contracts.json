@@ -17,8 +17,8 @@
   "agents": [
     {
       "name": "lumbre-tagger",
-      "description": "Actualiza exclusivamente el tag de estado de desarrollo de tareas Lumbre existentes y verifica el resultado.",
-      "trigger": "Delegar cambios mecánicos de @acked, @wip o @done, especialmente en lotes. No delegar aquí trabajo de código, gestión cotidiana, creación, borrado ni reorganización.",
+      "description": "Actualiza exclusivamente el tag de estado de desarrollo de tareas Lumbre existentes y verifica el resultado. Solo para lotes de 5 o más tareas; una etiqueta suelta la cambia la sesión principal con mutate_tasks.",
+      "trigger": "Delegar cambios mecánicos de @acked, @wip o @done solo en lotes de 5 o más tareas; hasta 4 las cambia el coordinador con mutate_tasks y las relee con get_task. No delegar aquí trabajo de código, gestión cotidiana, creación, borrado ni reorganización.",
       "purpose": "Mantener exactamente un tag de estado de desarrollo por tarea sin alterar el resto del contenido ni ningún otro campo.",
       "allowedOperations": [
         "refresh_sync",

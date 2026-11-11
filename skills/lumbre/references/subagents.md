@@ -1,7 +1,8 @@
 # Subagentes opcionales
 
 La skill funciona íntegramente sin subagentes. Si el runtime expone uno compatible,
-puedes delegar trabajo mecánico a `lumbre-tagger` (solo tags de desarrollo),
+puedes delegar trabajo mecánico a `lumbre-tagger` (solo tags de desarrollo, y solo en lotes de 5 o más tareas: hasta 4 las
+marca el coordinador con `mutate_tasks` y las relee con `get_task`),
 `lumbre-reader` (solo lectura) o `lumbre-daily-operator` (gestión cotidiana segura).
 El coordinador conserva intención, autorización y veredicto; si el agente no existe,
 ejecuta aquí el mismo contrato sin bloquear la petición.
