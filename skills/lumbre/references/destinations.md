@@ -52,6 +52,6 @@ contiene la sección.
   demás no lo ven.
 - Salvo ese vínculo de origen, vincular o desvincular notas solo se hace con petición
   expresa. Se desvincula con `unlink_list_note` o `unlink_task_note` (misma `url` y
-  `label` que el vínculo); `unlink_task_note` dice si quitó algo (`removed`).
+  `label` que el vínculo); las dos dicen si quitaron algo (`removed`).
 - El vínculo lo hace el coordinador: los subagentes de la skill no tienen
   `link_list_note`.
