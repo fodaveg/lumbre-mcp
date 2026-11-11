@@ -98,7 +98,8 @@ Ops de `mutate_tasks` salvo donde se indica; el esquema de cada tool detalla sus
   la manda a «Más tarde»; `null` la quita.
   Borrar un hábito (`delete_habit`, en `organize`) exige confirmación como cualquier
   borrado.
-- El registro del día (BRL) se escribe con `mutate_brl`; `delete` es destructiva.
+- El registro del día (BRL) se escribe con `mutate_brl` (`add`, `update`, `delete`);
+  `delete` es destructiva.
 
 No actives automáticamente `@acked`, `@wip`, `@done` ni `@not-done`, salvo en las
 tareas que creas para trabajo que hará un agente: esas nacen en `@acked` según

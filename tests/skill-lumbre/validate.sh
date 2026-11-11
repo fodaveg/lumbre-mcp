@@ -75,10 +75,12 @@ node --check "$test_dir/test-forward-pilot-verifier.mjs"
 node --check "$test_dir/test-subagent-manager.mjs"
 node --check "$test_dir/validate-evidence.mjs"
 node --check "$test_dir/validate-tool-names.mjs"
+node --check "$test_dir/validate-public-text.mjs"
 node --check "$test_dir/verify-forward-pilot.mjs"
 node --check "$test_dir/test-windows-portability.mjs"
 node "$test_dir/validate-evidence.mjs"
 node "$test_dir/validate-tool-names.mjs"
+node "$test_dir/validate-public-text.mjs"
 
 if [ "$pilot_available" = 1 ] && { [ "$mode" = full ] || [ "$require_pilot" = 1 ]; }; then
   node "$test_dir/verify-forward-pilot.mjs" \

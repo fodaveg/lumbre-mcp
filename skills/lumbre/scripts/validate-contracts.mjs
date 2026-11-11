@@ -310,6 +310,7 @@ invariant(
   !/(?:\/Users\/|\/home\/[A-Za-z0-9_.-]+\/)/.test(publicText),
   "hard-coded user path found",
 );
+// Mínima en la copia instalada; la completa, en tests/skill-lumbre/validate-public-text.mjs.
 invariant(
   "PUBLIC_SKILL_HAS_NO_PRIVATE_IDENTITY_OR_DATED_STATE",
   !/(?:\bDavid\b|\b20\d{2}-\d{2}-\d{2}\b)/.test(publicText),

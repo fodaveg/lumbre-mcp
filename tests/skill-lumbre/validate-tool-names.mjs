@@ -14,7 +14,11 @@
 //      uno de los conceptos humanos de FILTER_CONCEPTS;
 //   5. «`op` con `campo`» / «`op` que lleve solo `campo`» con un campo ajeno a
 //      esa op;
-//   6. un listado «por `#tag`»: `list_tasks` no filtra por tag.
+//   6. un listado «por `#tag`»: `list_tasks` no filtra por tag;
+//   7. una tool del servidor, o una op de `mutate_tasks`/`organize`/`mutate_brl`,
+//      que no se nombra en ningún fichero de la skill (salvo COVERAGE_EXCLUSIONS);
+//   8. una tool anotada `readOnlyHint: true` que no está en `allowedOperations`
+//      de `lumbre-reader`.
 //
 // Limitación declarada: solo ve identificadores con forma de tool u op
 // (snake_case con guion bajo) y las frases de arriba. Una op de una sola
@@ -30,6 +34,9 @@ const skillDir = join(repoRoot, "skills", "lumbre");
 
 // Identificadores snake_case legítimos que NO son del MCP. Mantener corta.
 const NOT_MCP_IDENTIFIERS = new Set([]);
+// Tools («tool») u ops («tool.op») que la skill puede no nombrar a propósito, con
+// el motivo al lado. Hoy vacía: todas se nombran.
+const COVERAGE_EXCLUSIONS = new Set([]);
 // Conceptos humanos que la skill puede usar tras «Acota … por»: no son parámetros.
 const FILTER_CONCEPTS = new Set(["fecha", "alcance", "proyecto", "área", "sección", "lista"]);
 
@@ -105,9 +112,11 @@ function extractSurface() {
   );
   const allSource = [...sources.values()].join("\n");
 
+  const readOnlyTools = new Set(); // tools anotadas `readOnlyHint: true`
   for (const source of sources.values()) {
     for (const match of source.matchAll(/registerTool\(\s*'([a-z_]+)'/g)) {
       const body = source.slice(match.index, balancedEnd(source, source.indexOf("(", match.index)));
+      if (/annotations:\s*\{[^}]*\breadOnlyHint:\s*true\b/.test(body)) readOnlyTools.add(match[1]);
       const schema = /inputSchema:\s*(\{|[A-Za-z_]\w*)/.exec(body);
       let params = [];
       if (schema?.[1] === "{") {
@@ -144,7 +153,7 @@ function extractSurface() {
     }
     opsByTool.set(tool, toolOps);
   }
-  return { tools, ops, opsByTool };
+  return { tools, ops, opsByTool, readOnlyTools };
 }
 
 function documents() {
@@ -257,12 +266,75 @@ function check(surface, { path, text }) {
   return failures;
 }
 
+/** Nombres que aparecen en la skill: dentro de backticks en Markdown (también
+ *  dentro de `tool({op: "x"})`) y como palabra suelta en `contracts.json`. */
+function namedInSkill(docs) {
+  const named = new Set();
+  for (const { path, text } of docs) {
+    const spans = path.endsWith(".json") ? [text] : [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]);
+    for (const span of spans) {
+      for (const word of span.matchAll(/(?<![\w-])[a-z][a-z0-9_]*(?![\w-])/g)) named.add(word[0]);
+    }
+  }
+  return named;
+}
+
+/** 7. Cada tool del servidor y cada op de `mutate_tasks`, `organize` y
+ *  `mutate_brl` se nombra en algún fichero de la skill: una capacidad que la
+ *  skill calla es una que el agente no sabe usar con sus reglas. */
+function checkCoverage(surface, docs) {
+  const named = namedInSkill(docs);
+  const failures = [];
+  for (const tool of [...surface.tools.keys()].sort()) {
+    if (!named.has(tool) && !COVERAGE_EXCLUSIONS.has(tool)) {
+      failures.push(`skills/lumbre: la tool «${tool}» del servidor no se nombra en ningún fichero de la skill`);
+    }
+  }
+  for (const [tool, toolOps] of surface.opsByTool) {
+    for (const op of [...toolOps].sort()) {
+      if (!named.has(op) && !COVERAGE_EXCLUSIONS.has(`${tool}.${op}`)) {
+        failures.push(`skills/lumbre: la op «${op}» de ${tool} no se nombra en ningún fichero de la skill`);
+      }
+    }
+  }
+  for (const excluded of COVERAGE_EXCLUSIONS) {
+    const [tool, op] = excluded.split(".");
+    const exists = op ? surface.opsByTool.get(tool)?.has(op) : surface.tools.has(tool);
+    if (!exists) failures.push(`validate-tool-names: la exclusión «${excluded}» ya no existe en src/tools; quítala`);
+  }
+  return failures;
+}
+
+/** 8. Toda tool anotada `readOnlyHint: true` está en `allowedOperations` de
+ *  `lumbre-reader`: el lector cubre todas las lecturas del servidor. */
+function checkReaderCoversReadOnlyTools(surface) {
+  const contractsPath = join(skillDir, "assets", "subagents", "contracts.json");
+  const text = readFileSync(contractsPath, "utf8");
+  const reader = JSON.parse(text).agents.find((agent) => agent.name === "lumbre-reader");
+  const where = relative(repoRoot, contractsPath);
+  if (!reader) return [`${where}: no hay contrato «lumbre-reader»`];
+  if (surface.readOnlyTools.size === 0) {
+    return ["validate-tool-names: no veo ninguna tool con readOnlyHint: true en src/tools; el extractor se ha roto"];
+  }
+  const allowed = new Set(reader.allowedOperations);
+  return [...surface.readOnlyTools]
+    .filter((tool) => !allowed.has(tool))
+    .sort()
+    .map(
+      (tool) =>
+        `${where}:${lineOf(text, text.indexOf('"allowedOperations"', text.indexOf('"lumbre-reader"')))}: ` +
+        `lumbre-reader no tiene «${tool}», que src/tools anota readOnlyHint: true`,
+    );
+}
+
 const surface = extractSurface();
 if (surface.tools.size < 15) {
   console.error(`validate-tool-names: solo veo ${surface.tools.size} tools en src/tools (esperaba al menos 15); el extractor se ha roto`);
   process.exit(1);
 }
 const failures = documents().flatMap((doc) => check(surface, doc));
+failures.push(...checkCoverage(surface, documents()));
+failures.push(...checkReaderCoversReadOnlyTools(surface));
 if (failures.length > 0) {
   console.error(`validate-tool-names: ${failures.length} fallo(s)`);
   for (const failure of failures) console.error(`  ${failure}`);
