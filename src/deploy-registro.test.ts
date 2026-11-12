@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import {
 	chmodSync,
 	copyFileSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -14,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Despliegue por registro de imágenes (deploy/lib/deploy-registro.sh, lado
@@ -369,13 +370,34 @@ describe('registry_lookup', () => {
 });
 
 /**
- * Repo temporal con un remoto «origin» desnudo y `main` empujada. Copia los
- * scripts de deploy REALES, y trae `dist/` y `node_modules/` para el gate falso.
+ * Plantilla del repo, construida UNA vez por fichero: remoto «origin» desnudo y
+ * `main` empujada, con los scripts de deploy REALES y `dist/` y `node_modules/`
+ * para el gate falso. `origin` es la ruta relativa `../remote.git`, que sigue
+ * valiendo al copiar la plantilla a cualquier `tmp`. La plantilla no se toca.
  */
-function makeRepo(): string {
-	const remote = join(tmp, 'remote.git');
-	const work = join(tmp, 'work');
-	sh(LOCAL_LIB, `git init -q --bare -b main "${remote}" && git init -q -b main "${work}"`);
+let repoTemplate = '';
+
+beforeAll(() => {
+	repoTemplate = mkdtempSync(join(tmpdir(), 'lumbre-mcp-deploy-tpl-'));
+	const remote = join(repoTemplate, 'remote.git');
+	const work = join(repoTemplate, 'work');
+	// Sin binarios falsos ni `tmp`: aquí solo corre git de verdad.
+	const gitEnv = {
+		...process.env,
+		GIT_CONFIG_GLOBAL: '/dev/null',
+		GIT_CONFIG_NOSYSTEM: '1',
+		GIT_AUTHOR_NAME: 't',
+		GIT_AUTHOR_EMAIL: 't@t',
+		GIT_COMMITTER_NAME: 't',
+		GIT_COMMITTER_EMAIL: 't@t'
+	};
+	const git = (cwd: string, ...args: string[]) => {
+		const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: gitEnv });
+		if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+	};
+	mkdirSync(work, { recursive: true });
+	git(repoTemplate, 'init', '-q', '--bare', '-b', 'main', remote);
+	git(work, 'init', '-q', '-b', 'main');
 	mkdirSync(join(work, 'deploy', 'lib'), { recursive: true });
 	copyFileSync(join(ROOT, 'deploy', 'publicar.sh'), join(work, 'deploy', 'publicar.sh'));
 	for (const f of ['deploy-registro.sh', 'remote-release.sh', 'docker-platform.sh']) {
@@ -386,12 +408,20 @@ function makeRepo(): string {
 	writeFileSync(join(work, 'dist', 'http.js'), '// compilado\n');
 	writeFileSync(join(work, '.gitignore'), 'node_modules\n');
 	mkdirSync(join(work, 'node_modules'));
-	const git = (args: string) => sh(LOCAL_LIB, `git ${args}`, {}, work);
-	git('add -A');
-	git('commit -qm uno');
-	git(`remote add origin "${remote}"`);
-	git('push -q origin main');
-	return work;
+	git(work, 'add', '-A');
+	git(work, 'commit', '-qm', 'uno');
+	git(work, 'remote', 'add', 'origin', '../remote.git');
+	git(work, 'push', '-q', 'origin', 'main');
+});
+
+afterAll(() => {
+	rmSync(repoTemplate, { recursive: true, force: true });
+});
+
+/** Repo temporal de un test: copia de la plantilla, sin lanzar ningún proceso. */
+function makeRepo(): string {
+	cpSync(repoTemplate, tmp, { recursive: true });
+	return join(tmp, 'work');
 }
 
 describe('árbol limpio y HEAD en origin/main', () => {
