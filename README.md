@@ -32,7 +32,7 @@ espacios, y también cuando los manda a `null` (cuenta sin espacios o `LUMBRE_SP
 apagado): el texto de cada herramienta es el mismo que antes de C5. Cuando los trae,
 enseñan `storeId`, `spaceId` y el nombre del espacio de cada tarea/lista compartida y
 las marcas `inViewerToday` y `crossStoreDuplicate` y, en las de espacio, el asignado
-(`asignado: <nombre> (accountId)` o `sin asignar`) y `asignada a mí`. En lo personal el
+(`asignado: <nombre> (accountId)`, `asignado: Todos` o `sin asignar`) y `asignada a mí`. En lo personal el
 servidor manda `assigneeId: null` y `assignedToMe: false` y no se pinta nada: la salida
 es la misma que sin esos campos. El catálogo `GET /api/tasks?includeLists=1` añade `spaces[]`
 con miembros `{accountId, name}` y metadata opcional (`storeId`, `role`, `agentAccess`).
@@ -86,7 +86,7 @@ existe», nunca como el listado general.
 Para la vista «asignadas a mí», combina `scope: "all"` (con futuras y sin fecha) con
 `assignee: "me"`; `scope: "today"` restringe a Hoy. Ambos filtros los evalúa el servidor.
 `assignee` solo admite `"me"`: otro valor da 400 en el servidor y el MCP lo traduce a un
-mensaje claro. Con `assignee: "me"` el asignado efectivo es quien consulta; una subtarea
+mensaje claro. Una tarea asignada a Todos (`assigneeId: "everyone"`) sale con `assignedToMe: true` y se acepta sin buscarla entre los miembros. Con `assignee: "me"` el asignado efectivo es quien consulta; una subtarea
 asignada cuya madre también sale va anidada en la madre (no se repite) y, si la madre no
 sale, aparece suelta con `subtarea de <parentId>`. Una cuenta sin espacios recibe «Sin
 tareas»: lo personal no se asigna. Los nombres iguales favorecen
@@ -99,8 +99,8 @@ servidor (`espacio no accesible`, `listId no es una lista de ese espacio`…) y 
 íntegros por op, sin que el MCP los duplique.
 
 `mutate_tasks` añade `{op: "set_assignee", taskId, assigneeId}` → `setAssignee`.
-`assigneeId` es un `accountId` de `spaces[].members`: 64 hex en minúsculas o `""`
-para desasignar; nunca UUID, email, mayúsculas ni `null`. Se admite también sobre
+`assigneeId` es un `accountId` de `spaces[].members`: 64 hex en minúsculas, `"everyone"` (Todos: una sola tarea que cada miembro
+activo ve como suya; si uno la completa, queda hecha para todos) o `""` para desasignar; nunca UUID, email, mayúsculas ni `null`. Se admite también sobre
 subtareas, con asignado propio (la madre no hereda ni agrega). Las altas de
 `add_task` (suelta o batch) aceptan ese campo: el servidor solo lo admite con
 `listId` compartida y miembro activo; en otro caso rechaza el alta sin crearla (400
@@ -1046,7 +1046,7 @@ SUS ops, todos opcionales); el contrato real por-op (`*` = obligatorio) es:
 
 ```
 # mutate_tasks
-add_task: text* [list|listId, spaceId, assigneeId, section, priority, date, someday (no con date/time/recurrence), deadline, time, recurrence, subtasks, notes, tags]
+add_task: text* [list|listId, spaceId, assigneeId (accountId o "everyone"), section, priority, date, someday (no con date/time/recurrence), deadline, time, recurrence, subtasks, notes, tags]
 complete: taskId* [done]
 cancel: taskId* [cancelled]
 update: taskId*, ≥1 de [content, notes, tags, priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también en una semilla archivada), deadline, reminders, daypart ("later"|null)] [expectedContent, expectedNotes]
@@ -1064,7 +1064,7 @@ unarchive: taskId* (desarchiva; noop sin aviso si ya estaba viva)
 skip_occurrence: seriesId*, date* (seriesId = SEMILLA; sin comprobación de existencia en el cliente)
 archive_habit: habitId* (sin comprobación de existencia de tarea)
 unarchive_habit: habitId* (sin comprobación de existencia de tarea)
-set_assignee: taskId*, assigneeId* (accountId de miembro o ""; también en subtarea)
+set_assignee: taskId*, assigneeId* (accountId de miembro, "everyone" = Todos o ""; también en subtarea)
 set_parent: taskId*, parentId* (uuid de la madre, o null para sacarla; taskId puede ser subtarea; el resto de reglas, en la app)
 
 # organize

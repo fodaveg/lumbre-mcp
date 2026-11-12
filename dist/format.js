@@ -20,7 +20,7 @@ function assignmentLabels(entity, space, personal = false) {
     const labels = [];
     if (!personal && entity.assigneeId !== undefined) {
         const member = space?.members?.find((member) => member.accountId === entity.assigneeId);
-        labels.push(entity.assigneeId ? `asignado: ${member ? `${member.name ?? '(sin nombre)'} (${entity.assigneeId})` : entity.assigneeId}` : 'sin asignar');
+        labels.push(entity.assigneeId ? `asignado: ${entity.assigneeId === 'everyone' ? 'Todos' : member ? `${member.name ?? '(sin nombre)'} (${entity.assigneeId})` : entity.assigneeId}` : 'sin asignar');
     }
     if (!personal && entity.assignedToMe !== undefined)
         labels.push(`asignada a mí: ${entity.assignedToMe ? 'sí' : 'no'}`);

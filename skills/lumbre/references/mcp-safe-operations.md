@@ -121,7 +121,8 @@ espacio con `organize` `create_list` y `spaceId` (y `parentId` para anidarlo); u
 `add_task` con `spaceId` exige `list` o `listId`. BRL y hábitos son personales.
 
 `set_assignee` usa `assigneeId` como `accountId` de `spaces[].members` (64 hex
-minúsculas, de `list_lists`/`get_list`); `""` desasigna. No envíes `null`, email ni UUID.
+minúsculas, de `list_lists`/`get_list`) o `"everyone"` (Todos: una sola tarea, cada
+miembro activo la ve como suya); `""` desasigna. No envíes `null`, email ni UUID.
 Vale también sobre subtareas, con asignado propio: no uses el de su principal como
 sustituto. En un alta, `assigneeId` va con `listId` compartida y miembro activo; si
 no, la app rechaza el alta y la tarea NO se crea: dilo así.

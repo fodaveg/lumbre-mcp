@@ -181,6 +181,15 @@ describe('assignee="me" por espacio', () => {
 		await expect(listTasks(CONFIG, { spaceId: SPACE_A, assignee: 'me' })).rejects.toThrow(/no es miembro del espacio/);
 	});
 
+	it('una tarea asignada a Todos (everyone) no lanza', async () => {
+		stubFetch((url) =>
+			url.searchParams.has('includeLists')
+				? json({ lists: [], spaces: [spaceA] })
+				: json([task({ assigneeId: 'everyone', assignedToMe: true })])
+		);
+		await expect(listTasks(CONFIG, { spaceId: SPACE_A, assignee: 'me' })).resolves.toHaveLength(1);
+	});
+
 	it('una tarea sin asignado no se presenta como asignada a mí', async () => {
 		stubFetch((url) =>
 			url.searchParams.has('includeLists')

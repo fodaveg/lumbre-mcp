@@ -207,6 +207,12 @@ describe('C5-g — nombres nulos o vacíos y list ambiguo', () => {
 		expect(out).not.toContain('null');
 	});
 
+	it('everyone se pinta como Todos', () => {
+		const out = formatTaskFull({ ...task, assigneeId: 'everyone', assignedToMe: true, space });
+		expect(out).toContain('asignado: Todos');
+		expect(out).not.toContain('asignado: everyone');
+	});
+
 	it('espacio con name vacío pinta (sin nombre) y conserva el spaceId', () => {
 		expect(formatTaskFull({ ...task, space: unnamed })).toContain(`espacio: (sin nombre) (spaceId: ${SPACE})`);
 		expect(formatTaskFull({ ...task, spaceName: '' })).toContain(`espacio: (sin nombre) (spaceId: ${SPACE})`);
@@ -256,7 +262,7 @@ describe('C5-g — nombres nulos o vacíos y list ambiguo', () => {
 });
 
 describe('C5-g — asignación, altas y éxito parcial', () => {
-	it.each([MEMBER, ''])('set_assignee traduce accountId=%s incluso en subtarea', (assigneeId) => {
+	it.each([MEMBER, '', 'everyone'])('set_assignee traduce accountId=%s incluso en subtarea', (assigneeId) => {
 		const op = { op: 'set_assignee' as const, taskId: TASK, assigneeId };
 		expect(mutateTasksStrictOpSchema.safeParse(op).success).toBe(true);
 		expect(collectExistenceCheckIds([op])).toEqual([TASK]);
@@ -265,7 +271,7 @@ describe('C5-g — asignación, altas y éxito parcial', () => {
 		expect(result.batchOps).toEqual([{ type: 'mutate', taskId: TASK, kind: 'setAssignee', payload: { assigneeId } }]);
 	});
 
-	it.each([null, 'Ana', 'ana@example.test', TASK, MEMBER.toUpperCase(), 'a'.repeat(63)])('rechaza forma inválida de assigneeId=%s', (assigneeId) => {
+	it.each([null, 'Ana', 'ana@example.test', TASK, MEMBER.toUpperCase(), 'a'.repeat(63), 'Everyone', 'everyone '])('rechaza forma inválida de assigneeId=%s', (assigneeId) => {
 		expect(mutateTasksStrictOpSchema.safeParse({ op: 'set_assignee', taskId: TASK, assigneeId }).success).toBe(false);
 	});
 

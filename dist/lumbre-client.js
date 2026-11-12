@@ -298,7 +298,7 @@ export async function listTasks(config, input) {
         // store. Se contrasta con los miembros que el catálogo da para el espacio.
         const { spaces } = await getListCatalog(config, { notes: 'length', spaceId: input.spaceId });
         const members = spaces?.find((space) => space.spaceId === input.spaceId)?.members;
-        if (members && tasks.some((t) => !t.assigneeId || !members.some((m) => m.accountId === t.assigneeId))) {
+        if (members && tasks.some((t) => !t.assigneeId || (t.assigneeId !== 'everyone' && !members.some((m) => m.accountId === t.assigneeId)))) {
             throw new LumbreApiError(`El servidor devolvió tareas asignadas a alguien que no es miembro del espacio ${input.spaceId}: ` +
                 'no se presentan como «asignadas a mí».');
         }

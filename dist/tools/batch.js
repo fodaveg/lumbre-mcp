@@ -763,7 +763,7 @@ export function registerBatchTool(server, ctx) {
                 'priority, time, recurrence (parcial, conserva lo no enviado; null la apaga, también ' +
                 'en una semilla archivada), deadline, reminders, daypart] [expectedContent, expectedNotes] · ' +
                 'reschedule: taskId*, date* · set_section: taskId*, section* · ' +
-                'set_assignee: taskId*, assigneeId* (\"\" desasigna; también subtareas) · ' +
+                'set_assignee: taskId*, assigneeId* (\"\" desasigna, \"everyone\" = Todos; también subtareas) · ' +
                 'set_waiting: taskId*, until* (estrictamente futura) [for] · clear_waiting: taskId* · ' +
                 'add_subtask: taskId*, subtasks* · complete_subtask: subtaskId* [done] · ' +
                 'restore: taskId* (tarea borrada; sin efecto si ya se purgó) · ' +

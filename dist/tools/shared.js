@@ -145,7 +145,7 @@ export function formatOutcomeReport(entries, notices) {
     return lines.join('\n');
 }
 /** Forma de accountId de Hebra; UUID, email, mayúsculas y null no son wire válido. */
-export const assigneeIdSchema = z.string().regex(/^(?:[0-9a-f]{64})?$/).describe('accountId (64 hex) de spaces[].members en list_lists/get_list; "" desasigna. ' +
+export const assigneeIdSchema = z.string().regex(/^(?:[0-9a-f]{64}|everyone)?$/).describe('accountId (64 hex) de spaces[].members en list_lists/get_list; "everyone" = Todos (cada miembro activo la ve como suya; sigue siendo una tarea); "" desasigna. ' +
     'add_task exige listId compartida y miembro activo');
 /**
  * Mapa op → tool que la implementa, con las ops de tarea repartidas entre
