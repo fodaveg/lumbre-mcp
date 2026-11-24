@@ -287,6 +287,7 @@ class FakeLumbre {
 		expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${BACKCHANNEL_SECRET}`);
 		const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
 		const path = url.slice('https://app.lumbre.pro/api/integrations/'.length);
+		if (path === 'lumbre-mcp/exchange/capabilities') return Response.json({ deliveryId: false });
 		if (path === 'lumbre-mcp/requests') {
 			this.requests.push(body);
 			const requestId = `10000000-0000-4000-8000-${String(this.requests.length).padStart(12, '0')}`;

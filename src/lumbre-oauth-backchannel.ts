@@ -26,10 +26,9 @@ export type BackchannelFailureKind = 'invalid' | 'transient';
  * el cliente ve una respuesta (buena o 503) siempre antes de que el borde
  * corte por su cuenta.
  *
- * SOLO reintentan `introspect` y `revoke`: `exchange` y
- * `exchangeSumegoIdentity` consumen una transacción de un solo uso y un
- * reintento tras un fallo de red podría llegar como `token_reused` aunque el
- * primer intento hubiera prosperado (ver el JSDoc de `exchangeSumegoIdentity`);
+ * Este calendario se aplica a `introspect` y `revoke`. Un canje recuperable
+ * hace una sola repetición con el mismo deliveryId y renegocia la capacidad;
+ * el canje legado sigue siendo de un solo uso.
  * `createAuthorizationRequest` deja transacciones huérfanas si el primer
  * intento prosperó y la respuesta se perdió.
  */
@@ -62,7 +61,8 @@ export class BackchannelError extends Error {
 		readonly kind: BackchannelFailureKind,
 		message: string,
 		/** Solo en el canje con Sumego, y solo si es de la lista cerrada. */
-		readonly code?: SumegoExchangeErrorCode
+		readonly code?: SumegoExchangeErrorCode,
+		readonly status?: number
 	) {
 		super(message);
 	}
@@ -126,16 +126,26 @@ export interface SumegoExchangeRequest {
 	clientId: string;
 	resource: string;
 	scope: string;
+	deliveryId?: string;
+}
+
+export interface ExchangeDeliveryRef {
+	requestId: string;
+	transactionId: string;
+	deliveryId: string;
 }
 
 export interface LumbreBackchannelApi {
 	ensureConfigured(): void;
 	createAuthorizationRequest(request: CreateAuthorizationRequest): Promise<CreatedAuthorizationRequest>;
-	exchange(requestId: string, transactionId: string): Promise<ExchangedCredential>;
+	exchange(requestId: string, transactionId: string, deliveryId?: string): Promise<ExchangedCredential>;
 	introspect(accessToken: string): Promise<IntrospectionResult>;
 	revoke(accessToken: string): Promise<void>;
 	createSumegoAuthorizationRequest(request: CreateSumegoAuthorizationRequest): Promise<CreatedSumegoAuthorizationRequest>;
 	exchangeSumegoIdentity(request: SumegoExchangeRequest): Promise<ExchangedCredential>;
+	exchangeDeliverySupported?(): Promise<boolean>;
+	recoverExchangeDelivery?(ref: ExchangeDeliveryRef): Promise<ExchangedCredential | 'pending' | 'closed'>;
+	acknowledgeExchangeDelivery?(ref: ExchangeDeliveryRef): Promise<void>;
 }
 
 export interface LumbreBackchannelOptions {
@@ -328,8 +338,48 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 		};
 	}
 
-	async exchange(requestId: string, transactionId: string): Promise<ExchangedCredential> {
-		return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, { requestId, transactionId }));
+	async exchange(requestId: string, transactionId: string, deliveryId?: string): Promise<ExchangedCredential> {
+		return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, {
+			requestId, transactionId, ...(deliveryId ? { deliveryId } : {})
+		}));
+	}
+
+	async exchangeDeliverySupported(): Promise<boolean> {
+		let value: unknown;
+		try {
+			value = await this.post(`${LUMBRE_MCP_PATH}exchange/capabilities`, {});
+		} catch (error) {
+			if (error instanceof BackchannelError && (error.status === 404 || error.status === 405)) return false;
+			throw error;
+		}
+		if (!exactObject(value, ['deliveryId']) || typeof value.deliveryId !== 'boolean')
+			throw new BackchannelError('invalid', 'Capacidad de canje fuera de contrato.');
+		return value.deliveryId;
+	}
+
+	async recoverExchangeDelivery(ref: ExchangeDeliveryRef): Promise<ExchangedCredential | 'pending' | 'closed'> {
+		this.ensureConfigured();
+		const response = await this.send(`${LUMBRE_MCP_PATH}exchange/recover`, ref);
+		if (response.status === 404 || response.status === 410) {
+			const value = await readBoundedJson(response);
+			if (exactObject(value, ['code']) &&
+				(response.status === 404 && value.code === 'transaction_not_found' ||
+				 response.status === 410 && value.code === 'credential_inactive')) return 'closed';
+		} else if (response.status === 202) {
+			const value = await readBoundedJson(response);
+			if (exactObject(value, ['state']) && value.state === 'pending') return 'pending';
+		} else if (response.status === 200) {
+			return exchangedCredential(await readBoundedJson(response));
+		} else {
+			await response.body?.cancel().catch(() => undefined);
+		}
+		throw new BackchannelError('transient', 'La entrega de Lumbre sigue sin confirmarse.');
+	}
+
+	async acknowledgeExchangeDelivery(ref: ExchangeDeliveryRef): Promise<void> {
+		const value = await this.post(`${LUMBRE_MCP_PATH}exchange/ack`, ref);
+		if (!exactObject(value, ['acknowledged']) || value.acknowledged !== true)
+			throw new BackchannelError('invalid', 'Acuse de canje fuera de contrato.');
 	}
 
 	/**
@@ -446,14 +496,9 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 		}
 	}
 
-	private async postOnce(
-		path: string,
-		body: unknown,
-		options: { readErrorCode?: boolean } = {}
-	): Promise<unknown> {
-		let response: Response;
+	private async send(path: string, body: unknown): Promise<Response> {
 		try {
-			response = await this.fetchFn(`${this.baseUrl}${path}`, {
+			return await this.fetchFn(`${this.baseUrl}${path}`, {
 				method: 'POST',
 				redirect: 'error',
 				signal: AbortSignal.timeout(this.timeoutMs),
@@ -467,6 +512,14 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 		} catch {
 			throw new BackchannelError('transient', 'No se pudo contactar con Lumbre.');
 		}
+	}
+
+	private async postOnce(
+		path: string,
+		body: unknown,
+		options: { readErrorCode?: boolean } = {}
+	): Promise<unknown> {
+		const response = await this.send(path, body);
 		if (response.status < 200 || response.status >= 300) {
 			const code = options.readErrorCode ? await errorCodeOf(response) : undefined;
 			await response.body?.cancel().catch(() => undefined);
@@ -475,9 +528,15 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 				response.status >= 500 || response.status === 429
 					? 'Lumbre no está disponible temporalmente.'
 					: 'Lumbre rechazó la operación.',
-				code
+				code,
+				response.status
 			);
 		}
-		return await readBoundedJson(response);
+		try {
+			return await readBoundedJson(response);
+		} catch (error) {
+			if (error instanceof BackchannelError) throw error;
+			throw new BackchannelError('transient', 'La respuesta de Lumbre se interrumpió.');
+		}
 	}
 }

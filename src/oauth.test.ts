@@ -125,6 +125,7 @@ function oauthFetch(
 			expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${BACKCHANNEL_SECRET}`);
 			const path = url.slice(backchannelPrefix.length);
 			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (path === 'exchange/capabilities') return Response.json({ deliveryId: false });
 			overrides.onBackchannel?.(path, body);
 			if (path === 'requests') {
 				requestCounter += 1;

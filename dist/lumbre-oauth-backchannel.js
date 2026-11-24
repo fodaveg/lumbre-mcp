@@ -22,10 +22,9 @@ const ACCESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
  * el cliente ve una respuesta (buena o 503) siempre antes de que el borde
  * corte por su cuenta.
  *
- * SOLO reintentan `introspect` y `revoke`: `exchange` y
- * `exchangeSumegoIdentity` consumen una transacción de un solo uso y un
- * reintento tras un fallo de red podría llegar como `token_reused` aunque el
- * primer intento hubiera prosperado (ver el JSDoc de `exchangeSumegoIdentity`);
+ * Este calendario se aplica a `introspect` y `revoke`. Un canje recuperable
+ * hace una sola repetición con el mismo deliveryId y renegocia la capacidad;
+ * el canje legado sigue siendo de un solo uso.
  * `createAuthorizationRequest` deja transacciones huérfanas si el primer
  * intento prosperó y la respuesta se perdió.
  */
@@ -52,12 +51,14 @@ export const SUMEGO_EXCHANGE_ERROR_CODES = [
 export class BackchannelError extends Error {
     kind;
     code;
+    status;
     constructor(kind, message, 
     /** Solo en el canje con Sumego, y solo si es de la lista cerrada. */
-    code) {
+    code, status) {
         super(message);
         this.kind = kind;
         this.code = code;
+        this.status = status;
     }
 }
 function exactObject(value, keys) {
@@ -222,8 +223,52 @@ export class LumbreBackchannel {
             expiresAt
         };
     }
-    async exchange(requestId, transactionId) {
-        return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, { requestId, transactionId }));
+    async exchange(requestId, transactionId, deliveryId) {
+        return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, {
+            requestId, transactionId, ...(deliveryId ? { deliveryId } : {})
+        }));
+    }
+    async exchangeDeliverySupported() {
+        let value;
+        try {
+            value = await this.post(`${LUMBRE_MCP_PATH}exchange/capabilities`, {});
+        }
+        catch (error) {
+            if (error instanceof BackchannelError && (error.status === 404 || error.status === 405))
+                return false;
+            throw error;
+        }
+        if (!exactObject(value, ['deliveryId']) || typeof value.deliveryId !== 'boolean')
+            throw new BackchannelError('invalid', 'Capacidad de canje fuera de contrato.');
+        return value.deliveryId;
+    }
+    async recoverExchangeDelivery(ref) {
+        this.ensureConfigured();
+        const response = await this.send(`${LUMBRE_MCP_PATH}exchange/recover`, ref);
+        if (response.status === 404 || response.status === 410) {
+            const value = await readBoundedJson(response);
+            if (exactObject(value, ['code']) &&
+                (response.status === 404 && value.code === 'transaction_not_found' ||
+                    response.status === 410 && value.code === 'credential_inactive'))
+                return 'closed';
+        }
+        else if (response.status === 202) {
+            const value = await readBoundedJson(response);
+            if (exactObject(value, ['state']) && value.state === 'pending')
+                return 'pending';
+        }
+        else if (response.status === 200) {
+            return exchangedCredential(await readBoundedJson(response));
+        }
+        else {
+            await response.body?.cancel().catch(() => undefined);
+        }
+        throw new BackchannelError('transient', 'La entrega de Lumbre sigue sin confirmarse.');
+    }
+    async acknowledgeExchangeDelivery(ref) {
+        const value = await this.post(`${LUMBRE_MCP_PATH}exchange/ack`, ref);
+        if (!exactObject(value, ['acknowledged']) || value.acknowledged !== true)
+            throw new BackchannelError('invalid', 'Acuse de canje fuera de contrato.');
     }
     /**
      * Abre la solicitud en Lumbre para un login con Sumego. Mismo endpoint y
@@ -324,10 +369,9 @@ export class LumbreBackchannel {
             }
         }
     }
-    async postOnce(path, body, options = {}) {
-        let response;
+    async send(path, body) {
         try {
-            response = await this.fetchFn(`${this.baseUrl}${path}`, {
+            return await this.fetchFn(`${this.baseUrl}${path}`, {
                 method: 'POST',
                 redirect: 'error',
                 signal: AbortSignal.timeout(this.timeoutMs),
@@ -342,14 +386,24 @@ export class LumbreBackchannel {
         catch {
             throw new BackchannelError('transient', 'No se pudo contactar con Lumbre.');
         }
+    }
+    async postOnce(path, body, options = {}) {
+        const response = await this.send(path, body);
         if (response.status < 200 || response.status >= 300) {
             const code = options.readErrorCode ? await errorCodeOf(response) : undefined;
             await response.body?.cancel().catch(() => undefined);
             throw new BackchannelError(response.status >= 500 || response.status === 429 ? 'transient' : 'invalid', response.status >= 500 || response.status === 429
                 ? 'Lumbre no está disponible temporalmente.'
-                : 'Lumbre rechazó la operación.', code);
+                : 'Lumbre rechazó la operación.', code, response.status);
         }
-        return await readBoundedJson(response);
+        try {
+            return await readBoundedJson(response);
+        }
+        catch (error) {
+            if (error instanceof BackchannelError)
+                throw error;
+            throw new BackchannelError('transient', 'La respuesta de Lumbre se interrumpió.');
+        }
     }
 }
 //# sourceMappingURL=lumbre-oauth-backchannel.js.map

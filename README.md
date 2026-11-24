@@ -1317,13 +1317,18 @@ local) cae a su client id público cuando su DCR confidencial se rechaza, con
 redirect loopback de puerto y path libres. La caché CIMD respeta
 `Cache-Control: no-store` y `no-cache` y no reutiliza esas respuestas.
 
-El callback Lumbre es one-shot: se consume durablemente antes de `/exchange`,
-de modo que dos callbacks concurrentes nunca canjean dos veces. Si la respuesta
-del canje se pierde por un timeout ambiguo, no se reintenta a ciegas porque el
-contrato de Lumbre no ofrece una respuesta idempotente recuperable; la persona
-debe iniciar otra autorización y puede revocar desde Lumbre cualquier
-credencial huérfana. Los tests fijan esta única llamada aun tras repetir el
-callback.
+El callback de ambos logins se consume durablemente antes del canje. Cuando el
+backchannel anuncia `{deliveryId:true}`, el relé guarda un UUID y sella los
+datos de la transacción antes de llamar a Lumbre. Si se pierde la respuesta,
+confirma la capacidad y repite una vez con el mismo UUID y la misma solicitud.
+La credencial debe seguir activa. Al guardar el código, el relé sella su
+credencial y registra en la misma escritura que puede acusar recibo. Tras
+reiniciar, reanuda el acuse o recupera la credencial para revocarla, según
+el estado guardado.
+
+Con un servidor legado, el canje sigue siendo de un solo uso. Un timeout
+requiere empezar otra autorización. En los dos modos, repetir un callback
+público consumido se rechaza y el código conserva su validación PKCE.
 
 Si una petición trae **las dos** (cabecera Y path), **gana la cabecera**: es
 la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
@@ -1458,7 +1463,8 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
    admite 10 por minuto y solicitud); `invalid_request`, `payload_too_large` y el 401 del secreto son
    fallos nuestros: frase genérica para la persona y una línea en el log del
    servidor. Todas las frases viven en `src/sumego-messages.ts`. Un rechazo termina
-   el flujo; no se reintenta solo. El grant hereda el `sub`, el `sid` y el refresh de
+   el flujo. La pérdida de respuesta del canal autenticado se trata como en el canje
+   web. El grant hereda el `sub`, el `sid` y el refresh de
    Sumego.
 
 El grant guarda el `sub` y el `sid` de Sumego. **Back-channel logout**: Sumego hace

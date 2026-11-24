@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, link, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -996,6 +996,7 @@ function normalizeStore(value) {
         !Array.isArray(raw.authorizationRequests) ||
         !Array.isArray(raw.authorizationCodes) ||
         !Array.isArray(raw.revocationOutbox) ||
+        (raw.exchangeDeliveries !== undefined && !Array.isArray(raw.exchangeDeliveries)) ||
         (raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes)) ||
         (raw.usedLogoutTokens !== undefined && !Array.isArray(raw.usedLogoutTokens)) ||
         (raw.closedSumegoSessions !== undefined && !Array.isArray(raw.closedSumegoSessions)) ||
@@ -1206,6 +1207,24 @@ function normalizeStore(value) {
         new Set(opaqueHashes).size !== opaqueHashes.length) {
         throw new Error('store OAuth incoherente');
     }
+    const exchangeDeliveries = (raw.exchangeDeliveries ?? []).map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('entrega OAuth inválida');
+        const item = value;
+        if (typeof item.requestId !== 'string' || !isValidRequestId(item.requestId) ||
+            typeof item.deliveryId !== 'string' || !isValidRequestId(item.deliveryId) ||
+            !validEncryptedValue(item.transaction) || typeof item.clientId !== 'string' || !item.clientId ||
+            item.resource !== OAUTH_RESOURCE || item.scope !== OAUTH_SCOPE ||
+            (item.disposition !== 'recover' && item.disposition !== 'acknowledge')) {
+            throw new Error('entrega OAuth inválida');
+        }
+        return { requestId: item.requestId, deliveryId: item.deliveryId, transaction: item.transaction,
+            clientId: item.clientId, resource: item.resource, scope: item.scope, disposition: item.disposition };
+    });
+    if (exchangeDeliveries.length > MAX_PENDING_ITEMS ||
+        new Set(exchangeDeliveries.map((item) => item.deliveryId)).size !== exchangeDeliveries.length) {
+        throw new Error('entregas OAuth incoherentes');
+    }
     return {
         version: 3,
         grants,
@@ -1213,6 +1232,7 @@ function normalizeStore(value) {
         authorizationRequests,
         authorizationCodes,
         revocationOutbox,
+        exchangeDeliveries,
         redeemedCodes,
         usedLogoutTokens,
         closedSumegoSessions,
@@ -1370,6 +1390,7 @@ export class OAuthService {
     orphanTempsRemoved = false;
     /** Renovación de Sumego en vuelo por `familyId`; ver `renewSumegoSession`. */
     sumegoRenewals = new Map();
+    activeExchangeDeliveries = new Set();
     /** Revocaciones best-effort en Sumego aún en vuelo; ver
      *  `revokeSumegoRefreshLater`. */
     backgroundTasks = new Set();
@@ -1934,15 +1955,10 @@ export class OAuthService {
                 throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
             }
             const authorized = pending;
-            let credential;
-            try {
-                const transactionId = decrypt(authorized.transaction, await this.key(), transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope));
-                credential = await this.backchannel.exchange(requestId, transactionId);
-            }
-            catch (error) {
-                throw this.backchannelOAuthError(error, 'invalid_grant');
-            }
-            const code = await this.storeAuthorizationCode(authorized, credential);
+            const transactionId = decrypt(authorized.transaction, await this.key(), transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope));
+            const code = await this.runExchangeDelivery(authorized, transactionId, (deliveryId) => deliveryId
+                ? this.backchannel.exchange(requestId, transactionId, deliveryId)
+                : this.backchannel.exchange(requestId, transactionId), (error) => this.backchannelOAuthError(error, 'invalid_grant'));
             this.redirectToClient(res, authorized, { code });
         }
         catch (error) {
@@ -1950,6 +1966,112 @@ export class OAuthService {
         }
         finally {
             release?.();
+        }
+    }
+    /** El callback público ya consumió su transacción. Solo repetimos el salto autenticado. */
+    async runExchangeDelivery(authorized, transactionId, send, onExchangeError, sumego) {
+        let supported;
+        try {
+            supported = await this.backchannel.exchangeDeliverySupported?.();
+        }
+        catch (error) {
+            throw onExchangeError(error);
+        }
+        if (!supported) {
+            let credential;
+            try {
+                credential = await send();
+            }
+            catch (error) {
+                throw onExchangeError(error);
+            }
+            return this.storeAuthorizationCode(authorized, credential, sumego);
+        }
+        const { requestId, transaction, clientId, resource, scope } = authorized;
+        const deliveryId = randomUUID();
+        const ref = { requestId, transactionId, deliveryId };
+        this.activeExchangeDeliveries.add(deliveryId);
+        try {
+            await this.mutateStore((store) => {
+                if (store.exchangeDeliveries.length >= MAX_PENDING_ITEMS)
+                    throw new OAuthError('temporarily_unavailable', 'Hay demasiadas entregas pendientes.', 503);
+                store.exchangeDeliveries.push({
+                    requestId, transaction, deliveryId, clientId, resource, scope, disposition: 'recover'
+                });
+                return true;
+            });
+            let credential;
+            try {
+                try {
+                    credential = await send(deliveryId);
+                }
+                catch (error) {
+                    if (!(error instanceof BackchannelError) || error.kind !== 'transient' ||
+                        (error.status !== undefined && error.status < 500) ||
+                        !await this.backchannel.exchangeDeliverySupported?.())
+                        throw error;
+                    credential = await send(deliveryId);
+                }
+                const active = await this.backchannel.introspect(credential.accessToken);
+                if (!active.active || active.credentialId !== credential.credentialId ||
+                    active.clientId !== clientId || active.resource !== resource || active.scope !== scope) {
+                    throw new BackchannelError('invalid', 'La entrega de Lumbre ya no corresponde a la autorización.');
+                }
+            }
+            catch (error) {
+                throw onExchangeError(error);
+            }
+            const code = await this.storeAuthorizationCode(authorized, credential, sumego, deliveryId);
+            await this.acknowledgeExchange(ref).catch(() => undefined);
+            return code;
+        }
+        finally {
+            this.activeExchangeDeliveries.delete(deliveryId);
+        }
+    }
+    retireExchangeDelivery(deliveryId) {
+        return this.mutateStore((store) => {
+            const before = store.exchangeDeliveries.length;
+            store.exchangeDeliveries = store.exchangeDeliveries.filter((item) => item.deliveryId !== deliveryId);
+            return before !== store.exchangeDeliveries.length;
+        });
+    }
+    async acknowledgeExchange(ref) {
+        if (!this.backchannel.acknowledgeExchangeDelivery)
+            return;
+        await this.backchannel.acknowledgeExchangeDelivery(ref);
+        await this.retireExchangeDelivery(ref.deliveryId);
+    }
+    /** Después del reinicio solo se acusa custodia durable o se recupera para revocar. */
+    async recoverExchangeDeliveries() {
+        if (!this.backchannel.recoverExchangeDelivery)
+            return;
+        const items = (await this.loadStore()).exchangeDeliveries
+            .filter((item) => !this.activeExchangeDeliveries.has(item.deliveryId))
+            .slice(0, MAX_OUTBOX_RETRIES_PER_READINESS);
+        for (const item of items) {
+            try {
+                const transactionId = decrypt(item.transaction, await this.key(), transactionContext(item.requestId, item.clientId, item.resource, item.scope));
+                const ref = { requestId: item.requestId, transactionId, deliveryId: item.deliveryId };
+                if (item.disposition === 'acknowledge') {
+                    await this.acknowledgeExchange(ref);
+                    continue;
+                }
+                const recovered = await this.backchannel.recoverExchangeDelivery(ref);
+                if (recovered === 'pending')
+                    continue;
+                if (recovered === 'closed') {
+                    await this.retireExchangeDelivery(item.deliveryId);
+                    continue;
+                }
+                if (recovered.resource !== item.resource || recovered.scope !== item.scope)
+                    continue;
+                await this.persistCredentialRevocation(recovered, item);
+                await this.acknowledgeExchange(ref);
+            }
+            catch {
+                // La incertidumbre conserva la intención para el próximo pase.
+            }
         }
     }
     /**
@@ -1966,7 +2088,7 @@ export class OAuthService {
      * revoca en Lumbre por la outbox antes de fallar: nunca se queda una
      * credencial viva allí que este relé no conozca.
      */
-    async storeAuthorizationCode(authorized, credential, sumego) {
+    async storeAuthorizationCode(authorized, credential, sumego, deliveryId) {
         if (credential.resource !== authorized.resource || credential.scope !== authorized.scope) {
             await this.persistCredentialRevocation(credential, authorized);
             throw new OAuthError('server_error', 'Lumbre devolvió una credencial fuera de contrato.', 502);
@@ -2009,6 +2131,12 @@ export class OAuthService {
                         }
                         : {})
                 });
+                if (deliveryId) {
+                    const delivery = store.exchangeDeliveries.find((item) => item.deliveryId === deliveryId);
+                    if (!delivery)
+                        throw new Error('entrega OAuth ausente');
+                    delivery.disposition = 'acknowledge';
+                }
                 return true;
             });
         }
@@ -2335,21 +2463,15 @@ export class OAuthService {
             }
             const transactionId = decrypt(authorized.transaction, key, transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope));
             const idToken = decrypt(authorized.sumego.idToken, key, sumegoContext('id-token', authorized, stateHash));
-            let credential;
-            try {
-                credential = await this.backchannel.exchangeSumegoIdentity({
-                    requestId: authorized.requestId,
-                    transactionId,
-                    idToken,
-                    clientId: authorized.clientId,
-                    resource: authorized.resource,
-                    scope: authorized.scope
-                });
-            }
-            catch (error) {
-                throw this.sumegoExchangeError(error);
-            }
-            const code = await this.storeAuthorizationCode(authorized, credential, {
+            const code = await this.runExchangeDelivery(authorized, transactionId, (deliveryId) => this.backchannel.exchangeSumegoIdentity({
+                requestId: authorized.requestId,
+                transactionId,
+                idToken,
+                clientId: authorized.clientId,
+                resource: authorized.resource,
+                scope: authorized.scope,
+                ...(deliveryId ? { deliveryId } : {})
+            }), (error) => this.sumegoExchangeError(error), {
                 subject: authorized.sumego.subject,
                 issuedAt: authorized.sumego.issuedAt,
                 refreshToken: orphanRefresh
@@ -3425,6 +3547,7 @@ export class OAuthService {
         // pasan al outbox antes de intentar la revocación upstream.
         await this.mutateStore(() => false);
         await this.flushRevocationOutbox();
+        await this.recoverExchangeDeliveries();
     }
     async checkReady() {
         const cached = this.readinessCache;
@@ -3958,6 +4081,7 @@ export class OAuthService {
                     authorizationRequests: [],
                     authorizationCodes: [],
                     revocationOutbox: [],
+                    exchangeDeliveries: [],
                     redeemedCodes: [],
                     usedLogoutTokens: [],
                     closedSumegoSessions: [],
