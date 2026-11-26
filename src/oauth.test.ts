@@ -126,6 +126,7 @@ function oauthFetch(
 			const path = url.slice(backchannelPrefix.length);
 			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
 			overrides.onBackchannel?.(path, body);
+			if (path === 'exchange/capabilities') return new Response(null, { status: 404 });
 			if (path === 'requests') {
 				requestCounter += 1;
 				const requestId = `10000000-0000-4000-8000-${String(requestCounter).padStart(12, '0')}`;

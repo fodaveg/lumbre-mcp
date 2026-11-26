@@ -1318,12 +1318,16 @@ redirect loopback de puerto y path libres. La caché CIMD respeta
 `Cache-Control: no-store` y `no-cache` y no reutiliza esas respuestas.
 
 El callback Lumbre es one-shot: se consume durablemente antes de `/exchange`,
-de modo que dos callbacks concurrentes nunca canjean dos veces. Si la respuesta
-del canje se pierde por un timeout ambiguo, no se reintenta a ciegas porque el
-contrato de Lumbre no ofrece una respuesta idempotente recuperable; la persona
-debe iniciar otra autorización y puede revocar desde Lumbre cualquier
-credencial huérfana. Los tests fijan esta única llamada aun tras repetir el
-callback.
+de modo que dos callbacks concurrentes nunca canjean dos veces. Antes de
+`exchange` o `sumego/exchange`, el relé consulta `POST /exchange/capabilities`
+con el mismo prefijo y secreto del canal. Si anuncia `{deliveryId:true}`,
+el relé guarda la referencia con la transacción cifrada y envía el
+`deliveryId`. Ante una respuesta ambigua consulta `/exchange/recover`
+con esa referencia. Una vez guardado el código local y su credencial,
+envía `/exchange/ack`. Al reiniciar, reintenta el acuse o revoca una
+credencial recuperada que quedó sin código local. Si el servidor anterior
+responde 404 o anuncia `{deliveryId:false}`, el canje usa el cuerpo histórico
+y una respuesta perdida pide empezar otra autorización.
 
 Si una petición trae **las dos** (cabecera Y path), **gana la cabecera**: es
 la forma menos expuesta de las dos (no queda guardada en ningún sitio salvo
@@ -1449,7 +1453,7 @@ es exactamente lo de arriba; con `sumego`, el relé es un cliente OIDC propio
 4. «Permitir» canjea en Lumbre (`POST /api/integrations/lumbre-mcp/sumego/exchange`,
    el mismo prefijo que el resto del canal, con
    el secreto del canal y el cuerpo `{requestId, transactionId, idToken, clientId,
-   resource, scope}`). Lumbre vuelve a validar el ID token y devuelve la misma
+   resource, scope}` más `deliveryId` si se negoció). Lumbre vuelve a validar el ID token y devuelve la misma
    credencial dedicada que `/exchange`. Desde ahí todo sigue como con Lumbre: código
    de autorización, `/token`, refresh y revocación. Si Lumbre rechaza, la persona ve
    una página con una frase cerrada según el `code` (cuenta pendiente, suspendida,

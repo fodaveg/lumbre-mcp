@@ -52,13 +52,18 @@ export const SUMEGO_EXCHANGE_ERROR_CODES = [
 export class BackchannelError extends Error {
     kind;
     code;
+    status;
     constructor(kind, message, 
     /** Solo en el canje con Sumego, y solo si es de la lista cerrada. */
-    code) {
+    code, status) {
         super(message);
         this.kind = kind;
         this.code = code;
+        this.status = status;
     }
+}
+export function deliveryMayHaveIssued(error) {
+    return !(error instanceof BackchannelError) || error.status === undefined || error.status === 202 || error.status >= 500;
 }
 function exactObject(value, keys) {
     if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -183,6 +188,7 @@ const LUMBRE_MCP_PATH = '/api/integrations/lumbre-mcp/';
 /** Ruta del canje con Sumego (main de Lumbre e0fdd69c7 + 6cfe83b25). */
 export const SUMEGO_EXCHANGE_PATH = `${LUMBRE_MCP_PATH}sumego/exchange`;
 export class LumbreBackchannel {
+    delivery = this;
     baseUrl;
     secret;
     fetchFn;
@@ -222,8 +228,24 @@ export class LumbreBackchannel {
             expiresAt
         };
     }
-    async exchange(requestId, transactionId) {
-        return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, { requestId, transactionId }));
+    /** Un servidor anterior al protocolo de entrega desconoce esta ruta. */
+    async supportsDelivery() {
+        let body;
+        try {
+            body = await this.post(`${LUMBRE_MCP_PATH}exchange/capabilities`, {});
+        }
+        catch (error) {
+            if (error instanceof BackchannelError && error.status === 404)
+                return false;
+            throw error;
+        }
+        if (!exactObject(body, ['deliveryId']) || typeof body.deliveryId !== 'boolean') {
+            throw new BackchannelError('invalid', 'Capacidades de entrega fuera de contrato.');
+        }
+        return body.deliveryId;
+    }
+    async exchange(requestId, transactionId, deliveryId) {
+        return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, { requestId, transactionId, deliveryId }));
     }
     /**
      * Abre la solicitud en Lumbre para un login con Sumego. Mismo endpoint y
@@ -277,11 +299,20 @@ export class LumbreBackchannel {
      * pero aquí no se reintenta: la transacción y el consentimiento del relé
      * ya se consumieron, y el flujo acaba con su página de error.
      */
-    async exchangeSumegoIdentity(request) {
+    async exchangeSumegoIdentity(request, deliveryId) {
         if (!TRANSACTION_PATTERN.test(request.transactionId) || !isValidRequestId(request.requestId)) {
             throw new BackchannelError('invalid', 'Canje con Sumego fuera de contrato.');
         }
-        return exchangedCredential(await this.post(SUMEGO_EXCHANGE_PATH, request, { readErrorCode: true }));
+        return exchangedCredential(await this.post(SUMEGO_EXCHANGE_PATH, { ...request, deliveryId }, { readErrorCode: true }));
+    }
+    async recoverDelivery(ref) {
+        return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange/recover`, ref));
+    }
+    async acknowledgeDelivery(ref) {
+        const body = await this.post(`${LUMBRE_MCP_PATH}exchange/ack`, ref);
+        if (!exactObject(body, ['acknowledged']) || body.acknowledged !== true) {
+            throw new BackchannelError('invalid', 'Acuse de entrega fuera de contrato.');
+        }
     }
     async introspect(accessToken) {
         const body = await this.post(`${LUMBRE_MCP_PATH}introspect`, { accessToken }, { retryTransient: true });
@@ -342,12 +373,16 @@ export class LumbreBackchannel {
         catch {
             throw new BackchannelError('transient', 'No se pudo contactar con Lumbre.');
         }
+        if (response.status === 202) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new BackchannelError('transient', 'La entrega sigue pendiente.', undefined, 202);
+        }
         if (response.status < 200 || response.status >= 300) {
             const code = options.readErrorCode ? await errorCodeOf(response) : undefined;
             await response.body?.cancel().catch(() => undefined);
             throw new BackchannelError(response.status >= 500 || response.status === 429 ? 'transient' : 'invalid', response.status >= 500 || response.status === 429
                 ? 'Lumbre no está disponible temporalmente.'
-                : 'Lumbre rechazó la operación.', code);
+                : 'Lumbre rechazó la operación.', code, response.status);
         }
         return await readBoundedJson(response);
     }

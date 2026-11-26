@@ -62,7 +62,8 @@ export class BackchannelError extends Error {
 		readonly kind: BackchannelFailureKind,
 		message: string,
 		/** Solo en el canje con Sumego, y solo si es de la lista cerrada. */
-		readonly code?: SumegoExchangeErrorCode
+		readonly code?: SumegoExchangeErrorCode,
+		readonly status?: number
 	) {
 		super(message);
 	}
@@ -128,14 +129,31 @@ export interface SumegoExchangeRequest {
 	scope: string;
 }
 
+export interface DeliveryRef {
+	requestId: string;
+	transactionId: string;
+	deliveryId: string;
+}
+
+interface AuthorizationDeliveryApi {
+	supportsDelivery(): Promise<boolean>;
+	recoverDelivery(ref: DeliveryRef): Promise<ExchangedCredential>;
+	acknowledgeDelivery(ref: DeliveryRef): Promise<void>;
+}
+
+export function deliveryMayHaveIssued(error: unknown): boolean {
+	return !(error instanceof BackchannelError) || error.status === undefined || error.status === 202 || error.status >= 500;
+}
+
 export interface LumbreBackchannelApi {
 	ensureConfigured(): void;
 	createAuthorizationRequest(request: CreateAuthorizationRequest): Promise<CreatedAuthorizationRequest>;
-	exchange(requestId: string, transactionId: string): Promise<ExchangedCredential>;
+	exchange(requestId: string, transactionId: string, deliveryId?: string): Promise<ExchangedCredential>;
 	introspect(accessToken: string): Promise<IntrospectionResult>;
 	revoke(accessToken: string): Promise<void>;
 	createSumegoAuthorizationRequest(request: CreateSumegoAuthorizationRequest): Promise<CreatedSumegoAuthorizationRequest>;
-	exchangeSumegoIdentity(request: SumegoExchangeRequest): Promise<ExchangedCredential>;
+	exchangeSumegoIdentity(request: SumegoExchangeRequest, deliveryId?: string): Promise<ExchangedCredential>;
+	delivery?: AuthorizationDeliveryApi;
 }
 
 export interface LumbreBackchannelOptions {
@@ -285,6 +303,7 @@ const LUMBRE_MCP_PATH = '/api/integrations/lumbre-mcp/';
 export const SUMEGO_EXCHANGE_PATH = `${LUMBRE_MCP_PATH}sumego/exchange`;
 
 export class LumbreBackchannel implements LumbreBackchannelApi {
+	readonly delivery: AuthorizationDeliveryApi = this;
 	private readonly baseUrl: string;
 	private readonly secret: string;
 	private readonly fetchFn: typeof fetch;
@@ -328,8 +347,23 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 		};
 	}
 
-	async exchange(requestId: string, transactionId: string): Promise<ExchangedCredential> {
-		return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, { requestId, transactionId }));
+	/** Un servidor anterior al protocolo de entrega desconoce esta ruta. */
+	async supportsDelivery(): Promise<boolean> {
+		let body: unknown;
+		try {
+			body = await this.post(`${LUMBRE_MCP_PATH}exchange/capabilities`, {});
+		} catch (error) {
+			if (error instanceof BackchannelError && error.status === 404) return false;
+			throw error;
+		}
+		if (!exactObject(body, ['deliveryId']) || typeof body.deliveryId !== 'boolean') {
+			throw new BackchannelError('invalid', 'Capacidades de entrega fuera de contrato.');
+		}
+		return body.deliveryId;
+	}
+
+	async exchange(requestId: string, transactionId: string, deliveryId?: string): Promise<ExchangedCredential> {
+		return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange`, { requestId, transactionId, deliveryId }));
 	}
 
 	/**
@@ -389,13 +423,24 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 	 * pero aquí no se reintenta: la transacción y el consentimiento del relé
 	 * ya se consumieron, y el flujo acaba con su página de error.
 	 */
-	async exchangeSumegoIdentity(request: SumegoExchangeRequest): Promise<ExchangedCredential> {
+	async exchangeSumegoIdentity(request: SumegoExchangeRequest, deliveryId?: string): Promise<ExchangedCredential> {
 		if (!TRANSACTION_PATTERN.test(request.transactionId) || !isValidRequestId(request.requestId)) {
 			throw new BackchannelError('invalid', 'Canje con Sumego fuera de contrato.');
 		}
 		return exchangedCredential(
-			await this.post(SUMEGO_EXCHANGE_PATH, request, { readErrorCode: true })
+			await this.post(SUMEGO_EXCHANGE_PATH, { ...request, deliveryId }, { readErrorCode: true })
 		);
+	}
+
+	async recoverDelivery(ref: DeliveryRef): Promise<ExchangedCredential> {
+		return exchangedCredential(await this.post(`${LUMBRE_MCP_PATH}exchange/recover`, ref));
+	}
+
+	async acknowledgeDelivery(ref: DeliveryRef): Promise<void> {
+		const body = await this.post(`${LUMBRE_MCP_PATH}exchange/ack`, ref);
+		if (!exactObject(body, ['acknowledged']) || body.acknowledged !== true) {
+			throw new BackchannelError('invalid', 'Acuse de entrega fuera de contrato.');
+		}
 	}
 
 	async introspect(accessToken: string): Promise<IntrospectionResult> {
@@ -467,6 +512,10 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 		} catch {
 			throw new BackchannelError('transient', 'No se pudo contactar con Lumbre.');
 		}
+		if (response.status === 202) {
+			await response.body?.cancel().catch(() => undefined);
+			throw new BackchannelError('transient', 'La entrega sigue pendiente.', undefined, 202);
+		}
 		if (response.status < 200 || response.status >= 300) {
 			const code = options.readErrorCode ? await errorCodeOf(response) : undefined;
 			await response.body?.cancel().catch(() => undefined);
@@ -475,7 +524,8 @@ export class LumbreBackchannel implements LumbreBackchannelApi {
 				response.status >= 500 || response.status === 429
 					? 'Lumbre no está disponible temporalmente.'
 					: 'Lumbre rechazó la operación.',
-				code
+				code,
+				response.status
 			);
 		}
 		return await readBoundedJson(response);

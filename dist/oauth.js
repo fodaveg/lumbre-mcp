@@ -1,8 +1,8 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, link, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { BackchannelError, LUMBRE_OAUTH_CALLBACK, LumbreBackchannel, isValidRequestId } from './lumbre-oauth-backchannel.js';
+import { BackchannelError, LUMBRE_OAUTH_CALLBACK, LumbreBackchannel, deliveryMayHaveIssued, isValidRequestId } from './lumbre-oauth-backchannel.js';
 import { forgetAccountNotesSeen, pruneStaleAccountNotesSeen } from './notes.js';
 import { SUMEGO_PERSON_MESSAGES, exchangeFailure } from './sumego-messages.js';
 import { OidcError, SumegoOidcClient, loginConfigFromEnv } from './sumego-oidc.js';
@@ -792,6 +792,12 @@ function grantContext(clientId, resource, scope) {
 function transactionContext(requestId, clientId, resource, scope) {
     return Buffer.from(JSON.stringify(['lumbre-transaction', requestId, clientId, resource, scope]), 'utf8');
 }
+function deliveryContext(item) {
+    return Buffer.from(JSON.stringify(['lumbre-delivery', item.requestId, item.deliveryId]), 'utf8');
+}
+function closedDelivery(error) {
+    return error instanceof BackchannelError && (error.status === 404 || error.status === 410);
+}
 /** AAD de lo cifrado de una transacción de Sumego: atado a su solicitud y a
  *  su `state`, para que no se pueda trasplantar a otra entrada del almacén. */
 function sumegoContext(kind, request, stateHash) {
@@ -995,12 +1001,28 @@ function normalizeStore(value) {
         !Array.isArray(raw.usedRefreshTokens) ||
         !Array.isArray(raw.authorizationRequests) ||
         !Array.isArray(raw.authorizationCodes) ||
+        (raw.authorizationDeliveries !== undefined && !Array.isArray(raw.authorizationDeliveries)) ||
         !Array.isArray(raw.revocationOutbox) ||
         (raw.redeemedCodes !== undefined && !Array.isArray(raw.redeemedCodes)) ||
         (raw.usedLogoutTokens !== undefined && !Array.isArray(raw.usedLogoutTokens)) ||
         (raw.closedSumegoSessions !== undefined && !Array.isArray(raw.closedSumegoSessions)) ||
         (raw.registeredClients !== undefined && !Array.isArray(raw.registeredClients))) {
         throw new Error('store OAuth inválido');
+    }
+    const authorizationDeliveries = (raw.authorizationDeliveries ?? []).map((value) => {
+        if (!value || typeof value !== 'object')
+            throw new Error('entrega OAuth inválida');
+        const item = value;
+        if (typeof item.requestId !== 'string' || !isValidRequestId(item.requestId) ||
+            typeof item.deliveryId !== 'string' || !isValidRequestId(item.deliveryId) ||
+            !validEncryptedValue(item.transaction) || typeof item.owned !== 'boolean') {
+            throw new Error('entrega OAuth inválida');
+        }
+        return item;
+    });
+    if (authorizationDeliveries.length > MAX_PENDING_ITEMS ||
+        new Set(authorizationDeliveries.map((item) => item.deliveryId)).size !== authorizationDeliveries.length) {
+        throw new Error('store OAuth incoherente: entregas');
     }
     const grants = raw.grants.map((value) => {
         if (!value || typeof value !== 'object')
@@ -1212,6 +1234,7 @@ function normalizeStore(value) {
         usedRefreshTokens,
         authorizationRequests,
         authorizationCodes,
+        authorizationDeliveries,
         revocationOutbox,
         redeemedCodes,
         usedLogoutTokens,
@@ -1295,6 +1318,8 @@ export class OAuthService {
     storeRead;
     linkFile;
     backchannel;
+    activeDeliveries = new Set();
+    deliveryRecoveryCursor = 0;
     encryptionKey;
     keyPromise;
     rateWindows = new Map();
@@ -1897,8 +1922,8 @@ export class OAuthService {
             // igual que hasta ahora: es lo que garantiza UNA sola llamada de
             // canje: dos callbacks concurrentes compiten por el mismo
             // `mutateStore`, gana uno y el otro se encuentra sin pendiente. El
-            // contrato de `/exchange` de Lumbre no es reintentable a ciegas
-            // (ver `README.md`), así que esa ventana no se abre.
+            // canje negociado permite recuperar su recibo con la misma entrega,
+            // sin volver a consumir el callback.
             //
             // DE QUÉ DEPENDE ESTO AL OTRO LADO, comprobado en el repo `lumbre`:
             // `exchangeMcpAuthorizationRequest`
@@ -1934,15 +1959,17 @@ export class OAuthService {
                 throw new OAuthError('invalid_request', 'La autorización ha caducado, ya fue usada o no existe.');
             }
             const authorized = pending;
-            let credential;
+            let delivered;
             try {
                 const transactionId = decrypt(authorized.transaction, await this.key(), transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope));
-                credential = await this.backchannel.exchange(requestId, transactionId);
+                delivered = await this.exchangeGrant(requestId, transactionId, (id) => id
+                    ? this.backchannel.exchange(requestId, transactionId, id)
+                    : this.backchannel.exchange(requestId, transactionId));
             }
             catch (error) {
                 throw this.backchannelOAuthError(error, 'invalid_grant');
             }
-            const code = await this.storeAuthorizationCode(authorized, credential);
+            const code = await this.storeDeliveredCode(authorized, delivered);
             this.redirectToClient(res, authorized, { code });
         }
         catch (error) {
@@ -1950,6 +1977,110 @@ export class OAuthService {
         }
         finally {
             release?.();
+        }
+    }
+    /** Guarda la referencia antes de canjear. Si la respuesta se pierde, consulta su recibo. */
+    async exchangeGrant(requestId, transactionId, exchange) {
+        const api = this.backchannel.delivery;
+        if (!api || !await api.supportsDelivery())
+            return { credential: await exchange() };
+        const delivery = { requestId, transactionId, deliveryId: randomUUID() };
+        const key = await this.key();
+        this.activeDeliveries.add(delivery.deliveryId);
+        try {
+            await this.mutateStore((store) => {
+                if (store.authorizationDeliveries.length >= MAX_PENDING_ITEMS) {
+                    throw new OAuthError('temporarily_unavailable', 'Hay demasiadas entregas pendientes.', 503);
+                }
+                store.authorizationDeliveries.push({
+                    requestId,
+                    deliveryId: delivery.deliveryId,
+                    transaction: encrypt(transactionId, key, deliveryContext(delivery)),
+                    owned: false
+                });
+                return true;
+            });
+            try {
+                return { credential: await exchange(delivery.deliveryId), delivery };
+            }
+            catch (error) {
+                if (!deliveryMayHaveIssued(error)) {
+                    await this.forgetDelivery(delivery.deliveryId);
+                    throw error;
+                }
+                try {
+                    return { credential: await api.recoverDelivery(delivery), delivery };
+                }
+                catch (recovery) {
+                    if (closedDelivery(recovery))
+                        await this.forgetDelivery(delivery.deliveryId);
+                    throw error;
+                }
+            }
+        }
+        catch (error) {
+            this.activeDeliveries.delete(delivery.deliveryId);
+            throw error;
+        }
+    }
+    async forgetDelivery(deliveryId) {
+        await this.mutateStore((store) => {
+            const index = store.authorizationDeliveries.findIndex((item) => item.deliveryId === deliveryId);
+            if (index < 0)
+                return false;
+            store.authorizationDeliveries.splice(index, 1);
+            return true;
+        });
+    }
+    async storeDeliveredCode(authorized, delivered, sumego) {
+        const { credential, delivery } = delivered;
+        try {
+            const code = await this.storeAuthorizationCode(authorized, credential, sumego, delivery?.deliveryId);
+            if (delivery) {
+                try {
+                    await this.backchannel.delivery.acknowledgeDelivery(delivery);
+                    await this.forgetDelivery(delivery.deliveryId);
+                }
+                catch { /* El almacén conserva el acuse pendiente. */ }
+            }
+            return code;
+        }
+        finally {
+            if (delivery)
+                this.activeDeliveries.delete(delivery.deliveryId);
+        }
+    }
+    /** Al recuperar una entrega, el navegador original ya no puede recibir un código nuevo. */
+    async recoverAuthorizationDelivery() {
+        const api = this.backchannel.delivery;
+        if (!api)
+            return;
+        const pending = (await this.loadStoreReadOnly()).authorizationDeliveries.filter((item) => !this.activeDeliveries.has(item.deliveryId));
+        if (pending.length === 0)
+            return;
+        const item = pending[this.deliveryRecoveryCursor++ % pending.length];
+        this.activeDeliveries.add(item.deliveryId);
+        try {
+            const ref = {
+                requestId: item.requestId,
+                deliveryId: item.deliveryId,
+                transactionId: decrypt(item.transaction, await this.key(), deliveryContext(item))
+            };
+            try {
+                if (!item.owned) {
+                    const credential = await api.recoverDelivery(ref);
+                    await this.backchannel.revoke(credential.accessToken);
+                }
+                await api.acknowledgeDelivery(ref);
+            }
+            catch (error) {
+                if (!closedDelivery(error))
+                    return;
+            }
+            await this.forgetDelivery(item.deliveryId);
+        }
+        finally {
+            this.activeDeliveries.delete(item.deliveryId);
         }
     }
     /**
@@ -1966,7 +2097,7 @@ export class OAuthService {
      * revoca en Lumbre por la outbox antes de fallar: nunca se queda una
      * credencial viva allí que este relé no conozca.
      */
-    async storeAuthorizationCode(authorized, credential, sumego) {
+    async storeAuthorizationCode(authorized, credential, sumego, deliveryId) {
         if (credential.resource !== authorized.resource || credential.scope !== authorized.scope) {
             await this.persistCredentialRevocation(credential, authorized);
             throw new OAuthError('server_error', 'Lumbre devolvió una credencial fuera de contrato.', 502);
@@ -2009,6 +2140,12 @@ export class OAuthService {
                         }
                         : {})
                 });
+                if (deliveryId) {
+                    const delivery = store.authorizationDeliveries.find((item) => item.deliveryId === deliveryId);
+                    if (!delivery)
+                        throw new Error('entrega OAuth ausente');
+                    delivery.owned = true;
+                }
                 return true;
             });
         }
@@ -2335,21 +2472,24 @@ export class OAuthService {
             }
             const transactionId = decrypt(authorized.transaction, key, transactionContext(authorized.requestId, authorized.clientId, authorized.resource, authorized.scope));
             const idToken = decrypt(authorized.sumego.idToken, key, sumegoContext('id-token', authorized, stateHash));
-            let credential;
+            let delivered;
             try {
-                credential = await this.backchannel.exchangeSumegoIdentity({
+                const input = {
                     requestId: authorized.requestId,
                     transactionId,
                     idToken,
                     clientId: authorized.clientId,
                     resource: authorized.resource,
                     scope: authorized.scope
-                });
+                };
+                delivered = await this.exchangeGrant(input.requestId, input.transactionId, (id) => id
+                    ? this.backchannel.exchangeSumegoIdentity(input, id)
+                    : this.backchannel.exchangeSumegoIdentity(input));
             }
             catch (error) {
                 throw this.sumegoExchangeError(error);
             }
-            const code = await this.storeAuthorizationCode(authorized, credential, {
+            const code = await this.storeDeliveredCode(authorized, delivered, {
                 subject: authorized.sumego.subject,
                 issuedAt: authorized.sumego.issuedAt,
                 refreshToken: orphanRefresh
@@ -3396,6 +3536,11 @@ export class OAuthService {
                     decrypt(pending.sumego.refresh, key, sumegoContext('refresh', pending, stateHash));
             }
         }
+        for (const delivery of store.authorizationDeliveries) {
+            const transactionId = decrypt(delivery.transaction, key, deliveryContext(delivery));
+            if (!/^[A-Za-z0-9_-]{32,256}$/.test(transactionId))
+                throw new Error('entrega OAuth inválida');
+        }
         for (const code of store.authorizationCodes) {
             validateStoredClientId(code.clientId);
             const upstream = decrypt(code.upstream, key, grantContext(code.clientId, code.resource, code.scope));
@@ -3425,6 +3570,7 @@ export class OAuthService {
         // pasan al outbox antes de intentar la revocación upstream.
         await this.mutateStore(() => false);
         await this.flushRevocationOutbox();
+        await this.recoverAuthorizationDelivery();
     }
     async checkReady() {
         const cached = this.readinessCache;
@@ -3564,6 +3710,7 @@ export class OAuthService {
         this.sweepInFlight = true;
         try {
             try {
+                await this.recoverAuthorizationDelivery();
                 await this.sweepStoredCredentials(result);
             }
             catch {
@@ -3957,6 +4104,7 @@ export class OAuthService {
                     usedRefreshTokens: [],
                     authorizationRequests: [],
                     authorizationCodes: [],
+                    authorizationDeliveries: [],
                     revocationOutbox: [],
                     redeemedCodes: [],
                     usedLogoutTokens: [],
